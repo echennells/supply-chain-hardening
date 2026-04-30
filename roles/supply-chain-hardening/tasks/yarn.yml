@@ -1,0 +1,20 @@
+---
+- name: Check if yarn is installed
+  ansible.builtin.command: which yarn
+  register: yarn_check
+  changed_when: false
+  failed_when: false
+
+- name: Create global yarn config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}"
+    state: directory
+    mode: "0755"
+  when: yarn_check.rc == 0
+
+- name: Deploy global .yarnrc.yml with supply chain hardening
+  ansible.builtin.template:
+    src: yarnrc.yml.j2
+    dest: "{{ ansible_env.HOME }}/.yarnrc.yml"
+    mode: "0644"
+  when: yarn_check.rc == 0

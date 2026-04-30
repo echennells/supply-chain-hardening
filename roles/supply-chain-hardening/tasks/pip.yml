@@ -1,0 +1,66 @@
+---
+- name: Check if pip is installed
+  ansible.builtin.command: which pip3
+  register: pip_check
+  changed_when: false
+  failed_when: false
+
+- name: Create pip config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.config/pip"
+    state: directory
+    mode: "0755"
+  when: pip_check.rc == 0
+
+- name: Deploy pip.conf with supply chain hardening
+  ansible.builtin.template:
+    src: pip.conf.j2
+    dest: "{{ ansible_env.HOME }}/.config/pip/pip.conf"
+    mode: "0644"
+  when: pip_check.rc == 0
+
+- name: Deploy pip-dependency-cooldown script
+  ansible.builtin.template:
+    src: pip-dependency-cooldown.py.j2
+    dest: "{{ ansible_env.HOME }}/.local/bin/pip-dependency-cooldown"
+    mode: "0755"
+  when: pip_check.rc == 0
+
+- name: Create .local/bin directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.local/bin"
+    state: directory
+    mode: "0755"
+  when: pip_check.rc == 0
+
+- name: Run pip-dependency-cooldown now to set initial date
+  ansible.builtin.command: "python3 {{ ansible_env.HOME }}/.local/bin/pip-dependency-cooldown {{ ansible_env.HOME }}/.config/pip/pip.conf {{ pip_minimum_release_age_days }}"
+  when: pip_check.rc == 0
+  changed_when: true
+
+- name: Schedule daily pip cooldown update (cron on Linux)
+  ansible.builtin.cron:
+    name: "pip dependency cooldown"
+    minute: "0"
+    hour: "9"
+    job: "/usr/bin/python3 {{ ansible_env.HOME }}/.local/bin/pip-dependency-cooldown {{ ansible_env.HOME }}/.config/pip/pip.conf {{ pip_minimum_release_age_days }}"
+  when: pip_check.rc == 0 and ansible_os_family != "Darwin"
+
+- name: Deploy launchd plist for pip cooldown (macOS)
+  ansible.builtin.template:
+    src: pip-dependency-cooldown.plist.j2
+    dest: "{{ ansible_env.HOME }}/Library/LaunchAgents/com.pip.dependency-cooldown.plist"
+    mode: "0644"
+  when: pip_check.rc == 0 and ansible_os_family == "Darwin"
+
+- name: Load launchd pip cooldown (macOS)
+  ansible.builtin.command: "launchctl load {{ ansible_env.HOME }}/Library/LaunchAgents/com.pip.dependency-cooldown.plist"
+  when: pip_check.rc == 0 and ansible_os_family == "Darwin"
+  changed_when: true
+  failed_when: false
+
+- name: Install pip-audit
+  ansible.builtin.command: "pip3 install --user pip-audit"
+  when: pip_check.rc == 0
+  changed_when: true
+  failed_when: false

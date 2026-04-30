@@ -1,0 +1,99 @@
+---
+- name: Check if npm is installed
+  ansible.builtin.command: which npm
+  register: npm_check
+  changed_when: false
+  failed_when: false
+
+- name: Install npq globally
+  ansible.builtin.command: npm install -g npq
+  when: npm_check.rc == 0
+  changed_when: true
+  failed_when: false
+
+- name: Set NPQ_DISABLE_AUTO_CONTINUE in zshrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: "export NPQ_DISABLE_AUTO_CONTINUE=true"
+    regexp: "^export NPQ_DISABLE_AUTO_CONTINUE="
+    create: true
+    mode: "0644"
+  when: npm_check.rc == 0
+
+- name: Set NPQ_DISABLE_AUTO_CONTINUE in bashrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: "export NPQ_DISABLE_AUTO_CONTINUE=true"
+    regexp: "^export NPQ_DISABLE_AUTO_CONTINUE="
+    create: true
+    mode: "0644"
+  when: npm_check.rc == 0
+
+# npm → npq-hero (default NPQ_PKG_MGR=npm)
+- name: Add npq-hero alias for npm in zshrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: 'alias npm="npq-hero"'
+    regexp: '^alias npm='
+    create: true
+    mode: "0644"
+  when: npm_check.rc == 0
+
+- name: Add npq-hero alias for npm in bashrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: 'alias npm="npq-hero"'
+    regexp: '^alias npm='
+    create: true
+    mode: "0644"
+  when: npm_check.rc == 0
+
+# yarn → npq-hero with NPQ_PKG_MGR=yarn
+- name: Check if yarn is installed
+  ansible.builtin.command: which yarn
+  register: yarn_for_npq
+  changed_when: false
+  failed_when: false
+
+- name: Add npq-hero alias for yarn in zshrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: 'alias yarn="NPQ_PKG_MGR=yarn npq-hero"'
+    regexp: '^alias yarn='
+    create: true
+    mode: "0644"
+  when: yarn_for_npq.rc == 0 and npm_check.rc == 0
+
+- name: Add npq-hero alias for yarn in bashrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: 'alias yarn="NPQ_PKG_MGR=yarn npq-hero"'
+    regexp: '^alias yarn='
+    create: true
+    mode: "0644"
+  when: yarn_for_npq.rc == 0 and npm_check.rc == 0
+
+# pnpm → npq-hero with NPQ_PKG_MGR=pnpm
+- name: Check if pnpm is installed
+  ansible.builtin.command: which pnpm
+  register: pnpm_for_npq
+  changed_when: false
+  failed_when: false
+
+- name: Add npq-hero alias for pnpm in zshrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: 'alias pnpm="NPQ_PKG_MGR=pnpm npq-hero"'
+    regexp: '^alias pnpm='
+    create: true
+    mode: "0644"
+  when: pnpm_for_npq.rc == 0 and npm_check.rc == 0
+
+- name: Add npq-hero alias for pnpm in bashrc
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: 'alias pnpm="NPQ_PKG_MGR=pnpm npq-hero"'
+    regexp: '^alias pnpm='
+    create: true
+    mode: "0644"
+  when: pnpm_for_npq.rc == 0 and npm_check.rc == 0

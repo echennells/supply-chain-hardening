@@ -1,0 +1,46 @@
+---
+# Cargo/Rust supply chain hardening
+
+- name: Check if cargo is installed
+  ansible.builtin.command: which cargo
+  register: cargo_check
+  changed_when: false
+  failed_when: false
+  tags: [cargo]
+
+- name: Install cargo-audit for vulnerability scanning
+  ansible.builtin.command: cargo install cargo-audit
+  when: cargo_check.rc == 0
+  changed_when: true
+  failed_when: false
+  tags: [cargo]
+
+- name: Install cargo-deny for license and supply chain checks
+  ansible.builtin.command: cargo install cargo-deny
+  when: cargo_check.rc == 0
+  changed_when: true
+  failed_when: false
+  tags: [cargo]
+
+- name: Install cargo-vet for supply chain verification
+  ansible.builtin.command: cargo install cargo-vet
+  when: cargo_check.rc == 0
+  changed_when: true
+  failed_when: false
+  tags: [cargo]
+
+- name: Create cargo config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.cargo"
+    state: directory
+    mode: "0755"
+  when: cargo_check.rc == 0
+  tags: [cargo]
+
+- name: Deploy cargo config with supply chain settings
+  ansible.builtin.template:
+    src: cargo-config.toml.j2
+    dest: "{{ ansible_env.HOME }}/.cargo/config.toml"
+    mode: "0644"
+  when: cargo_check.rc == 0
+  tags: [cargo]

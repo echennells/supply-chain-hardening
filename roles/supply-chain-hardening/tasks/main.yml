@@ -1,0 +1,49 @@
+---
+- name: Include npm hardening
+  ansible.builtin.include_tasks: npm.yml
+  tags: [npm]
+
+- name: Include pnpm hardening
+  ansible.builtin.include_tasks: pnpm.yml
+  tags: [pnpm]
+
+- name: Include yarn hardening
+  ansible.builtin.include_tasks: yarn.yml
+  tags: [yarn]
+
+- name: Include bun hardening
+  ansible.builtin.include_tasks: bun.yml
+  tags: [bun]
+
+- name: Include pip/python hardening
+  ansible.builtin.include_tasks: pip.yml
+  tags: [pip, python]
+
+- name: Include uv hardening
+  ansible.builtin.include_tasks: uv.yml
+  tags: [uv, python]
+
+- name: Include deno hardening
+  ansible.builtin.include_tasks: deno.yml
+  tags: [deno]
+
+- name: Include cargo/rust hardening
+  ansible.builtin.include_tasks: cargo.yml
+  tags: [cargo, rust]
+
+- name: Include go hardening
+  ansible.builtin.include_tasks: go.yml
+  tags: [go]
+
+- name: Include npq pre-install auditing
+  ansible.builtin.include_tasks: npq.yml
+  tags: [npq, npm]
+
+- name: Include socket firewall
+  ansible.builtin.include_tasks: socket.yml
+  when: socket_firewall_install
+  tags: [socket]
+
+- name: Include shell environment hardening
+  ansible.builtin.include_tasks: shell_env.yml
+  tags: [shell]

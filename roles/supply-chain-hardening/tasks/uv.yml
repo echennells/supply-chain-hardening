@@ -1,0 +1,20 @@
+---
+- name: Check if uv is installed
+  ansible.builtin.command: which uv
+  register: uv_check
+  changed_when: false
+  failed_when: false
+
+- name: Create uv config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.config/uv"
+    state: directory
+    mode: "0755"
+  when: uv_check.rc == 0
+
+- name: Deploy uv.toml with supply chain hardening
+  ansible.builtin.template:
+    src: uv.toml.j2
+    dest: "{{ ansible_env.HOME }}/.config/uv/uv.toml"
+    mode: "0644"
+  when: uv_check.rc == 0

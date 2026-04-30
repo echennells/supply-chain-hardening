@@ -1,0 +1,18 @@
+---
+- name: Check if socket firewall is already installed
+  ansible.builtin.command: which sfw
+  register: sfw_check
+  changed_when: false
+  failed_when: false
+
+- name: Check if npm is available for socket install
+  ansible.builtin.command: which npm
+  register: npm_for_socket
+  changed_when: false
+  failed_when: false
+
+- name: Install Socket Firewall Free via npm
+  ansible.builtin.command: npm install -g @aspect-build/sfw
+  when: sfw_check.rc != 0 and npm_for_socket.rc == 0
+  changed_when: true
+  failed_when: false

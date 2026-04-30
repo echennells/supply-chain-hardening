@@ -1,0 +1,51 @@
+---
+# Shell environment supply chain hardening
+# Sets env vars that apply across all package managers
+
+- name: Deploy supply chain environment variables to zshrc
+  ansible.builtin.blockinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    marker: "# {mark} SUPPLY CHAIN HARDENING (managed by ansible)"
+    create: true
+    mode: "0644"
+    block: |
+      # === npm ===
+      export NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
+      export NPM_CONFIG_AUDIT={{ npm_audit | lower }}
+      export NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
+      export NPM_CONFIG_FUND={{ npm_fund | lower }}
+      export NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
+      export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
+
+      # === Python ===
+      export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
+      export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
+      export UV_LINK_MODE=copy
+
+      # === Go ===
+      export GOSUMDB='{{ go_sumdb }}'
+  tags: [shell]
+
+- name: Deploy supply chain environment variables to bashrc
+  ansible.builtin.blockinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    marker: "# {mark} SUPPLY CHAIN HARDENING (managed by ansible)"
+    create: true
+    mode: "0644"
+    block: |
+      # === npm ===
+      export NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
+      export NPM_CONFIG_AUDIT={{ npm_audit | lower }}
+      export NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
+      export NPM_CONFIG_FUND={{ npm_fund | lower }}
+      export NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
+      export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
+
+      # === Python ===
+      export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
+      export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
+      export UV_LINK_MODE=copy
+
+      # === Go ===
+      export GOSUMDB='{{ go_sumdb }}'
+  tags: [shell]

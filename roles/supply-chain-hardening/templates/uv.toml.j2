@@ -1,0 +1,8 @@
+# Managed by ansible-supply-chain-security
+# Reject packages published less than {{ release_age_hours }} hours ago
+exclude-newer = "{{ uv_exclude_newer }}"
+
+{% if uv_no_build %}
+# Force wheels only — blocks setup.py execution from source distributions
+no-build = true
+{% endif %}

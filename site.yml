@@ -1,0 +1,6 @@
+---
+- name: Supply chain security hardening
+  hosts: all
+  gather_facts: true
+  roles:
+    - supply-chain-hardening

@@ -1,0 +1,15 @@
+# Managed by ansible-supply-chain-security
+[global]
+disable-pip-version-check = true
+
+[install]
+{% if pip_only_binary %}
+# Force wheels only — blocks setup.py execution from source distributions
+only-binary = :all:
+{% endif %}
+{% if pip_require_hashes %}
+require-hashes = true
+{% endif %}
+# Auto-updated daily by pip-dependency-cooldown script
+# Initial placeholder — will be set by the cooldown script
+uploaded-prior-to = 2020-01-01

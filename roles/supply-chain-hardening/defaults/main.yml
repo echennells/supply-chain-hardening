@@ -1,0 +1,47 @@
+---
+# Minimum package age — 48 hours across all package managers
+# Each manager uses different units, so we derive from one source of truth
+release_age_hours: 48
+
+# Derived values (do not override individually — change release_age_hours)
+npm_minimum_release_age_days: "{{ (release_age_hours / 24) | int }}"          # 2 days
+pnpm_minimum_release_age_minutes: "{{ (release_age_hours * 60) | int }}"      # 2880 min
+bun_minimum_release_age_seconds: "{{ (release_age_hours * 3600) | int }}"     # 172800 sec
+pip_minimum_release_age_days: "{{ (release_age_hours / 24) | int }}"          # 2 days
+uv_exclude_newer: "{{ release_age_hours | int }} hours"                       # "48 hours"
+yarn_minimal_age_gate: "{{ (release_age_hours / 24) | int }}d"               # "2d"
+deno_minimum_dependency_age: "P{{ (release_age_hours / 24) | int }}D"         # "P2D"
+
+# npm settings
+npm_ignore_scripts: true
+npm_audit: true
+npm_save_exact: true
+npm_fund: false
+npm_update_notifier: false
+
+# pip/python settings
+pip_only_binary: true
+pip_require_hashes: false
+pip_disable_version_check: true
+python_dont_write_bytecode: true
+
+# uv settings
+uv_no_build: true
+
+# cargo settings
+cargo_audit_enabled: true
+
+# go settings
+go_sumdb: "sum.golang.org"
+go_private: ""
+gonosumcheck: ""
+goflags_mod: "readonly"
+
+# pnpm settings
+pnpm_approve_builds: true
+
+# yarn settings
+yarn_enable_scripts: false
+
+# socket firewall
+socket_firewall_install: true

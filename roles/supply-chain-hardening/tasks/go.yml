@@ -1,0 +1,56 @@
+---
+# Go module supply chain hardening
+
+- name: Check if go is installed
+  ansible.builtin.command: which go
+  register: go_check
+  changed_when: false
+  failed_when: false
+  tags: [go]
+
+- name: Set GONOSUMCHECK (private modules excluded from sumdb)
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: "export GONOSUMCHECK='{{ gonosumcheck }}'"
+    regexp: "^export GONOSUMCHECK="
+    create: true
+    mode: "0644"
+  when: go_check.rc == 0 and gonosumcheck | length > 0
+  tags: [go]
+
+- name: Set GOFLAGS for module mode (readonly by default)
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: "export GOFLAGS='-mod={{ goflags_mod }}'"
+    regexp: "^export GOFLAGS="
+    create: true
+    mode: "0644"
+  when: go_check.rc == 0
+  tags: [go]
+
+- name: Set GOSUM DB (checksum database)
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: "export GOSUMDB='{{ go_sumdb }}'"
+    regexp: "^export GOSUMDB="
+    create: true
+    mode: "0644"
+  when: go_check.rc == 0
+  tags: [go]
+
+- name: Set GOPRIVATE for private modules
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: "export GOPRIVATE='{{ go_private }}'"
+    regexp: "^export GOPRIVATE="
+    create: true
+    mode: "0644"
+  when: go_check.rc == 0 and go_private | length > 0
+  tags: [go]
+
+- name: Install govulncheck for vulnerability scanning
+  ansible.builtin.command: go install golang.org/x/vuln/cmd/govulncheck@latest
+  when: go_check.rc == 0
+  changed_when: true
+  failed_when: false
+  tags: [go]

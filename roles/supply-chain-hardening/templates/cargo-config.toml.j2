@@ -1,0 +1,13 @@
+# Cargo supply chain hardening
+
+[net]
+# Use git CLI for fetches (respects system SSH/proxy config)
+git-fetch-with-cli = true
+
+[http]
+# Verify SSL certificates
+check-revoke = true
+
+[build]
+# Use locked dependencies when Cargo.lock exists
+dep-info-basedir = "."
