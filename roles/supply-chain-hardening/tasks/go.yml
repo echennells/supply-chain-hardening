@@ -34,6 +34,8 @@
       # Do not skip checksum verification for any module
       export GONOSUMCHECK=''
       export GONOSUMDB=''
+      # Prevent auto-downloading different Go toolchain versions
+      export GOTOOLCHAIN=local
   when: go_check.rc == 0
 
 - name: Set Go supply chain env vars in bashrc
@@ -48,4 +50,5 @@
       export GOFLAGS='-mod={{ goflags_mod }}'
       export GONOSUMCHECK=''
       export GONOSUMDB=''
+      export GOTOOLCHAIN=local
   when: go_check.rc == 0

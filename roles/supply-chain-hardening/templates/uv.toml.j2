@@ -6,3 +6,7 @@ exclude-newer = "{{ uv_exclude_newer }}"
 # Force wheels only — blocks setup.py execution from source distributions
 no-build = true
 {% endif %}
+
+# Cryptographic hash verification of all packages
+require-hashes = true
+verify-hashes = true

@@ -1,0 +1,55 @@
+---
+# Maven supply chain hardening
+
+- name: Check if mvn is installed
+  ansible.builtin.command: which mvn
+  register: mvn_check
+  changed_when: false
+  failed_when: false
+
+- name: Create Maven config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.m2"
+    state: directory
+    mode: "0755"
+  when: mvn_check.rc == 0
+
+- name: Deploy Maven settings.xml with HTTPS-only mirror and strict checksums
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.m2/settings.xml"
+    mode: "0644"
+    content: |
+      <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0
+                https://maven.apache.org/xsd/settings-1.2.0.xsd">
+        <!-- Force all repositories through HTTPS -->
+        <mirrors>
+          <mirror>
+            <id>central-https</id>
+            <url>https://repo.maven.apache.org/maven2</url>
+            <mirrorOf>*</mirrorOf>
+          </mirror>
+        </mirrors>
+        <profiles>
+          <profile>
+            <id>strict-checksums</id>
+            <repositories>
+              <repository>
+                <id>central</id>
+                <url>https://repo.maven.apache.org/maven2</url>
+                <releases>
+                  <checksumPolicy>fail</checksumPolicy>
+                </releases>
+                <snapshots>
+                  <checksumPolicy>fail</checksumPolicy>
+                </snapshots>
+              </repository>
+            </repositories>
+          </profile>
+        </profiles>
+        <activeProfiles>
+          <activeProfile>strict-checksums</activeProfile>
+        </activeProfiles>
+      </settings>
+  when: mvn_check.rc == 0

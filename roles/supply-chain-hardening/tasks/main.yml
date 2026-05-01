@@ -35,6 +35,26 @@
   ansible.builtin.include_tasks: go.yml
   tags: [go]
 
+- name: Include composer/PHP hardening
+  ansible.builtin.include_tasks: composer.yml
+  tags: [composer, php]
+
+- name: Include bundler/Ruby hardening
+  ansible.builtin.include_tasks: bundler.yml
+  tags: [bundler, ruby]
+
+- name: Include Maven hardening
+  ansible.builtin.include_tasks: maven.yml
+  tags: [maven, java]
+
+- name: Include Gradle hardening
+  ansible.builtin.include_tasks: gradle.yml
+  tags: [gradle, java]
+
+- name: Include NuGet/.NET hardening
+  ansible.builtin.include_tasks: nuget.yml
+  tags: [nuget, dotnet]
+
 - name: Include npq pre-install auditing
   ansible.builtin.include_tasks: npq.yml
   tags: [npq, npm]

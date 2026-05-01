@@ -1,0 +1,33 @@
+---
+# Composer (PHP) supply chain hardening
+
+- name: Check if composer is installed
+  ansible.builtin.command: which composer
+  register: composer_check
+  changed_when: false
+  failed_when: false
+
+- name: Create composer config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.config/composer"
+    state: directory
+    mode: "0755"
+  when: composer_check.rc == 0
+
+- name: Deploy composer config.json with supply chain hardening
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.config/composer/config.json"
+    mode: "0644"
+    content: |
+      {
+        "config": {
+          "scripts-are-disabled": true,
+          "secure-http": true,
+          "lock": true,
+          "preferred-install": "dist",
+          "audit": {
+            "abandoned": "report"
+          }
+        }
+      }
+  when: composer_check.rc == 0

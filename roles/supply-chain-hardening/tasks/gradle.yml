@@ -1,0 +1,33 @@
+---
+# Gradle supply chain hardening
+
+- name: Check if gradle is installed
+  ansible.builtin.command: which gradle
+  register: gradle_check
+  changed_when: false
+  failed_when: false
+
+- name: Create Gradle init.d directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.gradle/init.d"
+    state: directory
+    mode: "0755"
+  when: gradle_check.rc == 0
+
+- name: Deploy Gradle init script to enforce HTTPS-only repositories
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.gradle/init.d/supply-chain-security.gradle"
+    mode: "0644"
+    content: |
+      // Managed by ansible-supply-chain-security
+      // Reject any HTTP (non-HTTPS) repository
+      allprojects {
+          repositories {
+              all { repo ->
+                  if (repo instanceof MavenArtifactRepository && repo.url.scheme == 'http') {
+                      throw new GradleException("Insecure HTTP repository blocked: ${repo.url}")
+                  }
+              }
+          }
+      }
+  when: gradle_check.rc == 0
