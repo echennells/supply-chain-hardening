@@ -22,8 +22,7 @@
       export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
       export UV_LINK_MODE=copy
 
-      # === Go ===
-      export GOSUMDB='{{ go_sumdb }}'
+      # Go env vars are in their own block (see go.yml)
   tags: [shell]
 
 - name: Deploy supply chain environment variables to bashrc
@@ -46,6 +45,5 @@
       export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
       export UV_LINK_MODE=copy
 
-      # === Go ===
-      export GOSUMDB='{{ go_sumdb }}'
+      # Go env vars are in their own block (see go.yml)
   tags: [shell]

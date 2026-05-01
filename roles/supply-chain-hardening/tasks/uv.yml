@@ -5,16 +5,68 @@
   changed_when: false
   failed_when: false
 
+- name: Install uv if not present
+  ansible.builtin.shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+  when: uv_check.rc != 0
+  changed_when: true
+  args:
+    creates: "{{ ansible_env.HOME }}/.local/bin/uv"
+
+- name: Re-check uv path after install
+  ansible.builtin.command: which uv
+  register: uv_path
+  changed_when: false
+  failed_when: false
+
 - name: Create uv config directory
   ansible.builtin.file:
     path: "{{ ansible_env.HOME }}/.config/uv"
     state: directory
     mode: "0755"
-  when: uv_check.rc == 0
 
 - name: Deploy uv.toml with supply chain hardening
   ansible.builtin.template:
     src: uv.toml.j2
     dest: "{{ ansible_env.HOME }}/.config/uv/uv.toml"
     mode: "0644"
-  when: uv_check.rc == 0
+
+- name: Install uv-secure (scans uv.lock for vulnerabilities)
+  ansible.builtin.command: uv tool install uv-secure
+  changed_when: true
+  failed_when: false
+
+- name: Create pip wrapper script that delegates to uv pip
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.local/bin/pip"
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # Managed by ansible-supply-chain-security
+      # Redirects pip to uv pip so all uv hardening (age gate, no-build) applies
+      exec uv pip "$@"
+
+- name: Create pip3 wrapper script that delegates to uv pip
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.local/bin/pip3"
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # Managed by ansible-supply-chain-security
+      # Redirects pip3 to uv pip so all uv hardening (age gate, no-build) applies
+      exec uv pip "$@"
+
+- name: Ensure ~/.local/bin is first in PATH (zshrc)
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.zshrc"
+    line: 'export PATH="$HOME/.local/bin:$PATH"'
+    regexp: 'export PATH="\$HOME/\.local/bin'
+    create: true
+    mode: "0644"
+
+- name: Ensure ~/.local/bin is first in PATH (bashrc)
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: 'export PATH="$HOME/.local/bin:$PATH"'
+    regexp: 'export PATH="\$HOME/\.local/bin'
+    create: true
+    mode: "0644"

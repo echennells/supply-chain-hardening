@@ -20,6 +20,12 @@
   when: cargo_check.rc == 0
   changed_when: true
   failed_when: false
+
+- name: Install cargo-cooldown (release age gate for crates)
+  ansible.builtin.command: cargo install cargo-cooldown
+  when: cargo_check.rc == 0
+  changed_when: true
+  failed_when: false
   tags: [cargo]
 
 - name: Install cargo-vet for supply chain verification

@@ -34,3 +34,12 @@
     create: true
     mode: "0644"
   when: pnpm_check.rc == 0
+
+- name: Set pnpm blockExoticSubdeps (block transitive git/tarball deps)
+  ansible.builtin.lineinfile:
+    path: "{{ pnpm_config_dir }}/rc"
+    line: "block-exotic-subdeps=true"
+    regexp: "^block-exotic-subdeps="
+    create: true
+    mode: "0644"
+  when: pnpm_check.rc == 0

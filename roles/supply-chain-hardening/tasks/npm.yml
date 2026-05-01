@@ -34,3 +34,14 @@
   ansible.builtin.command: "npm config set update-notifier {{ npm_update_notifier | lower }}"
   when: npm_check.rc == 0
   changed_when: true
+
+- name: Set npm config - block git URL dependencies (prevents .npmrc override attacks)
+  ansible.builtin.command: "npm config set allow-git none"
+  when: npm_check.rc == 0
+  changed_when: true
+
+- name: Install lockfile-lint globally (validates lockfile integrity)
+  ansible.builtin.command: npm install -g lockfile-lint
+  when: npm_check.rc == 0
+  changed_when: true
+  failed_when: false

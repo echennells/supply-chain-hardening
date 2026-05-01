@@ -33,8 +33,8 @@ cargo_audit_enabled: true
 
 # go settings
 go_sumdb: "sum.golang.org"
+go_proxy: "https://proxy.golang.org,direct"
 go_private: ""
-gonosumcheck: ""
 goflags_mod: "readonly"
 
 # pnpm settings

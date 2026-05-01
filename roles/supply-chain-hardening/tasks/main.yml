@@ -44,6 +44,10 @@
   when: socket_firewall_install
   tags: [socket]
 
+- name: Include GitHub Actions hardening tools
+  ansible.builtin.include_tasks: github.yml
+  tags: [github, ci]
+
 - name: Include shell environment hardening
   ansible.builtin.include_tasks: shell_env.yml
   tags: [shell]
