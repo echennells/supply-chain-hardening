@@ -1,15 +1,22 @@
 ---
-# pip is replaced by uv wrappers (see uv.yml)
-# This task only installs pip-audit as a scanning tool
+# pip is redirected to uv via system-wide wrappers (see uv.yml)
+# This task deploys pip.conf as a fallback in case the real pip binary
+# is invoked directly (bypassing the wrapper)
 
-- name: Check if uv is available
-  ansible.builtin.command: which uv
-  register: uv_for_pip
-  changed_when: false
-  failed_when: false
+- name: Create pip config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.config/pip"
+    state: directory
+    mode: "0755"
 
-- name: Install pip-audit via uv
-  ansible.builtin.command: uv tool install pip-audit
-  when: uv_for_pip.rc == 0
-  changed_when: true
-  failed_when: false
+- name: Deploy hardened pip.conf as fallback
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.config/pip/pip.conf"
+    mode: "0644"
+    content: |
+      ; Managed by ansible-supply-chain-security
+      [global]
+      disable-pip-version-check = true
+
+      [install]
+      only-binary = :all:

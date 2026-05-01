@@ -1,37 +1,20 @@
 ---
 # Bundler/RubyGems supply chain hardening
+# Config deployed unconditionally
 # Note: Ruby has NO install script blocking — extconf.rb always runs
-
-- name: Check if bundle is installed
-  ansible.builtin.command: which bundle
-  register: bundle_check
-  changed_when: false
-  failed_when: false
 
 - name: Create bundler config directory
   ansible.builtin.file:
     path: "{{ ansible_env.HOME }}/.bundle"
     state: directory
     mode: "0755"
-  when: bundle_check.rc == 0
 
-- name: Set bundler frozen mode (lockfile cannot be modified)
-  ansible.builtin.command: bundle config set --global frozen true
-  when: bundle_check.rc == 0
-  changed_when: true
-
-- name: Set bundler deployment mode (requires Gemfile.lock)
-  ansible.builtin.command: bundle config set --global deployment true
-  when: bundle_check.rc == 0
-  changed_when: true
-
-- name: Set bundler disable_exec_load (uses exec instead of load for isolation)
-  ansible.builtin.command: bundle config set --global disable_exec_load true
-  when: bundle_check.rc == 0
-  changed_when: true
-
-- name: Install bundler-audit for vulnerability scanning
-  ansible.builtin.command: gem install bundler-audit
-  when: bundle_check.rc == 0
-  changed_when: true
-  failed_when: false
+- name: Deploy hardened bundler config
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.bundle/config"
+    mode: "0644"
+    content: |
+      ---
+      BUNDLE_FROZEN: "true"
+      BUNDLE_DEPLOYMENT: "true"
+      BUNDLE_DISABLE_EXEC_LOAD: "true"

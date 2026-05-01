@@ -1,47 +1,22 @@
 ---
-- name: Check if npm is installed
-  ansible.builtin.command: which npm
-  register: npm_check
-  changed_when: false
-  failed_when: false
+# npm supply chain hardening
+# Config files deployed unconditionally — ready when npm arrives
 
-- name: Set npm config - minimum release age
-  ansible.builtin.command: "npm config set min-release-age {{ npm_minimum_release_age_days }}"
-  when: npm_check.rc == 0
-  changed_when: true
+- name: Deploy hardened .npmrc
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.npmrc"
+    mode: "0644"
+    content: |
+      ; Managed by ansible-supply-chain-security
+      ignore-scripts=true
+      audit=true
+      save-exact=true
+      fund=false
+      update-notifier=false
+      min-release-age={{ npm_minimum_release_age_days }}
+      allow-git=none
 
-- name: Set npm config - ignore install scripts
-  ansible.builtin.command: "npm config set ignore-scripts {{ npm_ignore_scripts | lower }}"
-  when: npm_check.rc == 0
-  changed_when: true
-
-- name: Set npm config - audit on install
-  ansible.builtin.command: "npm config set audit {{ npm_audit | lower }}"
-  when: npm_check.rc == 0
-  changed_when: true
-
-- name: Set npm config - save exact versions
-  ansible.builtin.command: "npm config set save-exact {{ npm_save_exact | lower }}"
-  when: npm_check.rc == 0
-  changed_when: true
-
-- name: Set npm config - disable fund messages
-  ansible.builtin.command: "npm config set fund {{ npm_fund | lower }}"
-  when: npm_check.rc == 0
-  changed_when: true
-
-- name: Set npm config - disable update notifier
-  ansible.builtin.command: "npm config set update-notifier {{ npm_update_notifier | lower }}"
-  when: npm_check.rc == 0
-  changed_when: true
-
-- name: Set npm config - block git URL dependencies (prevents .npmrc override attacks)
-  ansible.builtin.command: "npm config set allow-git none"
-  when: npm_check.rc == 0
-  changed_when: true
-
-- name: Install lockfile-lint globally (validates lockfile integrity)
+- name: Install lockfile-lint globally
   ansible.builtin.command: npm install -g lockfile-lint
-  when: npm_check.rc == 0
   changed_when: true
   failed_when: false

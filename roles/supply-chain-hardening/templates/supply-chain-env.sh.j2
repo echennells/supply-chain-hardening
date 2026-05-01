@@ -1,0 +1,27 @@
+#!/bin/sh
+# Managed by ansible-supply-chain-security
+# System-wide supply chain hardening — loaded by /etc/profile.d/
+
+# === npm / pnpm / yarn / bun ===
+export NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
+export NPM_CONFIG_AUDIT={{ npm_audit | lower }}
+export NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
+export NPM_CONFIG_FUND={{ npm_fund | lower }}
+export NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
+export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
+
+# === Python (pip / uv) ===
+export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
+export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
+export UV_LINK_MODE=copy
+
+# === Go ===
+export GOSUMDB='{{ go_sumdb }}'
+export GOPROXY='{{ go_proxy }}'
+export GOFLAGS='-mod={{ goflags_mod }}'
+export GONOSUMCHECK=''
+export GONOSUMDB=''
+export GOTOOLCHAIN=local
+
+# === PHP (Composer) ===
+export COMPOSER_NO_SCRIPTS=1

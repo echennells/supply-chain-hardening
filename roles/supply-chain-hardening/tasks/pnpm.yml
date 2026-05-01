@@ -1,45 +1,23 @@
 ---
-- name: Check if pnpm is installed
-  ansible.builtin.command: which pnpm
-  register: pnpm_check
-  changed_when: false
-  failed_when: false
+# pnpm supply chain hardening
+# Config deployed unconditionally
 
 - name: Determine pnpm global config path
   ansible.builtin.set_fact:
     pnpm_config_dir: "{{ (ansible_os_family == 'Darwin') | ternary(ansible_env.HOME ~ '/Library/Preferences/pnpm', ansible_env.HOME ~ '/.config/pnpm') }}"
-  when: pnpm_check.rc == 0
 
 - name: Create pnpm config directory
   ansible.builtin.file:
     path: "{{ pnpm_config_dir }}"
     state: directory
     mode: "0755"
-  when: pnpm_check.rc == 0
 
-- name: Set pnpm minimum release age
-  ansible.builtin.lineinfile:
-    path: "{{ pnpm_config_dir }}/rc"
-    line: "minimum-release-age={{ pnpm_minimum_release_age_minutes }}"
-    regexp: "^minimum-release-age="
-    create: true
+- name: Deploy hardened pnpm rc
+  ansible.builtin.copy:
+    dest: "{{ pnpm_config_dir }}/rc"
     mode: "0644"
-  when: pnpm_check.rc == 0
-
-- name: Set pnpm ignore scripts (handled by approve-builds in v10+)
-  ansible.builtin.lineinfile:
-    path: "{{ pnpm_config_dir }}/rc"
-    line: "ignore-scripts=true"
-    regexp: "^ignore-scripts="
-    create: true
-    mode: "0644"
-  when: pnpm_check.rc == 0
-
-- name: Set pnpm blockExoticSubdeps (block transitive git/tarball deps)
-  ansible.builtin.lineinfile:
-    path: "{{ pnpm_config_dir }}/rc"
-    line: "block-exotic-subdeps=true"
-    regexp: "^block-exotic-subdeps="
-    create: true
-    mode: "0644"
-  when: pnpm_check.rc == 0
+    content: |
+      ; Managed by ansible-supply-chain-security
+      minimum-release-age={{ pnpm_minimum_release_age_minutes }}
+      ignore-scripts=true
+      block-exotic-subdeps=true

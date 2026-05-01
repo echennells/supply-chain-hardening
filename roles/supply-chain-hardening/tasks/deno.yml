@@ -1,24 +1,16 @@
 ---
-- name: Check if deno is installed
-  ansible.builtin.command: which deno
-  register: deno_check
-  changed_when: false
-  failed_when: false
+# Deno supply chain hardening
+# Deno has no global config file — alias is the only option.
+# Deployed to /etc/profile.d/ via a system-wide alias.
 
-- name: Add deno alias with minimum dependency age to zshrc
-  ansible.builtin.lineinfile:
-    path: "{{ ansible_env.HOME }}/.zshrc"
-    line: "alias deno='command deno --minimum-dependency-age={{ deno_minimum_dependency_age }}'"
-    regexp: "^alias deno="
-    create: true
+- name: Deploy deno cooldown alias system-wide
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/profile.d/deno-cooldown.sh
     mode: "0644"
-  when: deno_check.rc == 0
-
-- name: Add deno alias with minimum dependency age to bashrc
-  ansible.builtin.lineinfile:
-    path: "{{ ansible_env.HOME }}/.bashrc"
-    line: "alias deno='command deno --minimum-dependency-age={{ deno_minimum_dependency_age }}'"
-    regexp: "^alias deno="
-    create: true
-    mode: "0644"
-  when: deno_check.rc == 0
+    owner: root
+    group: root
+    content: |
+      #!/bin/sh
+      # Managed by ansible-supply-chain-security
+      alias deno='command deno --minimum-dependency-age={{ deno_minimum_dependency_age }}'

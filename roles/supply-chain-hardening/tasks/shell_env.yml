@@ -1,49 +1,42 @@
 ---
-# Shell environment supply chain hardening
-# Sets env vars that apply across all package managers
+# System-wide supply chain environment variables
+# Deployed to /etc/profile.d/ so they apply to ALL users, ALL shells,
+# ALL login types — interactive, non-interactive, agent-spawned.
+# Config files deployed unconditionally — harmless if the tool isn't
+# installed yet, ready the instant it is.
 
-- name: Deploy supply chain environment variables to zshrc
-  ansible.builtin.blockinfile:
-    path: "{{ ansible_env.HOME }}/.zshrc"
-    marker: "# {mark} SUPPLY CHAIN HARDENING (managed by ansible)"
-    create: true
+- name: Deploy system-wide supply chain env vars
+  become: true
+  ansible.builtin.template:
+    src: supply-chain-env.sh.j2
+    dest: /etc/profile.d/supply-chain-hardening.sh
     mode: "0644"
-    block: |
-      # === npm ===
-      export NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
-      export NPM_CONFIG_AUDIT={{ npm_audit | lower }}
-      export NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
-      export NPM_CONFIG_FUND={{ npm_fund | lower }}
-      export NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
-      export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
-
-      # === Python ===
-      export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
-      export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
-      export UV_LINK_MODE=copy
-
-      # Go env vars are in their own block (see go.yml)
+    owner: root
+    group: root
   tags: [shell]
 
-- name: Deploy supply chain environment variables to bashrc
+- name: Deploy to /etc/environment for non-login shells
+  become: true
   ansible.builtin.blockinfile:
-    path: "{{ ansible_env.HOME }}/.bashrc"
+    path: /etc/environment
     marker: "# {mark} SUPPLY CHAIN HARDENING (managed by ansible)"
     create: true
     mode: "0644"
     block: |
-      # === npm ===
-      export NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
-      export NPM_CONFIG_AUDIT={{ npm_audit | lower }}
-      export NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
-      export NPM_CONFIG_FUND={{ npm_fund | lower }}
-      export NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
-      export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
-
-      # === Python ===
-      export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
-      export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
-      export UV_LINK_MODE=copy
-
-      # Go env vars are in their own block (see go.yml)
+      NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
+      NPM_CONFIG_AUDIT={{ npm_audit | lower }}
+      NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
+      NPM_CONFIG_FUND={{ npm_fund | lower }}
+      NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
+      NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
+      PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
+      PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
+      UV_LINK_MODE=copy
+      GOSUMDB={{ go_sumdb }}
+      GOPROXY={{ go_proxy }}
+      GOFLAGS=-mod={{ goflags_mod }}
+      GONOSUMCHECK=
+      GONOSUMDB=
+      GOTOOLCHAIN=local
+      COMPOSER_NO_SCRIPTS=1
   tags: [shell]

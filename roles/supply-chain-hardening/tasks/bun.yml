@@ -1,13 +1,9 @@
 ---
-- name: Check if bun is installed
-  ansible.builtin.command: which bun
-  register: bun_check
-  changed_when: false
-  failed_when: false
+# Bun supply chain hardening
+# Config deployed unconditionally
 
-- name: Deploy global bunfig.toml with supply chain hardening
+- name: Deploy hardened global bunfig.toml
   ansible.builtin.template:
     src: bunfig.toml.j2
     dest: "{{ ansible_env.HOME }}/.bunfig.toml"
     mode: "0644"
-  when: bun_check.rc == 0
