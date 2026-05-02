@@ -7,6 +7,6 @@ exclude-newer = "{{ uv_exclude_newer }}"
 no-build = true
 {% endif %}
 
-# Cryptographic hash verification of all packages
-require-hashes = true
+[pip]
+# Verify hashes when present (lockfiles), but don't require them for ad-hoc installs
 verify-hashes = true

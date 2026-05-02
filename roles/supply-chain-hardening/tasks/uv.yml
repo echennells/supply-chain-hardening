@@ -14,6 +14,12 @@
     dest: "{{ ansible_env.HOME }}/.config/uv/uv.toml"
     mode: "0644"
 
+- name: Find uv binary path
+  ansible.builtin.command: bash -lc "which uv"
+  register: uv_binary_path
+  changed_when: false
+  failed_when: false
+
 - name: Deploy pip wrapper to /usr/local/bin (system-wide, delegates to uv)
   become: true
   ansible.builtin.copy:
@@ -25,7 +31,8 @@
       #!/bin/sh
       # Managed by ansible-supply-chain-security
       # Redirects pip to uv pip so all uv hardening applies
-      exec uv pip "$@"
+      exec {{ uv_binary_path.stdout | default('/home/' + ansible_user_id + '/.local/bin/uv') }} pip "$@"
+  when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
 - name: Deploy pip3 wrapper to /usr/local/bin (system-wide, delegates to uv)
   become: true
@@ -37,7 +44,8 @@
     content: |
       #!/bin/sh
       # Managed by ansible-supply-chain-security
-      exec uv pip "$@"
+      exec {{ uv_binary_path.stdout | default('/home/' + ansible_user_id + '/.local/bin/uv') }} pip "$@"
+  when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
 - name: Install uv-secure
   ansible.builtin.command: uv tool install uv-secure
