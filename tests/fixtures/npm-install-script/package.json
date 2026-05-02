@@ -1,0 +1,9 @@
+{
+  "name": "test-install-trigger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tests the 'install' lifecycle hook (distinct from preinstall and postinstall).",
+  "scripts": {
+    "install": "echo 'INSTALL_RAN' > /tmp/marker-install-hook"
+  }
+}

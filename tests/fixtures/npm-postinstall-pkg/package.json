@@ -1,0 +1,9 @@
+{
+  "name": "test-postinstall-trigger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test fixture: postinstall script writes a marker file. If ignore-scripts works, the marker will NOT exist.",
+  "scripts": {
+    "postinstall": "touch /tmp/postinstall-marker"
+  }
+}

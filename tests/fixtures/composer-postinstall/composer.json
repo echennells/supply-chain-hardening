@@ -1,0 +1,11 @@
+{
+  "name": "test/postinstall-trigger",
+  "description": "Tests that Composer scripts-are-disabled blocks post-install-cmd",
+  "type": "project",
+  "scripts": {
+    "post-install-cmd": [
+      "echo 'COMPOSER_SCRIPT_RAN' > /tmp/marker-composer-script"
+    ]
+  },
+  "require": {}
+}

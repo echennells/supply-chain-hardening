@@ -1,0 +1,9 @@
+{
+  "name": "test-preinstall-trigger",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tests preinstall hook (not just postinstall). Some attacks use preinstall to run before any code is even unpacked.",
+  "scripts": {
+    "preinstall": "echo 'PREINSTALL_RAN' > /tmp/marker-preinstall"
+  }
+}

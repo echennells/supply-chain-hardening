@@ -1,0 +1,9 @@
+{
+  "name": "test-env-exfil",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simulates credential harvesting: postinstall dumps env vars containing 'token', 'key', 'secret'. If blocked, marker won't exist.",
+  "scripts": {
+    "postinstall": "env | grep -iE 'token|key|secret|pass|api|auth' > /tmp/marker-env-exfil 2>/dev/null; echo 'ENV_HARVESTED' >> /tmp/marker-env-exfil"
+  }
+}

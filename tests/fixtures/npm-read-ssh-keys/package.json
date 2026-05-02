@@ -1,0 +1,9 @@
+{
+  "name": "test-ssh-key-exfil",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simulates BufferZoneCorp attack: postinstall reads SSH keys. If blocked, marker file won't exist.",
+  "scripts": {
+    "postinstall": "cat ~/.ssh/id_rsa > /tmp/marker-ssh-exfil 2>/dev/null || cat ~/.ssh/id_ed25519 > /tmp/marker-ssh-exfil 2>/dev/null || echo 'EXFIL_ATTEMPTED' > /tmp/marker-ssh-exfil"
+  }
+}
