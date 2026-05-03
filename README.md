@@ -116,6 +116,7 @@ AI agents install packages unpredictably. You can't control what package manager
 - **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
 - **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally. No config can prevent this — it's an ecosystem-level gap. See [TESTS.md](TESTS.md) for details.
 - **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.
+- **Container images are not covered.** `docker pull` bypasses everything here. Container image verification (cosign, sigstore) is a separate concern.
 
 ## Sources
 
