@@ -12,7 +12,16 @@
   failed_when: false
 
 - name: Install Socket Firewall Free via npm
-  ansible.builtin.command: npm install -g @aspect-build/sfw
+  become: true
+  ansible.builtin.command: npm install -g sfw
   when: sfw_check.rc != 0 and npm_for_socket.rc == 0
   changed_when: true
+  failed_when: false
+
+- name: Ensure sfw cache directory is writable
+  become: true
+  ansible.builtin.file:
+    path: /usr/local/lib/node_modules/sfw/.sfw-cache
+    state: directory
+    mode: "0777"
   failed_when: false
