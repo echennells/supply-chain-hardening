@@ -41,11 +41,29 @@ ansible-playbook site.yml --tags npm,pip,uv
 
 ## How it works
 
-1. **System-wide env vars** deployed to `/etc/profile.d/supply-chain-hardening.sh` and `/etc/environment` — applies to all users, all shells, interactive and non-interactive
-2. **Config files** deployed unconditionally to their expected paths (`.npmrc`, `uv.toml`, `.cargo/config.toml`, etc.) — harmless when the tool isn't installed, ready the instant it is
-3. **pip/pip3 wrappers** in `/usr/local/bin/` redirect all pip commands through uv's hardened pipeline
-4. **npq aliases** in `/etc/profile.d/` route npm/yarn/pnpm through pre-install reputation checks
-5. **Audit tools** installed where available (cargo-audit, govulncheck, pip-audit, uv-secure, etc.)
+### Layer 1: System-wide environment variables
+
+Deployed to `/etc/profile.d/supply-chain-hardening.sh` and `/etc/environment`. These apply to all users, all shells (bash, zsh, sh), interactive and non-interactive sessions. An AI agent running `bash -c "npm install foo"` gets the same hardening as a human in an interactive terminal.
+
+Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GONOSUMCHECK`, `GONOSUMDB`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
+
+### Layer 2: Config files deployed unconditionally
+
+Package manager config files are written to their expected paths before the tools are even installed. When an agent installs npm, pnpm, yarn, bun, uv, cargo, composer, or bundler at any point in the future, the hardened config is already waiting.
+
+Files deployed: `~/.npmrc`, `~/.config/pnpm/rc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.config/uv/uv.toml`, `~/.config/pip/pip.conf`, `~/.cargo/config.toml`, `~/.config/composer/config.json`, `~/.bundle/config`.
+
+### Layer 3: pip-to-uv redirect
+
+Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement, hash verification) applies even when an agent or script calls `pip install` directly.
+
+### Layer 4: Pre-install reputation checks (npq)
+
+Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm` through [npq](https://github.com/lirantal/npq), which runs 14 checks before every install: typosquatting detection, provenance regression, dormant maintainer flagging, install script warnings, and more. Auto-continue is disabled — the agent must acknowledge warnings.
+
+### Layer 5: Install-time malware blocking (Socket Firewall)
+
+[Socket Firewall Free](https://github.com/SocketDev/sfw-free) wraps npm, pip, and cargo to block packages flagged by Socket's threat intelligence in real time. No API key required.
 
 ## Configuration
 
