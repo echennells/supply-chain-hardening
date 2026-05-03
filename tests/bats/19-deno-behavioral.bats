@@ -4,7 +4,7 @@
 load setup
 
 @test "deno: binary is installed" {
-  which deno
+  which deno || skip "deno not available on this platform"
 }
 
 @test "deno: cooldown alias is in profile.d" {

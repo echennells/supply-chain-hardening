@@ -3,6 +3,10 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HOME=/root
 
+# Configurable versions for matrix testing
+ARG NODE_VERSION=22
+ARG GO_VERSION=1.24.2
+
 # System packages + Ansible
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-setuptools \
@@ -13,8 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     php-cli php-json \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 LTS
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Node.js (version from build arg)
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,8 +33,9 @@ RUN corepack enable
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:$PATH"
 
-# Go
-RUN curl -fsSL https://go.dev/dl/go1.24.2.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+# Go (version from build arg)
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:/root/go/bin:$PATH"
 
 # Rust + Cargo

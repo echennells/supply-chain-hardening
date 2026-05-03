@@ -9,11 +9,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+    name: "Test (Node ${{ matrix.node-version }})"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Build test container
-        run: docker build -t supply-chain-test -f tests/Dockerfile .
+      - name: Build test container (Node ${{ matrix.node-version }})
+        run: docker build -t supply-chain-test --build-arg NODE_VERSION=${{ matrix.node-version }} -f tests/Dockerfile .
 
       - name: Run tests
         run: docker run --rm supply-chain-test
