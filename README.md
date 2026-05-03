@@ -4,7 +4,7 @@ Ansible role that sets safe defaults for 14 package managers. Designed for serve
 
 Deploys hardened config files, system-wide environment variables (`/etc/profile.d/`, `/etc/environment`), and install-time gates so that a naive `npm install` or `pip install` gets age-gated, script-blocked, and reputation-checked without the caller knowing about it.
 
-This raises the default posture — it doesn't create a sandbox. An agent or process running as the same user can override env vars, pass CLI flags, or unset configs. If you need a hard security boundary, pair this with process-level isolation (containers, bubblewrap, nono, read-only filesystems). This project makes the safe path the default path; isolation makes it the only path.
+This raises the default posture — it doesn't create a sandbox. Env vars and config files set what happens when a package manager runs normally. Process-level isolation is a separate concern. The two are complementary — a sandbox controls what can run, this controls how package managers behave when they do.
 
 ## What it does
 

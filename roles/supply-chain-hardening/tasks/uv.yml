@@ -30,7 +30,7 @@
     content: |
       #!/bin/sh
       # Managed by ansible-supply-chain-security
-      # Redirects pip to uv pip so all uv hardening applies
+      echo "[supply-chain-hardening] pip redirected through uv" >&2
       exec {{ uv_binary_path.stdout | default('/home/' + ansible_user_id + '/.local/bin/uv') }} pip "$@"
   when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
@@ -44,6 +44,7 @@
     content: |
       #!/bin/sh
       # Managed by ansible-supply-chain-security
+      echo "[supply-chain-hardening] pip3 redirected through uv" >&2
       exec {{ uv_binary_path.stdout | default('/home/' + ansible_user_id + '/.local/bin/uv') }} pip "$@"
   when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
