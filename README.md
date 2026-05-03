@@ -1,8 +1,10 @@
 # supply-chain-hardening
 
-Ansible role that enforces install-time supply chain security across 14 package managers. Designed for servers running AI agents that install packages unpredictably.
+Ansible role that sets safe defaults for 14 package managers. Designed for servers running AI agents that install packages unpredictably.
 
-The key idea: hardening is applied at the system level (`/etc/profile.d/`, `/etc/environment/`, config files deployed unconditionally) so it's in place before any package manager is installed and can't be bypassed by an agent choosing a different shell or tool.
+Deploys hardened config files, system-wide environment variables (`/etc/profile.d/`, `/etc/environment`), and install-time gates so that a naive `npm install` or `pip install` gets age-gated, script-blocked, and reputation-checked without the caller knowing about it.
+
+This raises the default posture — it doesn't create a sandbox. An agent or process running as the same user can override env vars, pass CLI flags, or unset configs. If you need a hard security boundary, pair this with process-level isolation (containers, bubblewrap, nono, read-only filesystems). This project makes the safe path the default path; isolation makes it the only path.
 
 ## What it does
 
@@ -105,7 +107,15 @@ ansible-playbook site.yml --tags shell        # env vars only
 
 ## Why this exists
 
-AI agents install packages unpredictably. You can't control what package manager an agent reaches for, what shell it uses, or when it decides to `npm install` something. This playbook ensures that no matter what an agent does, the hardening is already enforced at the system level — not as instructions the agent can ignore, but as configs baked into the environment before the agent starts.
+AI agents install packages unpredictably. You can't control what package manager an agent reaches for, what shell it uses, or when it decides to `npm install` something. This playbook sets safe defaults at the system level so that a careless install hits age gates, script blocking, and reputation checks automatically.
+
+## Limitations
+
+- **Not a sandbox.** Env vars and config files can be overridden by any process running as the same user. This protects against naive installs, not determined bypass.
+- **sudo clears the environment.** `sudo npm install` bypasses `/etc/profile.d/` settings. The `.npmrc` config file still applies.
+- **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
+- **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally. No config can prevent this — it's an ecosystem-level gap. See [TESTS.md](TESTS.md) for details.
+- **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.
 
 ## Sources
 
