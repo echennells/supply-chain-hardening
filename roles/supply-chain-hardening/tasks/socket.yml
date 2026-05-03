@@ -11,12 +11,29 @@
   changed_when: false
   failed_when: false
 
-- name: Install Socket Firewall Free via npm
+- name: Check Node.js version (sfw requires >= 20)
+  ansible.builtin.shell: node --version | sed 's/v\([0-9]*\).*/\1/'
+  register: node_major_version
+  changed_when: false
+  failed_when: false
+  when: npm_for_socket.rc == 0
+
+- name: Install Socket Firewall Free via npm (requires Node >= 20)
   become: true
-  ansible.builtin.command: npm install -g sfw
-  when: sfw_check.rc != 0 and npm_for_socket.rc == 0
+  ansible.builtin.command: npm install -g sfw@2
+  when:
+    - sfw_check.rc != 0
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
   changed_when: true
   failed_when: false
+
+- name: Warn if Node too old for Socket Firewall
+  ansible.builtin.debug:
+    msg: "WARNING: Socket Firewall requires Node >= 20 but found Node {{ node_major_version.stdout }}. Skipping sfw install."
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int < 20
 
 - name: Ensure sfw cache directory is writable
   become: true
@@ -25,3 +42,6 @@
     state: directory
     mode: "0777"
   failed_when: false
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
