@@ -1,0 +1,57 @@
+---
+# Podman container supply chain hardening
+# Deploys policy.json for image signature verification and registries.conf
+# for registry restriction. Podman enforces these at the daemon level —
+# unlike Docker, these can't be bypassed with an env var.
+
+- name: Install podman
+  become: true
+  ansible.builtin.apt:
+    name: podman
+    state: present
+  failed_when: false
+
+- name: Create containers config directory
+  become: true
+  ansible.builtin.file:
+    path: /etc/containers
+    state: directory
+    mode: "0755"
+
+- name: Deploy container image policy (signature verification)
+  become: true
+  ansible.builtin.template:
+    src: containers-policy.json.j2
+    dest: /etc/containers/policy.json
+    mode: "0644"
+
+- name: Deploy container registries config (registry restriction)
+  become: true
+  ansible.builtin.template:
+    src: containers-registries.conf.j2
+    dest: /etc/containers/registries.conf
+    mode: "0644"
+
+- name: Install cosign for image signature verification
+  become: true
+  ansible.builtin.get_url:
+    url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    dest: /usr/local/bin/cosign
+    mode: "0755"
+  failed_when: false
+
+- name: Deploy docker-to-podman alias system-wide
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/profile.d/podman-docker-alias.sh
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      #!/bin/sh
+      # Managed by ansible-supply-chain-security
+      # Route docker commands through podman (enforces policy.json)
+      if command -v podman >/dev/null 2>&1; then
+        alias docker='podman'
+      fi
+  when: podman_alias_docker | default(true)

@@ -55,6 +55,10 @@
   ansible.builtin.include_tasks: nuget.yml
   tags: [nuget, dotnet]
 
+- name: Include podman/container hardening
+  ansible.builtin.include_tasks: podman.yml
+  tags: [podman, container, docker]
+
 - name: Include npq pre-install auditing
   ansible.builtin.include_tasks: npq.yml
   tags: [npq, npm]
