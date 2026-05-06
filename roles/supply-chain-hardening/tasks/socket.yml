@@ -40,7 +40,7 @@
   ansible.builtin.file:
     path: /usr/local/lib/node_modules/sfw/.sfw-cache
     state: directory
-    mode: "0777"
+    mode: "0755"
   failed_when: false
   when:
     - npm_for_socket.rc == 0

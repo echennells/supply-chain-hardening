@@ -31,7 +31,7 @@
       #!/bin/sh
       # Managed by ansible-supply-chain-security
       echo "[supply-chain-hardening] pip redirected through uv" >&2
-      exec {{ uv_binary_path.stdout | default('/home/' + ansible_user_id + '/.local/bin/uv') }} pip "$@"
+      exec {{ uv_binary_path.stdout | default(ansible_env.HOME + '/.local/bin/uv') }} pip "$@"
   when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
 - name: Deploy pip3 wrapper to /usr/local/bin (system-wide, delegates to uv)
@@ -45,7 +45,7 @@
       #!/bin/sh
       # Managed by ansible-supply-chain-security
       echo "[supply-chain-hardening] pip3 redirected through uv" >&2
-      exec {{ uv_binary_path.stdout | default('/home/' + ansible_user_id + '/.local/bin/uv') }} pip "$@"
+      exec {{ uv_binary_path.stdout | default(ansible_env.HOME + '/.local/bin/uv') }} pip "$@"
   when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
 - name: Install uv-secure

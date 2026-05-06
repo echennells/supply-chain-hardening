@@ -21,7 +21,6 @@ npm_update_notifier: false
 
 # pip/python settings
 pip_only_binary: true
-pip_require_hashes: false
 pip_disable_version_check: true
 python_dont_write_bytecode: true
 
@@ -45,3 +44,15 @@ yarn_enable_scripts: false
 
 # socket firewall
 socket_firewall_install: true
+
+# podman / container image hardening
+podman_enabled: false           # set true to install podman and deploy policy.json
+podman_disable_docker: false    # set true to stop and disable Docker
+podman_docker_compat: false     # set true to symlink docker.sock to podman
+podman_allowed_registries:
+  - "docker.io"
+  - "docker.io/library"
+  - "ghcr.io"
+  - "quay.io"
+  - "mcr.microsoft.com"
+  - "gcr.io"

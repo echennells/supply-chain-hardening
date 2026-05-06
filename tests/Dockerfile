@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ansible \
     curl git ca-certificates sudo jq unzip \
     build-essential \
+    podman fuse-overlayfs \
     ruby ruby-dev ruby-bundler \
     php-cli php-json \
     && rm -rf /var/lib/apt/lists/*
@@ -76,6 +77,7 @@ WORKDIR /opt/ansible-supply-chain-security
 
 # Apply the hardening role
 RUN ansible-playbook site.yml --connection=local --limit localhost \
+    -e podman_enabled=true \
     2>&1 | tee /var/log/ansible-run.log
 
 # Copy BATS tests (after hardening so edits don't trigger rebuild)

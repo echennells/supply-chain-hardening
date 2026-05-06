@@ -1,0 +1,16 @@
+{
+  "default": [
+    { "type": "insecureAcceptAnything" }
+  ],
+  "_comment": "default covers non-registry transports (local builds, oci-archive, dir). Registry pulls are gated by the docker transport below.",
+  "transports": {
+    "docker": {
+      "": [{ "type": "reject" }]{{ "," if podman_allowed_registries }}
+{% for registry in podman_allowed_registries %}
+      "{{ registry }}": [
+        { "type": "insecureAcceptAnything" }
+      ]{{ "," if not loop.last else "" }}
+{% endfor %}
+    }
+  }
+}

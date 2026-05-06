@@ -1,0 +1,94 @@
+---
+# Podman container supply chain hardening
+# Deploys policy.json for registry restriction and installs cosign.
+# Unlike Docker env vars, policy.json is daemon-level enforcement.
+#
+# Optional flags:
+#   podman_disable_docker: true  — stops and disables Docker
+#   podman_docker_compat: true   — symlinks docker.sock to podman socket
+
+- name: Install podman and fuse-overlayfs
+  become: true
+  ansible.builtin.apt:
+    name:
+      - podman
+      - fuse-overlayfs
+    state: present
+  failed_when: false
+
+- name: Create containers config directory
+  become: true
+  ansible.builtin.file:
+    path: /etc/containers
+    state: directory
+    mode: "0755"
+
+- name: Deploy container image policy (registry allowlist)
+  become: true
+  ansible.builtin.template:
+    src: containers-policy.json.j2
+    dest: /etc/containers/policy.json
+    mode: "0644"
+
+- name: Deploy container registries config (registry restriction)
+  become: true
+  ansible.builtin.template:
+    src: containers-registries.conf.j2
+    dest: /etc/containers/registries.conf
+    mode: "0644"
+
+- name: Install cosign for image signature verification
+  become: true
+  ansible.builtin.get_url:
+    url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    dest: /usr/local/bin/cosign
+    mode: "0755"
+  failed_when: false
+
+- name: Enable linger for deploy user (rootless socket survives reboot)
+  become: true
+  ansible.builtin.command: "loginctl enable-linger {{ ansible_user_id }}"
+  changed_when: true
+  failed_when: false
+
+- name: Enable user podman socket
+  ansible.builtin.systemd:
+    name: podman.socket
+    scope: user
+    state: started
+    enabled: true
+  failed_when: false
+
+# --- Optional: disable Docker ---
+
+- name: Disable Docker daemon
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - docker.service
+    - docker.socket
+  failed_when: false
+  when: podman_disable_docker
+
+# --- Optional: Docker CLI compatibility ---
+
+- name: Deploy tmpfiles.d for docker.sock symlink (survives reboot)
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/podman-docker-compat.conf
+    mode: "0644"
+    content: |
+      L /run/docker.sock - - - - /run/user/{{ ansible_user_uid }}/podman/podman.sock
+  when: podman_docker_compat
+
+- name: Create docker.sock symlink now
+  become: true
+  ansible.builtin.file:
+    src: "/run/user/{{ ansible_user_uid }}/podman/podman.sock"
+    dest: /run/docker.sock
+    state: link
+    force: true
+  when: podman_docker_compat

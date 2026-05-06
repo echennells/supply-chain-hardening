@@ -21,6 +21,16 @@ This raises the default posture — it doesn't create a sandbox. Env vars and co
 
 `*` = via third-party `cargo-cooldown` crate
 
+### Container image hardening (Podman)
+
+Installs podman, disables Docker, and deploys `/etc/containers/policy.json` with a registry allowlist. Unlike Docker's `DOCKER_CONTENT_TRUST` env var, podman's policy.json is enforced by the runtime — it can't be bypassed by unsetting a variable or passing a CLI flag.
+
+- Default policy: reject all registries, allowlist docker.io, ghcr.io, quay.io, mcr.microsoft.com, gcr.io
+- Docker CLI compatibility via socket symlink (survives reboot)
+- Rootless by default — no root container runtime
+- cosign installed for manual signature verification
+- Configurable: override `podman_allowed_registries` to change the allowlist
+
 ## Quick start
 
 ```bash
@@ -116,7 +126,7 @@ AI agents install packages unpredictably. You can't control what package manager
 - **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
 - **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally. No config can prevent this — it's an ecosystem-level gap. See [TESTS.md](TESTS.md) for details.
 - **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.
-- **Container images are not covered.** `docker pull` bypasses everything here. Container image verification (cosign, sigstore) is a separate concern.
+- **Container image hardening requires podman.** Docker has no daemon-level policy enforcement. The playbook installs podman with `policy.json` registry restrictions and disables Docker.
 
 ## Sources
 
