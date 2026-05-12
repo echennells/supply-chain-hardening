@@ -1,23 +1,34 @@
 # Tests
 
-82 automated tests verify the supply chain hardening works. Run with `make test`.
+131 automated tests verify the supply chain hardening works. Run with `make test`.
 
 ## Test structure
 
 | File | Tests | What it covers |
 |---|---|---|
-| 01-config-files.bats | 18 | All config files deployed with correct content |
+| 01-config-files.bats | 19 | All config files deployed with correct content |
 | 02-env-vars.bats | 12 | System-wide env vars in /etc/profile.d/ and /etc/environment |
 | 03-npm.bats | 3 | npm ignore-scripts behavioral test + config readback |
 | 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist |
-| 05-go.bats | 5 | Go env vars verified via `go env` |
+| 05-go.bats | 6 | Go env vars verified via `go env` |
 | 06-js-ecosystem.bats | 5 | pnpm, yarn, bun config verification |
 | 07-other-configs.bats | 7 | Composer, bundler, cargo, npq alias checks |
 | 08-npm-adversarial.bats | 5 | Simulated npm supply chain attacks |
 | 09-python-adversarial.bats | 3 | Simulated Python supply chain attacks |
-| 10-go-adversarial.bats | 7 | Simulated Go environment poisoning |
+| 10-go-adversarial.bats | 9 | Simulated Go environment poisoning |
 | 11-composer-adversarial.bats | 4 | Composer script blocking verification |
 | 12-cross-ecosystem.bats | 8 | File permissions, non-interactive shell coverage |
+| 13-pnpm-adversarial.bats | 3 | Simulated pnpm lifecycle-script attacks |
+| 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
+| 15-bun-adversarial.bats | 3 | Simulated bun lifecycle-script attacks |
+| 16-composer-behavioral.bats | 1 | Composer end-to-end blocking |
+| 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
+| 18-cargo-behavioral.bats | 3 | Cargo git-fetch-with-cli, SSL revocation |
+| 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
+| 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
+| 21-podman.bats | 11 | Podman policy.json, registries, cosign |
+| 22-pip-wrapper-safety.bats | 4 | Defensive guards in the pip→uv wrapper |
+| 23-npm-path-wrapper.bats | 9 | npm PATH wrapper plumbing + end-to-end |
 
 ## Adversarial tests
 
@@ -78,7 +89,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 82 tests
+make test          # build container + run all 131 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```
