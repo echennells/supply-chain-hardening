@@ -12,7 +12,11 @@
   failed_when: false
 
 - name: Check Node.js version (sfw requires >= 20)
-  ansible.builtin.shell: node --version | sed 's/v\([0-9]*\).*/\1/'
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      node --version | sed 's/v\([0-9]*\).*/\1/'
+    executable: /bin/bash
   register: node_major_version
   changed_when: false
   failed_when: false
@@ -26,7 +30,6 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
   changed_when: true
-  failed_when: false
 
 - name: Warn if Node too old for Socket Firewall
   ansible.builtin.debug:

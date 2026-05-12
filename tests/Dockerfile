@@ -69,16 +69,21 @@ RUN mkdir -p /root/.ssh /root/.aws \
     && echo "[default]\naws_access_key_id=FAKE_TEST_KEY\naws_secret_access_key=FAKE_TEST_SECRET" > /root/.aws/credentials \
     && chmod 600 /root/.ssh/id_rsa /root/.ssh/id_ed25519 /root/.aws/credentials
 
-# Copy the Ansible role
+# Copy the Ansible role (standalone-role layout: role files at repo root)
 COPY site.yml ansible.cfg /opt/ansible-supply-chain-security/
 COPY inventories /opt/ansible-supply-chain-security/inventories/
-COPY roles /opt/ansible-supply-chain-security/roles/
+COPY meta /opt/ansible-supply-chain-security/meta/
+COPY defaults /opt/ansible-supply-chain-security/defaults/
+COPY tasks /opt/ansible-supply-chain-security/tasks/
+COPY templates /opt/ansible-supply-chain-security/templates/
 WORKDIR /opt/ansible-supply-chain-security
 
-# Apply the hardening role
-RUN ansible-playbook site.yml --connection=local --limit localhost \
+# Apply the hardening role. Use bash with pipefail so the playbook's exit
+# code propagates through `tee` — otherwise an Ansible failure looks like
+# a successful build, with cascading test failures the only signal.
+RUN bash -o pipefail -c "ansible-playbook site.yml --connection=local --limit localhost \
     -e podman_enabled=true \
-    2>&1 | tee /var/log/ansible-run.log
+    2>&1 | tee /var/log/ansible-run.log"
 
 # Copy BATS tests (after hardening so edits don't trigger rebuild)
 COPY tests/bats /opt/tests/bats

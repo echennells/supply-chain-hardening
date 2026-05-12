@@ -57,7 +57,7 @@
 
 - name: Include podman/container hardening
   ansible.builtin.include_tasks: podman.yml
-  when: podman_enabled
+  when: podman_enabled | bool
   tags: [podman, container]
 
 - name: Include npq pre-install auditing
@@ -66,7 +66,7 @@
 
 - name: Include socket firewall
   ansible.builtin.include_tasks: socket.yml
-  when: socket_firewall_install
+  when: socket_firewall_install | bool
   tags: [socket]
 
 - name: Include GitHub Actions hardening tools

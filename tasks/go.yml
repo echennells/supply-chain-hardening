@@ -1,0 +1,16 @@
+---
+# Go supply chain hardening
+# Env vars deployed system-wide via /etc/profile.d/ and /etc/environment
+# (see shell_env.yml). This task handles tool installs only.
+
+- name: Check if go is installed
+  ansible.builtin.command: which go
+  register: go_check
+  changed_when: false
+  failed_when: false
+
+- name: Install govulncheck
+  ansible.builtin.command:
+    cmd: go install golang.org/x/vuln/cmd/govulncheck@latest
+    creates: "{{ ansible_env.HOME }}/go/bin/govulncheck"
+  when: go_check.rc == 0

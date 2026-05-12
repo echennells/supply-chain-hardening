@@ -2,10 +2,25 @@
 # npq pre-install reputation checks
 # Aliases deployed system-wide via /etc/profile.d/
 
+- name: Check if npm is installed
+  ansible.builtin.command: which npm
+  register: npm_for_npq
+  changed_when: false
+  failed_when: false
+
+- name: Check if npq is already installed
+  ansible.builtin.command: which npq-hero
+  register: npq_check
+  changed_when: false
+  failed_when: false
+  when: npm_for_npq.rc == 0
+
 - name: Install npq globally
   ansible.builtin.command: npm install -g npq
   changed_when: true
-  failed_when: false
+  when:
+    - npm_for_npq.rc == 0
+    - npq_check.rc != 0
 
 - name: Deploy npq aliases and config system-wide
   become: true

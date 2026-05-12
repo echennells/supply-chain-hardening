@@ -3,4 +3,4 @@
   hosts: all
   gather_facts: true
   roles:
-    - supply-chain-hardening
+    - role: "{{ playbook_dir }}"

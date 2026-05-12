@@ -1,0 +1,33 @@
+---
+galaxy_info:
+  role_name: supply_chain_hardening
+  namespace: echennells
+  author: Eric Chennells
+  description: >-
+    Sets safe defaults for 14 package managers (npm, pnpm, yarn, bun, deno, pip,
+    uv, cargo, go, composer, bundler, maven, gradle, nuget) plus podman image
+    policy. Designed for servers running AI agents that install packages
+    unpredictably.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bookworm
+  galaxy_tags:
+    - security
+    - supplychain
+    - hardening
+    - npm
+    - pip
+    - cargo
+    - golang
+    - composer
+    - bundler
+    - container
+    - podman
+dependencies: []

@@ -1,9 +1,0 @@
----
-# Go supply chain hardening
-# Env vars deployed system-wide via /etc/profile.d/ and /etc/environment
-# (see shell_env.yml). This task handles tool installs only.
-
-- name: Install govulncheck
-  ansible.builtin.command: go install golang.org/x/vuln/cmd/govulncheck@latest
-  changed_when: true
-  failed_when: false

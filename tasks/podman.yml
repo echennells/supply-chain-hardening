@@ -7,14 +7,15 @@
 #   podman_disable_docker: true  — stops and disables Docker
 #   podman_docker_compat: true   — symlinks docker.sock to podman socket
 
-- name: Install podman and fuse-overlayfs
+- name: Install podman and fuse-overlayfs (Debian/Ubuntu)
   become: true
   ansible.builtin.apt:
     name:
       - podman
       - fuse-overlayfs
     state: present
-  failed_when: false
+    update_cache: true
+  when: ansible_os_family == 'Debian'
 
 - name: Create containers config directory
   become: true
@@ -43,13 +44,25 @@
     url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
     dest: /usr/local/bin/cosign
     mode: "0755"
-  failed_when: false
+
+- name: Detect systemd (linger and user socket only apply on systemd hosts)
+  ansible.builtin.stat:
+    path: /run/systemd/system
+  register: systemd_present
+
+- name: Check if linger is already enabled
+  ansible.builtin.stat:
+    path: "/var/lib/systemd/linger/{{ ansible_user_id }}"
+  register: linger_state
+  when: systemd_present.stat.exists
 
 - name: Enable linger for deploy user (rootless socket survives reboot)
   become: true
   ansible.builtin.command: "loginctl enable-linger {{ ansible_user_id }}"
+  when:
+    - systemd_present.stat.exists
+    - not linger_state.stat.exists
   changed_when: true
-  failed_when: false
 
 - name: Enable user podman socket
   ansible.builtin.systemd:
@@ -57,7 +70,7 @@
     scope: user
     state: started
     enabled: true
-  failed_when: false
+  when: systemd_present.stat.exists
 
 # --- Optional: disable Docker ---
 
@@ -70,8 +83,8 @@
   loop:
     - docker.service
     - docker.socket
-  failed_when: false
-  when: podman_disable_docker
+  when: podman_disable_docker | bool
+  failed_when: false  # docker may not be installed — disabling a non-existent unit is fine
 
 # --- Optional: Docker CLI compatibility ---
 
@@ -82,7 +95,7 @@
     mode: "0644"
     content: |
       L /run/docker.sock - - - - /run/user/{{ ansible_user_uid }}/podman/podman.sock
-  when: podman_docker_compat
+  when: podman_docker_compat | bool
 
 - name: Create docker.sock symlink now
   become: true
@@ -91,4 +104,4 @@
     dest: /run/docker.sock
     state: link
     force: true
-  when: podman_docker_compat
+  when: podman_docker_compat | bool

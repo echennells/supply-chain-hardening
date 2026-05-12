@@ -48,12 +48,11 @@
       exec {{ uv_binary_path.stdout | default(ansible_env.HOME + '/.local/bin/uv') }} pip "$@"
   when: uv_binary_path.rc == 0 or ansible_user_id is defined
 
-- name: Install uv-secure
-  ansible.builtin.command: uv tool install uv-secure
-  changed_when: true
-  failed_when: false
-
-- name: Install pip-audit
-  ansible.builtin.command: uv tool install pip-audit
-  changed_when: true
-  failed_when: false
+- name: Install uv-managed tools
+  ansible.builtin.command:
+    cmd: "uv tool install {{ item }}"
+    creates: "{{ ansible_env.HOME }}/.local/bin/{{ item }}"
+  loop:
+    - uv-secure
+    - pip-audit
+  when: uv_binary_path.rc == 0

@@ -16,7 +16,22 @@
       min-release-age={{ npm_minimum_release_age_days }}
       allow-git=none
 
+- name: Check if npm is installed
+  ansible.builtin.command: which npm
+  register: npm_check
+  changed_when: false
+  failed_when: false
+
+- name: Check if lockfile-lint is already installed
+  ansible.builtin.command: which lockfile-lint
+  register: lockfile_lint_check
+  changed_when: false
+  failed_when: false
+  when: npm_check.rc == 0
+
 - name: Install lockfile-lint globally
   ansible.builtin.command: npm install -g lockfile-lint
   changed_when: true
-  failed_when: false
+  when:
+    - npm_check.rc == 0
+    - lockfile_lint_check.rc != 0

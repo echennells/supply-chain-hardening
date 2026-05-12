@@ -1,0 +1,32 @@
+---
+# Cargo/Rust supply chain hardening
+# Config deployed unconditionally; auditing tools only install if cargo exists.
+
+- name: Create cargo config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.cargo"
+    state: directory
+    mode: "0755"
+
+- name: Deploy hardened cargo config.toml
+  ansible.builtin.template:
+    src: cargo-config.toml.j2
+    dest: "{{ ansible_env.HOME }}/.cargo/config.toml"
+    mode: "0644"
+
+- name: Check if cargo is installed
+  ansible.builtin.command: which cargo
+  register: cargo_check
+  changed_when: false
+  failed_when: false
+
+- name: Install cargo auditing tools
+  ansible.builtin.command:
+    cmd: "cargo install {{ item }}"
+    creates: "{{ ansible_env.HOME }}/.cargo/bin/{{ item }}"
+  loop:
+    - cargo-audit
+    - cargo-deny
+    - cargo-vet
+    - cargo-cooldown
+  when: cargo_check.rc == 0

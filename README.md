@@ -33,6 +33,22 @@ Installs podman, disables Docker, and deploys `/etc/containers/policy.json` with
 
 ## Quick start
 
+### Install from Ansible Galaxy
+
+```bash
+ansible-galaxy role install echennells.supply_chain_hardening
+```
+
+Then reference it in your playbook:
+
+```yaml
+- hosts: all
+  roles:
+    - echennells.supply_chain_hardening
+```
+
+### Or clone and run directly
+
 ```bash
 # Install Ansible if you don't have it
 pip install ansible
@@ -79,7 +95,7 @@ Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm`
 
 ## Configuration
 
-All age gates are controlled by a single variable in `roles/supply-chain-hardening/defaults/main.yml`:
+All age gates are controlled by a single variable in `defaults/main.yml`:
 
 ```yaml
 release_age_hours: 48
