@@ -27,8 +27,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
-# pnpm + yarn via corepack
-RUN corepack enable
+# pnpm + yarn via corepack. pnpm 11 requires Node >= 22.13 (uses
+# node:sqlite). On older Node, cap at pnpm 10 so corepack doesn't
+# auto-download an incompatible major. Node 22 floats to latest.
+RUN corepack enable && \
+    if [ "${NODE_VERSION}" -lt 22 ]; then \
+        corepack prepare pnpm@10 --activate; \
+    fi
 
 # Bun
 RUN curl -fsSL https://bun.sh/install | bash
