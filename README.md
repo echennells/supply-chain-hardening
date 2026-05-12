@@ -1,10 +1,10 @@
 # supply-chain-hardening
 
-Ansible role that sets safe defaults for 14 package managers. Designed for servers running AI agents that install packages unpredictably.
+Ansible role that sets safe defaults for 14 package managers. Designed for hosts running AI agents that install packages.
 
-Deploys hardened config files, system-wide environment variables (`/etc/profile.d/`, `/etc/environment`), and install-time gates so that a naive `npm install` or `pip install` gets age-gated, script-blocked, and reputation-checked without the caller knowing about it.
+Deploys hardened config files and system-wide environment variables (`/etc/profile.d/`, `/etc/environment`) so a naive `npm install` or `pip install` gets age-gated, script-blocked, and reputation-checked without the caller knowing about it.
 
-This raises the default posture — it doesn't create a sandbox. Env vars and config files set what happens when a package manager runs normally. Process-level isolation is a separate concern. The two are complementary — a sandbox controls what can run, this controls how package managers behave when they do.
+Apply it to a bare host, inside a sandbox, or to a container image — anywhere a package manager runs. This raises the default posture; it isn't a sandbox. Process-level isolation is a separate, complementary concern: a sandbox controls what can run, this controls how package managers behave when they do.
 
 ## What it does
 
