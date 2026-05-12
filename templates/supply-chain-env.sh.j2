@@ -16,11 +16,15 @@ export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
 export UV_LINK_MODE=copy
 
 # === Go ===
+# Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are emptied so
+# no module is exempted from sumdb checks, proxy traffic, or HTTPS. GOTOOLCHAIN
+# locks to the installed toolchain to prevent auto-download of alternatives.
 export GOSUMDB='{{ go_sumdb }}'
 export GOPROXY='{{ go_proxy }}'
 export GOFLAGS='-mod={{ goflags_mod }}'
-export GONOSUMCHECK=''
-export GONOSUMDB=''
+export GOPRIVATE='{{ go_private }}'
+export GONOPROXY='{{ go_noproxy }}'
+export GOINSECURE='{{ go_insecure }}'
 export GOTOOLCHAIN=local
 
 # === PHP (Composer) ===

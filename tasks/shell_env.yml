@@ -35,8 +35,9 @@
       GOSUMDB={{ go_sumdb }}
       GOPROXY={{ go_proxy }}
       GOFLAGS=-mod={{ goflags_mod }}
-      GONOSUMCHECK=
-      GONOSUMDB=
+      GOPRIVATE={{ go_private }}
+      GONOPROXY={{ go_noproxy }}
+      GOINSECURE={{ go_insecure }}
       GOTOOLCHAIN=local
       COMPOSER_NO_SCRIPTS=1
   tags: [shell]

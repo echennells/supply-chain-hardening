@@ -2,6 +2,12 @@
 # Adversarial tests: verify Go env vars can't be poisoned.
 # Simulates BufferZoneCorp: malicious init() sets GOSUMDB=off, GOPROXY to attacker.
 # Our hardening sets these in /etc/environment so they survive subprocess spawning.
+#
+# Note: the bypass knobs we defend are the actual Go env vars documented at
+# https://go.dev/ref/mod (GOPRIVATE, GONOPROXY, GOINSECURE). An earlier version
+# of this role set GONOSUMCHECK and GONOSUMDB — neither is a real Go env var,
+# so those assertions were trivially-true no-ops that gave a false sense of
+# coverage. Tests below use the documented variables.
 
 load setup
 
@@ -23,13 +29,20 @@ setup() {
   [ "$result" = "https://proxy.golang.org,direct" ]
 }
 
-@test "ATTACK: GONOSUMDB cannot be set to wildcard '*'" {
-  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh; echo $GONOSUMDB')
+@test "ATTACK: GOPRIVATE cannot be set to wildcard to bypass sumdb" {
+  # GOPRIVATE='*' would mark all modules as private, skipping sumdb checks.
+  # Our hardening keeps it empty so every module is verified.
+  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh; echo $GOPRIVATE')
   [ -z "$result" ]
 }
 
-@test "ATTACK: GONOSUMCHECK cannot be set to wildcard '*'" {
-  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh; echo $GONOSUMCHECK')
+@test "ATTACK: GONOPROXY cannot be set to bypass module proxy" {
+  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh; echo $GONOPROXY')
+  [ -z "$result" ]
+}
+
+@test "ATTACK: GOINSECURE cannot be set to allow HTTP for any module" {
+  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh; echo $GOINSECURE')
   [ -z "$result" ]
 }
 
@@ -38,10 +51,14 @@ setup() {
   [ "$result" = "local" ]
 }
 
-@test "/etc/environment has GONOSUMCHECK empty (blocks wildcard)" {
-  grep -q "^GONOSUMCHECK=$" /etc/environment
+@test "/etc/environment has GOPRIVATE empty (blocks wildcard)" {
+  grep -q "^GOPRIVATE=$" /etc/environment
 }
 
-@test "/etc/environment has GONOSUMDB empty (blocks wildcard)" {
-  grep -q "^GONOSUMDB=$" /etc/environment
+@test "/etc/environment has GONOPROXY empty (blocks wildcard)" {
+  grep -q "^GONOPROXY=$" /etc/environment
+}
+
+@test "/etc/environment has GOINSECURE empty (blocks wildcard)" {
+  grep -q "^GOINSECURE=$" /etc/environment
 }

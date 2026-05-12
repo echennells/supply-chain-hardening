@@ -1,6 +1,8 @@
 ---
 # uv / Python supply chain hardening
-# Config and wrappers deployed unconditionally
+# Config deployed unconditionally; pip-redirect wrappers ONLY deployed when uv
+# is actually present — otherwise the wrapper would recurse into itself and
+# brick pip system-wide. See tests/bats/22-pip-wrapper-safety.bats.
 
 - name: Create uv config directory
   ansible.builtin.file:
@@ -15,7 +17,7 @@
     mode: "0644"
 
 - name: Find uv binary path
-  ansible.builtin.command: bash -lc "which uv"
+  ansible.builtin.command: bash -lc "command -v uv"
   register: uv_binary_path
   changed_when: false
   failed_when: false
@@ -30,9 +32,16 @@
     content: |
       #!/bin/sh
       # Managed by ansible-supply-chain-security
+      # Belt-and-suspenders: refuse to run if uv isn't where we expect,
+      # rather than recursing into ourselves and bricking pip.
+      UV='{{ uv_binary_path.stdout }}'
+      if [ -z "$UV" ] || [ ! -x "$UV" ]; then
+        echo "[supply-chain-hardening] error: uv not found at '$UV'; refusing to recurse" >&2
+        exit 127
+      fi
       echo "[supply-chain-hardening] pip redirected through uv" >&2
-      exec {{ uv_binary_path.stdout | default(ansible_env.HOME + '/.local/bin/uv') }} pip "$@"
-  when: uv_binary_path.rc == 0 or ansible_user_id is defined
+      exec "$UV" pip "$@"
+  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
 - name: Deploy pip3 wrapper to /usr/local/bin (system-wide, delegates to uv)
   become: true
@@ -44,9 +53,14 @@
     content: |
       #!/bin/sh
       # Managed by ansible-supply-chain-security
+      UV='{{ uv_binary_path.stdout }}'
+      if [ -z "$UV" ] || [ ! -x "$UV" ]; then
+        echo "[supply-chain-hardening] error: uv not found at '$UV'; refusing to recurse" >&2
+        exit 127
+      fi
       echo "[supply-chain-hardening] pip3 redirected through uv" >&2
-      exec {{ uv_binary_path.stdout | default(ansible_env.HOME + '/.local/bin/uv') }} pip "$@"
-  when: uv_binary_path.rc == 0 or ansible_user_id is defined
+      exec "$UV" pip "$@"
+  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
 - name: Install uv-managed tools
   ansible.builtin.command:
@@ -55,4 +69,4 @@
   loop:
     - uv-secure
     - pip-audit
-  when: uv_binary_path.rc == 0
+  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0

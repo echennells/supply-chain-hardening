@@ -2,9 +2,9 @@
 
 Ansible role that sets safe defaults for 14 package managers. Designed for hosts running AI agents that install packages.
 
-Deploys hardened config files and system-wide environment variables (`/etc/profile.d/`, `/etc/environment`) so a naive `npm install` or `pip install` gets age-gated, script-blocked, and reputation-checked without the caller knowing about it.
+Deploys hardened config files and system-wide environment variables (`/etc/profile.d/`, `/etc/environment`) so a naive `npm install` or `pip install` gets age-gated and script-blocked without the caller knowing about it. Reputation checks (npq) are an additional layer for humans typing in an interactive shell.
 
-Apply it to a bare host, inside a sandbox, or to a container image — anywhere a package manager runs. This raises the default posture; it isn't a sandbox. Process-level isolation is a separate, complementary concern: a sandbox controls what can run, this controls how package managers behave when they do.
+Apply it to a bare host, inside a sandbox, or to a container image — anywhere a package manager runs. The role configures the package managers you already have — it doesn't install them (podman is the opt-in exception). This raises the default posture; it isn't a sandbox. Process-level isolation is a separate, complementary concern: a sandbox controls what can run, this controls how package managers behave when they do.
 
 ## What it does
 
@@ -87,7 +87,11 @@ Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root
 
 ### Pre-install reputation checks (npq)
 
-Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm` through [npq](https://github.com/lirantal/npq), which runs 14 checks before every install: typosquatting detection, provenance regression, dormant maintainer flagging, install script warnings, and more. Auto-continue is disabled — the agent must acknowledge warnings.
+Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm` through [npq](https://github.com/lirantal/npq), which runs 14 checks before each install: typosquatting detection, provenance regression, dormant maintainer flagging, install script warnings, and more. Auto-continue is disabled — the user must acknowledge warnings before the install proceeds.
+
+**Scope:** shell aliases only expand in interactive shells. They do **not** fire for scripts, CI runners, `sh -c`, sudo, `package.json` lifecycle hooks, or AI agents invoking npm via subprocess. For those (non-interactive) contexts — which is most automated traffic — the `.npmrc` and env-var layers above are what actually catch the install. npq is a complement for humans, not the primary defense.
+
+**Closing the gap with `npm_path_wrapper`:** set `npm_path_wrapper: true` to deploy `/usr/local/bin/npm` as a wrapper that intercepts every npm invocation at the PATH level. The wrapper detects whether stdin is a TTY: interactive humans get routed through npq + Socket Firewall (reputation prompt plus threat-intel block); scripts, agents, and CI get routed through Socket Firewall alone (silent blocking, no prompt to hang on). Trade-offs: ~50–200 ms latency per npm call, and `npm` becomes a hard dependency on `sfw` working. Recommended for agent-heavy hosts; default off so it isn't a surprise on first install.
 
 ### Install-time malware blocking (Socket Firewall)
 
@@ -133,7 +137,7 @@ ansible-playbook site.yml --tags shell        # env vars only
 
 ## Why this exists
 
-AI agents install packages unpredictably. You can't control what package manager an agent reaches for, what shell it uses, or when it decides to `npm install` something. This playbook sets safe defaults at the system level so that a careless install hits age gates, script blocking, and reputation checks automatically.
+AI agents install packages unpredictably. You can't control what package manager an agent reaches for, what shell it uses, or when it decides to `npm install` something. This playbook sets safe defaults at the system level so that a careless install hits age gates and script blocking automatically — both deployed via config files and env vars that apply universally, including the non-interactive shells AI agents typically use.
 
 ## Limitations
 

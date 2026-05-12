@@ -48,3 +48,37 @@
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+
+# --- npm PATH wrapper (opt-in via npm_path_wrapper) ---
+# Without this, sfw is installed but never invoked except by callers who
+# explicitly type `sfw npm install ...`. The wrapper interposes at the
+# PATH level so every npm call (scripts, agents, sudo, package.json
+# lifecycles) is routed through sfw.
+
+- name: Find real npm path (excluding /usr/local/bin to avoid wrapper recursion)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vFx '/usr/local/bin' | tr '\n' ':' | sed 's/:$//')
+      PATH="$CLEAN_PATH" command -v npm 2>/dev/null
+    executable: /bin/bash
+  register: npm_real_path
+  changed_when: false
+  failed_when: false
+  when:
+    - npm_path_wrapper | bool
+    - npm_for_socket.rc == 0
+
+- name: Deploy npm PATH wrapper to /usr/local/bin
+  become: true
+  ansible.builtin.template:
+    src: npm-wrapper.sh.j2
+    dest: /usr/local/bin/npm
+    mode: "0755"
+    owner: root
+    group: root
+  when:
+    - npm_path_wrapper | bool
+    - npm_for_socket.rc == 0
+    - npm_real_path.rc == 0
+    - npm_real_path.stdout | length > 0

@@ -33,7 +33,11 @@ cargo_audit_enabled: true
 # go settings
 go_sumdb: "sum.golang.org"
 go_proxy: "https://proxy.golang.org,direct"
+# Bypass knobs — kept empty so no module is exempted from sumdb / proxy / HTTPS.
+# Setting any to a pattern (e.g. "example.com/*") weakens hardening.
 go_private: ""
+go_noproxy: ""
+go_insecure: ""
 goflags_mod: "readonly"
 
 # pnpm settings
@@ -44,6 +48,15 @@ yarn_enable_scripts: false
 
 # socket firewall
 socket_firewall_install: true
+
+# npm PATH wrapper (opt-in)
+# When true, deploys /usr/local/bin/npm as a wrapper that routes calls through
+# Socket Firewall (non-interactive) or npq (interactive shells). Closes the
+# "alias only works in interactive shells" gap so scripts/agents/CI get real
+# threat-intel checks too. Cost: ~50-200ms per npm invocation, hard dependency
+# on sfw working. Recommended for agent-heavy hosts; default off to avoid
+# surprising users on first install.
+npm_path_wrapper: false
 
 # podman / container image hardening
 podman_enabled: false           # set true to install podman and deploy policy.json

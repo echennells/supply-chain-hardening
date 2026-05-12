@@ -7,11 +7,15 @@ load setup
 }
 
 @test "pip wrapper delegates to uv" {
-  assert_file_contains /usr/local/bin/pip "uv pip"
+  # Match the exec line semantically (uv binary executed with `pip` as
+  # first arg + caller args). Avoids depending on the literal source
+  # form, which changed when the wrapper added a uv-binary recursion
+  # guard around the exec.
+  assert_file_contains /usr/local/bin/pip 'exec "$UV" pip'
 }
 
 @test "pip3 wrapper delegates to uv" {
-  assert_file_contains /usr/local/bin/pip3 "uv pip"
+  assert_file_contains /usr/local/bin/pip3 'exec "$UV" pip'
 }
 
 @test "uv no-build rejects sdist-only package" {

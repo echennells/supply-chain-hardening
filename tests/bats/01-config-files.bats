@@ -37,6 +37,15 @@ load setup
   assert_file_contains "$HOME/.config/pip/pip.conf" "only-binary = :all:"
 }
 
+@test "pip.conf: template wiring intact (pip_only_binary variable controls behavior)" {
+  # Regression catcher: pip.conf must be template-driven, not hardcoded.
+  # The trade-off comment is only present in the template-rendered version.
+  # If this disappears, someone has reverted to a hardcoded copy: task and
+  # the pip_only_binary default variable is no longer actually controlling
+  # anything (silent contract violation with defaults/main.yml).
+  assert_file_contains "$HOME/.config/pip/pip.conf" "Set pip_only_binary: false to disable"
+}
+
 # pnpm
 @test "pnpm rc: ignore-scripts=true" {
   assert_file_contains "$HOME/.config/pnpm/rc" "ignore-scripts=true"

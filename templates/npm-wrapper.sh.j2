@@ -1,0 +1,68 @@
+#!/bin/sh
+# /usr/local/bin/npm — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# Routes npm calls through:
+#   - Socket Firewall (sfw) for non-interactive callers (scripts, agents, CI)
+#   - npq + sfw for interactive humans (reputation prompt + threat-intel block)
+#
+# Closes the gap where the alias-only npq integration leaves agents,
+# subprocess.run() calls, package.json scripts, and sudo-invoked installs
+# without any reputation/threat-intel coverage. The real npm path was
+# detected at deploy time and embedded below.
+
+REAL_NPM='{{ npm_real_path.stdout }}'
+
+# Recursion guard — refuse to run if real npm path is empty, non-executable,
+# or points back at ourselves. Same belt-and-suspenders pattern as the
+# pip→uv wrapper. Surfaces a loud error rather than looping until killed.
+if [ -z "$REAL_NPM" ] || [ ! -x "$REAL_NPM" ] || [ "$REAL_NPM" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real npm not found at '$REAL_NPM'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Find the first non-flag argument — that's the npm subcommand. Bare `npm`,
+# `npm --version`, `npm -v` etc. leave subcmd empty.
+subcmd=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *) subcmd="$arg"; break ;;
+  esac
+done
+
+# sfw is a network-layer filter; npq is a fetch-time reputation check.
+# Both add stdout/stderr chatter and only protect calls that actually
+# fetch from the registry. For local-only or read-only subcommands
+# (config, version, ls, run, help, …) bypass both — sfw's "no fetch
+# attempts" banner corrupts captured `npm config get` output, and npq
+# would either hang or error on non-install arguments.
+case "$subcmd" in
+  install|i|add|ci|update|up|rebuild|exec|x|dedupe|link|\
+  audit|view|info|show|search|outdated)
+    ;;
+  *)
+    exec "$REAL_NPM" "$@"
+    ;;
+esac
+
+# TTY detection — if both stdin and stdout are terminals, a human is at
+# the keyboard. Use npq's prompt-driven reputation review, wrapped by sfw
+# for threat-intel blocking. Otherwise (script/agent/CI), use sfw alone
+# (npq would hang waiting for input).
+if [ -t 0 ] && [ -t 1 ] && command -v npq-hero >/dev/null 2>&1; then
+  if command -v sfw >/dev/null 2>&1; then
+    exec sfw npq-hero "$@"
+  fi
+  exec npq-hero "$@"
+fi
+
+# Non-interactive path — sfw blocks Socket-flagged packages silently
+if command -v sfw >/dev/null 2>&1; then
+  exec sfw "$REAL_NPM" "$@"
+fi
+
+# sfw unavailable — warn loudly and pass through. Don't break npm just
+# because the wrapper's helper isn't there.
+echo "[supply-chain-hardening] warning: sfw not found; npm call not filtered through threat intel" >&2
+exec "$REAL_NPM" "$@"

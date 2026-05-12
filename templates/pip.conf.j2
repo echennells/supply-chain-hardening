@@ -1,0 +1,12 @@
+; Managed by ansible-supply-chain-security
+[global]
+disable-pip-version-check = {{ pip_disable_version_check | bool | lower }}
+{% if pip_only_binary | bool %}
+
+[install]
+; Refuses sdists (source distributions). Blocks the LiteLLM/BufferZoneCorp-class
+; attack where setup.py executes arbitrary code at install time. Trade-off:
+; sdist-only packages (rare for popular libs, common for niche/old/pre-release)
+; will fail to install. Set pip_only_binary: false to disable.
+only-binary = :all:
+{% endif %}

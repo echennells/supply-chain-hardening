@@ -1,7 +1,7 @@
 ---
 # pip is redirected to uv via system-wide wrappers (see uv.yml)
 # This task deploys pip.conf as a fallback in case the real pip binary
-# is invoked directly (bypassing the wrapper)
+# is invoked directly (bypassing the wrapper) — e.g. on hosts without uv.
 
 - name: Create pip config directory
   ansible.builtin.file:
@@ -10,13 +10,7 @@
     mode: "0755"
 
 - name: Deploy hardened pip.conf as fallback
-  ansible.builtin.copy:
+  ansible.builtin.template:
+    src: pip.conf.j2
     dest: "{{ ansible_env.HOME }}/.config/pip/pip.conf"
     mode: "0644"
-    content: |
-      ; Managed by ansible-supply-chain-security
-      [global]
-      disable-pip-version-check = true
-
-      [install]
-      only-binary = :all:

@@ -16,13 +16,18 @@ setup() {
   [ "$result" = "https://proxy.golang.org,direct" ]
 }
 
-@test "go: GONOSUMCHECK is empty" {
-  result=$(go env GONOSUMCHECK)
+@test "go: GOPRIVATE is empty (no modules exempted from sumdb)" {
+  result=$(go env GOPRIVATE)
   [ -z "$result" ]
 }
 
-@test "go: GONOSUMDB is empty" {
-  result=$(go env GONOSUMDB)
+@test "go: GONOPROXY is empty (no modules bypass proxy)" {
+  result=$(go env GONOPROXY)
+  [ -z "$result" ]
+}
+
+@test "go: GOINSECURE is empty (HTTPS required for all modules)" {
+  result=$(go env GOINSECURE)
   [ -z "$result" ]
 }
 
