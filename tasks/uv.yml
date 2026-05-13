@@ -17,7 +17,22 @@
     mode: "0644"
 
 - name: Find uv binary path
-  ansible.builtin.command: bash -lc "command -v uv"
+  # Check the canonical install location first. `bash -lc` (login shell) was
+  # the previous approach but it's fragile: the uv installer adds PATH only
+  # to ~/.bashrc, and login shells source ~/.bash_profile (not ~/.bashrc).
+  # On real hosts where the user follows the official installer, a login
+  # shell may have empty PATH for ~/.local/bin and `command -v uv` returns
+  # nothing — pip wrappers then silently don't deploy.
+  ansible.builtin.shell:
+    cmd: |
+      for p in "$HOME/.local/bin/uv" /usr/local/bin/uv /usr/bin/uv; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v uv 2>/dev/null
+    executable: /bin/bash
   register: uv_binary_path
   changed_when: false
   failed_when: false
@@ -65,7 +80,7 @@
 - name: Install uv-managed tools
   ansible.builtin.command:
     cmd: "uv tool install {{ item }}"
-    creates: "{{ ansible_env.HOME }}/.local/bin/{{ item }}"
+    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/' + item }}"
   loop:
     - uv-secure
     - pip-audit

@@ -4,8 +4,12 @@
 # Background: shell aliases for npq only fire in interactive shells, leaving
 # scripts, agents, package.json scripts, sudo, and CI without reputation or
 # threat-intel coverage. The PATH wrapper sits at /usr/local/bin/npm and
-# routes every npm invocation through Socket Firewall (non-interactive) or
-# npq + sfw (interactive). The test container builds with this feature on.
+# routes registry-touching subcommands (install/ci/update/audit/…) through
+# Socket Firewall (non-interactive) or npq + sfw (interactive). Read-only
+# and local subcommands (config/version/ls/run/help/…) bypass both — sfw's
+# "no fetch attempts" banner corrupts captured stdout for `npm config get`,
+# and npq would error on non-install subcommands. The test container builds
+# with this feature on.
 
 load setup
 
@@ -80,4 +84,52 @@ load setup
   # recursion guard. Should exit 0 (pass-through to real npm).
   [ "$status" -eq 0 ]
   [ -n "$output" ]
+}
+
+@test "npm config get produces clean output (read-only subcommand bypasses wrapper chatter)" {
+  # Regression catcher for the exact bug that drove the subcommand allowlist:
+  # before the allowlist, sfw's "no fetch attempts" banner prepended to every
+  # `npm config get` call, breaking direct string comparisons in 03-npm.bats
+  # and elsewhere. If someone narrows the bypass list to exclude `config`,
+  # `npm config get ignore-scripts` will return something like
+  # "[supply-chain-hardening] ... true" instead of just "true" and this fails.
+  result=$(npm config get ignore-scripts 2>/dev/null)
+  [ "$result" = "true" ]
+}
+
+@test "npm --version output is only a version number" {
+  # The bypass path must not prepend warnings/banners to stdout. Anything
+  # other than a bare semver-shaped string breaks scripts and CI that parse
+  # `npm --version`. Catches a regression where someone moves `--version`
+  # routing through sfw or adds wrapper output before the exec.
+  result=$(npm --version 2>/dev/null)
+  echo "$result" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'
+}
+
+@test "npm wrapper allowlist contains registry-fetching subcommands" {
+  # Regression catcher: if someone narrows the allowlist, install/ci/update
+  # would silently bypass sfw and lose threat-intel coverage. These four
+  # subcommands MUST stay routed.
+  assert_file_contains /usr/local/bin/npm "install"
+  assert_file_contains /usr/local/bin/npm "ci"
+  assert_file_contains /usr/local/bin/npm "update"
+  assert_file_contains /usr/local/bin/npm "audit"
+}
+
+@test "npm install subcommand actually attempts to route through sfw" {
+  # Behavioral check that the allowlist works in the OTHER direction: install
+  # MUST go through sfw, not bypass to real npm. We verify by hiding sfw and
+  # running an install — the wrapper's fallback path emits a "sfw not found"
+  # warning. If the warning is absent, the install bypassed sfw entirely
+  # (allowlist regression in the wrong direction).
+  sfw_path=$(command -v sfw 2>/dev/null) || skip "sfw not present"
+
+  mv "$sfw_path" "${sfw_path}.bats-hidden"
+  cd /tmp && rm -rf wrapper-route-test && mkdir wrapper-route-test && cd wrapper-route-test
+  npm init -y >/dev/null 2>&1
+  output=$(npm install /opt/test-fixtures/npm-postinstall-pkg 2>&1 || true)
+  mv "${sfw_path}.bats-hidden" "$sfw_path"
+  rm -rf /tmp/wrapper-route-test
+
+  echo "$output" | grep -q "sfw not found"
 }

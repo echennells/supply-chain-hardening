@@ -1,7 +1,112 @@
 ---
 # Deno supply chain hardening
-# Deno has no global config file — alias is the only option.
-# Deployed to /etc/profile.d/ via a system-wide alias.
+# Two mechanisms (mutually exclusive, controlled by deno_path_wrapper):
+#   1. Default: shell alias at /etc/profile.d/deno-cooldown.sh. Interactive
+#      shells only — won't fire for scripts, agents, or CI.
+#   2. deno_path_wrapper: true: PATH wrapper installed IN-PLACE at the
+#      discovered deno location (typically ~/.deno/bin/deno). The original
+#      deno binary is preserved as <path>-real in the same directory.
+#
+# Why in-place rather than /usr/local/bin/deno:
+# Deno's official installer (curl ... | sh) writes to ~/.deno/bin and
+# prepends that directory to PATH. A wrapper at /usr/local/bin/deno would
+# be silently bypassed because the user-prefix directory wins PATH lookup.
+# Installing in-place defeats PATH ordering by being upstream of it.
+# Caveat: re-running Deno's installer overwrites the wrapper; the role
+# must be re-applied after Deno upgrades.
+
+- name: Find current deno path
+  # Check the canonical install location first rather than relying on shell
+  # sourcing. The deno installer puts the binary at ~/.deno/bin/deno but
+  # adds PATH only to ~/.bashrc — `bash -lc` sources ~/.bash_profile, not
+  # ~/.bashrc, so on real hosts the login-shell lookup may return empty.
+  ansible.builtin.shell:
+    cmd: |
+      for p in "$HOME/.deno/bin/deno" /usr/local/bin/deno /usr/bin/deno; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="$HOME/.deno/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v deno 2>/dev/null
+    executable: /bin/bash
+  register: deno_path
+  changed_when: false
+  failed_when: false
+
+- name: Determine whether current deno binary is our wrapper or the real binary
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'supply-chain-hardening' '{{ deno_path.stdout }}' 2>/dev/null; then
+        echo is_wrapper
+      else
+        echo is_real
+      fi
+    executable: /bin/bash
+  register: deno_kind
+  changed_when: false
+  when:
+    - deno_path.rc == 0
+    - deno_path.stdout | length > 0
+
+- name: Check whether a deno-real backup exists (from prior wrapper run)
+  ansible.builtin.stat:
+    path: "{{ deno_path.stdout }}-real"
+  register: deno_real_backup
+  when:
+    - deno_path.rc == 0
+    - deno_path.stdout | length > 0
+
+# --- WRAPPER MODE (deno_path_wrapper: true) ---
+
+- name: Rename real deno to deno-real (first time activating wrapper)
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ deno_path.stdout }} {{ deno_path.stdout }}-real"
+  when:
+    - deno_path_wrapper | bool
+    - deno_path.rc == 0
+    - deno_path.stdout | length > 0
+    - deno_kind.stdout == 'is_real'
+    - not deno_real_backup.stat.exists
+  changed_when: true
+
+- name: Deploy deno wrapper at the discovered deno path
+  become: true
+  ansible.builtin.template:
+    src: deno-wrapper.sh.j2
+    dest: "{{ deno_path.stdout }}"
+    mode: "0755"
+  vars:
+    deno_real_path:
+      stdout: "{{ deno_path.stdout }}-real"
+  when:
+    - deno_path_wrapper | bool
+    - deno_path.rc == 0
+    - deno_path.stdout | length > 0
+
+- name: Remove deno alias file when wrapper is active
+  become: true
+  ansible.builtin.file:
+    path: /etc/profile.d/deno-cooldown.sh
+    state: absent
+  when: deno_path_wrapper | bool
+
+# --- ALIAS MODE (deno_path_wrapper: false; default) ---
+
+- name: Restore original deno binary when wrapper is disabled
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ deno_path.stdout }}-real {{ deno_path.stdout }}"
+  when:
+    - not (deno_path_wrapper | bool)
+    - deno_path.rc == 0
+    - deno_path.stdout | length > 0
+    - deno_kind is defined
+    - deno_kind.stdout == 'is_wrapper'
+    - deno_real_backup is defined
+    - deno_real_backup.stat.exists
+  changed_when: true
 
 - name: Deploy deno cooldown alias system-wide
   become: true
@@ -14,3 +119,4 @@
       #!/bin/sh
       # Managed by ansible-supply-chain-security
       alias deno='command deno --minimum-dependency-age={{ deno_minimum_dependency_age }}'
+  when: not (deno_path_wrapper | bool)

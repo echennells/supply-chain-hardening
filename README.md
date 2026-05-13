@@ -71,13 +71,26 @@ ansible-playbook site.yml --tags npm,pip,uv
 
 ### System-wide environment variables
 
-Deployed to `/etc/profile.d/supply-chain-hardening.sh` and `/etc/environment`. These apply to all users, all shells (bash, zsh, sh), interactive and non-interactive sessions. An AI agent running `bash -c "npm install foo"` gets the same hardening as a human in an interactive terminal.
+Deployed to `/etc/profile.d/supply-chain-hardening.sh` (sourced by login shells) and `/etc/environment` (read by PAM via `pam_env.so`). Coverage by caller type:
 
-Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GONOSUMCHECK`, `GONOSUMDB`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
+| Caller | Sees these env vars? |
+|---|---|
+| Login shell (ssh, sudo -i, su -, getty) | ✓ (PAM loads /etc/environment + shell sources profile.d) |
+| Cron job, ssh session, any process inherited from a PAM-launched parent | ✓ (env propagation through fork/exec) |
+| `bash -c "..."` from inside a PAM-launched shell | ✓ (inherited) |
+| Container `CMD ["python", "app.py"]` started by Docker | ✗ (no PAM, no shell sourcing) |
+| systemd service without `Environment=` directives | ✗ |
+| `env -i bash -c "..."` (deliberately clean env) | ✗ |
+
+For the `✗` rows — most notably long-lived agent processes started as container CMDs or systemd services — the **config files layer** below is what actually protects them. The env vars are a redundancy layer that helps when an agent runs inside a PAM-launched shell.
+
+Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
 
 ### Config files deployed unconditionally
 
 Package manager config files are written to their expected paths before the tools are even installed. When an agent installs npm, pnpm, yarn, bun, uv, cargo, composer, or bundler at any point in the future, the hardened config is already waiting.
+
+**Config files are the load-bearing defense layer.** Each package manager reads its config file unconditionally when invoked — regardless of process tree, PAM state, or shell context. That makes the config files the universal coverage layer for direct-exec callers (Docker CMD, systemd services, agents running as long-lived processes) where the env-var layer above doesn't apply.
 
 Files deployed: `~/.npmrc`, `~/.config/pnpm/rc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.config/uv/uv.toml`, `~/.config/pip/pip.conf`, `~/.cargo/config.toml`, `~/.config/composer/config.json`, `~/.bundle/config`.
 
@@ -97,6 +110,16 @@ Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm`
 
 [Socket Firewall Free](https://github.com/SocketDev/sfw-free) wraps npm, pip, and cargo to block packages flagged by Socket's threat intelligence in real time. No API key required.
 
+### Deno age gate
+
+Deno has no global config file (`deno.json` is per-project), so the only way to enforce a minimum dependency age across all invocations is to inject the `--minimum-dependency-age` flag on every call.
+
+By default, the role deploys a shell alias at `/etc/profile.d/deno-cooldown.sh` that adds the flag. **Like all shell aliases, this only fires in interactive shells** — scripts, agents, and CI never see it, so their `deno run` calls bypass the age gate entirely.
+
+**Closing the gap with `deno_path_wrapper`:** set `deno_path_wrapper: true` to install a wrapper **in-place at the discovered deno location** (typically `~/.deno/bin/deno`, where Deno's official installer puts it). The wrapper injects `--minimum-dependency-age` into every dep-fetching invocation (`run`, `cache`, `install`, `test`, `compile`, `eval`, `info`, `doc`, `bench`, `publish`). Non-fetching subcommands (`fmt`, `lint`, `repl`, `--version`, `--help`) pass through unchanged. The original deno binary is preserved as `<path>-real` in the same directory. When the wrapper is enabled, the shell alias is removed (the two mechanisms would otherwise double-inject). Setting `deno_path_wrapper: false` again will restore the original binary.
+
+**Why in-place rather than `/usr/local/bin/deno`:** Deno's installer prepends `~/.deno/bin` to `PATH`, so a wrapper at `/usr/local/bin/deno` is silently bypassed. Installing in-place defeats PATH ordering by being upstream of it. **Caveat:** re-running Deno's installer overwrites the wrapper — the role must be re-applied after a Deno upgrade.
+
 ## Configuration
 
 All age gates are controlled by a single variable in `defaults/main.yml`:
@@ -106,6 +129,16 @@ release_age_hours: 48
 ```
 
 Change it once, all package managers update. Individual settings are also tuneable — see `defaults/main.yml` for the full list.
+
+### Refreshing auditing tools
+
+The role installs auditing tools (`govulncheck`, `cargo-audit`, `pip-audit`, `zizmor`, `pinact`, etc.) on first run and skips re-installs on subsequent runs for idempotency. After a toolchain upgrade (new Go, new Rust) or when you want the latest `@latest`-pinned versions of these tools, force a refresh:
+
+```bash
+ansible-playbook site.yml -e refresh_tools=true
+```
+
+This re-installs every auditing tool regardless of whether the binary already exists. Slow (10–30 s per tool) but always produces fresh builds against the current toolchain.
 
 ## Inventory
 

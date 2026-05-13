@@ -1,0 +1,57 @@
+#!/bin/bash
+# /usr/local/bin/deno — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# Deno has no global config file (deno.json is per-project), so the only way
+# to enforce a minimum dependency age across all invocations is to inject the
+# --minimum-dependency-age flag into the caller's args. The alias-only fallback
+# at /etc/profile.d/deno-cooldown.sh fires only in interactive shells, leaving
+# scripts/agents/CI without age-gate coverage. This wrapper closes that gap.
+#
+# Uses bash (not sh) because injecting an argument *in the middle* of $@ is
+# cleanest with bash arrays. Both supported platforms (Ubuntu, Debian) ship
+# bash by default.
+
+REAL_DENO='{{ deno_real_path.stdout }}'
+MIN_AGE='{{ deno_minimum_dependency_age }}'
+
+# Recursion guard — refuse to run if the embedded real-deno path is empty,
+# non-executable, or points back at ourselves. Same pattern as the pip→uv
+# and npm→sfw wrappers.
+if [ -z "$REAL_DENO" ] || [ ! -x "$REAL_DENO" ] || [ "$REAL_DENO" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real deno not found at '$REAL_DENO'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Find first non-flag arg — that's the deno subcommand. Bare `deno`,
+# `deno --version`, `deno -V` leave subcmd empty.
+subcmd=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *) subcmd="$arg"; break ;;
+  esac
+done
+
+# Inject --minimum-dependency-age only for subcommands that fetch remote
+# modules. Bypass for read-only / non-fetching subcommands — Deno errors
+# if you pass --minimum-dependency-age to subcommands that don't accept
+# it (e.g. `deno fmt`, `deno lint`, `deno repl`, `deno --version`).
+case "$subcmd" in
+  run|cache|install|test|compile|eval|info|doc|bench|publish)
+    # Build new arg array with the flag injected directly after the subcommand
+    new_args=()
+    inserted=0
+    for arg in "$@"; do
+      new_args+=("$arg")
+      if [ "$inserted" = "0" ] && [ "$arg" = "$subcmd" ]; then
+        new_args+=("--minimum-dependency-age=$MIN_AGE")
+        inserted=1
+      fi
+    done
+    exec "$REAL_DENO" "${new_args[@]}"
+    ;;
+  *)
+    exec "$REAL_DENO" "$@"
+    ;;
+esac

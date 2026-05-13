@@ -4,7 +4,21 @@
 # (see shell_env.yml). This task handles tool installs only.
 
 - name: Check if go is installed
-  ansible.builtin.command: which go
+  # Check canonical install locations first. /usr/local/go/bin/go is where
+  # the official tarball installer puts go, but many users don't add it to
+  # PATH globally — they source it via .profile or .bashrc, which ansible's
+  # connection may not see on automated runs. Plain `which go` then misses
+  # the installed binary entirely.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/local/go/bin/go /usr/bin/go /usr/local/bin/go "$HOME/sdk/go/bin/go"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v go 2>/dev/null
+    executable: /bin/bash
   register: go_check
   changed_when: false
   failed_when: false
@@ -12,5 +26,5 @@
 - name: Install govulncheck
   ansible.builtin.command:
     cmd: go install golang.org/x/vuln/cmd/govulncheck@latest
-    creates: "{{ ansible_env.HOME }}/go/bin/govulncheck"
+    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/govulncheck' }}"
   when: go_check.rc == 0

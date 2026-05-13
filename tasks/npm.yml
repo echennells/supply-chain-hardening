@@ -17,7 +17,33 @@
       allow-git=none
 
 - name: Check if npm is installed
-  ansible.builtin.command: which npm
+  # Check canonical locations across the most common Node install methods
+  # before falling back to a PATH search. Plain `which npm` from ansible's
+  # connection environment misses npm when the user installed Node via nvm,
+  # fnm, volta, asdf, etc. — those tools add PATH only through ~/.bashrc.
+  # Coverage: system (apt/dnf), volta, asdf, nodenv, nvm, fnm.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.nvm/versions/node/*/bin/npm; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
+    executable: /bin/bash
   register: npm_check
   changed_when: false
   failed_when: false

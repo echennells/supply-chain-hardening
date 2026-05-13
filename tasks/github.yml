@@ -3,7 +3,19 @@
 # Ref: tj-actions/changed-files tag retargeting compromise (March 2025)
 
 - name: Check if uv is installed (for zizmor)
-  ansible.builtin.command: which uv
+  # Same canonical-path-first lookup as tasks/uv.yml. Plain `which uv` would
+  # silently miss uv installed via the official installer when ansible's
+  # connection environment lacks ~/.local/bin (common on automated runs).
+  ansible.builtin.shell:
+    cmd: |
+      for p in "$HOME/.local/bin/uv" /usr/local/bin/uv /usr/bin/uv; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v uv 2>/dev/null
+    executable: /bin/bash
   register: uv_for_github
   changed_when: false
   failed_when: false
@@ -11,11 +23,21 @@
 - name: Install zizmor (GitHub Actions workflow auditor)
   ansible.builtin.command:
     cmd: uv tool install zizmor
-    creates: "{{ ansible_env.HOME }}/.local/bin/zizmor"
+    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/zizmor' }}"
   when: uv_for_github.rc == 0
 
 - name: Check if go is installed (for pinact)
-  ansible.builtin.command: which go
+  # Canonical-path-first detection. See tasks/go.yml for the same logic.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/local/go/bin/go /usr/bin/go /usr/local/bin/go "$HOME/sdk/go/bin/go"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v go 2>/dev/null
+    executable: /bin/bash
   register: go_for_github
   changed_when: false
   failed_when: false
@@ -23,5 +45,5 @@
 - name: Install pinact (pin GitHub Actions to commit SHAs)
   ansible.builtin.command:
     cmd: go install github.com/suzuki-shunsuke/pinact/cmd/pinact@latest
-    creates: "{{ ansible_env.HOME }}/go/bin/pinact"
+    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/pinact' }}"
   when: go_for_github.rc == 0

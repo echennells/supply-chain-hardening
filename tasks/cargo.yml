@@ -15,7 +15,21 @@
     mode: "0644"
 
 - name: Check if cargo is installed
-  ansible.builtin.command: which cargo
+  # Check the canonical rustup install location first. rustup (the dominant
+  # cargo installer) puts the binary at ~/.cargo/bin/cargo and adds PATH only
+  # via ~/.cargo/env (sourced from ~/.bashrc and ~/.profile). Plain `which
+  # cargo` from ansible's connection environment may not see ~/.cargo/bin
+  # on non-interactive / automated runs where .bashrc isn't sourced.
+  ansible.builtin.shell:
+    cmd: |
+      for p in "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo /usr/bin/cargo; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v cargo 2>/dev/null
+    executable: /bin/bash
   register: cargo_check
   changed_when: false
   failed_when: false
@@ -23,7 +37,7 @@
 - name: Install cargo auditing tools
   ansible.builtin.command:
     cmd: "cargo install {{ item }}"
-    creates: "{{ ansible_env.HOME }}/.cargo/bin/{{ item }}"
+    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.cargo/bin/' + item }}"
   loop:
     - cargo-audit
     - cargo-deny

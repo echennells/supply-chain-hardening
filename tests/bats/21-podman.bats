@@ -50,8 +50,17 @@ assert "ghcr.io" in d["transports"]["docker"], "ghcr.io not in allowlist"
   assert_file_contains /etc/containers/registries.conf "short-name-mode"
 }
 
-@test "podman: cosign installed" {
-  which cosign
+@test "podman: cosign runs on this host" {
+  # Behavioral check that strengthens the prior `which cosign` test.
+  # If the arch mapping in tasks/podman.yml downloads the wrong binary
+  # (e.g. silent arm64 fallback on a non-x86_64 host like the original
+  # bug), `cosign version` fails with "exec format error" or similar.
+  # Skips cleanly on platforms where cosign install is intentionally
+  # not attempted (non-Linux, non-supported arch like riscv64).
+  command -v cosign >/dev/null 2>&1 || skip "cosign not installed (unsupported platform: $(uname -sm))"
+  run cosign version
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qiE "cosign|gitversion"
 }
 
 @test "podman: Docker daemon is not running" {

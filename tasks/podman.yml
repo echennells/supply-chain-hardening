@@ -38,12 +38,29 @@
     dest: /etc/containers/registries.conf
     mode: "0644"
 
+- name: Map ansible_architecture to cosign release naming
+  ansible.builtin.set_fact:
+    cosign_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'arm', 'ppc64le': 'ppc64le', 's390x': 's390x'}[ansible_architecture] | default('') }}"
+
 - name: Install cosign for image signature verification
   become: true
   ansible.builtin.get_url:
-    url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ cosign_arch }}"
     dest: /usr/local/bin/cosign
     mode: "0755"
+  when:
+    - ansible_system == 'Linux'
+    - cosign_arch | length > 0
+
+- name: Notify when cosign install was skipped (unsupported platform)
+  ansible.builtin.debug:
+    msg: >-
+      Skipping cosign install: no prebuilt binary for {{ ansible_system }}/{{ ansible_architecture }}.
+      Container image signature verification via cosign will not be available. The rest of the
+      podman hardening (policy.json registry allowlist, registries.conf) still applies — those are
+      enforced by podman itself, not by cosign. Install cosign manually from
+      https://github.com/sigstore/cosign/releases if you need it.
+  when: ansible_system != 'Linux' or cosign_arch | length == 0
 
 - name: Detect systemd (linger and user socket only apply on systemd hosts)
   ansible.builtin.stat:

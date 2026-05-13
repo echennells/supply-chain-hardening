@@ -3,14 +3,26 @@
 # Each manager uses different units, so we derive from one source of truth
 release_age_hours: 48
 
-# Derived values (do not override individually — change release_age_hours)
-npm_minimum_release_age_days: "{{ (release_age_hours / 24) | int }}"          # 2 days
-pnpm_minimum_release_age_minutes: "{{ (release_age_hours * 60) | int }}"      # 2880 min
-bun_minimum_release_age_seconds: "{{ (release_age_hours * 3600) | int }}"     # 172800 sec
-pip_minimum_release_age_days: "{{ (release_age_hours / 24) | int }}"          # 2 days
-uv_exclude_newer: "{{ release_age_hours | int }} hours"                       # "48 hours"
-yarn_minimal_age_gate: "{{ (release_age_hours / 24) | int }}d"               # "2d"
-deno_minimum_dependency_age: "P{{ (release_age_hours / 24) | int }}D"         # "P2D"
+# Derived values (do not override individually — change release_age_hours).
+#
+# Type note: Ansible default Jinja renders all template results as strings.
+# Each derived value below ends up as a string like "2" or "2880", even
+# though it represents a number. That's fine for all current consumers,
+# which interpolate the value into config files (.npmrc, bunfig.toml, env
+# vars) where the receiving tool parses it as int. If a future consumer
+# needs numeric semantics in a Jinja expression (comparison, arithmetic),
+# apply `| int` at the point of use.
+#
+# `release_age_hours | int` on the input handles the case where the user
+# overrides via CLI (`-e release_age_hours=72`), which Ansible passes as
+# a string. Without the cast, `(release_age_hours / 24)` would error on
+# string-divided-by-int.
+npm_minimum_release_age_days: "{{ (release_age_hours | int / 24) | int }}"     # 2 days
+pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" # 2880 min
+bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
+uv_exclude_newer: "{{ release_age_hours | int }} hours"                        # "48 hours"
+yarn_minimal_age_gate: "{{ (release_age_hours | int / 24) | int }}d"           # "2d"
+deno_minimum_dependency_age: "P{{ (release_age_hours | int / 24) | int }}D"    # "P2D"
 
 # npm settings
 npm_ignore_scripts: true
@@ -49,6 +61,15 @@ yarn_enable_scripts: false
 # socket firewall
 socket_firewall_install: true
 
+# Refresh auditing tools (cargo-audit, govulncheck, pip-audit, etc.) on this run.
+# Default false: installs only happen on first run (idempotent via `creates:`).
+# Set to true via CLI — `ansible-playbook site.yml -e refresh_tools=true` — to
+# re-install everything regardless of whether the binary already exists. Useful
+# after a toolchain upgrade (Go, Rust, etc.) where existing binaries are valid
+# but built against an older compiler, or when you want the latest @latest
+# versions of @latest-pinned tools.
+refresh_tools: false
+
 # npm PATH wrapper (opt-in)
 # When true, deploys /usr/local/bin/npm as a wrapper that routes calls through
 # Socket Firewall (non-interactive) or npq (interactive shells). Closes the
@@ -57,6 +78,15 @@ socket_firewall_install: true
 # on sfw working. Recommended for agent-heavy hosts; default off to avoid
 # surprising users on first install.
 npm_path_wrapper: false
+
+# Deno PATH wrapper (opt-in)
+# Deno has no global config file — the only way to enforce a minimum dependency
+# age across all invocations is to inject the flag itself. When true, deploys
+# /usr/local/bin/deno as a wrapper that adds --minimum-dependency-age to every
+# dep-fetching subcommand (run, cache, install, test, compile, ...). When true,
+# the alias-only mechanism in /etc/profile.d/deno-cooldown.sh is removed
+# (wrapper supersedes it). Default off to preserve existing behavior on upgrade.
+deno_path_wrapper: false
 
 # podman / container image hardening
 podman_enabled: false           # set true to install podman and deploy policy.json

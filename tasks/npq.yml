@@ -3,7 +3,30 @@
 # Aliases deployed system-wide via /etc/profile.d/
 
 - name: Check if npm is installed
-  ansible.builtin.command: which npm
+  # Canonical-path-first detection across system + Node-manager install
+  # methods. See tasks/npm.yml for the same logic explained.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.nvm/versions/node/*/bin/npm; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
+    executable: /bin/bash
   register: npm_for_npq
   changed_when: false
   failed_when: false

@@ -19,6 +19,6 @@ load setup
 }
 
 @test "deno: cooldown alias exists in profile.d" {
-  assert_file_exists /etc/profile.d/deno-cooldown.sh
+  [ -f /etc/profile.d/deno-cooldown.sh ] || skip "alias removed — deno_path_wrapper is active (covered by 24-deno-path-wrapper.bats)"
   assert_file_contains /etc/profile.d/deno-cooldown.sh "minimum-dependency-age"
 }

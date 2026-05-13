@@ -89,6 +89,7 @@ WORKDIR /opt/ansible-supply-chain-security
 RUN bash -o pipefail -c "ansible-playbook site.yml --connection=local --limit localhost \
     -e podman_enabled=true \
     -e npm_path_wrapper=true \
+    -e deno_path_wrapper=true \
     2>&1 | tee /var/log/ansible-run.log"
 
 # Copy BATS tests (after hardening so edits don't trigger rebuild)

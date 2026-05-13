@@ -3,8 +3,25 @@
 # Config deployed unconditionally
 
 - name: Determine pnpm global config path
+  # pnpm's resolution order, per https://pnpm.io/npmrc :
+  #   1. $XDG_CONFIG_HOME/pnpm  (if XDG_CONFIG_HOME is set, regardless of OS)
+  #   2. ~/Library/Preferences/pnpm  (macOS default, env-paths convention)
+  #   3. ~/.config/pnpm  (Linux/other default)
+  # Many developer macOS environments set XDG_CONFIG_HOME to ~/.config for
+  # cross-platform consistency, in which case pnpm reads from there rather
+  # than the native macOS location. Writing to the wrong location is silent
+  # failure — pnpm just doesn't see our hardening — so mirror pnpm's logic.
   ansible.builtin.set_fact:
-    pnpm_config_dir: "{{ (ansible_os_family == 'Darwin') | ternary(ansible_env.HOME ~ '/Library/Preferences/pnpm', ansible_env.HOME ~ '/.config/pnpm') }}"
+    pnpm_config_dir: >-
+      {{
+        ansible_env.XDG_CONFIG_HOME ~ '/pnpm'
+        if ansible_env.XDG_CONFIG_HOME is defined and ansible_env.XDG_CONFIG_HOME | length > 0
+        else (
+          ansible_env.HOME ~ '/Library/Preferences/pnpm'
+          if ansible_os_family == 'Darwin'
+          else ansible_env.HOME ~ '/.config/pnpm'
+        )
+      }}
 
 - name: Create pnpm config directory
   ansible.builtin.file:
