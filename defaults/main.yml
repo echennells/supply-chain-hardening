@@ -70,23 +70,23 @@ socket_firewall_install: true
 # versions of @latest-pinned tools.
 refresh_tools: false
 
-# npm PATH wrapper (opt-in)
-# When true, deploys /usr/local/bin/npm as a wrapper that routes calls through
-# Socket Firewall (non-interactive) or npq (interactive shells). Closes the
-# "alias only works in interactive shells" gap so scripts/agents/CI get real
-# threat-intel checks too. Cost: ~50-200ms per npm invocation, hard dependency
-# on sfw working. Recommended for agent-heavy hosts; default off to avoid
-# surprising users on first install.
-npm_path_wrapper: false
+# npm PATH wrapper (default on; the agent-relevant protection layer)
+# Deploys /usr/local/bin/npm as a wrapper that routes calls through Socket
+# Firewall so scripts/agents/CI get threat-intel checks too (the shell-alias
+# fallback for npq only fires in interactive shells, which agents almost
+# never use). Set to false on hosts where you don't want the ~50-200ms per
+# npm invocation cost or the hard dependency on sfw being available.
+npm_path_wrapper: true
 
-# Deno PATH wrapper (opt-in)
-# Deno has no global config file — the only way to enforce a minimum dependency
-# age across all invocations is to inject the flag itself. When true, deploys
-# /usr/local/bin/deno as a wrapper that adds --minimum-dependency-age to every
-# dep-fetching subcommand (run, cache, install, test, compile, ...). When true,
-# the alias-only mechanism in /etc/profile.d/deno-cooldown.sh is removed
-# (wrapper supersedes it). Default off to preserve existing behavior on upgrade.
-deno_path_wrapper: false
+# Deno PATH wrapper (default on; in-place at the discovered deno binary)
+# Deno has no global config file — the only way to enforce a minimum
+# dependency age across all invocations is to inject the flag itself. The
+# wrapper replaces the deno binary in-place (preserving the original as
+# `<path>-real`) and injects --minimum-dependency-age on every dep-fetching
+# subcommand. Set to false to fall back to the alias-only mechanism (which
+# only fires in interactive shells). Note: re-running Deno's installer
+# overwrites the wrapper; re-apply the role after a Deno upgrade.
+deno_path_wrapper: true
 
 # podman / container image hardening
 podman_enabled: false           # set true to install podman and deploy policy.json
