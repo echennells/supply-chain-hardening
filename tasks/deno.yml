@@ -59,7 +59,7 @@
 
 # --- WRAPPER MODE (deno_path_wrapper: true) ---
 
-- name: Rename real deno to deno-real (first time activating wrapper)
+- name: Rename real deno to deno-real (refresh backup if user reinstalled deno)
   become: true
   ansible.builtin.command:
     cmd: "mv {{ deno_path.stdout }} {{ deno_path.stdout }}-real"
@@ -68,7 +68,10 @@
     - deno_path.rc == 0
     - deno_path.stdout | length > 0
     - deno_kind.stdout == 'is_real'
-    - not deno_real_backup.stat.exists
+  # No `not deno_real_backup.stat.exists` gate: if user reinstalled deno via
+  # the official installer (overwriting our wrapper), the backup is now stale
+  # and the freshly-installed binary at deno_path is what we want to preserve.
+  # Overwriting a stale backup with the current binary is the correct semantics.
   changed_when: true
 
 - name: Deploy deno wrapper at the discovered deno path

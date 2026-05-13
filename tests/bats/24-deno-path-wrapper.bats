@@ -118,6 +118,21 @@ EOF
   ! echo "$output" | grep -q -- "--minimum-dependency-age"
 }
 
+@test "deno rename task does not skip-on-stale-backup (M1 regression)" {
+  # Background: an earlier revision of tasks/deno.yml gated the rename task on
+  # `not deno_real_backup.stat.exists`. After a user reinstalled deno via the
+  # official installer (which overwrites the wrapper), the next role re-run
+  # would detect current binary as `is_real` and skip the rename — silently
+  # preserving a stale backup. The wrapper would then be redeployed pointing
+  # at the OLD deno, masking the user's upgrade (including any CVE patches).
+  # This static check catches a regression that reintroduces the condition.
+  taskfile=/opt/ansible-supply-chain-security/tasks/deno.yml
+  [ -f "$taskfile" ] || skip "role source not available at $taskfile"
+  # Match only an active YAML list-item condition, not the explanatory comment
+  # in the file that documents *why* this gate must not exist.
+  ! grep -qE "^[[:space:]]+-[[:space:]]+not deno_real_backup\.stat\.exists" "$taskfile"
+}
+
 @test "deno wrapper recursion guard fires when real deno is missing" {
   deno_path=$(get_deno_path)
   embedded=$(grep -E "^REAL_DENO=" "$deno_path" | head -1 | sed "s/REAL_DENO=//; s/'//g")

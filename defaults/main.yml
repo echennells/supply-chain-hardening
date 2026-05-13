@@ -39,9 +39,6 @@ python_dont_write_bytecode: true
 # uv settings
 uv_no_build: true
 
-# cargo settings
-cargo_audit_enabled: true
-
 # go settings
 go_sumdb: "sum.golang.org"
 go_proxy: "https://proxy.golang.org,direct"
@@ -51,9 +48,6 @@ go_private: ""
 go_noproxy: ""
 go_insecure: ""
 goflags_mod: "readonly"
-
-# pnpm settings
-pnpm_approve_builds: true
 
 # yarn settings
 yarn_enable_scripts: false
