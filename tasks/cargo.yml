@@ -34,9 +34,32 @@
   changed_when: false
   failed_when: false
 
-- name: Install cargo auditing tools
-  ansible.builtin.command:
-    cmd: "cargo install {{ item }}"
+- name: Bootstrap cargo-binstall (prebuilt — avoids multi-minute source compile of audit tools)
+  # cargo-binstall pulls prebuilt binaries from each crate's GitHub releases,
+  # auto-detecting the right target triple. cargo-audit alone takes ~15min to
+  # source-build on small VMs; binstall drops it in seconds. The bootstrap
+  # itself uses the project's official installer, which fetches the prebuilt
+  # binstall binary (no source compile). Failure here is non-fatal: the next
+  # task falls back to plain `cargo install`.
+  ansible.builtin.shell:
+    cmd: >-
+      curl -L --proto '=https' --tlsv1.2 -sSf
+      https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh
+      | bash
+    creates: "{{ ansible_env.HOME }}/.cargo/bin/cargo-binstall"
+  when: cargo_check.rc == 0
+  failed_when: false
+
+- name: Install cargo auditing tools (prebuilt via binstall when present, source-build fallback)
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      export PATH="$HOME/.cargo/bin:$PATH"
+      if [ -x "$HOME/.cargo/bin/cargo-binstall" ]; then
+        cargo binstall --no-confirm {{ item }} || cargo install {{ item }}
+      else
+        cargo install {{ item }}
+      fi
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.cargo/bin/' + item }}"
   loop:
     - cargo-audit
