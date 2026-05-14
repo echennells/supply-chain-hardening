@@ -55,6 +55,23 @@ load setup
   assert_file_contains "$HOME/.config/pnpm/rc" "block-exotic-subdeps=true"
 }
 
+@test "pnpm rc: minimum-release-age-strict=true" {
+  # Without strict mode, pnpm can silently fall back to whatever version is
+  # available when no candidate satisfies the age gate — defeating the gate.
+  # Regression catcher: if anyone reverts the strict flag, the install would
+  # appear to honor the age but actually permit fresh versions.
+  assert_file_contains "$HOME/.config/pnpm/rc" "minimum-release-age-strict=true"
+}
+
+@test "pnpm rc: template wiring (catches revert to hardcoded copy)" {
+  # The rc is template-driven so the new variables (built_dependencies,
+  # release_age_exclude) actually take effect. If someone reverts to the old
+  # hardcoded copy:-based deployment, neither variable would apply.
+  # The template emits an explanatory comment that the hardcoded version
+  # didn't have — its presence proves the template is in use.
+  assert_file_contains "$HOME/.config/pnpm/rc" "Explicit build-script allowlist\|equivalent default-deny via the"
+}
+
 # yarn
 @test "yarnrc: enableScripts false" {
   assert_file_contains "$HOME/.yarnrc.yml" "enableScripts: false"

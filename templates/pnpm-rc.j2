@@ -1,0 +1,19 @@
+; Managed by ansible-supply-chain-security
+minimum-release-age={{ pnpm_minimum_release_age_minutes }}
+minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
+{% for pkg in pnpm_minimum_release_age_exclude %}
+minimum-release-age-exclude[]={{ pkg }}
+{% endfor %}
+block-exotic-subdeps=true
+{% if pnpm_built_dependencies | length > 0 %}
+; Explicit build-script allowlist (pnpm 11+). Listed packages may run build
+; scripts; everything else is blocked. Implicit ignore-scripts behavior.
+{% for pkg in pnpm_built_dependencies %}
+only-built-dependencies[]={{ pkg }}
+{% endfor %}
+{% else %}
+; No build scripts allowed for any package — equivalent default-deny via the
+; older mechanism (works on pnpm 8-11+). To allow specific packages to run
+; build scripts, set pnpm_built_dependencies in role vars.
+ignore-scripts=true
+{% endif %}

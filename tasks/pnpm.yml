@@ -23,6 +23,23 @@
         )
       }}
 
+- name: Validate pnpm package-name lists (defense against npmrc injection)
+  # pnpm_built_dependencies and pnpm_minimum_release_age_exclude are
+  # interpolated into the rc file as `key[]=<value>` lines. A value
+  # containing a newline could inject additional npmrc directives — most
+  # severely, `ignore-scripts=false` to undo hardening. Reject any value
+  # that isn't a plausible package name. npm/pnpm package names are
+  # lowercase alphanumeric + ._-, optionally scoped (@scope/name).
+  ansible.builtin.assert:
+    that:
+      - item is match("^@?[a-zA-Z0-9_./-]+$")
+    fail_msg: >-
+      Invalid pnpm package name '{{ item }}': contains characters that could
+      inject npmrc directives. Allowed: alphanumeric, hyphen, underscore,
+      dot, @, /.
+  loop: "{{ pnpm_built_dependencies + pnpm_minimum_release_age_exclude }}"
+  when: (pnpm_built_dependencies | length + pnpm_minimum_release_age_exclude | length) > 0
+
 - name: Create pnpm config directory
   ansible.builtin.file:
     path: "{{ pnpm_config_dir }}"
@@ -30,11 +47,7 @@
     mode: "0755"
 
 - name: Deploy hardened pnpm rc
-  ansible.builtin.copy:
+  ansible.builtin.template:
+    src: pnpm-rc.j2
     dest: "{{ pnpm_config_dir }}/rc"
     mode: "0644"
-    content: |
-      ; Managed by ansible-supply-chain-security
-      minimum-release-age={{ pnpm_minimum_release_age_minutes }}
-      ignore-scripts=true
-      block-exotic-subdeps=true

@@ -49,6 +49,22 @@ go_noproxy: ""
 go_insecure: ""
 goflags_mod: "readonly"
 
+# pnpm settings
+# Strict mode: fail the install when an age-gate violation occurs instead of
+# silently falling back to whatever version is available. Default true matches
+# the role's posture (fail loud, not fail silent).
+pnpm_minimum_release_age_strict: true
+# Packages exempt from the age gate. Use for your own packages where you push
+# updates and want to install them immediately rather than wait for the gate.
+# Example: pnpm_minimum_release_age_exclude: ["@myorg/internal-pkg", "scoped/own"]
+pnpm_minimum_release_age_exclude: []
+# Build-script allowlist (pnpm 11+ `onlyBuiltDependencies` semantics).
+# Empty list (default) → block all build scripts via ignore-scripts=true.
+# Non-empty list → switch to onlyBuiltDependencies semantics: only these
+# packages' build scripts are allowed to run; everything else is blocked.
+# Example: pnpm_built_dependencies: ["esbuild", "sharp"]
+pnpm_built_dependencies: []
+
 # yarn settings
 yarn_enable_scripts: false
 
