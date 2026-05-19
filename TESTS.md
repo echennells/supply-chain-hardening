@@ -1,12 +1,12 @@
 # Tests
 
-131 automated tests verify the supply chain hardening works. Run with `make test`.
+166 automated tests verify the supply chain hardening works. Run with `make test`.
 
 ## Test structure
 
 | File | Tests | What it covers |
 |---|---|---|
-| 01-config-files.bats | 19 | All config files deployed with correct content |
+| 01-config-files.bats | 33 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
 | 02-env-vars.bats | 12 | System-wide env vars in /etc/profile.d/ and /etc/environment |
 | 03-npm.bats | 3 | npm ignore-scripts behavioral test + config readback |
 | 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist |
@@ -17,8 +17,8 @@
 | 09-python-adversarial.bats | 3 | Simulated Python supply chain attacks |
 | 10-go-adversarial.bats | 9 | Simulated Go environment poisoning |
 | 11-composer-adversarial.bats | 4 | Composer script blocking verification |
-| 12-cross-ecosystem.bats | 8 | File permissions, non-interactive shell coverage |
-| 13-pnpm-adversarial.bats | 3 | Simulated pnpm lifecycle-script attacks |
+| 12-cross-ecosystem.bats | 13 | File permissions, non-interactive shell coverage |
+| 13-pnpm-adversarial.bats | 4 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher) |
 | 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
 | 15-bun-adversarial.bats | 3 | Simulated bun lifecycle-script attacks |
 | 16-composer-behavioral.bats | 1 | Composer end-to-end blocking |
@@ -28,7 +28,8 @@
 | 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
 | 21-podman.bats | 11 | Podman policy.json, registries, cosign |
 | 22-pip-wrapper-safety.bats | 4 | Defensive guards in the pip→uv wrapper |
-| 23-npm-path-wrapper.bats | 9 | npm PATH wrapper plumbing + end-to-end |
+| 23-npm-path-wrapper.bats | 13 | npm PATH wrapper plumbing + end-to-end |
+| 24-deno-path-wrapper.bats | 11 | Deno in-place PATH wrapper plumbing + end-to-end |
 
 ## Adversarial tests
 

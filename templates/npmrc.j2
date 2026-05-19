@@ -1,0 +1,11 @@
+; Managed by ansible-supply-chain-security
+; Per-user npm config. The system-wide /etc/npmrc has the same npm
+; settings (mirrored from the same defaults), so root and other
+; users on the host are also covered.
+ignore-scripts={{ npm_ignore_scripts | bool | lower }}
+audit={{ npm_audit | bool | lower }}
+save-exact={{ npm_save_exact | bool | lower }}
+fund={{ npm_fund | bool | lower }}
+update-notifier={{ npm_update_notifier | bool | lower }}
+min-release-age={{ npm_minimum_release_age_days }}
+allow-git=none

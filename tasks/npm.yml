@@ -2,19 +2,32 @@
 # npm supply chain hardening
 # Config files deployed unconditionally — ready when npm arrives
 
-- name: Deploy hardened .npmrc
-  ansible.builtin.copy:
+- name: Deploy hardened .npmrc (per-user)
+  # Template-driven so npm_ignore_scripts / npm_audit / npm_save_exact /
+  # npm_fund / npm_update_notifier actually control behavior. Previously
+  # this content was hardcoded inline, which made those variables
+  # misleading: setting npm_ignore_scripts=false did nothing for the
+  # config files (only the env var). The template now makes the variable
+  # names match what they actually do.
+  ansible.builtin.template:
+    src: npmrc.j2
     dest: "{{ ansible_env.HOME }}/.npmrc"
     mode: "0644"
-    content: |
-      ; Managed by ansible-supply-chain-security
-      ignore-scripts=true
-      audit=true
-      save-exact=true
-      fund=false
-      update-notifier=false
-      min-release-age={{ npm_minimum_release_age_days }}
-      allow-git=none
+
+- name: Deploy hardened /etc/npmrc (system-wide; covers sudo and non-deploying users)
+  # The per-user ~/.npmrc above only protects the user the role was run
+  # against. `sudo npm install` flips $HOME to /root and misses it; same
+  # for any other account on the host. /etc/npmrc is npm's documented
+  # global config (the default value of npm's `globalconfig` setting) and
+  # is also read by pnpm as the lowest-priority layer in its resolution
+  # chain — so one file covers both tools for every user including root.
+  become: true
+  ansible.builtin.template:
+    src: etc-npmrc.j2
+    dest: /etc/npmrc
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Check if npm is installed
   # Check canonical locations across the most common Node install methods

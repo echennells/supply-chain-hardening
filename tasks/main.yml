@@ -1,4 +1,8 @@
 ---
+- name: Pre-flight input validation and conflict detection
+  ansible.builtin.include_tasks: preflight.yml
+  tags: always
+
 - name: Include npm hardening
   ansible.builtin.include_tasks: npm.yml
   tags: [npm]

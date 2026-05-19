@@ -1,0 +1,65 @@
+---
+# Pre-flight validation that runs before any ecosystem task.
+# Tagged `always` in tasks/main.yml so it executes regardless of which
+# ecosystem tag the operator chose; we want input validation even on
+# narrow runs like `--tags npm`.
+
+- name: Validate release_age_hours is at least 1
+  ansible.builtin.assert:
+    that:
+      - release_age_hours | int >= 1
+    fail_msg: >-
+      release_age_hours must be >= 1 (got {{ release_age_hours }}).
+      Setting to 0 or negative silently disables the age gate across
+      npm, pnpm, bun, yarn, uv, and deno — that's one of the role's
+      load-bearing protections. If you need to install a fresh
+      package, override per invocation (e.g. `npm install --foreground-scripts
+      --ignore-scripts=false`) rather than disabling globally.
+
+- name: Detect non-managed existing system config files
+  # Each /etc/* file we deploy has a marker comment line. If a file
+  # already exists without the marker, it was placed by someone or
+  # something else (corporate registry config, sysadmin override,
+  # distribution package, etc.). Refuse to overwrite without explicit
+  # operator opt-in — silently clobbering a /etc/npmrc with corporate
+  # registry settings is the worst-case scenario (dependency confusion).
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      missing_marker=0
+      conflict=""
+      for f in /etc/npmrc /etc/yarnrc.yml /etc/pip.conf /etc/uv/uv.toml; do
+        if [ -f "$f" ] && ! grep -q "Managed by ansible-supply-chain-security" "$f" 2>/dev/null; then
+          missing_marker=1
+          conflict="${conflict}${f}\n"
+        fi
+      done
+      if [ "$missing_marker" -eq 1 ]; then
+        printf "%b" "$conflict"
+        exit 42
+      fi
+    executable: /bin/bash
+  register: etc_preflight
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Fail when /etc config files exist without the role's marker
+  ansible.builtin.fail:
+    msg: |
+      Refusing to overwrite existing system config files that were not
+      placed by this role:
+
+      {{ etc_preflight.stdout }}
+
+      These files are commonly used for corporate registry / proxy /
+      auth settings; overwriting them blindly can cause registry-takeover
+      vulnerabilities (dependency confusion) or break installs entirely.
+
+      To proceed, either:
+        1. Back up the existing files and remove them, then re-run; or
+        2. Set `accept_etc_overwrite=true` to overwrite anyway (e.g.
+           `ansible-playbook site.yml -e accept_etc_overwrite=true`).
+  when:
+    - etc_preflight.rc == 42
+    - not (accept_etc_overwrite | default(false) | bool)

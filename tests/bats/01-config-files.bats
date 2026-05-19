@@ -72,6 +72,38 @@ load setup
   assert_file_contains "$HOME/.config/pnpm/rc" "Explicit build-script allowlist\|equivalent default-deny via the"
 }
 
+@test "pnpm-rc.j2 template: allowlist branch emits ignore-scripts=false (regression: don't let /etc/npmrc win silently)" {
+  # When pnpm_built_dependencies is non-empty, the user rc switches to
+  # only-built-dependencies semantics and MUST explicitly set
+  # ignore-scripts=false. Otherwise /etc/npmrc's ignore-scripts=true
+  # wins via pnpm's per-key config merge and silently blocks all build
+  # scripts — including allowlisted ones. We can't easily test the
+  # non-default vars path end-to-end, so assert against the template
+  # source: the override line must be present in the allowlist branch.
+  local template="/opt/ansible-supply-chain-security/templates/pnpm-rc.j2"
+  [ -f "$template" ] || template="${BATS_TEST_DIRNAME}/../../templates/pnpm-rc.j2"
+  assert_file_contains "$template" "ignore-scripts=false"
+}
+
+# pnpm 11+ YAML config — required because pnpm 11 stopped reading ini-format
+# rc files, ~/.npmrc, /etc/npmrc, and NPM_CONFIG_* env vars for non-auth
+# settings. Without this file, pnpm 11 has zero protection from the role.
+@test "pnpm config.yaml: ignoreScripts true (pnpm 11+ blocks project scripts)" {
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" "ignoreScripts: true"
+}
+
+@test "pnpm config.yaml: minimumReleaseAge set (pnpm 11+ age gate)" {
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" "minimumReleaseAge:"
+}
+
+@test "pnpm config.yaml: minimumReleaseAgeStrict true (fail loud not silent fallback)" {
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" "minimumReleaseAgeStrict: true"
+}
+
+@test "pnpm config.yaml: blockExoticSubdeps true (pnpm 11+ blocks tarball/git/http subdeps)" {
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" "blockExoticSubdeps: true"
+}
+
 # yarn
 @test "yarnrc: enableScripts false" {
   assert_file_contains "$HOME/.yarnrc.yml" "enableScripts: false"
@@ -107,4 +139,38 @@ load setup
 
 @test "bundler: BUNDLE_DEPLOYMENT true" {
   assert_file_contains "$HOME/.bundle/config" 'BUNDLE_DEPLOYMENT: "true"'
+}
+
+# system-wide /etc fallbacks (close the sudo / other-user gap where $HOME
+# flips and the per-user config above isn't found)
+
+@test "/etc/npmrc: ignore-scripts=true (sudo-safe npm hardening)" {
+  assert_file_contains "/etc/npmrc" "ignore-scripts=true"
+}
+
+@test "/etc/npmrc: min-release-age set (sudo-safe npm age gate)" {
+  assert_file_contains "/etc/npmrc" "min-release-age="
+}
+
+@test "/etc/npmrc: pnpm keys present (sudo-safe pnpm via shared file)" {
+  # pnpm's resolution chain includes /etc/npmrc. Verifying pnpm-specific
+  # keys here confirms both tools are covered by one file.
+  assert_file_contains "/etc/npmrc" "minimum-release-age-strict="
+  assert_file_contains "/etc/npmrc" "block-exotic-subdeps=true"
+}
+
+@test "/etc/yarnrc.yml: enableScripts false (sudo-safe yarn hardening)" {
+  assert_file_contains "/etc/yarnrc.yml" "enableScripts: false"
+}
+
+@test "/etc/pip.conf: only-binary=:all: (sudo-safe pip wheels-only)" {
+  assert_file_contains "/etc/pip.conf" "only-binary = :all:"
+}
+
+@test "/etc/uv/uv.toml: exclude-newer set (sudo-safe uv age gate)" {
+  assert_file_contains "/etc/uv/uv.toml" "exclude-newer"
+}
+
+@test "/etc/uv/uv.toml: no-build = true (sudo-safe uv wheels-only)" {
+  assert_file_contains "/etc/uv/uv.toml" "no-build = true"
 }

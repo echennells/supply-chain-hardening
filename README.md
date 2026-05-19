@@ -92,7 +92,20 @@ Package manager config files are written to their expected paths before the tool
 
 **Config files are the load-bearing defense layer.** Each package manager reads its config file unconditionally when invoked — regardless of process tree, PAM state, or shell context. That makes the config files the universal coverage layer for direct-exec callers (Docker CMD, systemd services, agents running as long-lived processes) where the env-var layer above doesn't apply.
 
-Files deployed: `~/.npmrc`, `~/.config/pnpm/rc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.config/uv/uv.toml`, `~/.config/pip/pip.conf`, `~/.cargo/config.toml`, `~/.config/composer/config.json`, `~/.bundle/config`.
+Files deployed: `~/.npmrc`, `~/.config/pnpm/rc`, `~/.config/pnpm/config.yaml`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.config/uv/uv.toml`, `~/.config/pip/pip.conf`, `~/.cargo/config.toml`, `~/.config/composer/config.json`, `~/.bundle/config`.
+
+**pnpm needs two files for version compatibility.** pnpm 11 stopped reading `~/.npmrc`, `~/.config/pnpm/rc` (the old ini-format file), `/etc/npmrc`, and `NPM_CONFIG_*` environment variables for non-auth settings — verified empirically against pnpm 11.1.3. Only `~/.config/pnpm/config.yaml` (YAML, camelCase) works on pnpm 11+. pnpm 10 still reads the ini-format `rc` file. Both files are written so the host stays protected across pnpm version upgrades in either direction.
+
+**System-wide fallback for sudo and other users.** Per-user config files only protect the user the role was applied as. A `sudo npm install` flips `$HOME` to `/root` and reads `/root/.npmrc` (which doesn't exist); same for any second account on the host. To close that gap, the role also deploys the equivalent system-wide config files, which every user — including root — reads regardless of `$HOME`:
+
+- `/etc/npmrc` — read by npm and by pnpm 10 (pnpm 11 ignores it; pnpm 11's system protection has to come from per-user config.yaml until pnpm adds a system path)
+- `/etc/yarnrc.yml` — Yarn Berry's system fallback
+- `/etc/pip.conf` — pip's global config
+- `/etc/uv/uv.toml` — uv's documented system config path on Linux/macOS
+
+User-level configs override these **per-key**: a setting *present* in the user file wins, but a setting *omitted* from the user file falls through to the system value. Most settings are absent from both files until the role sets them, so this rarely matters — but it does mean the user file must explicitly set any value it wants to override, not rely on omission. (Example: the pnpm rc deliberately sets `ignore-scripts=false` when the build-script allowlist is configured, to prevent `/etc/npmrc`'s `ignore-scripts=true` from silently winning.) Ecosystems without a system config path (Bun, Cargo, Composer, Bundler) remain user-home-only — see Limitations.
+
+**Pre-flight check protects pre-existing `/etc/*` files.** Before any system file is deployed, the role looks at `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf`, and `/etc/uv/uv.toml`. If any of those exist *without* the role's `Managed by ansible-supply-chain-security` marker — meaning a sysadmin, corporate config management, or distribution package put them there — the playbook fails loudly with the list of conflicting paths. This catches the worst-case scenario: silently clobbering a corporate `/etc/npmrc` with `registry=https://npm.internal.corp/` and reverting npm to the public registry (a dependency-confusion exposure). To accept the overwrite explicitly: `-e accept_etc_overwrite=true`.
 
 ### pip-to-uv redirect
 
@@ -175,7 +188,10 @@ AI agents install packages unpredictably. You can't control what package manager
 ## Limitations
 
 - **Not a sandbox.** Env vars and config files can be overridden by any process running as the same user. This protects against naive installs, not determined bypass.
-- **sudo clears the environment.** `sudo npm install` bypasses `/etc/profile.d/` settings. The `.npmrc` config file still applies.
+- **sudo clears the environment**, but config-file hardening still applies for the ecosystems with a system path (npm, pnpm 10, yarn, pip, uv) via `/etc/*` deployment. Bun, Cargo, Composer, and Bundler have no system config path — `sudo` invocations of those tools bypass the per-user config and fall back to upstream defaults.
+- **pnpm 11 has no system-wide config path.** pnpm 11 only reads `~/.config/pnpm/config.yaml` per-user. `sudo pnpm install` runs as root, which has its own (empty) config — meaning sudo'd pnpm 11 invocations are unprotected by this role. Workaround for hosts where this matters: also write the file to `/root/.config/pnpm/config.yaml`.
+- **pnpm `pnpm_built_dependencies` allowlist works on pnpm 10 only.** pnpm 11 explicitly rejects `onlyBuiltDependencies` in the global config file ("Move it to a project-level `pnpm-workspace.yaml`"). On pnpm 11+, the role keeps the safe global default (`ignoreScripts: true`) and allowlist behavior must be configured per-project. Setting `pnpm_built_dependencies` in role vars has no effect on pnpm 11 callers.
+- **pnpm allowlist is per-user, not system-wide.** Even on pnpm 10, the role's allowlist (`pnpm_built_dependencies`) only lands in the deploying user's `~/.config/pnpm/rc`. `sudo pnpm install` or invocations from a second user account see only the strict `/etc/npmrc` default. This fails closed (more restrictive), not open.
 - **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
 - **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally. No config can prevent this — it's an ecosystem-level gap. See [TESTS.md](TESTS.md) for details.
 - **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.

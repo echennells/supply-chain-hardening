@@ -1,0 +1,39 @@
+; Managed by ansible-supply-chain-security
+; System-wide config read by both npm and pnpm. pnpm's resolution chain
+; (per https://pnpm.io/npmrc) includes /etc/npmrc as the lowest-priority
+; layer, so a single file covers both. Closes the gap where `sudo npm
+; install` or any other-user process flips $HOME and misses the deploying
+; user's ~/.npmrc or ~/.config/pnpm/rc.
+;
+; User-level config still wins — npm and pnpm both treat per-user
+; settings as higher precedence than system config.
+
+; --- npm-relevant keys (pnpm ignores `min-release-age`; it uses
+;     `minimum-release-age` below; note also that pnpm 11 ignores
+;     ALL of these — pnpm 11 settings live in
+;     ~/.config/pnpm/config.yaml) ---
+ignore-scripts={{ npm_ignore_scripts | bool | lower }}
+audit={{ npm_audit | bool | lower }}
+save-exact={{ npm_save_exact | bool | lower }}
+fund={{ npm_fund | bool | lower }}
+update-notifier={{ npm_update_notifier | bool | lower }}
+min-release-age={{ npm_minimum_release_age_days }}
+allow-git=none
+
+; --- pnpm-relevant keys (npm ignores these) ---
+minimum-release-age={{ pnpm_minimum_release_age_minutes }}
+minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
+{% for pkg in pnpm_minimum_release_age_exclude %}
+minimum-release-age-exclude[]={{ pkg }}
+{% endfor %}
+block-exotic-subdeps=true
+{% if pnpm_built_dependencies | length > 0 %}
+; Build-script allowlist. Note: `ignore-scripts=true` above is a hard
+; block in pnpm and takes precedence — under sudo, even allowlisted
+; packages won't run build scripts. This is intentional: sudo should
+; be more conservative than normal-user invocations. If you need build
+; scripts under sudo, override at the per-user level (root's ~/.npmrc).
+{% for pkg in pnpm_built_dependencies %}
+only-built-dependencies[]={{ pkg }}
+{% endfor %}
+{% endif %}

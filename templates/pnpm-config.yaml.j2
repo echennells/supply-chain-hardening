@@ -1,0 +1,38 @@
+# Managed by ansible-supply-chain-security
+#
+# pnpm 11+ only reads settings from this YAML file (camelCase keys).
+# It deliberately ignores ~/.npmrc, ~/.config/pnpm/rc (the older
+# ini-format file), /etc/npmrc, and NPM_CONFIG_* environment
+# variables for non-auth settings. See
+# https://pnpm.io/settings : "Only auth and registry settings are
+# read from .npmrc files. All other settings must be configured in
+# pnpm-workspace.yaml or the global ~/.config/pnpm/config.yaml."
+#
+# This file is deployed alongside ~/.config/pnpm/rc (kept for pnpm
+# 10 and earlier) so the host stays protected across pnpm version
+# upgrades. They are NOT redundant — different pnpm majors read
+# different files.
+#
+# Build-script allowlist note: pnpm 11 rejects `onlyBuiltDependencies`
+# in this global file (warns "Move them to a project-level
+# pnpm-workspace.yaml"). The role's `pnpm_built_dependencies`
+# variable therefore takes effect on pnpm 10 only (via the rc file).
+# On pnpm 11, allowlisting must be done per-project in
+# pnpm-workspace.yaml. The role intentionally keeps the global
+# default strict (ignoreScripts: true) and does not attempt to
+# disable it when the allowlist is configured, because flipping it
+# to false globally would run ALL build scripts (not just the
+# allowlisted ones — the allowlist directive being ignored).
+
+ignoreScripts: true
+minimumReleaseAge: {{ pnpm_minimum_release_age_minutes }}
+minimumReleaseAgeStrict: {{ pnpm_minimum_release_age_strict | bool | lower }}
+{% if pnpm_minimum_release_age_exclude | length > 0 %}
+minimumReleaseAgeExclude:
+{% for pkg in pnpm_minimum_release_age_exclude %}
+  - "{{ pkg }}"
+{% endfor %}
+{% else %}
+minimumReleaseAgeExclude: []
+{% endif %}
+blockExoticSubdeps: true

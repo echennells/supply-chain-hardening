@@ -14,3 +14,17 @@
     src: pip.conf.j2
     dest: "{{ ansible_env.HOME }}/.config/pip/pip.conf"
     mode: "0644"
+
+- name: Deploy hardened /etc/pip.conf (system-wide; covers sudo and non-deploying users)
+  # pip's config search order is global (/etc/pip.conf) → user
+  # (~/.config/pip/pip.conf) → site (venv). Without the system file,
+  # `sudo pip install` (HOME=/root) and other-user invocations see no
+  # hardening — bypassing the only-binary=:all: protection that blocks
+  # setup.py execution.
+  become: true
+  ansible.builtin.template:
+    src: pip.conf.j2
+    dest: /etc/pip.conf
+    owner: root
+    group: root
+    mode: "0644"

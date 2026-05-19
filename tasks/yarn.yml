@@ -7,3 +7,15 @@
     src: yarnrc.yml.j2
     dest: "{{ ansible_env.HOME }}/.yarnrc.yml"
     mode: "0644"
+
+- name: Deploy hardened /etc/yarnrc.yml (system-wide; covers sudo and non-deploying users)
+  # Yarn Berry walks parent directories, then ~/.yarnrc.yml, then falls
+  # back to /etc/yarnrc.yml. Without the system file, `sudo yarn install`
+  # (HOME=/root) and other-user invocations see no hardening.
+  become: true
+  ansible.builtin.template:
+    src: yarnrc.yml.j2
+    dest: /etc/yarnrc.yml
+    owner: root
+    group: root
+    mode: "0644"

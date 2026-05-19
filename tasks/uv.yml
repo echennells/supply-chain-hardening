@@ -16,6 +16,29 @@
     dest: "{{ ansible_env.HOME }}/.config/uv/uv.toml"
     mode: "0644"
 
+- name: Create system-wide uv config directory
+  become: true
+  ansible.builtin.file:
+    path: /etc/uv
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy hardened /etc/uv/uv.toml (system-wide; covers sudo and non-deploying users)
+  # uv's documented system config path on Linux/macOS. Without it,
+  # `sudo uv pip install` (HOME=/root) and other-user invocations miss
+  # exclude-newer (age gate) and no-build (wheels-only), the two
+  # protections that block fresh malicious releases and setup.py
+  # execution respectively.
+  become: true
+  ansible.builtin.template:
+    src: uv.toml.j2
+    dest: /etc/uv/uv.toml
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Find uv binary path
   # Check the canonical install location first. `bash -lc` (login shell) was
   # the previous approach but it's fragile: the uv installer adds PATH only

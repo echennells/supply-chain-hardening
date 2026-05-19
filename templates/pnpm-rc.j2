@@ -7,7 +7,11 @@ minimum-release-age-exclude[]={{ pkg }}
 block-exotic-subdeps=true
 {% if pnpm_built_dependencies | length > 0 %}
 ; Explicit build-script allowlist (pnpm 11+). Listed packages may run build
-; scripts; everything else is blocked. Implicit ignore-scripts behavior.
+; scripts; everything else is blocked. Override /etc/npmrc's
+; ignore-scripts=true explicitly — pnpm merges config per-key, and an
+; omitted key here would let the system-wide value win (silently disabling
+; this allowlist). The allowlist below is what actually constrains scripts.
+ignore-scripts=false
 {% for pkg in pnpm_built_dependencies %}
 only-built-dependencies[]={{ pkg }}
 {% endfor %}
