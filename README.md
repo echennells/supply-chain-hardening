@@ -86,6 +86,8 @@ For the `✗` rows — most notably long-lived agent processes started as contai
 
 Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
 
+**Go has one env-var-only protection** — `GOTOOLCHAIN=local` (prevents `go install` from auto-fetching a newer toolchain than the host has, which an attacker could use to ship malicious build constraints). Go has no config-file equivalent, so this protection vanishes for systemd services and Docker `CMD`-style direct-exec callers. If you run Go-touching agents under systemd, add `Environment=GOTOOLCHAIN=local` to the unit file; for Docker, set it via `ENV` in the image or `-e` on `docker run`. Every other env-var protection has a config-file backstop and is unaffected.
+
 ### Config files deployed unconditionally
 
 Package manager config files are written to their expected paths before the tools are even installed. When an agent installs npm, pnpm, yarn, bun, uv, cargo, composer, or bundler at any point in the future, the hardened config is already waiting.
@@ -188,6 +190,7 @@ AI agents install packages unpredictably. You can't control what package manager
 ## Limitations
 
 - **Not a sandbox.** Env vars and config files can be overridden by any process running as the same user. This protects against naive installs, not determined bypass.
+- **CLI flags beat config files in pip.** `python3 -m pip install --no-binary :all: --break-system-packages malicious-pkg` bypasses both the `/usr/local/bin/pip` wrapper (because `python3 -m pip` invokes the module directly, not the binary) and the `/etc/pip.conf` `only-binary=:all:` setting (because pip's CLI flags outrank config). There is no clean interception for `python3 -m pip` — the standard library exposes the module independently of the binary. Recommend `uv pip install` for callers that need pip's interface; uv applies the role's age gate and `no-build` settings regardless of how it's invoked. Don't expose hosts to untrusted `pip` callers and expect the wrapper alone to save you.
 - **sudo clears the environment**, but config-file hardening still applies for the ecosystems with a system path (npm, pnpm 10, yarn, pip, uv) via `/etc/*` deployment. Bun, Cargo, Composer, and Bundler have no system config path — `sudo` invocations of those tools bypass the per-user config and fall back to upstream defaults.
 - **pnpm 11 has no system-wide config path.** pnpm 11 only reads `~/.config/pnpm/config.yaml` per-user. `sudo pnpm install` runs as root, which has its own (empty) config — meaning sudo'd pnpm 11 invocations are unprotected by this role. Workaround for hosts where this matters: also write the file to `/root/.config/pnpm/config.yaml`.
 - **pnpm `pnpm_built_dependencies` allowlist works on pnpm 10 only.** pnpm 11 explicitly rejects `onlyBuiltDependencies` in the global config file ("Move it to a project-level `pnpm-workspace.yaml`"). On pnpm 11+, the role keeps the safe global default (`ignoreScripts: true`) and allowlist behavior must be configured per-project. Setting `pnpm_built_dependencies` in role vars has no effect on pnpm 11 callers.

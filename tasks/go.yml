@@ -23,8 +23,24 @@
   changed_when: false
   failed_when: false
 
-- name: Install govulncheck
+- name: Install govulncheck (with toolchain auto-fetch for this install only)
+  # Three things collide here without this fix:
+  #   1. `go install golang.org/x/vuln/cmd/govulncheck@latest` requires a
+  #      toolchain new enough to build the latest govulncheck (currently
+  #      go 1.24+). Ubuntu 24.04's stock go is 1.22.
+  #   2. The role just set GOTOOLCHAIN=local system-wide (correctly — that's
+  #      part of the hardening). With local, go refuses to auto-download a
+  #      newer toolchain even when go.mod requires one.
+  #   3. With (1) + (2), `go install` aborts with a toolchain error, which
+  #      fails the play and skips every downstream task.
+  # GOTOOLCHAIN=auto scoped to JUST this command lets go download whatever
+  # toolchain govulncheck needs, without changing the system-wide GOTOOLCHAIN
+  # value that protects user `go install` calls. Also uses the absolute go
+  # path we already discovered — bare `go` wouldn't be reachable on hosts
+  # where ansible's connection PATH lacks /usr/local/go/bin.
   ansible.builtin.command:
-    cmd: go install golang.org/x/vuln/cmd/govulncheck@latest
+    cmd: "{{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@latest"
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/govulncheck' }}"
+  environment:
+    GOTOOLCHAIN: auto
   when: go_check.rc == 0

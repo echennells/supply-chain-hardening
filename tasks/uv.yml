@@ -101,8 +101,15 @@
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
 - name: Install uv-managed tools
+  # Use the absolute uv path we already discovered, not bare `uv`. Ansible's
+  # connection environment doesn't include ~/.local/bin (uv installer's
+  # default location); the installer only adds it to ~/.bashrc, which
+  # ansible never sources. Bare `uv tool install` then exits 127 and aborts
+  # the whole play, taking down every downstream task group. Container CI
+  # passes because the Dockerfile prepends /root/.local/bin to PATH — but
+  # fresh hosts following the official installer instructions don't.
   ansible.builtin.command:
-    cmd: "uv tool install {{ item }}"
+    cmd: "{{ uv_binary_path.stdout }} tool install {{ item }}"
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/' + item }}"
   loop:
     - uv-secure
