@@ -63,3 +63,58 @@ setup() {
   [ ! -f /tmp/marker-install-hook ]
   rm -rf /tmp/attack-test
 }
+
+@test "ATTACK: npm install --ignore-scripts=false CLI flag does not bypass hardening" {
+  # CLI flags outrank env vars in npm's precedence (cli > env > project >
+  # user > global > builtin). A naive expectation is that
+  # `--ignore-scripts=false` would defeat NPM_CONFIG_IGNORE_SCRIPTS=true
+  # and run the postinstall. Today this is blocked (verified manually in
+  # the May 2026 review) but the path that catches it isn't documented
+  # in one place. Likely combo: env var + ~/.npmrc + /etc/npmrc all
+  # set ignore-scripts=true, and `npm install --ignore-scripts=false`
+  # only flips the CLI layer — the config layers remain. If npm changes
+  # its merge behavior, or if someone removes one of those layers, this
+  # test fails and surfaces the regression.
+  #
+  # If this test FAILS (postinstall ran), the documented bypass surface
+  # has expanded; update README Limitations and decide whether to add a
+  # wrapper-level reject for this flag combo.
+  rm -f /tmp/postinstall-marker
+  cd /tmp && rm -rf cli-bypass-test && mkdir cli-bypass-test && cd cli-bypass-test
+  npm init -y >/dev/null 2>&1
+  npm install --ignore-scripts=false /opt/test-fixtures/npm-postinstall-pkg 2>/dev/null || true
+  [ ! -f /tmp/postinstall-marker ]
+  rm -rf /tmp/cli-bypass-test
+  rm -f /tmp/postinstall-marker
+}
+
+@test "ATTACK: user-level ~/.npmrc with ignore-scripts=false is overridden by env+system layers" {
+  # Documents npm's precedence assumption: env var > user .npmrc.
+  # If npm ever changes precedence (e.g., to make user config win), this
+  # test fails and surfaces a real protection gap.
+  # We intentionally write to ~/.npmrc here (overriding the role's value)
+  # and expect the install to still be blocked because:
+  #   - NPM_CONFIG_IGNORE_SCRIPTS=true (env) outranks user config
+  #   - /etc/npmrc has ignore-scripts=true (lower priority than user
+  #     but still beats default)
+  #
+  # Restores ~/.npmrc afterward so subsequent tests aren't contaminated.
+  backup=$(mktemp)
+  cp "$HOME/.npmrc" "$backup"
+
+  # Write attacker-controlled override at user level
+  echo "ignore-scripts=false" > "$HOME/.npmrc"
+
+  rm -f /tmp/postinstall-marker
+  cd /tmp && rm -rf user-rc-bypass-test && mkdir user-rc-bypass-test && cd user-rc-bypass-test
+  npm init -y >/dev/null 2>&1
+  npm install /opt/test-fixtures/npm-postinstall-pkg 2>/dev/null || true
+  marker_present=$([ -f /tmp/postinstall-marker ] && echo "yes" || echo "no")
+
+  # Restore role-deployed .npmrc BEFORE asserting (cleanup-first pattern)
+  mv "$backup" "$HOME/.npmrc"
+  rm -rf /tmp/user-rc-bypass-test
+  rm -f /tmp/postinstall-marker
+
+  [ "$marker_present" = "no" ]
+}
