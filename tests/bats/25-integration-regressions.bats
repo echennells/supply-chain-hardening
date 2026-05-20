@@ -26,18 +26,26 @@ ROLE_DIR="/opt/ansible-supply-chain-security"
 # re-introduce the bug — someone "simplifying" the task back to bare
 # `uv tool install` or dropping the `environment:` block on the go install.
 
+# Helper note for the four tests below: we extract a window of lines
+# starting at the task header and capture enough lines to span the
+# task body (cmd:, environment:, creates:, comment block, etc.).
+# An earlier version used awk '/start/,/^- name:/' but that pattern
+# matches BOTH start AND end on the same `- name: ...` line and
+# returns just one line. Using grep -A with a generous N is simpler
+# and immune to the awk same-line-range trap.
+
 @test "H1 regression catcher: tasks/uv.yml uses absolute uv path for tool install" {
   # Bug: bare `uv tool install` exits 127 when ~/.local/bin isn't on
   # ansible's PATH (uv installer's default install location). Fix uses
   # the absolute path we already discover via uv_binary_path.
   task_file="${ROLE_DIR}/tasks/uv.yml"
-  awk '/Install uv-managed tools/,/^- name:/' "$task_file" \
+  grep -A 25 'name: Install uv-managed tools' "$task_file" \
     | grep -qE 'cmd:.*\{\{ *uv_binary_path\.stdout *\}\} tool install'
 }
 
 @test "H2 regression catcher: tasks/github.yml uses absolute uv path for zizmor install" {
   task_file="${ROLE_DIR}/tasks/github.yml"
-  awk '/Install zizmor/,/^- name:/' "$task_file" \
+  grep -A 15 'name: Install zizmor' "$task_file" \
     | grep -qE 'cmd:.*\{\{ *uv_for_github\.stdout *\}\} tool install zizmor'
 }
 
@@ -47,13 +55,13 @@ ROLE_DIR="/opt/ansible-supply-chain-security"
   # scopes GOTOOLCHAIN=auto to just this install task via the
   # environment: keyword, keeping global hardening intact.
   task_file="${ROLE_DIR}/tasks/go.yml"
-  awk '/Install govulncheck/,/^- name:/' "$task_file" \
+  grep -A 25 'name: Install govulncheck' "$task_file" \
     | grep -qE 'GOTOOLCHAIN: *auto'
 }
 
 @test "H3 regression catcher: tasks/github.yml scopes GOTOOLCHAIN=auto for pinact install" {
   task_file="${ROLE_DIR}/tasks/github.yml"
-  awk '/Install pinact/,/^- name:/' "$task_file" \
+  grep -A 15 'name: Install pinact' "$task_file" \
     | grep -qE 'GOTOOLCHAIN: *auto'
 }
 
