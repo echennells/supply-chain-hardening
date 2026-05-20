@@ -1,0 +1,76 @@
+name: 'Supply Chain Hardening'
+description: >-
+  Block malicious package installs in CI at the package-manager layer. Sets
+  ignore-scripts, minimum-release-age (cooldown), wheels-only, and related
+  defenses for npm, pnpm, yarn, pip, and uv. Defenses apply to every step
+  after this action runs.
+author: 'echennells'
+
+inputs:
+  ecosystems:
+    description: >-
+      Comma-separated subset of package managers to harden. Supported:
+      npm, pnpm, yarn, pip, uv. Default covers the JavaScript and Python
+      ecosystems that account for nearly all observed supply-chain attacks
+      against CI runners.
+    required: false
+    default: 'npm,pnpm,yarn,pip,uv'
+  release_age_hours:
+    description: >-
+      Reject packages newer than this many hours. The 2026 AntV / Shai-Hulud
+      compromise had a < 1-hour window between malicious publish and yank;
+      48h is a sensible default for CI. Set to a smaller value at your own
+      risk — going below 24 leaves you exposed to fast-moving attacks.
+    required: false
+    default: '48'
+  strict:
+    description: >-
+      When true, the age gate fails the install rather than silently falling
+      back to whatever older version is available. Default true matches the
+      role's "fail loud, not fail silent" posture.
+    required: false
+    default: 'true'
+  install_sfw:
+    description: >-
+      Install Socket Firewall (sfw) and wrap npm to route installs through
+      threat-intel blocking. Adds ~10-20s to job startup, requires Node 20+.
+      Off by default because most CI workflows don't tolerate the extra time;
+      flip on for security-critical pipelines.
+    required: false
+    default: 'false'
+  write_etc:
+    description: >-
+      Write system-wide /etc/* configs in addition to user-home configs.
+      Helps the case where a subsequent step uses `sudo npm install` or
+      similar (uncommon in CI but cheap to cover). Requires passwordless
+      sudo, which all stock GitHub runners have.
+    required: false
+    default: 'true'
+
+outputs:
+  ecosystems-hardened:
+    description: 'Comma-separated list of ecosystems actually hardened (skips unsupported entries from input).'
+    value: ${{ steps.harden.outputs.ecosystems_hardened }}
+  release-age-hours:
+    description: 'Active minimum release age in hours.'
+    value: ${{ steps.harden.outputs.release_age_hours }}
+  sfw-installed:
+    description: 'true if Socket Firewall was installed and the npm wrapper deployed.'
+    value: ${{ steps.harden.outputs.sfw_installed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: harden
+      shell: bash
+      env:
+        ECOSYSTEMS: ${{ inputs.ecosystems }}
+        RELEASE_AGE_HOURS: ${{ inputs.release_age_hours }}
+        STRICT: ${{ inputs.strict }}
+        INSTALL_SFW: ${{ inputs.install_sfw }}
+        WRITE_ETC: ${{ inputs.write_etc }}
+      run: ${{ github.action_path }}/harden.sh
+
+branding:
+  icon: 'package'
+  color: 'blue'

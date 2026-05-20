@@ -1,0 +1,121 @@
+name: Action smoke test
+
+on:
+  push:
+    branches: [main, feat/**]
+    paths:
+      - 'action/**'
+      - '.github/workflows/action-smoke.yml'
+  pull_request:
+    paths:
+      - 'action/**'
+      - '.github/workflows/action-smoke.yml'
+
+jobs:
+  action-defaults:
+    name: 'Action: default invocation works'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        id: harden
+
+      - name: Outputs are populated
+        run: |
+          echo "ecosystems-hardened=${{ steps.harden.outputs.ecosystems-hardened }}"
+          echo "release-age-hours=${{ steps.harden.outputs.release-age-hours }}"
+          echo "sfw-installed=${{ steps.harden.outputs.sfw-installed }}"
+          test -n "${{ steps.harden.outputs.ecosystems-hardened }}"
+          test "${{ steps.harden.outputs.release-age-hours }}" = "48"
+
+      - name: Env vars propagated to subsequent step
+        run: |
+          test "$NPM_CONFIG_IGNORE_SCRIPTS" = "true"
+          test "$NPM_CONFIG_AUDIT" = "true"
+          test "$PIP_DISABLE_PIP_VERSION_CHECK" = "1"
+
+      - name: Config files written to $HOME
+        run: |
+          grep -q "ignore-scripts=true" "$HOME/.npmrc"
+          grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
+          grep -q "enableScripts: false" "$HOME/.yarnrc.yml"
+          grep -q "only-binary = :all:" "$HOME/.config/pip/pip.conf"
+          grep -q "no-build = true" "$HOME/.config/uv/uv.toml"
+
+      - name: /etc files written (write_etc default true)
+        run: |
+          sudo grep -q "ignore-scripts=true" /etc/npmrc
+          sudo grep -q "only-binary = :all:" /etc/pip.conf
+
+  action-blocks-postinstall:
+    name: 'Action: blocks npm postinstall (the actual attack)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      - name: Attempt to install fixture with postinstall — must be blocked
+        run: |
+          rm -f /tmp/postinstall-marker
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y >/dev/null
+          npm install ${GITHUB_WORKSPACE}/tests/fixtures/npm-postinstall-pkg 2>&1 || true
+          if [ -f /tmp/postinstall-marker ]; then
+            echo "::error::Postinstall ran — hardening did NOT block it. This is the bug the action exists to prevent."
+            exit 1
+          fi
+          echo "✓ postinstall correctly blocked"
+
+  action-subset:
+    name: 'Action: subset selection (npm,pip only)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm,pip
+          write_etc: 'false'   # also exercise the opt-out path
+
+      - name: Only requested ecosystems hardened
+        run: |
+          test "${{ steps.harden.outputs.ecosystems-hardened }}" = "npm,pip"
+          # npm + pip configs exist
+          test -f "$HOME/.npmrc"
+          test -f "$HOME/.config/pip/pip.conf"
+          # pnpm/yarn/uv configs do NOT exist
+          test ! -f "$HOME/.config/pnpm/config.yaml"
+          test ! -f "$HOME/.yarnrc.yml"
+          test ! -f "$HOME/.config/uv/uv.toml"
+
+      - name: write_etc=false skipped system files
+        run: |
+          if [ -f /etc/npmrc ]; then
+            echo "::error::/etc/npmrc was written despite write_etc=false"
+            exit 1
+          fi
+
+  action-rejects-bad-input:
+    name: 'Action: rejects release_age_hours=0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        id: harden
+        continue-on-error: true
+        with:
+          release_age_hours: '0'
+
+      - name: Action must have failed
+        run: |
+          if [ "${{ steps.harden.outcome }}" != "failure" ]; then
+            echo "::error::Action did not fail on release_age_hours=0 (outcome: ${{ steps.harden.outcome }})"
+            exit 1
+          fi
+          echo "✓ action correctly refused release_age_hours=0"
