@@ -64,45 +64,55 @@ setup() {
   rm -rf /tmp/attack-test
 }
 
-@test "ATTACK: npm install --ignore-scripts=false CLI flag does not bypass hardening" {
-  # CLI flags outrank env vars in npm's precedence (cli > env > project >
-  # user > global > builtin). A naive expectation is that
-  # `--ignore-scripts=false` would defeat NPM_CONFIG_IGNORE_SCRIPTS=true
-  # and run the postinstall. Today this is blocked (verified manually in
-  # the May 2026 review) but the path that catches it isn't documented
-  # in one place. Likely combo: env var + ~/.npmrc + /etc/npmrc all
-  # set ignore-scripts=true, and `npm install --ignore-scripts=false`
-  # only flips the CLI layer — the config layers remain. If npm changes
-  # its merge behavior, or if someone removes one of those layers, this
-  # test fails and surfaces the regression.
+@test "DOCUMENTED BYPASS: npm install --ignore-scripts=false CLI flag bypasses hardening in non-PAM contexts" {
+  # CLI flags outrank everything in npm's precedence (cli > env >
+  # project > user > global > builtin). In any context where
+  # NPM_CONFIG_IGNORE_SCRIPTS isn't in the environment (Docker CMD,
+  # systemd unit without EnvironmentFile, anything not launched via
+  # PAM — which is most agent contexts), passing
+  # `--ignore-scripts=false` on the CLI silently re-enables script
+  # execution. /etc/npmrc and ~/.npmrc both lose because CLI wins.
   #
-  # If this test FAILS (postinstall ran), the documented bypass surface
-  # has expanded; update README Limitations and decide whether to add a
-  # wrapper-level reject for this flag combo.
+  # No defense exists at the role layer — npm's CLI is designed to
+  # let callers override config. The wrapper at /usr/local/bin/npm
+  # passes args through unchanged; routing through sfw doesn't help
+  # (network-layer filter, not a lifecycle interceptor). Documented
+  # in README Limitations.
+  #
+  # This test asserts the bypass works (locks in the current reality).
+  # If a future change adds wrapper-level arg filtering or some other
+  # defense, this test fails and forces explicit re-evaluation.
   rm -f /tmp/postinstall-marker
   cd /tmp && rm -rf cli-bypass-test && mkdir cli-bypass-test && cd cli-bypass-test
   npm init -y >/dev/null 2>&1
   npm install --ignore-scripts=false /opt/test-fixtures/npm-postinstall-pkg 2>/dev/null || true
-  [ ! -f /tmp/postinstall-marker ]
+  marker_present=$([ -f /tmp/postinstall-marker ] && echo "yes" || echo "no")
   rm -rf /tmp/cli-bypass-test
   rm -f /tmp/postinstall-marker
+  [ "$marker_present" = "yes" ]
 }
 
-@test "ATTACK: user-level ~/.npmrc with ignore-scripts=false is overridden by env+system layers" {
-  # Documents npm's precedence assumption: env var > user .npmrc.
-  # If npm ever changes precedence (e.g., to make user config win), this
-  # test fails and surfaces a real protection gap.
-  # We intentionally write to ~/.npmrc here (overriding the role's value)
-  # and expect the install to still be blocked because:
-  #   - NPM_CONFIG_IGNORE_SCRIPTS=true (env) outranks user config
-  #   - /etc/npmrc has ignore-scripts=true (lower priority than user
-  #     but still beats default)
+@test "DOCUMENTED BYPASS: user-controlled ~/.npmrc overrides /etc/npmrc in non-PAM contexts" {
+  # npm precedence (with no env var in play): per-user .npmrc beats
+  # global .npmrc (/etc/npmrc). A user — or any process running as
+  # that user — can write `ignore-scripts=false` to their own
+  # ~/.npmrc and the role's /etc/npmrc protection is overridden.
   #
-  # Restores ~/.npmrc afterward so subsequent tests aren't contaminated.
+  # In PAM-launched contexts (login shells, ssh, sudo -i, cron),
+  # NPM_CONFIG_IGNORE_SCRIPTS is in the env and DOES beat user
+  # .npmrc — env > user config. The bypass shown here is specific
+  # to non-PAM contexts: Docker CMD, systemd units without
+  # EnvironmentFile, agent processes, the bats test environment.
+  #
+  # Documented in README Limitations alongside the M1/M2 entries.
+  # If a future change adds defense (e.g., the role refuses to start
+  # if ~/.npmrc is operator-modified, or PAM-style env loading is
+  # extended into non-PAM contexts), this test fails and forces
+  # re-evaluation.
   backup=$(mktemp)
   cp "$HOME/.npmrc" "$backup"
 
-  # Write attacker-controlled override at user level
+  # Attacker-controlled override at user level
   echo "ignore-scripts=false" > "$HOME/.npmrc"
 
   rm -f /tmp/postinstall-marker
@@ -116,5 +126,5 @@ setup() {
   rm -rf /tmp/user-rc-bypass-test
   rm -f /tmp/postinstall-marker
 
-  [ "$marker_present" = "no" ]
+  [ "$marker_present" = "yes" ]
 }
