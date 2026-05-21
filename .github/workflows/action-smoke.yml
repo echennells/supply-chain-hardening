@@ -119,3 +119,141 @@ jobs:
             exit 1
           fi
           echo "✓ action correctly refused release_age_hours=0"
+
+  action-blocks-pnpm-project-script:
+    name: 'Action: blocks pnpm project-level postinstall (pnpm 11 config.yaml is load-bearing)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: Install pnpm via corepack
+        run: corepack enable && corepack prepare pnpm@latest --activate && pnpm --version
+
+      - uses: ./action
+        with:
+          ecosystems: pnpm
+
+      # pnpm 11 BLOCKS dependency build scripts by default (without our help) —
+      # the meaningful test is whether it blocks the PROJECT'S OWN postinstall,
+      # which pnpm 11 runs unless ignoreScripts: true is set in config.yaml.
+      # That's the file the action deploys and the file pnpm 11 actually reads.
+      - name: Project-level postinstall must be blocked
+        run: |
+          rm -f /tmp/marker-pnpm-project
+          mkdir -p /tmp/pnpm-victim && cd /tmp/pnpm-victim
+          cat > package.json <<'EOF'
+          {
+            "name": "victim",
+            "version": "1.0.0",
+            "scripts": {"postinstall": "touch /tmp/marker-pnpm-project"}
+          }
+          EOF
+          pnpm install --ignore-workspace 2>&1 | tail -3 || true
+          if [ -f /tmp/marker-pnpm-project ]; then
+            echo "::error::pnpm project postinstall RAN — action's config.yaml is not effective"
+            exit 1
+          fi
+          echo "✓ pnpm 11 project-level postinstall blocked via config.yaml"
+
+  action-blocks-pip-sdist:
+    name: 'Action: blocks pip sdist install (only-binary=:all: refuses setup.py execution)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      # Build the sdist BEFORE the action runs — the action's hardening blocks
+      # sdist builds via setup.py, so we couldn't build it after either.
+      - name: Build malicious-pattern sdist fixture
+        run: |
+          cd ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil
+          python3 setup.py sdist 2>&1 | tail -3
+          ls dist/
+
+      - uses: ./action
+        with:
+          ecosystems: pip,uv
+
+      - name: Install attempt must fail OR setup.py must not execute
+        run: |
+          rm -f /tmp/marker-python-setup-exfil
+          sdist=$(ls ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil/dist/*.tar.gz | head -1)
+          # Action sets only-binary=:all: in env and config. pip should refuse.
+          # We use --break-system-packages NOT to bypass — to make sure the
+          # error we get is "no binary distribution available" (the protection
+          # working) rather than PEP 668's "use a venv" gate firing first.
+          python3 -m pip install --break-system-packages "$sdist" 2>&1 | tail -5 || true
+          if [ -f /tmp/marker-python-setup-exfil ]; then
+            echo "::error::setup.py executed — pip's only-binary=:all: did not block sdist install"
+            exit 1
+          fi
+          echo "✓ pip refused sdist install — setup.py never ran"
+
+  action-blocks-real-npm-package:
+    name: 'Action: blocks real npm package install script (bcrypt native bindings)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      # bcrypt@5.1.1 (released 2023) has an `install` lifecycle script that
+      # uses node-pre-gyp to fetch prebuilt native bindings — without that
+      # script running, the .node addon file is never on disk, and require()
+      # fails. This is a real package from npm (not a controlled fixture).
+      # Old enough to clear the 48h age gate by years.
+      - name: Install bcrypt — install script must be blocked
+        run: |
+          mkdir -p /tmp/bcrypt-real && cd /tmp/bcrypt-real
+          npm init -y >/dev/null
+          npm install bcrypt@5.1.1 2>&1 | tail -3 || true
+          # Package downloaded?
+          if [ ! -f node_modules/bcrypt/package.json ]; then
+            echo "::error::bcrypt failed to download — test inconclusive (network or registry issue)"
+            exit 2
+          fi
+          # Native bindings should NOT be present (install script blocked)
+          if node -e "require('bcrypt')" 2>/dev/null; then
+            echo "::error::bcrypt loaded successfully — install script RAN despite ignore-scripts"
+            exit 1
+          fi
+          echo "✓ bcrypt downloaded but native bindings absent (install script blocked)"
+
+  action-external-reference:
+    name: 'Action: works when consumed by external ref (uses owner/repo/path@branch)'
+    runs-on: ubuntu-24.04
+    steps:
+      # Deliberately NO `actions/checkout` of this repo — proves the action
+      # resolves and runs purely via GitHub Actions runtime, which is what a
+      # consumer in a separate repo experiences.
+      - uses: echennells/supply-chain-hardening/action@feat/github-action
+        id: harden
+
+      - name: Outputs are populated (same as local-checkout test)
+        run: |
+          test -n "${{ steps.harden.outputs.ecosystems-hardened }}"
+          test "${{ steps.harden.outputs.release-age-hours }}" = "48"
+          echo "ecosystems=${{ steps.harden.outputs.ecosystems-hardened }}"
+
+      - name: Env vars propagated
+        run: |
+          test "$NPM_CONFIG_IGNORE_SCRIPTS" = "true"
+          test "$PIP_DISABLE_PIP_VERSION_CHECK" = "1"
+
+      - name: Config files written
+        run: |
+          grep -q "ignore-scripts=true" "$HOME/.npmrc"
+          grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
