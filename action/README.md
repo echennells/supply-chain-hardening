@@ -100,6 +100,7 @@ Example consumption:
 ## Known limitations
 
 - **CLI flags can bypass.** A subsequent step running `npm install --ignore-scripts=false <pkg>` will run lifecycle scripts. The action sets env vars and config files; npm's CLI flags outrank both. There's no clean defense at this layer — npm is designed to let callers override config. Same goes for `pip install --no-binary :all: --break-system-packages`.
+- **`pip install <local-sdist-path>` is not blocked by `only-binary=:all:`.** pip's `only-binary` setting applies to PyPI resolution, not to explicit file path arguments — `python3 -m pip install ./some-malicious.tar.gz` will build the sdist and execute setup.py. Verified in CI; locked in by a smoke test that documents the gap. Use `uv pip install` instead, which honors `no-build` regardless of source.
 - **Per-job, not per-workflow.** Each job in a workflow gets a fresh runner; the action only protects the job it runs in. Add `- uses:` to every job that does installs.
 - **pnpm 11 vs 10 nuance.** pnpm 11 only reads `~/.config/pnpm/config.yaml`; pnpm 10 reads `~/.config/pnpm/rc`. The action writes both, so you're covered either way.
 - **Doesn't validate node/python versions.** If you're targeting older toolchains, some of the env vars (e.g., `NPM_CONFIG_MINIMUM_RELEASE_AGE` requires npm 10.5+) may be silently ignored by the package manager.

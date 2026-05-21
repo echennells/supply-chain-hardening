@@ -159,8 +159,8 @@ jobs:
           fi
           echo "✓ pnpm 11 project-level postinstall blocked via config.yaml"
 
-  action-blocks-pip-sdist:
-    name: 'Action: blocks pip sdist install (only-binary=:all: refuses setup.py execution)'
+  action-blocks-uv-sdist:
+    name: 'Action: uv pip install refuses sdist (setup.py blocked via no-build)'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -169,9 +169,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Build the sdist BEFORE the action runs — the action's hardening blocks
-      # sdist builds via setup.py, so we couldn't build it after either.
-      # Python 3.12 doesn't ship setuptools by default; install it first.
+      - name: Install uv (the action's recommended Python interface)
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # Build the sdist BEFORE the action runs. The action's hardening blocks
+      # sdist BUILDS via uv no-build, so once the action runs we can't even
+      # build the fixture. Building during this step is fine — the action
+      # hasn't applied yet.
       - name: Build malicious-pattern sdist fixture
         run: |
           python3 -m pip install --quiet --break-system-packages setuptools
@@ -181,22 +187,66 @@ jobs:
 
       - uses: ./action
         with:
-          ecosystems: pip,uv
+          ecosystems: uv
 
-      - name: Install attempt must fail OR setup.py must not execute
+      # Note: we test uv, not pip. `pip install <local-sdist>` with
+      # only-binary=:all: turns out NOT to block local file paths in
+      # modern pip (only-binary applies to PyPI resolution, not explicit
+      # file arguments). uv's no-build setting DOES refuse sdist builds
+      # regardless of source. The action's README explicitly recommends
+      # uv as the safe Python interface; this test verifies that
+      # recommendation holds.
+      - name: uv pip install must refuse the sdist
         run: |
           rm -f /tmp/marker-python-setup-exfil
           sdist=$(ls ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil/dist/*.tar.gz | head -1)
-          # Action sets only-binary=:all: in env and config. pip should refuse.
-          # We use --break-system-packages NOT to bypass — to make sure the
-          # error we get is "no binary distribution available" (the protection
-          # working) rather than PEP 668's "use a venv" gate firing first.
-          python3 -m pip install --break-system-packages "$sdist" 2>&1 | tail -5 || true
+          uv venv /tmp/uv-victim >/dev/null 2>&1
+          VIRTUAL_ENV=/tmp/uv-victim uv pip install "$sdist" 2>&1 | tail -5 || true
           if [ -f /tmp/marker-python-setup-exfil ]; then
-            echo "::error::setup.py executed — pip's only-binary=:all: did not block sdist install"
+            echo "::error::uv ran setup.py — no-build=true was not honored"
             exit 1
           fi
-          echo "✓ pip refused sdist install — setup.py never ran"
+          echo "✓ uv refused sdist build — setup.py never ran"
+
+  action-pip-only-binary-limitation:
+    name: 'DOCUMENTED LIMIT: pip only-binary does not block local-file sdist install'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Build fixture sdist before hardening applies
+        run: |
+          python3 -m pip install --quiet --break-system-packages setuptools
+          cd ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil
+          python3 setup.py sdist 2>&1 | tail -3
+
+      - uses: ./action
+        with:
+          ecosystems: pip
+
+      # Locks in the documented limit: `python3 -m pip install <local-sdist>`
+      # bypasses only-binary=:all: in modern pip (the flag applies to PyPI
+      # resolution, not explicit file arguments). README's "CLI flags beat
+      # config in pip" limitation extends here. If a future pip change
+      # actually starts enforcing only-binary for local file paths, this
+      # test will fail and tell us we can tighten the README.
+      - name: Local sdist install via pip SHOULD succeed (documenting the gap)
+        run: |
+          rm -f /tmp/marker-python-setup-exfil
+          sdist=$(ls ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil/dist/*.tar.gz | head -1)
+          python3 -m pip install --break-system-packages "$sdist" 2>&1 | tail -3 || true
+          if [ ! -f /tmp/marker-python-setup-exfil ]; then
+            echo "::warning::pip refused the sdist — this is BETTER than documented. Tighten README."
+            # Don't fail; better-than-expected behavior shouldn't break CI
+            exit 0
+          fi
+          echo "✓ documented limit confirmed: pip only-binary does not protect against local-file sdist installs"
+          rm -f /tmp/marker-python-setup-exfil
+          python3 -m pip uninstall -y --break-system-packages test-setup-exfil 2>/dev/null || true
 
   action-blocks-real-npm-package:
     name: 'Action: blocks real npm package install script (bcrypt native bindings)'
