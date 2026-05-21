@@ -171,8 +171,10 @@ jobs:
 
       # Build the sdist BEFORE the action runs — the action's hardening blocks
       # sdist builds via setup.py, so we couldn't build it after either.
+      # Python 3.12 doesn't ship setuptools by default; install it first.
       - name: Build malicious-pattern sdist fixture
         run: |
+          python3 -m pip install --quiet --break-system-packages setuptools
           cd ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil
           python3 setup.py sdist 2>&1 | tail -3
           ls dist/
