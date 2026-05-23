@@ -1,0 +1,25 @@
+{# Managed by ansible-supply-chain-security.
+   Tier auto-selected from detected Composer version.
+     Composer ≥ 2.9   : full audit block (block-insecure + block-abandoned + abandoned)
+     Composer 2.7-2.8 : audit block with abandoned only
+     Composer < 2.7   : no audit block (key added in 2.7.0)
+     Composer not detected at apply time: rendered as < 2.7 (safe baseline);
+       re-run the role after installing Composer to upgrade to the matching tier.
+   See README "Limitations" → "Composer audit blocking is version-tiered". #}
+{%- set v = composer_detected_version | default('', true) -%}
+{%- set has_audit = v != '' and v is version('2.7.0', '>=') -%}
+{%- set has_block = v != '' and v is version('2.9.0', '>=') -%}
+{
+  "config": {
+    "scripts-are-disabled": true,
+    "secure-http": true,
+    "lock": true,
+    "preferred-install": "dist",
+    "allow-plugins": {{ composer_allow_plugins | bool | lower }}{% if has_audit %},
+    "audit": {
+      "abandoned": "{{ composer_audit_abandoned }}"{% if has_block %},
+      "block-insecure": {{ composer_audit_block_insecure | bool | lower }},
+      "block-abandoned": {{ composer_audit_block_abandoned | bool | lower }}{% endif %}
+    }{% endif %}
+  }
+}

@@ -1,7 +1,54 @@
 ---
-# Composer (PHP) supply chain hardening
-# Config deployed unconditionally
-# COMPOSER_NO_SCRIPTS=1 is also set system-wide in /etc/environment
+# Composer (PHP) supply chain hardening.
+# Config deployed unconditionally; the rendered tier matches the detected
+# Composer version (or falls back to a safe baseline when Composer isn't
+# installed at apply time). COMPOSER_NO_SCRIPTS=1 is set system-wide in
+# /etc/environment by shell_env.yml.
+#
+# Tier breakdown (see README → Limitations for distro-version mapping):
+#   Composer ≥ 2.9   : allow-plugins + audit (abandoned + block-insecure + block-abandoned)
+#   Composer 2.7-2.8 : allow-plugins + audit (abandoned only)
+#   Composer < 2.7   : allow-plugins only (audit key added in 2.7.0)
+#   Not installed    : safe baseline; re-run role after install to upgrade tier
+
+- name: Detect installed Composer version (empty if not installed)
+  # Pull the X.Y.Z out of `composer --version` output:
+  #   "Composer version 2.7.1 2024-02-09 15:26:28"
+  # sed -n + /p only prints when the pattern matches, so any pre-version
+  # warning lines (e.g. "Do not run Composer as root!") are skipped.
+  # `command -v composer` short-circuits when Composer isn't on PATH —
+  # `exit 0` then leaves stdout empty, which the template treats as "unknown
+  # version, use safe baseline".
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      command -v composer >/dev/null 2>&1 || exit 0
+      composer --version --no-ansi 2>/dev/null \
+        | sed -nE 's/^Composer version ([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+        | head -1
+    executable: /bin/bash
+  register: composer_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Set composer_detected_version fact
+  ansible.builtin.set_fact:
+    composer_detected_version: "{{ composer_version_check.stdout | default('') | trim }}"
+
+- name: Warn when Composer is installed but below 2.9 (audit block-* keys inert)
+  # block-insecure and block-abandoned require Composer ≥ 2.9.0 (2025-11).
+  # The template omits them on older Composer so the config.json stays valid.
+  # Surfacing the warning here is the user-visible signal that those specific
+  # protections didn't apply on this host — everything else still does.
+  ansible.builtin.debug:
+    msg: >-
+      Composer {{ composer_detected_version }} detected. The audit.block-insecure
+      and audit.block-abandoned settings require Composer >= 2.9 and will not be
+      written. Other hardening (scripts-are-disabled, secure-http, allow-plugins,
+      preferred-install, COMPOSER_NO_SCRIPTS) applies on this host.
+  when:
+    - composer_detected_version | length > 0
+    - composer_detected_version is version('2.9.0', '<')
 
 - name: Create composer config directory
   ansible.builtin.file:
@@ -9,19 +56,31 @@
     state: directory
     mode: "0755"
 
-- name: Deploy hardened composer config.json
-  ansible.builtin.copy:
+- name: Deploy hardened composer config.json (tier matches detected version)
+  ansible.builtin.template:
+    src: composer-config.json.j2
     dest: "{{ ansible_env.HOME }}/.config/composer/config.json"
     mode: "0644"
-    content: |
-      {
-        "config": {
-          "scripts-are-disabled": true,
-          "secure-http": true,
-          "lock": true,
-          "preferred-install": "dist",
-          "audit": {
-            "abandoned": "report"
-          }
-        }
-      }
+
+# /root coverage for `sudo composer …`. Composer has no /etc/composer system
+# path, and sudo flips HOME to /root, so the per-user write above misses the
+# sudo invocation path. Writing to /root/.config/composer/ closes that.
+# When the role itself is run as root, the dest below is identical to the
+# per-user dest — the task becomes an idempotent re-render of the same file.
+- name: Create /root composer config directory (sudo coverage)
+  become: true
+  ansible.builtin.file:
+    path: /root/.config/composer
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy hardened composer config.json to /root (sudo coverage)
+  become: true
+  ansible.builtin.template:
+    src: composer-config.json.j2
+    dest: /root/.config/composer/config.json
+    owner: root
+    group: root
+    mode: "0644"

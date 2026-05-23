@@ -98,6 +98,20 @@ npm_path_wrapper: true
 # overwrites the wrapper; re-apply the role after a Deno upgrade.
 deno_path_wrapper: true
 
+# composer settings
+# Tier auto-selected from the detected Composer version at apply time:
+#   Composer >= 2.9 : allow-plugins + audit (abandoned + block-insecure + block-abandoned)
+#   Composer 2.7-2.8: allow-plugins + audit (abandoned only; block-* added in 2.9)
+#   Composer < 2.7  : allow-plugins only (audit key added in 2.7.0)
+#   Not installed   : safe baseline; re-run after install to upgrade the tier
+# Variables below apply on the tiers that support each key; older Composer
+# silently ignores them (the template omits them entirely to keep config.json
+# valid on parsers that may reject unknown keys).
+composer_audit_abandoned: "fail"        # ignore|report|fail (Composer >= 2.7)
+composer_audit_block_insecure: true     # Composer >= 2.9 only
+composer_audit_block_abandoned: true    # Composer >= 2.9 only
+composer_allow_plugins: false           # default-deny plugin execution; opt in via project composer.json
+
 # podman / container image hardening
 podman_enabled: false           # set true to install podman and deploy policy.json
 podman_disable_docker: false    # set true to stop and disable Docker
