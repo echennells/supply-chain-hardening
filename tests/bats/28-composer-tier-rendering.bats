@@ -18,9 +18,7 @@
 load setup
 
 TIER_DIR=/tmp/composer-tier-renders
-# Default is the container path baked into tests/Dockerfile. For local runs,
-# override: ROLE_DIR=/path/to/repo bats tests/bats/28-composer-tier-rendering.bats
-ROLE_DIR="${ROLE_DIR:-/opt/ansible-supply-chain-security}"
+# ROLE_DIR is autodetected by setup.bash for both in-Docker and local runs.
 
 setup_file() {
   mkdir -p "$TIER_DIR"

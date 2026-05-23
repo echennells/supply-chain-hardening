@@ -2,6 +2,24 @@
 
 # Shared helpers for all BATS test files
 
+# Resolve the role directory in both environments:
+#   - Inside the test Docker image: role copied to /opt/ansible-supply-chain-security
+#     (see tests/Dockerfile); tests/bats lives at a sibling /opt/tests/bats, so a
+#     BATS_TEST_DIRNAME-relative walk would land at /opt instead of the role dir.
+#     Prefer the well-known Docker path when it exists.
+#   - Local clone (any host, any path): walk up two dirs from the test file's
+#     location (tests/bats/x.bats -> repo root). Works on dev machines and CI
+#     runners regardless of where the repo was checked out.
+# Override by exporting ROLE_DIR before invoking bats.
+if [ -z "${ROLE_DIR:-}" ]; then
+  if [ -d /opt/ansible-supply-chain-security ]; then
+    ROLE_DIR=/opt/ansible-supply-chain-security
+  else
+    ROLE_DIR="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+  fi
+fi
+export ROLE_DIR
+
 load_profile() {
   source /etc/profile.d/supply-chain-hardening.sh 2>/dev/null || true
 }
