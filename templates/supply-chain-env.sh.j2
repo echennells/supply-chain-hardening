@@ -28,4 +28,8 @@ export GOINSECURE='{{ go_insecure }}'
 export GOTOOLCHAIN=local
 
 # === PHP (Composer) ===
-export COMPOSER_NO_SCRIPTS=1
+# No env-var-based script blocking available. COMPOSER_NO_SCRIPTS is a
+# made-up name — composer ignores it. The real primitives are the
+# --no-scripts CLI flag and COMPOSER_SKIP_SCRIPTS=<event,list> (composer
+# 2.9+), neither of which works as a host-wide always-on protection
+# without a wrapper. Tracked: see README Limitations.

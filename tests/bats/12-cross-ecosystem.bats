@@ -71,11 +71,6 @@ setup() {
   [ "$result" = "sum.golang.org" ]
 }
 
-@test "SYSTEM: profile.d exports Composer vars when sourced" {
-  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh && echo $COMPOSER_NO_SCRIPTS')
-  [ "$result" = "1" ]
-}
-
 # --- Honest test of the /etc/environment limit ---
 
 @test "LIMIT: direct-exec contexts (no PAM, no shell sourcing) do NOT inherit /etc/environment" {

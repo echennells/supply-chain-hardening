@@ -126,11 +126,6 @@ load setup
   assert_file_contains "$HOME/.cargo/config.toml" "check-revoke = true"
 }
 
-# composer
-@test "composer: scripts-are-disabled" {
-  assert_file_contains "$HOME/.config/composer/config.json" "scripts-are-disabled"
-}
-
 # bundler
 @test "bundler: BUNDLE_FROZEN true" {
   assert_file_contains "$HOME/.bundle/config" 'BUNDLE_FROZEN: "true"'

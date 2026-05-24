@@ -1,22 +1,19 @@
 #!/usr/bin/env bats
-# Adversarial tests: Composer script execution blocking.
-# Tests that COMPOSER_NO_SCRIPTS=1 and scripts-are-disabled prevent
-# post-install-cmd from running.
+# Adversarial tests: Composer config-file hardening assertions.
+#
+# NOTE: composer has no host-wide config-file or env-var mechanism to
+# disable script execution. The previous "blocked by env var" and
+# "scripts-are-disabled" tests asserted presence of strings that composer
+# ignores entirely (COMPOSER_NO_SCRIPTS is not a real composer env var;
+# "scripts-are-disabled" is not in composer's JSON schema). Those tests
+# passed but proved nothing about runtime behavior. See README Limitations
+# for the unmitigated composer-scripts attack class and the planned wrapper.
 
 load setup
 
 setup() {
   load_profile
   rm -f /tmp/marker-composer-script
-}
-
-@test "ATTACK: Composer post-install-cmd is blocked by env var" {
-  # COMPOSER_NO_SCRIPTS=1 should prevent all script execution
-  [ "$COMPOSER_NO_SCRIPTS" = "1" ]
-}
-
-@test "ATTACK: Composer config has scripts-are-disabled" {
-  assert_file_contains "$HOME/.config/composer/config.json" '"scripts-are-disabled": true'
 }
 
 @test "Composer config enforces HTTPS" {

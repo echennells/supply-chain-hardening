@@ -1,11 +1,16 @@
 {
   "name": "test/postinstall-trigger",
-  "description": "Tests that Composer scripts-are-disabled blocks post-install-cmd",
+  "description": "Fires post-install-cmd via a real (local) require. Tests whether composer script blocking is in effect.",
   "type": "project",
   "scripts": {
     "post-install-cmd": [
       "echo 'COMPOSER_SCRIPT_RAN' > /tmp/marker-composer-script"
     ]
   },
-  "require": {}
+  "repositories": [
+    { "type": "path", "url": "/opt/test-fixtures/composer-local-dep" }
+  ],
+  "require": {
+    "test/composer-local-dep": "*"
+  }
 }

@@ -39,5 +39,4 @@
       GONOPROXY={{ go_noproxy }}
       GOINSECURE={{ go_insecure }}
       GOTOOLCHAIN=local
-      COMPOSER_NO_SCRIPTS=1
   tags: [shell]

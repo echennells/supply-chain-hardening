@@ -63,8 +63,11 @@ assert_valid_json() {
 
 assert_has_baseline() {
   # Baseline keys that must appear on EVERY tier (including undetected).
+  # Notable absence: no "scripts-are-disabled" — that key is NOT in
+  # composer's JSON schema. It used to be in the template but composer
+  # ignored it; tests asserting its presence proved nothing about runtime
+  # behavior. Removed.
   local f="$1"
-  grep -q '"scripts-are-disabled": true' "$f" || { echo "missing scripts-are-disabled in $f" >&2; return 1; }
   grep -q '"secure-http": true' "$f" || { echo "missing secure-http in $f" >&2; return 1; }
   grep -q '"preferred-install": "dist"' "$f" || { echo "missing preferred-install in $f" >&2; return 1; }
   grep -q '"allow-plugins": false' "$f" || { echo "missing allow-plugins in $f" >&2; return 1; }

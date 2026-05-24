@@ -78,7 +78,6 @@ No actual malware is used. All fixtures are local packages with scripts that wri
 | Non-interactive npm env vars | `bash -c` gets NPM_CONFIG_IGNORE_SCRIPTS=true |
 | Non-interactive Python env vars | `bash -c` gets PYTHONDONTWRITEBYTECODE=1 |
 | Non-interactive Go env vars | `bash -c` gets GOSUMDB=sum.golang.org |
-| Non-interactive Composer env vars | `bash -c` gets COMPOSER_NO_SCRIPTS=1 |
 | Clean markers | No attack marker files exist after full test run |
 
 ## How the test container works

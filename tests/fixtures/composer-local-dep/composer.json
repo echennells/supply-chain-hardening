@@ -1,0 +1,6 @@
+{
+  "name": "test/composer-local-dep",
+  "description": "Minimal local dependency for the composer-postinstall fixture. Required because composer install with an empty `require` skips dispatching post-install-cmd entirely — making the test a tautology that passes regardless of hardening.",
+  "version": "1.0.0",
+  "type": "library"
+}

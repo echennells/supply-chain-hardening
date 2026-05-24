@@ -22,10 +22,6 @@ setup() {
   assert_env_equals NPM_CONFIG_FUND false
 }
 
-@test "env: COMPOSER_NO_SCRIPTS=1" {
-  assert_env_equals COMPOSER_NO_SCRIPTS 1
-}
-
 @test "env: GOSUMDB=sum.golang.org" {
   assert_env_equals GOSUMDB sum.golang.org
 }

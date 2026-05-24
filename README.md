@@ -11,7 +11,7 @@ Apply it to a bare host, inside a sandbox, or to a container image — anywhere 
 | Protection | npm | pnpm | Yarn | Bun | Deno | pip/uv | Cargo | Go | Composer | Bundler | Maven | Gradle | NuGet |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **48h release age gate** | x | x | x | x | x | x | * | | | | | | |
-| **Install script blocking** | x | x | x | x | x | x | | | x | | | | x |
+| **Install script blocking** | x | x | x | x | x | x | | | | | | | x |
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
 | **Socket Firewall** | x | | | | | x | x | | | | | | |
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
@@ -84,7 +84,7 @@ Deployed to `/etc/profile.d/supply-chain-hardening.sh` (sourced by login shells)
 
 For the `✗` rows — most notably long-lived agent processes started as container CMDs or systemd services — the **config files layer** below is what actually protects them. The env vars are a redundancy layer that helps when an agent runs inside a PAM-launched shell.
 
-Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
+Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`). Composer has no env-var mechanism to disable scripts host-wide — see Limitations.
 
 **Go has one env-var-only protection** — `GOTOOLCHAIN=local` (prevents `go install` from auto-fetching a newer toolchain than the host has, which an attacker could use to ship malicious build constraints). Go has no config-file equivalent, so this protection vanishes for systemd services and Docker `CMD`-style direct-exec callers. If you run Go-touching agents under systemd, add `Environment=GOTOOLCHAIN=local` to the unit file; for Docker, set it via `ENV` in the image or `-e` on `docker run`. Every other env-var protection has a config-file backstop and is unaffected.
 
@@ -199,7 +199,8 @@ AI agents install packages unpredictably. You can't control what package manager
 - **pnpm allowlist is per-user, not system-wide.** Even on pnpm 10, the role's allowlist (`pnpm_built_dependencies`) only lands in the deploying user's `~/.config/pnpm/rc`. `sudo pnpm install` or invocations from a second user account see only the strict `/etc/npmrc` default. This fails closed (more restrictive), not open.
 - **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
 - **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally. No config can prevent this — it's an ecosystem-level gap. See [TESTS.md](TESTS.md) for details.
-- **Composer audit blocking is version-tiered.** The role detects the installed Composer version and renders the strictest config that version supports. `audit.block-insecure` and `audit.block-abandoned` (which actively refuse updates to packages with known advisories) require Composer ≥ 2.9 (released 2025-11). `audit.abandoned: fail` requires ≥ 2.7. Distro-shipped versions hit different tiers: Ubuntu 24.04 noble ships 2.7.1 (gets `abandoned` but not `block-*`), Ubuntu 22.04 jammy ships 2.2.6 and Debian 12 bookworm ships 2.5.5 (neither gets the `audit` block at all). When Composer isn't installed at apply time, the safe baseline is written — re-run the role after `apt install composer` (or the upstream installer) to upgrade the config to the version-appropriate tier. The baseline hardening (`scripts-are-disabled`, `secure-http`, `allow-plugins: false`, `preferred-install: dist`, `COMPOSER_NO_SCRIPTS`) applies on every tier and every supported platform.
+- **Composer install scripts are not blocked.** The role does NOT currently block composer's `post-install-cmd`, `post-update-cmd`, `post-autoload-dump`, or `post-create-project-cmd` hooks. Composer has no host-wide config-file or env-var mechanism for disabling scripts — the only real primitives are the `--no-scripts` CLI flag (per-invocation) and `COMPOSER_SKIP_SCRIPTS=<event,list>` env var (composer 2.9+, requires enumerating every event name and silently lapses when upstream adds a new event). Earlier versions of this role deployed `COMPOSER_NO_SCRIPTS=1` and `"scripts-are-disabled": true` — both are made-up names that composer ignores entirely. Closing this gap requires a `/usr/local/bin/composer` wrapper (mirroring the deno-wrapper pattern); tracked as a follow-up. Until that lands, `composer install` on a hardened host can still execute arbitrary code via project scripts.
+- **Composer audit blocking is version-tiered.** The role detects the installed Composer version and renders the strictest config that version supports. `audit.block-insecure` and `audit.block-abandoned` (which actively refuse updates to packages with known advisories) require Composer ≥ 2.9 (released 2025-11). `audit.abandoned: fail` requires ≥ 2.7. Distro-shipped versions hit different tiers: Ubuntu 24.04 noble ships 2.7.1 (gets `abandoned` but not `block-*`), Ubuntu 22.04 jammy ships 2.2.6 and Debian 12 bookworm ships 2.5.5 (neither gets the `audit` block at all). When Composer isn't installed at apply time, the safe baseline is written — re-run the role after `apt install composer` (or the upstream installer) to upgrade the config to the version-appropriate tier. The baseline hardening (`secure-http`, `allow-plugins: false`, `preferred-install: dist`) applies on every tier and every supported platform.
 - **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.
 - **Container image hardening requires podman.** Docker has no daemon-level policy enforcement. The playbook installs podman with `policy.json` registry restrictions and disables Docker.
 
@@ -209,7 +210,7 @@ Some defenses against supply-chain attacks live at the application or runtime la
 
 ### PHP runtime: php.ini `disable_functions`
 
-Composer's `autoload.files` mechanism executes helper code on every PHP request that includes `vendor/autoload.php`. This path is **independent of install scripts** and **unaffected by `COMPOSER_NO_SCRIPTS`** or `audit.block-insecure`. The Laravel-Lang compromise (May 2026, 700+ retagged versions) used this exact path: the malicious `src/helpers.php` ran on every request and called `exec()` to fetch a second-stage payload from a C2 server.
+Composer's `autoload.files` mechanism executes helper code on every PHP request that includes `vendor/autoload.php`. This path is **independent of install scripts** and **unaffected by `--no-scripts`, `COMPOSER_SKIP_SCRIPTS`, or `audit.block-insecure`**. The Laravel-Lang compromise (May 2026, 700+ retagged versions) used this exact path: the malicious `src/helpers.php` ran on every request and called `exec()` to fetch a second-stage payload from a C2 server.
 
 The runtime mitigation is `disable_functions` in `php.ini`:
 

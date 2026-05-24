@@ -2,8 +2,16 @@
 # Composer (PHP) supply chain hardening.
 # Config deployed unconditionally; the rendered tier matches the detected
 # Composer version (or falls back to a safe baseline when Composer isn't
-# installed at apply time). COMPOSER_NO_SCRIPTS=1 is set system-wide in
-# /etc/environment by shell_env.yml.
+# installed at apply time).
+#
+# NOTE on script blocking: composer has NO host-wide config-file or env-var
+# mechanism to disable script execution. COMPOSER_NO_SCRIPTS is a made-up
+# name (composer ignores it); "scripts-are-disabled" is not in composer's
+# JSON schema. The only real primitives are --no-scripts (CLI flag) and
+# COMPOSER_SKIP_SCRIPTS=<event,list> (composer 2.9+, requires enumerating
+# every event name). Closing this gap requires a /usr/local/bin/composer
+# wrapper (mirroring the deno pattern). Until that lands, composer scripts
+# are NOT blocked by this role — see README Limitations.
 #
 # Tier breakdown (see README → Limitations for distro-version mapping):
 #   Composer ≥ 2.9   : allow-plugins + audit (abandoned + block-insecure + block-abandoned)
@@ -44,8 +52,8 @@
     msg: >-
       Composer {{ composer_detected_version }} detected. The audit.block-insecure
       and audit.block-abandoned settings require Composer >= 2.9 and will not be
-      written. Other hardening (scripts-are-disabled, secure-http, allow-plugins,
-      preferred-install, COMPOSER_NO_SCRIPTS) applies on this host.
+      written. Other hardening (secure-http, allow-plugins, preferred-install)
+      still applies on this host.
   when:
     - composer_detected_version | length > 0
     - composer_detected_version is version('2.9.0', '<')
