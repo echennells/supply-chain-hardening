@@ -80,8 +80,7 @@ load setup
   # scripts — including allowlisted ones. We can't easily test the
   # non-default vars path end-to-end, so assert against the template
   # source: the override line must be present in the allowlist branch.
-  local template="/opt/ansible-supply-chain-security/templates/pnpm-rc.j2"
-  [ -f "$template" ] || template="${BATS_TEST_DIRNAME}/../../templates/pnpm-rc.j2"
+  local template="$ROLE_DIR/templates/pnpm-rc.j2"
   assert_file_contains "$template" "ignore-scripts=false"
 }
 

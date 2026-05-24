@@ -126,7 +126,7 @@ EOF
   # preserving a stale backup. The wrapper would then be redeployed pointing
   # at the OLD deno, masking the user's upgrade (including any CVE patches).
   # This static check catches a regression that reintroduces the condition.
-  taskfile=/opt/ansible-supply-chain-security/tasks/deno.yml
+  taskfile="$ROLE_DIR/tasks/deno.yml"
   [ -f "$taskfile" ] || skip "role source not available at $taskfile"
   # Match only an active YAML list-item condition, not the explanatory comment
   # in the file that documents *why* this gate must not exist.

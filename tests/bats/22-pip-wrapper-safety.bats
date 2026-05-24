@@ -33,7 +33,7 @@ load setup
   # The when: condition must depend only on actual uv presence.
   # Specifically: must NOT include `ansible_user_id is defined`, which is
   # always true after gather_facts.
-  taskfile=/opt/ansible-supply-chain-security/tasks/uv.yml
+  taskfile="$ROLE_DIR/tasks/uv.yml"
   [ -f "$taskfile" ] || skip "role source not available at $taskfile"
 
   ! grep -qE "ansible_user_id[[:space:]]+is[[:space:]]+defined" "$taskfile"
