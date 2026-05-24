@@ -1,8 +1,13 @@
+{# `default` covers non-registry transports (local builds, oci-archive, dir).
+   Registry pulls are gated by the `docker` transport below. Do NOT add a
+   "_comment" or any other unknown top-level key — podman's policy.json
+   parser (containers/image's paranoidUnmarshalJSONObject) rejects unknown
+   keys with "Unknown key" and every `podman pull` fails. Comments belong
+   here in the Jinja source, not in the rendered JSON. #}
 {
   "default": [
     { "type": "insecureAcceptAnything" }
   ],
-  "_comment": "default covers non-registry transports (local builds, oci-archive, dir). Registry pulls are gated by the docker transport below.",
   "transports": {
     "docker": {
       "": [{ "type": "reject" }]{{ "," if podman_allowed_registries }}
