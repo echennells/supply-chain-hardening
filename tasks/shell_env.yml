@@ -39,4 +39,6 @@
       GONOPROXY={{ go_noproxy }}
       GOINSECURE={{ go_insecure }}
       GOTOOLCHAIN=local
+      COMPOSER_SKIP_SCRIPTS=pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create
+      COMPOSER_ALLOW_SUPERUSER=1
   tags: [shell]

@@ -38,6 +38,21 @@ setup() {
   assert_env_equals GOTOOLCHAIN local
 }
 
+@test "env: COMPOSER_SKIP_SCRIPTS enumerates post-install-cmd (belt-and-suspenders for php composer.phar callers)" {
+  # The /usr/local/bin/composer wrapper is the primary protection; this
+  # env var covers PAM-loaded shells that invoke composer via php
+  # composer.phar (bypassing the wrapper). Composer 2.9+ honors it.
+  # We assert against one representative event rather than the whole
+  # 24-event list — the env var either contains the comma-separated list
+  # or it doesn't, and asserting on the most-common event is a robust
+  # sentinel that catches regression without locking in the exact text.
+  [[ "$COMPOSER_SKIP_SCRIPTS" == *"post-install-cmd"* ]]
+}
+
+@test "env: COMPOSER_ALLOW_SUPERUSER=1 (suppress 'do not run as root' noise in CI/agent contexts)" {
+  assert_env_equals COMPOSER_ALLOW_SUPERUSER 1
+}
+
 @test "/etc/environment has NPM_CONFIG_IGNORE_SCRIPTS" {
   assert_file_contains /etc/environment "NPM_CONFIG_IGNORE_SCRIPTS=true"
 }

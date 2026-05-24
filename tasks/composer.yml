@@ -92,3 +92,105 @@
     owner: root
     group: root
     mode: "0644"
+
+# --- /usr/local/bin/composer wrapper ---
+# Composer has no host-wide config-file or env-var way to disable script
+# execution. The wrapper at the discovered composer path injects
+# --no-scripts and --no-plugins on every invocation. /etc/profile.d/ and
+# /etc/environment also set COMPOSER_SKIP_SCRIPTS=<event,list> as
+# belt-and-suspenders for `php composer.phar` callers that bypass the
+# wrapper but inherit the system env (PAM-loaded shells only).
+#
+# Self-update caveat: `composer self-update` overwrites the wrapper.
+# Detection below sees a fresh real binary at the wrap location and
+# re-wraps on the next role apply. Same pattern as deno's wrapper.
+
+- name: Find current composer path for wrapping
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/local/bin/composer /usr/bin/composer; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      command -v composer 2>/dev/null
+    executable: /bin/bash
+  register: composer_binary_path
+  changed_when: false
+  failed_when: false
+  when: composer_path_wrapper | bool
+
+- name: Determine whether current composer binary is our wrapper or the real binary
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'supply-chain-hardening' '{{ composer_binary_path.stdout }}' 2>/dev/null; then
+        echo is_wrapper
+      else
+        echo is_real
+      fi
+    executable: /bin/bash
+  register: composer_binary_kind
+  changed_when: false
+  when:
+    - composer_path_wrapper | bool
+    - composer_binary_path is defined
+    - composer_binary_path.rc == 0
+    - composer_binary_path.stdout | length > 0
+
+- name: Check whether a composer-real backup exists (from prior wrapper run)
+  ansible.builtin.stat:
+    path: "{{ composer_binary_path.stdout }}-real"
+  register: composer_real_backup
+  when:
+    - composer_path_wrapper | bool
+    - composer_binary_path is defined
+    - composer_binary_path.rc == 0
+    - composer_binary_path.stdout | length > 0
+
+- name: Rename real composer to composer-real (refresh backup if self-update overwrote wrapper)
+  # No gate on `not composer_real_backup.stat.exists`: if composer
+  # self-update overwrote our wrapper, the existing backup is stale and
+  # the freshly-installed binary is what we want to preserve. Overwriting
+  # a stale backup with the current binary is the correct semantics.
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ composer_binary_path.stdout }} {{ composer_binary_path.stdout }}-real"
+  when:
+    - composer_path_wrapper | bool
+    - composer_binary_path is defined
+    - composer_binary_path.rc == 0
+    - composer_binary_path.stdout | length > 0
+    - composer_binary_kind.stdout == 'is_real'
+  changed_when: true
+
+- name: Deploy composer wrapper at the discovered composer path
+  become: true
+  ansible.builtin.template:
+    src: composer-wrapper.sh.j2
+    dest: "{{ composer_binary_path.stdout }}"
+    owner: root
+    group: root
+    mode: "0755"
+  vars:
+    composer_real_path: "{{ composer_binary_path.stdout }}-real"
+  when:
+    - composer_path_wrapper | bool
+    - composer_binary_path is defined
+    - composer_binary_path.rc == 0
+    - composer_binary_path.stdout | length > 0
+
+- name: Restore original composer binary when wrapper is disabled
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ composer_binary_path.stdout }}-real {{ composer_binary_path.stdout }}"
+  when:
+    - not (composer_path_wrapper | bool)
+    - composer_binary_path is defined
+    - composer_binary_path.rc == 0
+    - composer_binary_path.stdout | length > 0
+    - composer_binary_kind is defined
+    - composer_binary_kind.stdout == 'is_wrapper'
+    - composer_real_backup is defined
+    - composer_real_backup.stat.exists
+  changed_when: true

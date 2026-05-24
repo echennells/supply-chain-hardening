@@ -28,8 +28,15 @@ export GOINSECURE='{{ go_insecure }}'
 export GOTOOLCHAIN=local
 
 # === PHP (Composer) ===
-# No env-var-based script blocking available. COMPOSER_NO_SCRIPTS is a
-# made-up name — composer ignores it. The real primitives are the
-# --no-scripts CLI flag and COMPOSER_SKIP_SCRIPTS=<event,list> (composer
-# 2.9+), neither of which works as a host-wide always-on protection
-# without a wrapper. Tracked: see README Limitations.
+# Belt-and-suspenders for `php composer.phar` callers that bypass our
+# /usr/local/bin/composer wrapper but inherit the system env. Composer
+# 2.9+ honors COMPOSER_SKIP_SCRIPTS=<event,list> by skipping dispatch
+# of any user-defined script registered for the named events. Below is
+# the full enumeration from composer's ScriptEvents + PackageEvents +
+# PluginEvents at the time of writing. Composer silently ignores unknown
+# names, so extra events here are harmless if composer drops one in the
+# future — but a NEW event added by composer that we don't list here
+# slips through. The /usr/local/bin/composer wrapper is the primary
+# protection; this env var is the backup for shells that bypass it.
+export COMPOSER_SKIP_SCRIPTS='pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create'
+export COMPOSER_ALLOW_SUPERUSER=1

@@ -1,0 +1,43 @@
+#!/bin/bash
+# /usr/local/bin/composer — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# Composer has no host-wide config-file or env-var mechanism for disabling
+# script and plugin execution. The only real primitives are the --no-scripts
+# / --no-plugins CLI flags (universal) and COMPOSER_SKIP_SCRIPTS=<event,list>
+# (composer 2.9+ only). This wrapper injects --no-scripts and --no-plugins
+# on every invocation so script/plugin execution is blocked even when the
+# caller doesn't pass those flags. Composer accepts global flags anywhere
+# on the command line (Symfony Console behavior) and ignores them for
+# subcommands where they don't apply (--version, help, etc.), so the
+# injection is safe across all subcommands.
+#
+# Bypass (per-invocation, for users who know what they need):
+#   /usr/local/bin/composer-real install
+#
+# Disable globally:
+#   role var composer_path_wrapper=false (restores the real binary at this
+#   path on next apply).
+#
+# Self-update caveat: `composer self-update` writes a new composer.phar
+# to wherever composer is invoked from — overwriting this wrapper. After a
+# self-update, re-apply the role to restore wrapping. (Same caveat applies
+# to the deno wrapper after a deno installer re-run.)
+
+REAL_COMPOSER='{{ composer_real_path }}'
+
+# Recursion guard — refuse to run if the embedded real-composer path is
+# empty, non-executable, or points back at ourselves. Same pattern as the
+# pip→uv, npm→sfw, and deno wrappers.
+if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real composer not found at '$REAL_COMPOSER'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Suppress the "Do not run Composer as root" warning when invoked in
+# CI/container/agent contexts where running as root is intentional and
+# unavoidable. Doesn't change any security posture — composer already
+# runs as the caller's UID regardless.
+export COMPOSER_ALLOW_SUPERUSER=1
+
+exec "$REAL_COMPOSER" --no-scripts --no-plugins "$@"

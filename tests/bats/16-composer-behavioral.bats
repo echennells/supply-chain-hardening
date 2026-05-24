@@ -40,5 +40,32 @@ setup() {
 }
 
 @test "ATTACK: composer post-install-cmd script is blocked" {
-  skip "composer has no host-wide config/env mechanism to block scripts; pending /usr/local/bin/composer wrapper (see README Limitations)"
+  # The /usr/local/bin/composer wrapper injects --no-scripts on every
+  # invocation. The fixture above (FIXTURE CONTROL) proves the script
+  # would fire absent hardening; this test proves the wrapper actually
+  # blocks it. If the wrapper is ever bypassed, removed, or fails to
+  # inject the flag, this test catches it.
+  cd /tmp && rm -rf composer-attack-test && mkdir composer-attack-test && cd composer-attack-test
+  cp /opt/test-fixtures/composer-postinstall/composer.json .
+  composer install --no-interaction 2>/dev/null || true
+  marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
+  rm -rf /tmp/composer-attack-test
+  rm -f /tmp/marker-composer-script
+  [ "$marker_present" = "no" ]
+}
+
+@test "BYPASS VERIFICATION: composer-real (unwrapped) does run scripts (escape hatch works)" {
+  # The wrapper's documented escape hatch: users who genuinely need
+  # scripts invoke /usr/local/bin/composer-real directly. This test
+  # verifies the escape hatch (a) exists and (b) actually bypasses the
+  # script-blocking. If composer-real is missing OR was somehow also
+  # script-blocked, this test catches it.
+  [ -x /usr/local/bin/composer-real ] || skip "composer-real not present (composer_path_wrapper may be false)"
+  cd /tmp && rm -rf composer-bypass-test && mkdir composer-bypass-test && cd composer-bypass-test
+  cp /opt/test-fixtures/composer-postinstall/composer.json .
+  /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
+  marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
+  rm -rf /tmp/composer-bypass-test
+  rm -f /tmp/marker-composer-script
+  [ "$marker_present" = "yes" ]
 }

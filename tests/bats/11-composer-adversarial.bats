@@ -46,6 +46,46 @@ setup() {
   assert_file_contains "$HOME/.config/composer/config.json" '"block-abandoned": true'
 }
 
+@test "composer wrapper deployed at the discovered composer path" {
+  composer_path=$(command -v composer)
+  [ -n "$composer_path" ]
+  grep -q "supply-chain-hardening" "$composer_path"
+}
+
+@test "composer-real backup exists next to the wrapper" {
+  composer_path=$(command -v composer)
+  [ -f "${composer_path}-real" ]
+  [ -x "${composer_path}-real" ]
+}
+
+@test "composer wrapper injects --no-scripts on every invocation" {
+  composer_path=$(command -v composer)
+  grep -q -- "--no-scripts" "$composer_path"
+}
+
+@test "composer wrapper injects --no-plugins on every invocation" {
+  composer_path=$(command -v composer)
+  grep -q -- "--no-plugins" "$composer_path"
+}
+
+@test "composer wrapper has recursion safety guard" {
+  composer_path=$(command -v composer)
+  grep -q "refusing to recurse" "$composer_path"
+}
+
+@test "which composer resolves to the wrapper (not bypassed by PATH lookup)" {
+  resolved=$(command -v composer)
+  grep -q "supply-chain-hardening" "$resolved"
+}
+
+@test "composer --version still works through the wrapper (read-only commands not broken)" {
+  # --no-scripts and --no-plugins are no-ops for --version. If the wrapper
+  # somehow breaks this, every CI lookup of composer's version fails.
+  run composer --version
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qi "composer"
+}
+
 @test "Composer config.json is valid JSON (template tiering must not break parse)" {
   # The template uses nested {% if %} blocks around commas — a regression
   # could easily leave a trailing comma or missing brace and silently break
