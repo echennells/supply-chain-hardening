@@ -211,3 +211,24 @@
         - "1.46.3"
         - "2.0.6"
         - "2.1.4"
+
+    # --- Bun (side-by-side via GitHub release zips) ---
+    # Bun is distributed at github.com/oven-sh/bun/releases. Each release
+    # has bun-linux-x64.zip containing the single bun binary. Pinned to
+    # recent stable patches; bump as new releases land.
+    - name: Install bun versions side-by-side to /usr/local/bin/bun-<version>
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          url="https://github.com/oven-sh/bun/releases/download/bun-v{{ item }}/bun-linux-x64.zip"
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+          curl -fsSL "$url" -o "$tmpdir/bun.zip"
+          unzip -q "$tmpdir/bun.zip" -d "$tmpdir"
+          install -m 0755 "$tmpdir/bun-linux-x64/bun" "/usr/local/bin/bun-{{ item }}"
+        creates: "/usr/local/bin/bun-{{ item }}"
+        executable: /bin/bash
+      loop:
+        - "1.0.30"
+        - "1.1.20"
+        - "1.2.0"

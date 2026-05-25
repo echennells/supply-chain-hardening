@@ -72,3 +72,25 @@ deno:
   # 1 × 3 = 3 cells per distro.
   bats_files:
     - tests/bats/24-deno-path-wrapper.bats
+
+# npm: less version-sensitive in the role's code than pnpm (no version-keyed
+# config file split), but still high-traffic enough to verify the role's
+# /usr/local/bin/npm wrapper works across Node majors and a couple of npm
+# patch lines. "bundled" uses whatever npm ships with the Node tarball
+# (npm 10.x with Node 20, npm 10.x with Node 22 at time of writing).
+npm:
+  lang_versions: ["20", "22"]
+  tool_versions: ["bundled", "11"]
+  # 2 × 2 = 4 cells per distro.
+  bats_files:
+    - tests/bats/08-npm-adversarial.bats
+    - tests/bats/23-npm-path-wrapper.bats
+
+# Bun is fast-moving but config surface is small (just .bunfig.toml).
+# Matrix covers three minor lines across the 1.x stable era.
+bun:
+  lang_versions: ["system"]
+  tool_versions: ["1.0.30", "1.1.20", "1.2.0"]
+  # 1 × 3 = 3 cells per distro.
+  bats_files:
+    - tests/bats/15-bun-adversarial.bats
