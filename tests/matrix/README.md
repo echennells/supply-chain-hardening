@@ -56,9 +56,9 @@ On a fresh Ubuntu 24.04 host:
 - `ansible` — needed to run `install-versions.yml` (and the role itself). `apt install ansible-core` or similar.
 - `git` — to clone this repo. `apt install git`.
 
-That's all you need to bootstrap. The `install-versions.yml` playbook installs everything else the matrix driver needs (`bats`, `jq`, `yq`) alongside Sury PHP and the composer phars. If you'd rather install them by hand: `apt install bats jq yq`.
+That's all you need to bootstrap. The `install-versions.yml` playbook installs everything else the matrix driver needs (`bats`, `jq`, `python3-yaml`) alongside Sury PHP and the composer phars. If you'd rather install them by hand: `apt install bats jq python3-yaml`.
 
-**yq flavor compatibility**: the driver works with both popular `yq` implementations — Mike Farah's Go binary (`snap install yq`, also bundled in some distros) and Andrey Kislyuk's Python wrapper (the one `apt install yq` provides on Debian/Ubuntu). The driver converts YAML→JSON once at startup using whichever flavor is present, then uses `jq` exclusively. If you see `matrix: yq failed to convert ...` at startup, your `yq` is neither flavor or is too old; install a current version of either.
+The driver uses Python + PyYAML to convert `cells.yml` and `expected-skips.yml` to JSON at startup, then uses `jq` for everything else. No `yq` dependency — PyYAML is a transitive dep of ansible already, so it's effectively free on any host that can run the role.
 
 ## Running it
 

@@ -42,11 +42,20 @@ trap 'rm -f "$CELLS_JSON" "$SKIPS_JSON"' EXIT
 
 # --- Sanity / preflight ---
 
-for cmd in yq jq ansible-playbook bats; do
+for cmd in python3 jq ansible-playbook bats; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "matrix: missing required command '$cmd'" >&2; exit 2;
   }
 done
+
+# pyyaml is the YAML parser. Already a transitive dep of ansible-playbook
+# (ansible won't run without it), but verify explicitly so a missing
+# install fails loud with a clear message instead of a python ImportError
+# the first time we try to parse cells.yml.
+python3 -c "import yaml" 2>/dev/null || {
+  echo "matrix: python3 yaml module missing (apt install python3-yaml)" >&2
+  exit 2
+}
 
 [[ -f "$CELLS_FILE" ]]   || { echo "matrix: $CELLS_FILE not found" >&2; exit 2; }
 [[ -f "$SKIPS_FILE" ]]   || { echo "matrix: $SKIPS_FILE not found" >&2; exit 2; }
@@ -64,25 +73,23 @@ if [[ -r /etc/os-release ]]; then
   DISTRO="${VERSION_CODENAME:-${ID:-unknown}}"
 fi
 
-# --- yq flavor abstraction: convert YAML to JSON, then use jq downstream ---
+# --- Convert YAML cells.yml + expected-skips.yml to JSON, then use jq ---
 #
-# mikefarah/yq (Go, distributed via snap and many distro packages):
-#   yq -o=json '.' file.yaml
-# kislyuk/yq (Python, what `apt install yq` gives on Debian/Ubuntu):
-#   yq . file.yaml      (default output is JSON since it pipes through jq)
-# Try the mikefarah syntax first; fall back to kislyuk. Either produces
-# the same JSON, which jq then handles uniformly with --arg.
-yq_to_json() {
-  local in="$1" out="$2"
-  if yq -o=json '.' "$in" > "$out" 2>/dev/null; then return 0; fi
-  if yq . "$in" > "$out" 2>/dev/null; then return 0; fi
-  return 1
+# Using python3 + pyyaml instead of yq: pyyaml is already a transitive
+# dep of ansible (ansible-playbook won't run without it), and python3 is
+# on every Debian/Ubuntu by default. yq has two incompatible flavors
+# (mikefarah Go vs kislyuk Python wrapper) with different CLI flags and
+# isn't even in apt on Ubuntu 22.04, so threading the needle there
+# required a pip+venv install we don't actually need. One python3
+# one-liner does the same job with zero extra dependencies.
+yaml_to_json() {
+  python3 -c 'import sys, yaml, json; json.dump(yaml.safe_load(open(sys.argv[1])), open(sys.argv[2], "w"))' "$1" "$2"
 }
 
-yq_to_json "$CELLS_FILE" "$CELLS_JSON" \
-  || { echo "matrix: yq failed to convert $CELLS_FILE — neither mikefarah nor kislyuk syntax worked" >&2; exit 2; }
-yq_to_json "$SKIPS_FILE" "$SKIPS_JSON" \
-  || { echo "matrix: yq failed to convert $SKIPS_FILE — neither mikefarah nor kislyuk syntax worked" >&2; exit 2; }
+yaml_to_json "$CELLS_FILE" "$CELLS_JSON" \
+  || { echo "matrix: failed to convert $CELLS_FILE to JSON" >&2; exit 2; }
+yaml_to_json "$SKIPS_FILE" "$SKIPS_JSON" \
+  || { echo "matrix: failed to convert $SKIPS_FILE to JSON" >&2; exit 2; }
 
 # --- Pull cell list (cross-product of lang × tool) and bats files ---
 # All-jq from here on. --arg is jq syntax (always present, never disputed).
