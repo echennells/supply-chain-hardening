@@ -79,6 +79,20 @@ pnpm:
       ignores it — config.yaml is what controls behavior on 11+. Test
       asserts an rc setting that pnpm 11 doesn't honor.
 
+yarn:
+  # enableHardenedMode was added in Yarn 4.0. The role's
+  # templates/yarnrc.yml.j2 conditionally emits the key only when
+  # detected Yarn >= 4.0 (or undetectable; modern assumed). On 3.x
+  # cells the key is correctly absent — the assertion's failure is
+  # the right outcome, not a regression.
+  - test: "tier-render: 3.6.4 → enableHardenedMode OMITTED (Yarn <4.0 warns on unknown key)"
+    when: { tool: "3.6.4" }
+    expect: skip
+    reason: >-
+      tier-render test runs inside-cell against the role's template with
+      synthetic version inputs, not the cell's actual yarn version, so
+      this test isn't actually cell-keyed. Listed for completeness.
+
 # pip and uv: no seeded entries. Add as observed divergences appear from
 # real cross-distro runs. The pip wrapper and uv invocations should be
 # version-stable in principle; if any test fails on a specific (lang, tool)

@@ -108,6 +108,26 @@ load setup
   assert_file_contains "$HOME/.yarnrc.yml" "enableScripts: false"
 }
 
+@test "yarnrc: enableImmutableInstalls true (lockfile-change refusal)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableInstalls: true"
+}
+
+@test "yarnrc: enableImmutableCache true (prevent cache mutation during install)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableCache: true"
+}
+
+@test "yarnrc: checksumBehavior throw (error on hash mismatch)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "checksumBehavior: throw"
+}
+
+@test "yarnrc: approvedGitRepositories present (allowlist for git deps; empty = block all)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "approvedGitRepositories"
+}
+
+@test "yarnrc: unsafeHttpWhitelist present (empty = HTTPS-only enforcement)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "unsafeHttpWhitelist"
+}
+
 # bun
 @test "bunfig: lifecycleScripts = false" {
   assert_file_contains "$HOME/.bunfig.toml" "lifecycleScripts = false"

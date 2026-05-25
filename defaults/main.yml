@@ -67,6 +67,13 @@ pnpm_built_dependencies: []
 
 # yarn settings
 yarn_enable_scripts: false
+# yarn settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
+yarn_enable_immutable_installs: true    # refuse install if lockfile would change
+yarn_enable_immutable_cache: true       # prevent cache mutation during install
+yarn_checksum_behavior: "throw"         # error on checksum mismatch (alternatives: ignore, update, reset)
+yarn_approved_git_repositories: []      # allowlist of git-URL globs; empty = block all git deps
+yarn_unsafe_http_whitelist: []          # allowlist of HTTP-allowed hosts; empty = HTTPS-only
+yarn_enable_hardened_mode: true         # lockfile-tampering defense (Yarn 4.0+); silently no-op on <4.0
 
 # socket firewall
 socket_firewall_install: true

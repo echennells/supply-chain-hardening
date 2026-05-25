@@ -1,5 +1,38 @@
+{%- set v = yarn_detected_version | default('', true) -%}
+{%- set has_hardened_mode = v == '' or v is version('4.0.0', '>=') -%}
 # Managed by ansible-supply-chain-security
+#
+# enableHardenedMode (Yarn 4.0+) is the highest-value setting here — it
+# instructs Yarn to query remote registries to validate that lockfile
+# content matches what upstream actually published. This catches
+# lockfile-tampering attacks (an attacker modifies yarn.lock to point at
+# a malicious version). Yarn >= 4.0 honors the key; older versions warn
+# on unknown keys but don't error. The role omits it on detected <4.0
+# to keep logs clean; when Yarn isn't detectable at apply time we assume
+# modern and emit it (downside on 3.x is a single warning per install).
 npmMinimalAgeGate: "{{ yarn_minimal_age_gate }}"
 enableScripts: {{ yarn_enable_scripts | lower }}
 defaultSemverRangePrefix: ""
 enableTelemetry: false
+enableImmutableInstalls: {{ yarn_enable_immutable_installs | bool | lower }}
+enableImmutableCache: {{ yarn_enable_immutable_cache | bool | lower }}
+checksumBehavior: {{ yarn_checksum_behavior }}
+{% if yarn_approved_git_repositories | length > 0 %}
+approvedGitRepositories:
+{% for repo in yarn_approved_git_repositories %}
+  - "{{ repo }}"
+{% endfor %}
+{% else %}
+approvedGitRepositories: []
+{% endif %}
+{% if yarn_unsafe_http_whitelist | length > 0 %}
+unsafeHttpWhitelist:
+{% for host in yarn_unsafe_http_whitelist %}
+  - "{{ host }}"
+{% endfor %}
+{% else %}
+unsafeHttpWhitelist: []
+{% endif %}
+{% if has_hardened_mode and yarn_enable_hardened_mode %}
+enableHardenedMode: true
+{% endif %}
