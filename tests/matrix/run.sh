@@ -52,6 +52,18 @@ done
 [[ -f "$SKIPS_FILE" ]]   || { echo "matrix: $SKIPS_FILE not found" >&2; exit 2; }
 [[ -x "$SWITCHER" ]]     || { echo "matrix: $SWITCHER not found or not executable" >&2; exit 2; }
 
+# --- Detect distro for distro-aware expected-skips lookups ---
+# Reads VERSION_CODENAME from /etc/os-release (e.g. "jammy", "noble",
+# "bookworm"). Falls back to ID when codename is missing (some minimal
+# distros). expected-skips.yml entries can filter on `distro:` to scope
+# version-specific divergences to particular OS releases.
+DISTRO="unknown"
+if [[ -r /etc/os-release ]]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  DISTRO="${VERSION_CODENAME:-${ID:-unknown}}"
+fi
+
 # --- yq flavor abstraction: convert YAML to JSON, then use jq downstream ---
 #
 # mikefarah/yq (Go, distributed via snap and many distro packages):
@@ -87,17 +99,21 @@ bats_files=($(jq -r ".${ECOSYSTEM}.bats_files[]" "$CELLS_JSON"))
 
 # Look up the expected-skip status for a given test in a given cell.
 # Echoes "skip" or "fail" if matched, empty if no match. Wildcard semantics:
-# entries with comma-separated values match any one of them. The `|| true`
-# at the end ensures the function returns 0 even when jq finds no match —
-# without it, set -e + pipefail would propagate a non-zero exit through
-# `$(lookup_expected ...)` and the silent-failure mode from this commit
-# would re-appear.
+# entries with comma-separated values match any one of them. Distro
+# defaults to wildcard when omitted from a when: block, so existing
+# entries that only filter on lang/tool keep working unchanged. The
+# `|| true` at the end ensures the function returns 0 even when jq finds
+# no match — without it, set -e + pipefail would propagate a non-zero
+# exit through `$(lookup_expected ...)` and the silent-failure mode would
+# re-appear.
 lookup_expected() {
   local test_name="$1" lang="$2" tool="$3"
-  jq -r --arg eco "$ECOSYSTEM" --arg t "$test_name" --arg l "$lang" --arg tl "$tool" '
+  jq -r --arg eco "$ECOSYSTEM" --arg t "$test_name" \
+        --arg l "$lang" --arg tl "$tool" --arg d "$DISTRO" '
     .[$eco] // [] |
     .[] | select(.test == $t) |
     select(
+      ((.when.distro // "*") | split(",") | any(. == "*" or . == $d)) and
       ((.when.lang // "*") | split(",") | any(. == "*" or . == $l)) and
       ((.when.tool // "*") | split(",") | any(. == "*" or . == $tl))
     ) | .expect

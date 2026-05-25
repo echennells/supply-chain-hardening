@@ -3,9 +3,15 @@
 #
 # Format: top-level key is ecosystem. Each entry is:
 #   - test:    the exact bats test name (the string after "ok N" / "not ok N")
-#     when:    Jinja-like dict of conditions { lang: "8.1", tool: "2.7" } —
-#              entry matches when ALL kv-pairs match the cell. Wildcards via
-#              comma-separated values, e.g. tool: "1.10,2.7,2.8".
+#     when:    Jinja-like dict of conditions. Supported keys:
+#                distro: "jammy", "noble", "bookworm", ... (OS codename
+#                        from /etc/os-release VERSION_CODENAME; defaults
+#                        to "*" if omitted)
+#                lang:   "8.1", "8.2", ... (defaults to "*")
+#                tool:   "1.10", "2.7", ... (defaults to "*")
+#              Entry matches when ALL specified kv-pairs match the cell.
+#              Wildcards via comma-separated values, e.g. tool: "1.10,2.7,2.8"
+#              or distro: "jammy,bookworm".
 #     reason:  one-line explanation. Surfaced in the matrix JSON output.
 #     expect:  "skip" (test should self-skip; pass if it does) or
 #              "fail"  (test is expected to assert-fail on this cell;

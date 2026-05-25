@@ -19,17 +19,35 @@ The matrix runs every (PHP, composer) combination, applies the role, and runs th
   - PHP: 8.1, 8.2, 8.3 (via Sury PPA, side-by-side)
   - Composer: 1.10.27, 2.7.9, 2.8.12, 2.9.8 (pinned phars, SHA-256 verified)
 
+## Cross-distro mode
+
+`run.sh` runs in-place on whatever host it's invoked on (fast single-distro iteration). For coverage across the role's full declared platform support — Ubuntu 22.04 (jammy), Ubuntu 24.04 (noble), Debian 12 (bookworm) — use the docker orchestrator:
+
+```
+sudo tests/matrix/run-docker.sh composer
+```
+
+It builds `Dockerfile.matrix` once per distro (parameterized by `BASE_IMAGE`), runs the existing `run.sh` inside each container, copies the per-distro `results.json` out tagged with the distro codename, then aggregates everything into `results-all.json`. Override the distro list with the `DISTROS` env var:
+
+```
+DISTROS="ubuntu:22.04" sudo tests/matrix/run-docker.sh composer    # one distro
+```
+
+Build cache is layered so that changes to most files (bats tests, task files, the role itself) don't invalidate the slow apt + composer-phar install step — only changes to `install-versions.yml` do. Expect ~10-15 min per distro cold, ~3-5 min per distro cached.
+
+Inside each container, `run.sh` detects the distro via `/etc/os-release` and exposes it to `expected-skips.yml` matching. Add `distro: "jammy,bookworm"` to a skip entry to scope it to specific OS releases — defaults to wildcard when omitted, so existing entries keep working.
+
+Requirements for `run-docker.sh`: `docker` and `jq` on the host. Nothing else — the container provides everything else.
+
 ## Coverage gaps (what this matrix does NOT verify)
 
 Read this section before claiming "the matrix is green so it works."
 
-- **Only one Ubuntu version.** Everything runs on Ubuntu 24.04. The role's `meta/main.yml` claims support for Ubuntu 22.04 (jammy) and Debian 12 (bookworm) as well, but the matrix never exercises either. 22.04 specifically is widely deployed, ships PHP 8.1 by default, and is on a different `update-alternatives` / apt / pam_env release than 24.04 — material divergences are plausible. A passing 24.04 matrix is **not** evidence that the role works on jammy or bookworm.
 - **Only one ecosystem.** Composer × PHP is wired up. The same class of version-sensitive bugs almost certainly exists in npm × node, pip × python, etc. (the existing `28-composer-tier-rendering.bats` is the only template-level cross-version coverage; behavioral coverage like this matrix doesn't exist for any other ecosystem yet).
 - **Self-update interaction is not tested.** The composer wrapper's self-recovery story ("composer self-update overwrites the wrapper; re-applying the role re-wraps") is documented and the detection logic exists, but no cell actually runs `composer self-update` and re-applies the role to verify.
 - **No multi-user testing.** Every cell runs as root. The wrapper at `/usr/local/bin/composer` is in every user's PATH so should cover non-root users, but the matrix never creates a second user and runs composer as them.
 - **No `php composer.phar` testing.** The wrapper bypass via direct phar invocation is supposed to be caught by the `COMPOSER_SKIP_SCRIPTS` env-var layer. No cell verifies this path end-to-end — the env-var test in `02-env-vars.bats` only checks the var is set in the test shell, not that a phar invocation actually skips dispatch.
-
-Closing the Ubuntu-version gap likely needs Docker-per-cell or external host orchestration (DO droplets, etc.) — both are heavier infra than v1 wanted. Treat that as the natural next step before claiming the role is verified across its declared platform support.
+- **Docker-in-docker for cross-distro means containerized PHP, not native.** `run-docker.sh` runs each distro in a container. That's much closer to reality than nothing, but a real droplet running pid 1 = systemd is a different shape than a container running pid 1 = bash. For pam_env / systemd-unit / sudo-with-PAM behaviors the matrix is still a best-effort approximation; bare-metal or VM testing for those specific surfaces is still warranted.
 
 ## Prerequisites
 
