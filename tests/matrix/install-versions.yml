@@ -275,3 +275,32 @@
         dest: /opt
         remote_src: true
         creates: /opt/gradle-8.5
+
+    # --- .NET SDK (for the nuget matrix ecosystem) ---
+    # Microsoft's apt repo varies per (distro, version) pair. The official
+    # dotnet-install.sh script is cross-distro and downloads the SDK
+    # tarball directly — simpler than maintaining per-distro repo configs.
+    # libicu is a hard runtime dep; apt's libicu-dev pulls whatever
+    # libicu version the distro ships.
+    - name: Install libicu (runtime dep for dotnet)
+      ansible.builtin.apt:
+        name: [libicu-dev]
+        state: present
+
+    - name: Install .NET SDK 8.0 via dotnet-install.sh
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+          chmod +x /tmp/dotnet-install.sh
+          /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet
+          rm -f /tmp/dotnet-install.sh
+        creates: /usr/share/dotnet/dotnet
+        executable: /bin/bash
+
+    - name: Symlink dotnet to /usr/local/bin so it's on PATH
+      ansible.builtin.file:
+        src: /usr/share/dotnet/dotnet
+        dest: /usr/local/bin/dotnet
+        state: link
+        force: true

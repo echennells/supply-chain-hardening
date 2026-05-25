@@ -147,3 +147,18 @@ gradle:
   # 1 × 2 = 2 cells per distro.
   bats_files:
     - tests/bats/30-gradle-behavioral.bats
+
+# NuGet/.NET: tasks/nuget.yml deploys ~/.nuget/NuGet/NuGet.Config with
+# nuget.org-only package source allowlist and required-signature
+# enforcement. .NET SDK 8.0 LTS installed via dotnet-install.sh
+# (cross-distro). v1 nuget matrix is a single-cell smoke test — the
+# matrix's value here is mostly "does the role's nuget task work on
+# every supported distro" (cross-distro axis). SDK-version-specific
+# matrix coverage would need multiple .NET SDKs side-by-side and a
+# switcher that pins via global.json; deferred.
+nuget:
+  lang_versions: ["system"]
+  tool_versions: ["bundled"]
+  # 1 × 1 = 1 cell per distro (3 cross-distro).
+  bats_files:
+    - tests/bats/31-nuget-behavioral.bats
