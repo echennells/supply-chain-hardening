@@ -21,12 +21,20 @@ The matrix runs every (PHP, composer) combination, applies the role, and runs th
 
 Out of scope for v1: cross-Ubuntu matrix (one distro at a time), cross-ecosystem expansion (npm × node, pip × python), and self-update interaction.
 
+## Prerequisites
+
+On a fresh Ubuntu 24.04 host:
+
+- `ansible` — needed to run `install-versions.yml` (and the role itself). `apt install ansible-core` or similar.
+- `git` — to clone this repo. `apt install git`.
+
+That's all you need to bootstrap. The `install-versions.yml` playbook installs everything else the matrix driver needs (`bats`, `jq`, `yq`) alongside Sury PHP and the composer phars. If you'd rather install them by hand: `apt install bats jq yq`.
+
 ## Running it
 
-On a fresh Ubuntu 24.04 host with `ansible`, `git`, `bats`, `yq`, and `jq` installed:
-
 ```
-# One-time setup: install Sury + every PHP + every composer phar
+# One-time setup: installs driver prereqs (bats, jq, yq) + Sury PHP repo
+# + every PHP version + every composer phar (checksum-verified).
 ansible-playbook tests/matrix/install-versions.yml -i tests/matrix/inventory.ini
 
 # Run the matrix (composer by default; takes ~10-15 min for 12 cells)

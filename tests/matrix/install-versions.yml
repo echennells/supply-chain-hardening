@@ -44,6 +44,18 @@
       - { minor: "2.9", patch: "2.9.8" }
 
   tasks:
+    # --- Driver prereqs ---
+    # The matrix driver (tests/matrix/run.sh) needs bats to run the test
+    # suite, jq to construct results.json, and yq to read cells.yml /
+    # expected-skips.yml. Ansible is required to run this playbook so it
+    # can't install itself, but everything else the matrix needs at run
+    # time installs here so the host is one-shot ready.
+    - name: Install matrix driver prereqs (bats, jq, yq)
+      ansible.builtin.apt:
+        name: [bats, jq, yq]
+        state: present
+        update_cache: true
+
     # --- PHP (via Sury) ---
     - name: Install prereqs for adding the Sury PHP repository
       ansible.builtin.apt:
