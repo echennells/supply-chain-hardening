@@ -124,3 +124,26 @@ bundler:
   # 1 × 1 = 1 cell per distro (smoke test — 3 cells cross-distro).
   bats_files:
     - tests/bats/17-bundler-behavioral.bats
+
+# Maven: the role's tasks/maven.yml deploys ~/.m2/settings.xml with an
+# HTTPS-only mirror and strict checksum policy. Config is version-stable
+# across maven 3.x; matrix coverage is mostly smoke ("does deployed
+# config remain valid as mvn versions change"). Java 17 (current LTS),
+# maven "bundled" (apt) + 3.9.9 (download).
+maven:
+  lang_versions: ["17"]
+  tool_versions: ["bundled", "3.9.9"]
+  # 1 × 2 = 2 cells per distro.
+  bats_files:
+    - tests/bats/29-maven-behavioral.bats
+
+# Gradle: tasks/gradle.yml deploys an init script
+# (~/.gradle/init.d/supply-chain-security.gradle) that rejects HTTP
+# repos. Same shape as maven — config is version-stable, matrix is
+# smoke coverage. Java 17 reused from maven.
+gradle:
+  lang_versions: ["17"]
+  tool_versions: ["bundled", "8.5"]
+  # 1 × 2 = 2 cells per distro.
+  bats_files:
+    - tests/bats/30-gradle-behavioral.bats

@@ -252,3 +252,26 @@
       # Dockerfile.matrix). If the gemspec is missing this task is a
       # no-op via creates: — the behavioral test will just skip.
       failed_when: false
+
+    # --- Java + Maven + Gradle (for the JVM matrix ecosystems) ---
+    # openjdk-17-jdk-headless is in apt main on jammy/noble/bookworm. apt
+    # maven and apt gradle are used for the "bundled" cells; specific
+    # versions get downloaded as tarballs for the version-specific cells.
+    - name: Install JDK 17 + apt-bundled maven and gradle
+      ansible.builtin.apt:
+        name: [openjdk-17-jdk-headless, maven, gradle]
+        state: present
+
+    - name: Download Apache Maven 3.9.9 tarball
+      ansible.builtin.unarchive:
+        src: "https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz"
+        dest: /opt
+        remote_src: true
+        creates: /opt/apache-maven-3.9.9
+
+    - name: Download Gradle 8.5 distribution
+      ansible.builtin.unarchive:
+        src: "https://services.gradle.org/distributions/gradle-8.5-bin.zip"
+        dest: /opt
+        remote_src: true
+        creates: /opt/gradle-8.5
