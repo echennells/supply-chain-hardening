@@ -94,3 +94,19 @@ bun:
   # 1 × 3 = 3 cells per distro.
   bats_files:
     - tests/bats/15-bun-adversarial.bats
+
+# Yarn: the role only supports Yarn Berry (2.x+) — Yarn Classic (1.x)
+# uses a different config format that the role doesn't deploy. Two
+# major lines of Berry (3.x stable, 4.x current) × the same Node
+# tarballs used for pnpm. Bats tests (14-yarn-adversarial.bats) now
+# write packageManager dynamically based on whichever yarn is
+# corepack-active, so cells actually exercise the matrix's yarn
+# version (previously the tests pinned yarn@4.9.1 which made matrix
+# coverage tautological — corepack would download 4.9.1 regardless
+# of switcher).
+yarn:
+  lang_versions: ["20", "22"]
+  tool_versions: ["3.6.4", "4.5.3"]
+  # 2 × 2 = 4 cells per distro.
+  bats_files:
+    - tests/bats/14-yarn-adversarial.bats
