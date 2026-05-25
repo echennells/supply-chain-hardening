@@ -60,3 +60,15 @@ uv:
   # bump in install-versions.yml when needed.
   bats_files:
     - tests/bats/22-pip-wrapper-safety.bats
+
+# Deno's CLI surface has changed between 1.x and 2.x (subcommand allowlist,
+# flag handling, exit codes). The role's tasks/deno.yml deploys an in-place
+# wrapper at the discovered deno location that injects --minimum-dependency-age
+# into fetching subcommands. The wrapper needs to work across both major
+# versions — matrix covers the last 1.x and two 2.x patches.
+deno:
+  lang_versions: ["system"]
+  tool_versions: ["1.46.3", "2.0.6", "2.1.4"]
+  # 1 × 3 = 3 cells per distro.
+  bats_files:
+    - tests/bats/24-deno-path-wrapper.bats

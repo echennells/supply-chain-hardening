@@ -183,3 +183,31 @@
         - "0.4.30"
         - "0.5.7"
         - "0.6.0"
+
+    # --- Deno (side-by-side via GitHub release zips) ---
+    # Deno is distributed at github.com/denoland/deno/releases as .zip
+    # archives. unzip is needed (jammy/noble/bookworm all have it in apt
+    # by default). Downloaded versions land at /usr/local/bin/deno-<version>;
+    # switchers/deno.sh copies the active one to /usr/local/bin/deno
+    # (copy, not symlink, so the role's `mv deno deno-real` works cleanly).
+    - name: Ensure unzip is installed (needed for deno releases)
+      ansible.builtin.apt:
+        name: [unzip]
+        state: present
+
+    - name: Install deno versions side-by-side to /usr/local/bin/deno-<version>
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          url="https://github.com/denoland/deno/releases/download/v{{ item }}/deno-x86_64-unknown-linux-gnu.zip"
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+          curl -fsSL "$url" -o "$tmpdir/deno.zip"
+          unzip -q "$tmpdir/deno.zip" -d "$tmpdir"
+          install -m 0755 "$tmpdir/deno" "/usr/local/bin/deno-{{ item }}"
+        creates: "/usr/local/bin/deno-{{ item }}"
+        executable: /bin/bash
+      loop:
+        - "1.46.3"
+        - "2.0.6"
+        - "2.1.4"
