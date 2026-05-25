@@ -21,11 +21,21 @@
 set -euo pipefail
 trap 'echo "run-docker: aborted at line $LINENO (exit $?)" >&2' ERR
 
-ECOSYSTEM="${1:-composer}"
 MATRIX_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$MATRIX_DIR/../.." && pwd)"
 RESULTS_DIR="$MATRIX_DIR/results-per-distro"
 AGGREGATE="$MATRIX_DIR/results-all.json"
+
+# Ecosystem selection: default to ALL ecosystems declared in cells.yml,
+# override by passing one or more names as args (e.g. `./run-docker.sh
+# composer pnpm`). Earlier UX defaulted to "composer" which silently
+# excluded the pnpm/pip/uv ecosystems even when they were defined in
+# cells.yml — easy mistake to make from the README's instructions.
+if [[ $# -eq 0 ]] || [[ "${1:-}" = "all" ]]; then
+  ECOSYSTEMS=($(python3 -c 'import sys, yaml; print(" ".join(yaml.safe_load(open(sys.argv[1])).keys()))' "$MATRIX_DIR/cells.yml"))
+else
+  ECOSYSTEMS=("$@")
+fi
 
 # Declared distros. Override: DISTROS="ubuntu:22.04 ubuntu:24.04" ./run-docker.sh
 read -ra DISTROS <<< "${DISTROS:-ubuntu:22.04 ubuntu:24.04 debian:12}"
@@ -33,19 +43,23 @@ read -ra DISTROS <<< "${DISTROS:-ubuntu:22.04 ubuntu:24.04 debian:12}"
 # --- Preflight ---
 command -v docker >/dev/null 2>&1 || { echo "run-docker: docker not installed" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "run-docker: jq not installed" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "run-docker: python3 not installed" >&2; exit 2; }
 [[ -f "$MATRIX_DIR/Dockerfile.matrix" ]] || { echo "run-docker: $MATRIX_DIR/Dockerfile.matrix not found" >&2; exit 2; }
 
 mkdir -p "$RESULTS_DIR"
-# Clean previous per-distro outputs so a missing distro is visible as
+# Clean previous per-distro outputs so a missing combo is visible as
 # missing (not stale data carried over from a prior run).
-rm -f "$RESULTS_DIR"/*.json
+rm -rf "$RESULTS_DIR"/*
 
-distros_with_failures=()
+failures=()
+
+echo "run-docker: ecosystems=${ECOSYSTEMS[*]}"
+echo "run-docker: distros=${DISTROS[*]}"
 
 for distro in "${DISTROS[@]}"; do
   distro_tag="${distro//:/-}"            # ubuntu:22.04 -> ubuntu-22.04
   image="supply-chain-matrix-${distro_tag}"
-  result_file="$RESULTS_DIR/${distro_tag}.json"
+  distro_results_dir="$RESULTS_DIR/${distro_tag}"
 
   echo
   echo "===== run-docker: building image for $distro ($image) ====="
@@ -62,67 +76,75 @@ for distro in "${DISTROS[@]}"; do
 
   if [[ "$build_rc" -ne 0 ]]; then
     echo "run-docker: $distro BUILD FAILED (rc=$build_rc) — skipping to next distro" >&2
-    distros_with_failures+=("$distro (build rc=$build_rc)")
+    failures+=("$distro (build rc=$build_rc)")
     continue
   fi
 
-  echo
-  echo "===== run-docker: running $ECOSYSTEM cells on $distro ====="
-  run_rc=0
-  docker run --rm \
-    -v "$RESULTS_DIR:/output" \
-    -e ECOSYSTEM="$ECOSYSTEM" \
-    "$image" || run_rc=$?
+  mkdir -p "$distro_results_dir"
 
-  # Rename results.json to <distro>.json. Container copies to /output/results.json;
-  # we move it so the next distro doesn't clobber it.
-  if [[ -f "$RESULTS_DIR/results.json" ]]; then
-    mv "$RESULTS_DIR/results.json" "$result_file"
-    echo "run-docker: $distro produced $(jq 'length' "$result_file") result rows"
-  else
-    echo "run-docker: $distro produced no results.json (driver failed inside container)" >&2
-    distros_with_failures+=("$distro (no results.json)")
-  fi
+  for ecosystem in "${ECOSYSTEMS[@]}"; do
+    echo
+    echo "===== run-docker: running $ecosystem on $distro ====="
+    run_rc=0
+    docker run --rm \
+      -v "$distro_results_dir:/output" \
+      -e ECOSYSTEM="$ecosystem" \
+      "$image" || run_rc=$?
 
-  if [[ "$run_rc" -ne 0 ]]; then
-    echo "run-docker: $distro container exited rc=$run_rc (driver flagged failures)" >&2
-    distros_with_failures+=("$distro (driver rc=$run_rc)")
-  fi
+    # Container writes /output/results.json — rename per-ecosystem so the
+    # next ecosystem doesn't clobber it.
+    if [[ -f "$distro_results_dir/results.json" ]]; then
+      mv "$distro_results_dir/results.json" "$distro_results_dir/${ecosystem}.json"
+      n=$(jq 'length' "$distro_results_dir/${ecosystem}.json")
+      echo "run-docker: $distro/$ecosystem produced $n result rows"
+    else
+      echo "run-docker: $distro/$ecosystem produced no results.json (driver failed inside container)" >&2
+      failures+=("$distro/$ecosystem (no results.json)")
+    fi
+
+    if [[ "$run_rc" -ne 0 ]]; then
+      echo "run-docker: $distro/$ecosystem container exited rc=$run_rc (driver flagged failures)" >&2
+      failures+=("$distro/$ecosystem (driver rc=$run_rc)")
+    fi
+  done
 done
 
 # --- Aggregate ---
 echo
-echo "===== run-docker: aggregating results across distros ====="
+echo "===== run-docker: aggregating results across distros × ecosystems ====="
 
-# Build aggregate by tagging each per-distro file with its distro and flattening.
-# Empty files produce empty arrays so a failed distro doesn't break the aggregate.
+# Each per-(distro,ecosystem) file is already ecosystem-tagged by run.sh
+# (added to row schema). We add distro here at the orchestrator layer.
 echo "[]" > "$AGGREGATE"
-for f in "$RESULTS_DIR"/*.json; do
-  [[ -f "$f" ]] || continue
-  distro_tag="$(basename "$f" .json)"
-  tagged=$(jq --arg d "$distro_tag" 'map(. + {distro: $d})' "$f")
-  jq --argjson new "$tagged" '. + $new' "$AGGREGATE" > "$AGGREGATE.tmp" && mv "$AGGREGATE.tmp" "$AGGREGATE"
+for distro_dir in "$RESULTS_DIR"/*/; do
+  [[ -d "$distro_dir" ]] || continue
+  distro_tag="$(basename "$distro_dir")"
+  for f in "$distro_dir"/*.json; do
+    [[ -f "$f" ]] || continue
+    tagged=$(jq --arg d "$distro_tag" 'map(. + {distro: $d})' "$f")
+    jq --argjson new "$tagged" '. + $new' "$AGGREGATE" > "$AGGREGATE.tmp" && mv "$AGGREGATE.tmp" "$AGGREGATE"
+  done
 done
 
 # --- Summary ---
 echo
 echo "===== aggregate summary ====="
 total=$(jq 'length' "$AGGREGATE")
-echo "Total result rows across all distros: $total"
+echo "Total result rows: $total"
 echo
-echo "Per-distro row counts:"
-jq -r 'group_by(.distro) | map({distro: .[0].distro, n: length}) | sort_by(.distro) | .[] | "  \(.distro): \(.n) rows"' "$AGGREGATE"
+echo "Per-(distro, ecosystem) row counts:"
+jq -r 'group_by(.distro + "/" + .ecosystem) | map({key: .[0].distro + "/" + .[0].ecosystem, n: length}) | sort_by(.key) | .[] | "  \(.key): \(.n) rows"' "$AGGREGATE"
 
 fails=$(jq '[.[]|select(.resolved=="fail")] | length' "$AGGREGATE")
 if [[ "$fails" -gt 0 ]]; then
   echo
-  echo "===== UNEXPECTED FAILURES (across all distros) ====="
-  jq -r '.[]|select(.resolved=="fail")|"\(.distro)  \(.lang)/\(.tool)  \(.file)  \(.test)"' "$AGGREGATE"
+  echo "===== UNEXPECTED FAILURES (across all distros × ecosystems) ====="
+  jq -r '.[]|select(.resolved=="fail")|"\(.distro)/\(.ecosystem)  \(.lang)/\(.tool)  \(.file)  \(.test)"' "$AGGREGATE"
 fi
 
-if [[ "${#distros_with_failures[@]}" -gt 0 ]]; then
+if [[ "${#failures[@]}" -gt 0 ]]; then
   echo
-  echo "Distros with driver-level or test failures: ${distros_with_failures[*]}" >&2
+  echo "(distro, ecosystem) pairs with driver-level or test failures: ${failures[*]}" >&2
   exit 1
 fi
 

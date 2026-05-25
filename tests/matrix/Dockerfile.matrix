@@ -42,7 +42,20 @@ RUN ansible-playbook /tmp/matrix-setup/install-versions.yml \
         -i localhost, -c local && \
     rm -rf /tmp/matrix-setup
 
-# Stage 2 copy: the whole role. Invalidates on most commits but the
+# Stage 2 copy: test fixtures to /opt/test-fixtures. The bats tests
+# hardcode this path (matching tests/Dockerfile's convention for the
+# single-version test harness) — composer-postinstall/composer.json,
+# composer-local-dep/, npm-postinstall-pkg/, etc. all need to be at
+# /opt/test-fixtures/ for the per-ecosystem bats files to function.
+# Without this copy the FIXTURE CONTROL tests find no composer.json,
+# composer install runs against empty input, post-install-cmd never
+# fires, and "ATTACK blocked" / "LAYERED DEFENSE" tests pass by
+# tautology — exactly the hollow-control problem 0bd53af fixed for
+# the native bats run, re-introduced when docker mode forgot the
+# fixture copy.
+COPY tests/fixtures /opt/test-fixtures
+
+# Stage 3 copy: the whole role. Invalidates on most commits but the
 # previous layer's installs are preserved by Docker's build cache.
 COPY . /workspace
 WORKDIR /workspace

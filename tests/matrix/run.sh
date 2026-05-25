@@ -216,10 +216,11 @@ for lang in "${lang_versions[@]}"; do
         esac
 
         entry=$(jq -n \
+          --arg ecosystem "$ECOSYSTEM" \
           --arg lang "$lang" --arg tool "$tool" --arg file "$bats_file" \
           --arg test "$test_name" --arg status "$status" \
           --arg reason "$reason" --arg resolved "$final" \
-          '{lang:$lang, tool:$tool, file:$file, test:$test, status:$status, reason:$reason, resolved:$resolved}')
+          '{ecosystem:$ecosystem, lang:$lang, tool:$tool, file:$file, test:$test, status:$status, reason:$reason, resolved:$resolved}')
 
         jq --argjson e "$entry" '. += [$e]' "$RESULTS" > "$RESULTS.tmp" && mv "$RESULTS.tmp" "$RESULTS"
       done < <(bats --tap "$bats_abs" 2>&1 | parse_tap)

@@ -30,26 +30,24 @@ Four ecosystems wired up. Cell counts are per-distro (multiply by 3 for full cro
   - Python: "system"
   - uv: 0.4.30, 0.5.7, 0.6.0 (side-by-side at `/usr/local/bin/uv-<version>`, switched per cell via symlink)
 
-Run one ecosystem at a time:
+Run one ecosystem at a time (in-place, fast iteration):
 
 ```
-sudo tests/matrix/run.sh composer    # in-place, current distro only
+sudo tests/matrix/run.sh composer
 sudo tests/matrix/run.sh pnpm
 sudo tests/matrix/run.sh pip
 sudo tests/matrix/run.sh uv
-
-sudo tests/matrix/run-docker.sh composer  # cross-distro via docker
-sudo tests/matrix/run-docker.sh pnpm
-# ...
 ```
 
-To run every ecosystem in sequence, shell-loop it:
+Run all ecosystems × all distros (cross-distro via docker):
 
 ```
-for eco in composer pnpm pip uv; do
-  sudo tests/matrix/run-docker.sh "$eco" || echo "FAILED: $eco"
-done
+sudo tests/matrix/run-docker.sh           # default: all ecosystems × all distros
+sudo tests/matrix/run-docker.sh composer  # one ecosystem × all distros
+sudo tests/matrix/run-docker.sh pnpm pip  # specific ecosystems × all distros
 ```
+
+`run-docker.sh` defaults to iterating every ecosystem declared in `cells.yml` against every distro in the default `DISTROS` list (Ubuntu 22.04, Ubuntu 24.04, Debian 12). Override distros with `DISTROS="ubuntu:22.04"`. Each (distro, ecosystem) pair produces a file at `results-per-distro/<distro>/<ecosystem>.json`; the orchestrator aggregates everything into `results-all.json` with both `distro` and `ecosystem` fields tagged on every row.
 
 ## Cross-distro mode
 
