@@ -98,6 +98,16 @@ lang_versions=($(jq -r ".${ECOSYSTEM}.lang_versions[]" "$CELLS_JSON"))
 tool_versions=($(jq -r ".${ECOSYSTEM}.tool_versions[]" "$CELLS_JSON"))
 bats_files=($(jq -r ".${ECOSYSTEM}.bats_files[]" "$CELLS_JSON"))
 
+# Per-cell partial apply: only re-run the ecosystem's tasks instead of
+# the full site.yml. Saves ~25s per cell × N cells × 3 distros. The
+# role's tasks/main.yml tags every include task with at least the
+# ecosystem name (e.g. composer.yml is tags=[composer, php], pip.yml
+# is tags=[pip, python]), so --tags <ecosystem> scopes to one ecosystem
+# while ansible's "always" tag keeps preflight running unconditionally.
+# Override via cells.yml `ansible_tags:` field if an ecosystem needs a
+# different tag (e.g. multi-tag include).
+ansible_tags=$(jq -r ".${ECOSYSTEM}.ansible_tags // \"${ECOSYSTEM}\"" "$CELLS_JSON")
+
 [[ "${#lang_versions[@]}" -gt 0 ]] || { echo "matrix: no lang_versions for $ECOSYSTEM in $CELLS_FILE" >&2; exit 2; }
 [[ "${#tool_versions[@]}" -gt 0 ]] || { echo "matrix: no tool_versions for $ECOSYSTEM in $CELLS_FILE" >&2; exit 2; }
 [[ "${#bats_files[@]}" -gt 0 ]] || { echo "matrix: no bats_files for $ECOSYSTEM in $CELLS_FILE" >&2; exit 2; }
@@ -178,10 +188,13 @@ for lang in "${lang_versions[@]}"; do
     fi
 
     # Re-apply the role (role detects the active tool version and configures
-    # accordingly; some tasks change behavior per version per bf10789)
+    # accordingly; some tasks change behavior per version per bf10789).
+    # --tags scopes to just the ecosystem under test — the always-tagged
+    # preflight still runs but the other ecosystems' tasks are skipped.
     (cd "$REPO_ROOT" && ansible-playbook site.yml \
         --connection=local --limit localhost \
-        -i tests/matrix/inventory.ini 2>&1) > "/tmp/matrix-apply-${lang}-${tool}.log" || {
+        -i tests/matrix/inventory.ini \
+        --tags "$ansible_tags" 2>&1) > "/tmp/matrix-apply-${lang}-${tool}.log" || {
       echo "matrix: site.yml apply FAILED for lang=$lang tool=$tool — see /tmp/matrix-apply-${lang}-${tool}.log" >&2
       jq --arg lang "$lang" --arg tool "$tool" \
         '. += [{"lang":$lang,"tool":$tool,"test":"<role-apply>","status":"fail","reason":"site.yml apply exited nonzero"}]' \

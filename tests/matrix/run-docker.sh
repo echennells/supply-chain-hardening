@@ -51,63 +51,80 @@ mkdir -p "$RESULTS_DIR"
 # missing (not stale data carried over from a prior run).
 rm -rf "$RESULTS_DIR"/*
 
-failures=()
-
 echo "run-docker: ecosystems=${ECOSYSTEMS[*]}"
 echo "run-docker: distros=${DISTROS[*]}"
+echo "run-docker: parallelism=${PARALLEL:-true} (override with PARALLEL=false for serial)"
 
-for distro in "${DISTROS[@]}"; do
-  distro_tag="${distro//:/-}"            # ubuntu:22.04 -> ubuntu-22.04
-  image="supply-chain-matrix-${distro_tag}"
-  distro_results_dir="$RESULTS_DIR/${distro_tag}"
+# Per-distro pipeline factored into a function so it can be launched as a
+# background subshell (parallel) or called synchronously (serial). Each
+# distro is best-effort — failures inside don't propagate to the
+# orchestrator and don't block other distros.
+run_distro_pipeline() {
+  local distro="$1"
+  local distro_tag="${distro//:/-}"
+  local image="supply-chain-matrix-${distro_tag}"
+  local distro_results_dir="$RESULTS_DIR/${distro_tag}"
 
-  echo
-  echo "===== run-docker: building image for $distro ($image) ====="
-  # Each distro is best-effort: a build failure on one distro must not
-  # block the others from running. Without this guard, set -e would
-  # abort run-docker.sh on the first failed build (e.g. distro-specific
-  # bootstrap issue) and hide whether the other distros work at all.
-  build_rc=0
-  docker build \
-    --build-arg BASE_IMAGE="$distro" \
-    -t "$image" \
-    -f "$MATRIX_DIR/Dockerfile.matrix" \
-    "$REPO_ROOT" || build_rc=$?
-
-  if [[ "$build_rc" -ne 0 ]]; then
-    echo "run-docker: $distro BUILD FAILED (rc=$build_rc) — skipping to next distro" >&2
-    failures+=("$distro (build rc=$build_rc)")
-    continue
+  echo "===== building image for $distro ($image) ====="
+  if ! docker build \
+        --build-arg BASE_IMAGE="$distro" \
+        -t "$image" \
+        -f "$MATRIX_DIR/Dockerfile.matrix" \
+        "$REPO_ROOT"; then
+    echo "BUILD FAILED for $distro" >&2
+    return 1
   fi
 
   mkdir -p "$distro_results_dir"
 
   for ecosystem in "${ECOSYSTEMS[@]}"; do
-    echo
-    echo "===== run-docker: running $ecosystem on $distro ====="
-    run_rc=0
+    echo "===== running $ecosystem on $distro ====="
+    local run_rc=0
     docker run --rm \
       -v "$distro_results_dir:/output" \
       -e ECOSYSTEM="$ecosystem" \
       "$image" || run_rc=$?
 
-    # Container writes /output/results.json — rename per-ecosystem so the
-    # next ecosystem doesn't clobber it.
     if [[ -f "$distro_results_dir/results.json" ]]; then
       mv "$distro_results_dir/results.json" "$distro_results_dir/${ecosystem}.json"
+      local n
       n=$(jq 'length' "$distro_results_dir/${ecosystem}.json")
-      echo "run-docker: $distro/$ecosystem produced $n result rows"
+      echo "$distro/$ecosystem produced $n result rows"
     else
-      echo "run-docker: $distro/$ecosystem produced no results.json (driver failed inside container)" >&2
-      failures+=("$distro/$ecosystem (no results.json)")
+      echo "$distro/$ecosystem produced no results.json (driver failed inside container)" >&2
     fi
 
     if [[ "$run_rc" -ne 0 ]]; then
-      echo "run-docker: $distro/$ecosystem container exited rc=$run_rc (driver flagged failures)" >&2
-      failures+=("$distro/$ecosystem (driver rc=$run_rc)")
+      echo "$distro/$ecosystem container exited rc=$run_rc (driver flagged failures)" >&2
     fi
   done
-done
+  return 0
+}
+
+# Parallel by default — distros are independent docker containers, so
+# they can run concurrently without contending for anything but the docker
+# daemon and disk I/O. ~3x wall-clock speedup. Set PARALLEL=false to serialize
+# for debugging (output is cleaner; failures are easier to attribute when
+# stdout isn't interleaved).
+if [[ "${PARALLEL:-true}" = "true" ]] && [[ "${#DISTROS[@]}" -gt 1 ]]; then
+  pids=()
+  for distro in "${DISTROS[@]}"; do
+    distro_tag="${distro//:/-}"
+    log="$RESULTS_DIR/${distro_tag}.log"
+    echo "===== launching $distro in background (log: $log) ====="
+    ( run_distro_pipeline "$distro" ) > "$log" 2>&1 &
+    pids+=("$!")
+  done
+  echo "===== ${#pids[@]} distros running in parallel; waiting for all to finish ====="
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
+  echo "===== all distros complete; per-distro logs in $RESULTS_DIR/*.log ====="
+else
+  for distro in "${DISTROS[@]}"; do
+    run_distro_pipeline "$distro"
+  done
+fi
 
 # --- Aggregate ---
 echo
@@ -142,9 +159,25 @@ if [[ "$fails" -gt 0 ]]; then
   jq -r '.[]|select(.resolved=="fail")|"\(.distro)/\(.ecosystem)  \(.lang)/\(.tool)  \(.file)  \(.test)"' "$AGGREGATE"
 fi
 
-if [[ "${#failures[@]}" -gt 0 ]]; then
+# Distros that produced no results at all (build failure or container abort)
+empty_distros=()
+for distro in "${DISTROS[@]}"; do
+  distro_tag="${distro//:/-}"
+  if [[ ! -d "$RESULTS_DIR/${distro_tag}" ]] || \
+     [[ -z "$(ls -A "$RESULTS_DIR/${distro_tag}"/*.json 2>/dev/null)" ]]; then
+    empty_distros+=("$distro_tag")
+  fi
+done
+
+if [[ "${#empty_distros[@]}" -gt 0 ]]; then
   echo
-  echo "(distro, ecosystem) pairs with driver-level or test failures: ${failures[*]}" >&2
+  echo "Distros that produced NO results (build or container failure — see per-distro logs):" >&2
+  for d in "${empty_distros[@]}"; do
+    echo "  $d (log: $RESULTS_DIR/${d}.log)" >&2
+  done
+fi
+
+if [[ "$fails" -gt 0 ]] || [[ "${#empty_distros[@]}" -gt 0 ]]; then
   exit 1
 fi
 

@@ -49,6 +49,16 @@ sudo tests/matrix/run-docker.sh pnpm pip  # specific ecosystems × all distros
 
 `run-docker.sh` defaults to iterating every ecosystem declared in `cells.yml` against every distro in the default `DISTROS` list (Ubuntu 22.04, Ubuntu 24.04, Debian 12). Override distros with `DISTROS="ubuntu:22.04"`. Each (distro, ecosystem) pair produces a file at `results-per-distro/<distro>/<ecosystem>.json`; the orchestrator aggregates everything into `results-all.json` with both `distro` and `ecosystem` fields tagged on every row.
 
+## Performance
+
+Two optimizations are applied by default:
+
+**Parallel distros.** `run-docker.sh` launches each distro's pipeline (build + per-ecosystem runs) as a background subshell, then waits for all to complete. ~3× wall-clock speedup over serial mode. Output goes to per-distro log files at `results-per-distro/<distro>.log` (interleaved live output would be unreadable across 3 parallel docker builds). Override with `PARALLEL=false` for serial mode when debugging — output is cleaner and failures easier to attribute.
+
+**Per-cell partial role apply.** When a cell switches the active composer to 2.7, only the composer task in site.yml needs to re-run — re-deploying the npm/python/cargo/go/etc. hardening is wasted work. `run.sh` passes `--tags <ecosystem>` to ansible-playbook so only the relevant ecosystem's tasks re-apply per cell. Each ecosystem's tag defaults to the ecosystem name (composer→composer tag, pnpm→pnpm tag, …); override in `cells.yml` with `ansible_tags: foo,bar` if you need a different mapping. Saves ~25s per cell — significant at 23+ cells per distro.
+
+Net: full run-docker.sh against 4 ecosystems × 3 distros drops from ~90 min serial+full-apply to ~15-20 min parallel+tag-scoped.
+
 ## Cross-distro mode
 
 `run.sh` runs in-place on whatever host it's invoked on (fast single-distro iteration). For coverage across the role's full declared platform support — Ubuntu 22.04 (jammy), Ubuntu 24.04 (noble), Debian 12 (bookworm) — use the docker orchestrator:
