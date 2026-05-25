@@ -32,6 +32,7 @@
       PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
       PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
       UV_LINK_MODE=copy
+      UV_NO_SYSTEM_CONFIG=1
       GOSUMDB={{ go_sumdb }}
       GOPROXY={{ go_proxy }}
       GOFLAGS=-mod={{ goflags_mod }}

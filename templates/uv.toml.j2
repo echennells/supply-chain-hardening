@@ -1,12 +1,35 @@
 # Managed by ansible-supply-chain-security
-# Reject packages published less than {{ release_age_hours }} hours ago
+#
+# index-strategy = "first-index" closes the dependency-confusion attack
+# class: if a package exists on the primary index, uv refuses to fall
+# through to a secondary index even when the name matches. Without this,
+# extra-index-url configurations can be exploited by an attacker
+# publishing a same-named package to a public index. Universal across
+# all current uv versions.
+index-strategy = "{{ uv_index_strategy }}"
+
+# Empty allow-insecure-host explicitly documents intent that no host
+# gets TLS verification bypass. Override via the uv_allow_insecure_host
+# role var if you have a private registry behind a self-signed cert.
+{% if uv_allow_insecure_host | length > 0 %}
+allow-insecure-host = [
+{% for host in uv_allow_insecure_host %}
+  "{{ host }}",
+{% endfor %}
+]
+{% else %}
+allow-insecure-host = []
+{% endif %}
+
+# Reject packages published less than {{ release_age_hours }} hours ago.
 exclude-newer = "{{ uv_exclude_newer }}"
 
 {% if uv_no_build %}
-# Force wheels only — blocks setup.py execution from source distributions
+# Force wheels only — blocks setup.py execution from source distributions.
 no-build = true
 {% endif %}
 
 [pip]
-# Verify hashes when present (lockfiles), but don't require them for ad-hoc installs
+# Verify hashes when present (lockfiles), but don't require them for
+# ad-hoc installs.
 verify-hashes = true

@@ -24,6 +24,14 @@ load setup
   assert_file_contains "$HOME/.config/uv/uv.toml" "exclude-newer"
 }
 
+@test "uv.toml: index-strategy first-index (anti-dep-confusion)" {
+  assert_file_contains "$HOME/.config/uv/uv.toml" 'index-strategy = "first-index"'
+}
+
+@test "uv.toml: allow-insecure-host explicit (default empty = no TLS bypass)" {
+  assert_file_contains "$HOME/.config/uv/uv.toml" "allow-insecure-host"
+}
+
 @test "uv.toml: no-build = true" {
   assert_file_contains "$HOME/.config/uv/uv.toml" "no-build = true"
 }

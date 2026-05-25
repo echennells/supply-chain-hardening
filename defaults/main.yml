@@ -38,6 +38,9 @@ python_dont_write_bytecode: true
 
 # uv settings
 uv_no_build: true
+# uv settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
+uv_index_strategy: "first-index"        # anti-dep-confusion; alternatives: unsafe-best-match, unsafe-first-match
+uv_allow_insecure_host: []              # allowlist of hosts allowed to skip TLS verification; empty = none
 
 # go settings
 go_sumdb: "sum.golang.org"

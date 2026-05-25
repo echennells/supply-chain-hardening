@@ -22,6 +22,10 @@ setup() {
   assert_env_equals NPM_CONFIG_FUND false
 }
 
+@test "env: UV_NO_SYSTEM_CONFIG=1 (prevent uv reading /etc/uv/ system config)" {
+  assert_env_equals UV_NO_SYSTEM_CONFIG 1
+}
+
 @test "env: GOSUMDB=sum.golang.org" {
   assert_env_equals GOSUMDB sum.golang.org
 }

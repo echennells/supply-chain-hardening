@@ -14,6 +14,10 @@ export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
 export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
 export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
 export UV_LINK_MODE=copy
+# Prevent uv from reading /etc/uv/ system config files — defends against
+# an attacker injecting registry overrides via the system config path.
+# Added in uv 0.11.16; silently ignored on older versions (safe unconditional).
+export UV_NO_SYSTEM_CONFIG=1
 
 # === Go ===
 # Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are emptied so
