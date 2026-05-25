@@ -15,9 +15,41 @@ The matrix runs every (PHP, composer) combination, applies the role, and runs th
 
 ## What's in v1
 
+Four ecosystems wired up. Cell counts are per-distro (multiply by 3 for full cross-distro run):
+
 - **Composer × PHP**: 3 × 4 = 12 cells
   - PHP: 8.1, 8.2, 8.3 (via Sury PPA, side-by-side)
   - Composer: 1.10.27, 2.7.9, 2.8.12, 2.9.8 (pinned phars, SHA-256 verified)
+- **pnpm × Node**: 2 × 2 = 4 cells
+  - Node: 20, 22 (LTS line, pinned to current patches, side-by-side via tarballs in /opt)
+  - pnpm: 10, 11 (the version-sensitive boundary — pnpm 10 reads `~/.config/pnpm/rc`, pnpm 11+ reads `~/.config/pnpm/config.yaml`)
+- **pip × Python**: 1 × 4 = 4 cells
+  - Python: "system" (the distro's default; cross-distro axis varies this naturally — jammy ships 3.10, noble ships 3.12, bookworm ships 3.11)
+  - pip: bundled, 23.3.2, 24.3.1, 25.0.1
+- **uv × Python**: 1 × 3 = 3 cells
+  - Python: "system"
+  - uv: 0.4.30, 0.5.7, 0.6.0 (side-by-side at `/usr/local/bin/uv-<version>`, switched per cell via symlink)
+
+Run one ecosystem at a time:
+
+```
+sudo tests/matrix/run.sh composer    # in-place, current distro only
+sudo tests/matrix/run.sh pnpm
+sudo tests/matrix/run.sh pip
+sudo tests/matrix/run.sh uv
+
+sudo tests/matrix/run-docker.sh composer  # cross-distro via docker
+sudo tests/matrix/run-docker.sh pnpm
+# ...
+```
+
+To run every ecosystem in sequence, shell-loop it:
+
+```
+for eco in composer pnpm pip uv; do
+  sudo tests/matrix/run-docker.sh "$eco" || echo "FAILED: $eco"
+done
+```
 
 ## Cross-distro mode
 

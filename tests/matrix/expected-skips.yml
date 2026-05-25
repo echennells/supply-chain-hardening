@@ -57,3 +57,29 @@ composer:
     reason: >-
       audit.abandoned config key was added in composer 2.7.0. On composer 1.x
       the role's template omits the entire audit block, so the assertion fails.
+
+pnpm:
+  - test: "pnpm config.yaml: ignoreScripts true (pnpm 11+ blocks project scripts)"
+    when: { tool: "10" }
+    expect: fail
+    reason: >-
+      pnpm 10 reads ~/.config/pnpm/rc (ini format), not config.yaml. The
+      role deploys config.yaml unconditionally for pnpm 11+ forward compat,
+      but pnpm 10 won't honor it — the rc file is what controls behavior
+      on this version. Test asserts a config.yaml setting that pnpm 10
+      ignores. Not a role bug; the version-keyed file choice is the whole
+      point of deploying both files.
+
+  - test: "pnpm rc: ignore-scripts=true"
+    when: { tool: "11" }
+    expect: fail
+    reason: >-
+      Mirror of the above: pnpm 11+ stopped reading the ini rc file. The
+      role still deploys it for pnpm 10 backwards compat, but pnpm 11
+      ignores it — config.yaml is what controls behavior on 11+. Test
+      asserts an rc setting that pnpm 11 doesn't honor.
+
+# pip and uv: no seeded entries. Add as observed divergences appear from
+# real cross-distro runs. The pip wrapper and uv invocations should be
+# version-stable in principle; if any test fails on a specific (lang, tool)
+# pair, surface it here with a reason rather than fixing the test.

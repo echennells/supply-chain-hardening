@@ -138,3 +138,48 @@
       loop: "{{ matrix_composer_versions }}"
       loop_control:
         label: "{{ item.minor }} ({{ item.patch }})"
+
+    # --- Node.js (side-by-side via tarballs) ---
+    # Sury doesn't ship Node. Nodesource ships one major per repo and
+    # conflicts on `nodejs` package, so multiple-side-by-side via apt
+    # isn't viable. Tarballs from nodejs.org are the standard pattern.
+    # Pinned to current LTS patches; bump as new LTS patches release.
+    - name: Download Node.js tarballs to /opt
+      ansible.builtin.unarchive:
+        src: "https://nodejs.org/dist/v{{ item.full }}/node-v{{ item.full }}-linux-x64.tar.xz"
+        dest: /opt
+        remote_src: true
+        creates: "/opt/node-v{{ item.full }}-linux-x64"
+      loop:
+        - { major: "20", full: "20.18.1" }
+        - { major: "22", full: "22.12.0" }
+
+    - name: Symlink Node directories to versioned paths (/opt/node-N)
+      ansible.builtin.file:
+        src: "/opt/node-v{{ item.full }}-linux-x64"
+        dest: "/opt/node-{{ item.major }}"
+        state: link
+      loop:
+        - { major: "20", full: "20.18.1" }
+        - { major: "22", full: "22.12.0" }
+
+    # --- uv (side-by-side via GitHub release tarballs) ---
+    # uv is a single statically-linked Rust binary distributed at
+    # github.com/astral-sh/uv/releases. Downloaded versions land at
+    # /usr/local/bin/uv-<version>; switchers/uv.sh swaps the active
+    # /usr/local/bin/uv symlink. Patch versions pinned for reproducibility.
+    - name: Install uv versions side-by-side to /usr/local/bin/uv-<version>
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          url="https://github.com/astral-sh/uv/releases/download/{{ item }}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+          curl -fsSL "$url" | tar -xz -C "$tmpdir"
+          install -m 0755 "$tmpdir"/uv-x86_64-unknown-linux-gnu/uv "/usr/local/bin/uv-{{ item }}"
+        creates: "/usr/local/bin/uv-{{ item }}"
+        executable: /bin/bash
+      loop:
+        - "0.4.30"
+        - "0.5.7"
+        - "0.6.0"

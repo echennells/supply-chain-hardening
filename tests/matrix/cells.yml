@@ -21,3 +21,42 @@ composer:
     - tests/bats/11-composer-adversarial.bats
     - tests/bats/16-composer-behavioral.bats
     - tests/bats/28-composer-tier-rendering.bats
+
+# pnpm 10 reads ~/.config/pnpm/rc (ini); pnpm 11+ only reads
+# ~/.config/pnpm/config.yaml (YAML). The role deploys both files but each
+# version only honors one of them — this matrix proves both code paths
+# work against the real binaries instead of just template assumptions.
+# Node 20 and 22 are the current LTS line; pnpm 10 and 11 both work on
+# either Node major.
+pnpm:
+  lang_versions: ["20", "22"]
+  tool_versions: ["10", "11"]
+  # 2 × 2 = 4 cells.
+  bats_files:
+    - tests/bats/13-pnpm-adversarial.bats
+
+# pip lang axis is intentionally degenerate ("system"): the distro axis
+# in run-docker.sh already covers different pythons (Ubuntu 22.04 ships
+# 3.10, Ubuntu 24.04 ships 3.12, Debian 12 ships 3.11). Installing
+# multiple pythons per cell would duplicate that. tool axis pins specific
+# pip versions to verify the role's wrapper survives across pip's recent
+# patch lines.
+pip:
+  lang_versions: ["system"]
+  tool_versions: ["bundled", "23.3.2", "24.3.1", "25.0.1"]
+  # 1 × 4 = 4 cells per distro.
+  bats_files:
+    - tests/bats/22-pip-wrapper-safety.bats
+
+# uv ships fast and has had meaningful behavioral changes recently
+# (cache layout, --exclude-newer semantics, exit codes). The cross-distro
+# axis exercises different pythons; the tool axis exercises three uv
+# minor versions. bats coverage is via the pip-wrapper tests since they
+# exercise the pip→uv redirect that the role installs.
+uv:
+  lang_versions: ["system"]
+  tool_versions: ["0.4.30", "0.5.7", "0.6.0"]
+  # 1 × 3 = 3 cells per distro. Patch versions pinned for reproducibility;
+  # bump in install-versions.yml when needed.
+  bats_files:
+    - tests/bats/22-pip-wrapper-safety.bats
