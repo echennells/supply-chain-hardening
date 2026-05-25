@@ -17,9 +17,19 @@ The matrix runs every (PHP, composer) combination, applies the role, and runs th
 
 - **Composer × PHP**: 3 × 4 = 12 cells
   - PHP: 8.1, 8.2, 8.3 (via Sury PPA, side-by-side)
-  - Composer: 1.10.27, 2.7.9, 2.8.12, 2.9.8 (pinned phars, SHA-384 verified)
+  - Composer: 1.10.27, 2.7.9, 2.8.12, 2.9.8 (pinned phars, SHA-256 verified)
 
-Out of scope for v1: cross-Ubuntu matrix (one distro at a time), cross-ecosystem expansion (npm × node, pip × python), and self-update interaction.
+## Coverage gaps (what this matrix does NOT verify)
+
+Read this section before claiming "the matrix is green so it works."
+
+- **Only one Ubuntu version.** Everything runs on Ubuntu 24.04. The role's `meta/main.yml` claims support for Ubuntu 22.04 (jammy) and Debian 12 (bookworm) as well, but the matrix never exercises either. 22.04 specifically is widely deployed, ships PHP 8.1 by default, and is on a different `update-alternatives` / apt / pam_env release than 24.04 — material divergences are plausible. A passing 24.04 matrix is **not** evidence that the role works on jammy or bookworm.
+- **Only one ecosystem.** Composer × PHP is wired up. The same class of version-sensitive bugs almost certainly exists in npm × node, pip × python, etc. (the existing `28-composer-tier-rendering.bats` is the only template-level cross-version coverage; behavioral coverage like this matrix doesn't exist for any other ecosystem yet).
+- **Self-update interaction is not tested.** The composer wrapper's self-recovery story ("composer self-update overwrites the wrapper; re-applying the role re-wraps") is documented and the detection logic exists, but no cell actually runs `composer self-update` and re-applies the role to verify.
+- **No multi-user testing.** Every cell runs as root. The wrapper at `/usr/local/bin/composer` is in every user's PATH so should cover non-root users, but the matrix never creates a second user and runs composer as them.
+- **No `php composer.phar` testing.** The wrapper bypass via direct phar invocation is supposed to be caught by the `COMPOSER_SKIP_SCRIPTS` env-var layer. No cell verifies this path end-to-end — the env-var test in `02-env-vars.bats` only checks the var is set in the test shell, not that a phar invocation actually skips dispatch.
+
+Closing the Ubuntu-version gap likely needs Docker-per-cell or external host orchestration (DO droplets, etc.) — both are heavier infra than v1 wanted. Treat that as the natural next step before claiming the role is verified across its declared platform support.
 
 ## Prerequisites
 
