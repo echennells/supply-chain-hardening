@@ -68,6 +68,13 @@ pnpm_minimum_release_age_exclude: []
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 pnpm_built_dependencies: []
 
+# bun settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
+bun_exact: true                  # exact version pinning
+bun_lifecycle_scripts: false     # block postinstall/preinstall scripts
+bun_frozen_lockfile: true        # refuse install if package.json diverges from lockfile
+bun_auto: "disable"              # disable bun's runtime auto-install (alternatives: auto, fallback, force)
+bun_save_text_lockfile: true     # text-format bun.lock (bun 1.2+); silently ignored on older
+
 # yarn settings
 yarn_enable_scripts: false
 # yarn settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)

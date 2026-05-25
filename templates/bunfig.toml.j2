@@ -1,5 +1,24 @@
+{%- set v = bun_detected_version | default('', true) -%}
+{%- set has_text_lockfile = v == '' or v is version('1.2.0', '>=') -%}
 # Managed by ansible-supply-chain-security
+#
+# frozenLockfile refuses install if package.json diverges from the
+# lockfile — catches sneaky dep additions during build. Universal
+# across all bun versions.
+#
+# auto = "disable" prevents bun's runtime auto-install feature from
+# silently grabbing missing deps when you `bun run` something — a real
+# foot-gun in CI/agent contexts where deps should be deterministic.
+#
+# saveTextLockfile uses text-format bun.lock (diff-able for audit)
+# instead of the binary bun.lockb. Added in bun 1.2; older bun ignores
+# the key but defaults to binary format.
 [install]
 minimumReleaseAge = {{ bun_minimum_release_age_seconds }}
-exact = true
-lifecycleScripts = false
+exact = {{ bun_exact | bool | lower }}
+lifecycleScripts = {{ bun_lifecycle_scripts | bool | lower }}
+frozenLockfile = {{ bun_frozen_lockfile | bool | lower }}
+auto = "{{ bun_auto }}"
+{% if has_text_lockfile and bun_save_text_lockfile %}
+saveTextLockfile = true
+{% endif %}

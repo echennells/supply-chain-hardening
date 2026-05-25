@@ -1,6 +1,26 @@
 ---
 # Bun supply chain hardening
-# Config deployed unconditionally
+# Config deployed unconditionally; saveTextLockfile is tiered (bun 1.2+ only).
+
+- name: Detect installed bun version (empty if not installed)
+  # `bun --version` outputs just the version number ("1.2.0") — no prefix.
+  # If bun isn't installed, empty stdout; template treats that as
+  # "assume modern" since modern bun is the common case when bun is
+  # installed at all. Old bun (pre-1.2) would just silently ignore
+  # the saveTextLockfile key; emitting it isn't harmful, just inert.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      command -v bun >/dev/null 2>&1 || exit 0
+      bun --version 2>/dev/null | head -1
+    executable: /bin/bash
+  register: bun_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Set bun_detected_version fact
+  ansible.builtin.set_fact:
+    bun_detected_version: "{{ bun_version_check.stdout | default('') | trim }}"
 
 - name: Deploy hardened global bunfig.toml
   ansible.builtin.template:

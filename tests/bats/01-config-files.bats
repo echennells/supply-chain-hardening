@@ -145,6 +145,14 @@ load setup
   assert_file_contains "$HOME/.bunfig.toml" "exact = true"
 }
 
+@test "bunfig: frozenLockfile = true (refuse install on lockfile divergence)" {
+  assert_file_contains "$HOME/.bunfig.toml" "frozenLockfile = true"
+}
+
+@test "bunfig: auto = disable (block runtime auto-install foot-gun)" {
+  assert_file_contains "$HOME/.bunfig.toml" 'auto = "disable"'
+}
+
 # cargo
 @test "cargo config exists" {
   assert_file_exists "$HOME/.cargo/config.toml"
