@@ -49,19 +49,30 @@ for distro in "${DISTROS[@]}"; do
 
   echo
   echo "===== run-docker: building image for $distro ($image) ====="
+  # Each distro is best-effort: a build failure on one distro must not
+  # block the others from running. Without this guard, set -e would
+  # abort run-docker.sh on the first failed build (e.g. distro-specific
+  # bootstrap issue) and hide whether the other distros work at all.
+  build_rc=0
   docker build \
     --build-arg BASE_IMAGE="$distro" \
     -t "$image" \
     -f "$MATRIX_DIR/Dockerfile.matrix" \
-    "$REPO_ROOT"
+    "$REPO_ROOT" || build_rc=$?
+
+  if [[ "$build_rc" -ne 0 ]]; then
+    echo "run-docker: $distro BUILD FAILED (rc=$build_rc) — skipping to next distro" >&2
+    distros_with_failures+=("$distro (build rc=$build_rc)")
+    continue
+  fi
 
   echo
   echo "===== run-docker: running $ECOSYSTEM cells on $distro ====="
-  rc=0
+  run_rc=0
   docker run --rm \
     -v "$RESULTS_DIR:/output" \
     -e ECOSYSTEM="$ECOSYSTEM" \
-    "$image" || rc=$?
+    "$image" || run_rc=$?
 
   # Rename results.json to <distro>.json. Container copies to /output/results.json;
   # we move it so the next distro doesn't clobber it.
@@ -70,12 +81,12 @@ for distro in "${DISTROS[@]}"; do
     echo "run-docker: $distro produced $(jq 'length' "$result_file") result rows"
   else
     echo "run-docker: $distro produced no results.json (driver failed inside container)" >&2
-    distros_with_failures+=("$distro")
+    distros_with_failures+=("$distro (no results.json)")
   fi
 
-  if [[ "$rc" -ne 0 ]]; then
-    echo "run-docker: $distro container exited rc=$rc (driver flagged failures)" >&2
-    distros_with_failures+=("$distro")
+  if [[ "$run_rc" -ne 0 ]]; then
+    echo "run-docker: $distro container exited rc=$run_rc (driver flagged failures)" >&2
+    distros_with_failures+=("$distro (driver rc=$run_rc)")
   fi
 done
 

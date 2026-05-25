@@ -45,16 +45,36 @@
 
   tasks:
     # --- Driver prereqs ---
-    # The matrix driver (tests/matrix/run.sh) needs bats to run the test
-    # suite, jq to construct results.json, and yq to read cells.yml /
-    # expected-skips.yml. Ansible is required to run this playbook so it
-    # can't install itself, but everything else the matrix needs at run
-    # time installs here so the host is one-shot ready.
-    - name: Install matrix driver prereqs (bats, jq, yq)
+    # The matrix driver (tests/matrix/run.sh) needs bats, jq, and yq.
+    # bats and jq are in apt across all supported distros. yq is NOT:
+    #   - Ubuntu 22.04 (jammy): no yq package in any component
+    #   - Ubuntu 24.04 (noble) / Debian 12 (bookworm): yq is the kislyuk
+    #     Python wrapper around jq (different from mikefarah's Go binary)
+    # To get a single yq that works everywhere, install kislyuk/yq from
+    # PyPI into a dedicated venv (avoids PEP 668 issues on Debian 12 /
+    # Ubuntu 24.04 where `pip install` to the system python is blocked
+    # by default), then symlink the entrypoint into /usr/local/bin.
+    # Ansible is required to run this playbook so it can't install
+    # itself, but everything else the matrix needs at run time installs
+    # here so the host is one-shot ready.
+    - name: Install matrix driver prereqs from apt (bats, jq, python3-venv)
       ansible.builtin.apt:
-        name: [bats, jq, yq]
+        name: [bats, jq, python3-venv]
         state: present
         update_cache: true
+
+    - name: Install yq via pip in a dedicated venv (cross-distro, PEP 668-safe)
+      ansible.builtin.pip:
+        name: yq
+        virtualenv: /opt/matrix-yq-venv
+        virtualenv_command: python3 -m venv
+
+    - name: Symlink venv yq into /usr/local/bin so it's on PATH
+      ansible.builtin.file:
+        src: /opt/matrix-yq-venv/bin/yq
+        dest: /usr/local/bin/yq
+        state: link
+        force: true
 
     # --- PHP (via Sury) ---
     - name: Install prereqs for adding the Sury PHP repository
