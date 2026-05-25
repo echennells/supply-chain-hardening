@@ -99,10 +99,17 @@
         label: "{{ item.patch }}"
 
     - name: Build composer SHA-256 map (patch -> hex digest)
+      # composer.phar.sha256sum format: "<64-hex>  composer.phar\n". Split
+      # on whitespace and take the first token — same way `sha256sum -c`
+      # parses the file. The previous regex_replace approach failed because
+      # YAML single-quoted strings pass backslashes through literally, so
+      # '\\s' reached Python re as a literal backslash-s pattern instead
+      # of a whitespace metaclass — regex never matched and the value was
+      # set to the full file content, which get_url then rightly rejected.
       ansible.builtin.set_fact:
         composer_sha_map: >-
           {{ composer_sha_map | default({}) | combine({
-            item.item.patch: (item.content | trim | regex_replace('^\\s*([0-9a-fA-F]+).*$', '\\1'))
+            item.item.patch: (item.content.split() | first)
           }) }}
       loop: "{{ composer_checksum_fetch.results }}"
       loop_control:
