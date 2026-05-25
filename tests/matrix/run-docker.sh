@@ -150,7 +150,7 @@ total=$(jq 'length' "$AGGREGATE")
 echo "Total result rows: $total"
 echo
 echo "Per-(distro, ecosystem) row counts:"
-jq -r 'group_by(.distro + "/" + .ecosystem) | map({key: .[0].distro + "/" + .[0].ecosystem, n: length}) | sort_by(.key) | .[] | "  \(.key): \(.n) rows"' "$AGGREGATE"
+jq -r 'group_by(.distro + "/" + .ecosystem) | map({key: (.[0].distro + "/" + .[0].ecosystem), n: length}) | sort_by(.key) | .[] | "  \(.key): \(.n) rows"' "$AGGREGATE"
 
 fails=$(jq '[.[]|select(.resolved=="fail")] | length' "$AGGREGATE")
 if [[ "$fails" -gt 0 ]]; then

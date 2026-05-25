@@ -52,9 +52,14 @@
     # the driver. All three packages are in apt main on every supported
     # distro (Ubuntu 22.04, Ubuntu 24.04, Debian 12). No yq needed —
     # python3 + pyyaml + jq covers everything the driver does.
-    - name: Install matrix driver prereqs (bats, jq, python3-yaml)
+    - name: Install matrix driver prereqs (bats, jq, python3-yaml, python3-pip)
+      # python3-pip is needed by switchers/pip.sh — without it,
+      # `python3 -m pip install` fails with "No module named pip" and
+      # every pip cell's switcher exits nonzero. Was missing in the
+      # original install-versions.yml; matrix runs caught it because all
+      # 4 pip cells × 3 distros uniformly failed at <switcher> step.
       ansible.builtin.apt:
-        name: [bats, jq, python3-yaml]
+        name: [bats, jq, python3-yaml, python3-pip]
         state: present
         update_cache: true
 
