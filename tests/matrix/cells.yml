@@ -110,3 +110,17 @@ yarn:
   # 2 × 2 = 4 cells per distro.
   bats_files:
     - tests/bats/14-yarn-adversarial.bats
+
+# Bundler: ruby axis intentionally degenerate ("system") — each distro
+# ships a different ruby version (Ubuntu 22.04→3.0, Ubuntu 24.04→3.2,
+# Debian 12→3.1), so cross-distro IS the ruby axis. Installing rbenv
+# /ruby-build per cell would multiply the install time significantly
+# for marginal value (role's bundler task is just .bundle/config
+# deployment; version-stable). tool axis is bundler version — "bundled"
+# uses what apt's ruby-bundler provides.
+bundler:
+  lang_versions: ["system"]
+  tool_versions: ["bundled"]
+  # 1 × 1 = 1 cell per distro (smoke test — 3 cells cross-distro).
+  bats_files:
+    - tests/bats/17-bundler-behavioral.bats

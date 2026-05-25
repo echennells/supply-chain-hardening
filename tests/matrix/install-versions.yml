@@ -232,3 +232,23 @@
         - "1.0.30"
         - "1.1.20"
         - "1.2.0"
+
+    # --- Ruby + bundler (system ruby; bundler from apt) ---
+    # Each distro's default ruby covers the ruby-version dimension via
+    # the cross-distro axis. ruby-dev is needed for the fixture's
+    # extconf gem build (17-bundler-behavioral.bats's KNOWN GAP test
+    # auto-skips if the gem fixture isn't built).
+    - name: Install ruby + bundler from apt
+      ansible.builtin.apt:
+        name: [ruby, ruby-dev, ruby-bundler]
+        state: present
+
+    - name: Build ruby-extconf-gem fixture (gives 17-bundler-behavioral KNOWN GAP test something to exercise)
+      ansible.builtin.shell:
+        cmd: cd /opt/test-fixtures/ruby-extconf-gem && gem build test-extconf.gemspec
+        creates: /opt/test-fixtures/ruby-extconf-gem/test-extconf-1.0.0.gem
+        executable: /bin/bash
+      # Fixture path must exist (added by `COPY tests/fixtures` step in
+      # Dockerfile.matrix). If the gemspec is missing this task is a
+      # no-op via creates: — the behavioral test will just skip.
+      failed_when: false
