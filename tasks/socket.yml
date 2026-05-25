@@ -78,12 +78,35 @@
 # PATH level so every npm call (scripts, agents, sudo, package.json
 # lifecycles) is routed through sfw.
 
-- name: Find real npm path (excluding /usr/local/bin to avoid wrapper recursion)
+- name: Find real npm path (symlink-aware, with wrapper-recursion guard)
+  # Previous logic blanket-excluded /usr/local/bin from PATH search and
+  # relied on /usr/bin/npm or ~/.{volta,asdf,nodenv,nvm,fnm}/.../npm being
+  # present. That misses a common sysadmin install pattern: Node tarball
+  # extracted to /opt/node-X/, symlinked into /usr/local/bin/npm.
+  # /opt/node-X/bin isn't in PATH and isn't in our static fallback list,
+  # so npm_real_path comes back empty and the wrapper never deploys.
+  #
+  # Better: check whether /usr/local/bin/npm IS our wrapper (has the
+  # supply-chain-hardening marker the template embeds). If yes, the
+  # original anti-recursion clean-PATH search is correct. If no
+  # (raw binary or symlink), readlink -f resolves through any symlink
+  # chain and gives the canonical path — catches the /opt install case.
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vFx '/usr/local/bin' | tr '\n' ':' | sed 's/:$//')
-      PATH="$CLEAN_PATH" command -v npm 2>/dev/null
+      if [ -f /usr/local/bin/npm ] && grep -q "supply-chain-hardening" /usr/local/bin/npm 2>/dev/null; then
+        # Wrapper already deployed — re-find the real npm to re-render
+        # the wrapper. Same anti-recursion logic as before.
+        CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vFx '/usr/local/bin' | tr '\n' ':' | sed 's/:$//')
+        PATH="$CLEAN_PATH" command -v npm 2>/dev/null
+      elif [ -e /usr/local/bin/npm ]; then
+        # Raw binary or symlink at /usr/local/bin/npm — follow to canonical
+        # path. Handles /opt/node-X/bin/npm via /usr/local/bin/npm symlink.
+        readlink -f /usr/local/bin/npm
+      else
+        # Nothing at /usr/local/bin/npm — fall back to PATH search.
+        command -v npm 2>/dev/null
+      fi
     executable: /bin/bash
   register: npm_real_path
   changed_when: false

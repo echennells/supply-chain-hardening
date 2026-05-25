@@ -52,4 +52,26 @@ else
   fi
 fi
 
-echo "switchers/pip.sh: python=$($PYTHON_BIN --version 2>&1) pip=$reported active"
+# Activate a default uv version so the role's pip→uv wrapper has the
+# uv binary it depends on. The role correctly skips deploying the
+# /usr/local/bin/pip wrapper when uv isn't on PATH (would otherwise
+# recurse into itself), but that means matrix pip cells need SOME uv
+# present to exercise the wrapper end-to-end. Without this, every pip
+# cell silently doesn't get the wrapper and the wrapper-safety bats
+# tests fail. Try newest pinned uv first.
+#
+# uv version itself is matrix-tested separately under the `uv` ecosystem;
+# pip cells just need ANY working uv binary in scope.
+for uv_v in 0.6.0 0.5.7 0.4.30; do
+  if [[ -x "/usr/local/bin/uv-${uv_v}" ]]; then
+    ln -sf "/usr/local/bin/uv-${uv_v}" /usr/local/bin/uv
+    break
+  fi
+done
+
+uv_active=$(command -v uv 2>/dev/null || true)
+if [[ -z "$uv_active" ]]; then
+  echo "switchers/pip.sh: warning — no /usr/local/bin/uv-* found; role's pip wrapper will be skipped" >&2
+fi
+
+echo "switchers/pip.sh: python=$($PYTHON_BIN --version 2>&1) pip=$reported uv=${uv_active:-none} active"
