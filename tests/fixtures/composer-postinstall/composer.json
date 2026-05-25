@@ -1,9 +1,15 @@
 {
   "name": "test/postinstall-trigger",
-  "description": "Fires post-install-cmd via a real (local) require. Tests whether composer script blocking is in effect.",
+  "description": "Fires composer scripts via a real (local) require. Declares post-install-cmd, post-update-cmd, AND post-autoload-dump pointing at the same marker because `composer install` with no composer.lock present transparently routes through `update` ('No composer.lock file present. Updating dependencies to latest…'), which fires post-update-cmd + post-autoload-dump but NOT post-install-cmd. A fixture declaring only post-install-cmd would never fire in that code path — a tautology that passes whether hardening works or not. Declaring all three guarantees the script fires regardless of which composer code path runs.",
   "type": "project",
   "scripts": {
     "post-install-cmd": [
+      "echo 'COMPOSER_SCRIPT_RAN' > /tmp/marker-composer-script"
+    ],
+    "post-update-cmd": [
+      "echo 'COMPOSER_SCRIPT_RAN' > /tmp/marker-composer-script"
+    ],
+    "post-autoload-dump": [
       "echo 'COMPOSER_SCRIPT_RAN' > /tmp/marker-composer-script"
     ]
   },

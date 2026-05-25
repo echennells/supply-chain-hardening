@@ -23,16 +23,21 @@ setup() {
   load_profile
 }
 
-@test "FIXTURE CONTROL: composer-postinstall fixture fires post-install-cmd on a wide-open install" {
-  # Sanity-check the fixture itself. If composer would NOT fire
-  # post-install-cmd against this fixture even with no hardening, then any
-  # "is blocked" test using this fixture is a tautology. Run with env -i +
-  # a clean HOME so neither role env vars nor the role's per-user config
-  # affects the result. The marker SHOULD appear.
+@test "FIXTURE CONTROL: composer-postinstall fixture fires a script hook on a wide-open install" {
+  # Sanity-check the fixture itself. If composer would NOT fire any script
+  # against this fixture even with no hardening, then any "is blocked"
+  # test using this fixture is a tautology. The fixture declares
+  # post-install-cmd, post-update-cmd, AND post-autoload-dump because
+  # `composer install` with no lock transparently routes through update
+  # (firing the latter two, not the former). Run with env -i + a clean
+  # HOME so neither role env vars nor the role's per-user config affects
+  # the result. /usr/local/bin/composer-real bypasses the wrapper too.
+  # The marker SHOULD appear.
+  [ -x /usr/local/bin/composer-real ] || skip "composer-real not present"
   cd /tmp && rm -rf composer-control-test && mkdir composer-control-test && cd composer-control-test
   cp /opt/test-fixtures/composer-postinstall/composer.json .
   env -i HOME=/tmp/composer-control-test PATH=/usr/local/bin:/usr/bin:/bin \
-    composer install --no-interaction 2>/dev/null || true
+    /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
   marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
   rm -rf /tmp/composer-control-test
   rm -f /tmp/marker-composer-script

@@ -1,6 +1,6 @@
 {
   "name": "test/composer-local-dep",
-  "description": "Minimal local dependency for the composer-postinstall fixture. Required because composer install with an empty `require` skips dispatching post-install-cmd entirely — making the test a tautology that passes regardless of hardening.",
+  "description": "Minimal local dependency for the composer-postinstall fixture. Required because composer install/update with an empty `require` skips dispatching most lifecycle events — making the test a tautology that passes regardless of hardening. The sibling fixture also declares all three of post-install-cmd/post-update-cmd/post-autoload-dump for the same reason (composer install without a lock routes through update, firing the latter two, not the first).",
   "version": "1.0.0",
   "type": "library"
 }
