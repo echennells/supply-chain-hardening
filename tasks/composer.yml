@@ -93,13 +93,16 @@
     group: root
     mode: "0644"
 
-# --- /usr/local/bin/composer wrapper ---
+# --- /usr/local/bin/composer wrapper (primary layer) ---
 # Composer has no host-wide config-file or env-var way to disable script
 # execution. The wrapper at the discovered composer path injects
 # --no-scripts and --no-plugins on every invocation. /etc/profile.d/ and
 # /etc/environment also set COMPOSER_SKIP_SCRIPTS=<event,list> as
 # belt-and-suspenders for `php composer.phar` callers that bypass the
-# wrapper but inherit the system env (PAM-loaded shells only).
+# wrapper but inherit the system env (PAM-loaded shells only); the
+# env-var layer also catches composer-real invocations in those shells
+# — by design. Documented bypass for both layers:
+#   COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install
 #
 # Self-update caveat: `composer self-update` overwrites the wrapper.
 # Detection below sees a fresh real binary at the wrap location and

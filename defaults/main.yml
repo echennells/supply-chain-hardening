@@ -112,14 +112,18 @@ composer_audit_block_insecure: true     # Composer >= 2.9 only
 composer_audit_block_abandoned: true    # Composer >= 2.9 only
 composer_allow_plugins: false           # default-deny plugin execution; opt in via project composer.json
 
-# Composer PATH wrapper (default on; the script-blocking mechanism).
+# Composer PATH wrapper (default on; primary script-blocking layer).
 # Composer has no host-wide config/env knob for disabling script execution
 # — COMPOSER_NO_SCRIPTS and "scripts-are-disabled" are made-up names that
 # composer ignores entirely. The wrapper at /usr/local/bin/composer (or
 # /usr/bin/composer on apt-installed hosts) injects --no-scripts and
-# --no-plugins on every invocation. Bypass per-invocation by calling the
-# unwrapped /usr/local/bin/composer-real directly. Set to false to
-# restore the real binary at the wrap location on next apply.
+# --no-plugins on every invocation. Belt-and-suspenders second layer is
+# COMPOSER_SKIP_SCRIPTS=<events> in /etc/environment + /etc/profile.d,
+# which catches composer-real and `php composer.phar` callers in PAM-
+# loaded shells (composer >= 2.9). Documented bypass for both layers:
+# `COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install`. Set
+# this var to false to restore the real binary at the wrap location on
+# next apply (env-var layer remains).
 composer_path_wrapper: true
 
 # podman / container image hardening

@@ -13,11 +13,16 @@
 # injection is safe across all subcommands.
 #
 # Bypass (per-invocation, for users who know what they need):
-#   /usr/local/bin/composer-real install
+#   COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install
+# Both halves are required. Just `composer-real install` alone is still
+# blocked by COMPOSER_SKIP_SCRIPTS in /etc/environment + /etc/profile.d
+# (belt-and-suspenders layer for PAM-loaded shells, intentional). Clearing
+# the env var AND going around the wrapper is the documented bypass.
 #
 # Disable globally:
 #   role var composer_path_wrapper=false (restores the real binary at this
-#   path on next apply).
+#   path on next apply). The env-var layer remains active unless you also
+#   remove the role's /etc/environment + /etc/profile.d entries.
 #
 # Self-update caveat: `composer self-update` writes a new composer.phar
 # to wherever composer is invoked from — overwriting this wrapper. After a

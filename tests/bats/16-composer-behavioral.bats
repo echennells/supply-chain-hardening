@@ -59,18 +59,40 @@ setup() {
   [ "$marker_present" = "no" ]
 }
 
-@test "BYPASS VERIFICATION: composer-real (unwrapped) does run scripts (escape hatch works)" {
-  # The wrapper's documented escape hatch: users who genuinely need
-  # scripts invoke /usr/local/bin/composer-real directly. This test
-  # verifies the escape hatch (a) exists and (b) actually bypasses the
-  # script-blocking. If composer-real is missing OR was somehow also
-  # script-blocked, this test catches it.
+@test "BYPASS VERIFICATION: composer-real + cleared COMPOSER_SKIP_SCRIPTS runs scripts (documented bypass works)" {
+  # The role ships TWO layers of script blocking:
+  #   1. /usr/local/bin/composer wrapper injects --no-scripts --no-plugins
+  #   2. COMPOSER_SKIP_SCRIPTS=<events> in /etc/environment (catches
+  #      `php composer.phar` callers and composer-real callers in
+  #      PAM-loaded shells)
+  # The documented bypass requires going around BOTH: invoke composer-real
+  # AND clear the env var. Just `composer-real install` alone is still
+  # blocked by layer 2 — which is intentional belt-and-suspenders, not a
+  # bug. This test verifies the documented bypass actually works.
   [ -x /usr/local/bin/composer-real ] || skip "composer-real not present (composer_path_wrapper may be false)"
   cd /tmp && rm -rf composer-bypass-test && mkdir composer-bypass-test && cd composer-bypass-test
   cp /opt/test-fixtures/composer-postinstall/composer.json .
-  /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
+  env -i HOME=/tmp/composer-bypass-test PATH=/usr/local/bin:/usr/bin:/bin \
+    /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
   marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
   rm -rf /tmp/composer-bypass-test
   rm -f /tmp/marker-composer-script
   [ "$marker_present" = "yes" ]
+}
+
+@test "LAYERED DEFENSE: composer-real alone (env-var layer still active) is still blocked" {
+  # Counterpart to BYPASS VERIFICATION above. Verifies the belt-and-
+  # suspenders env-var layer actually does what it claims — catches
+  # composer-real invocations that don't explicitly clear the env. If
+  # someone removed COMPOSER_SKIP_SCRIPTS from /etc/environment or
+  # /etc/profile.d/, this test would flip from blocked→not-blocked and
+  # catch the regression.
+  [ -x /usr/local/bin/composer-real ] || skip "composer-real not present"
+  cd /tmp && rm -rf composer-real-test && mkdir composer-real-test && cd composer-real-test
+  cp /opt/test-fixtures/composer-postinstall/composer.json .
+  /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
+  marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
+  rm -rf /tmp/composer-real-test
+  rm -f /tmp/marker-composer-script
+  [ "$marker_present" = "no" ]
 }
