@@ -15,12 +15,16 @@
 # side-by-side PHP on Debian/Ubuntu and is used in production by enough
 # of the PHP world that it's the only practical choice for a matrix host.
 #
-# Composer phars are downloaded from getcomposer.org with SHA-384 checksums
-# fetched from getcomposer.org itself (composer.phar.sha384sum). Pinning
+# Composer phars are downloaded from getcomposer.org with SHA-256 checksums
+# fetched from getcomposer.org itself (composer.phar.sha256sum). Pinning
 # patch versions per minor line gives reproducibility — running the matrix
 # in May 2026 vs August 2026 tests the same composer binary. To roll
 # forward, bump the `patch` field for any minor below (the checksum is
 # refetched automatically; no maintenance burden in this playbook).
+# Note: composer publishes .sha256sum, not .sha384sum — the latter URL
+# returns 404 for every version. SHA-256 is fine here: the threat model
+# is binary tampering on getcomposer.org (which serves over HTTPS+HSTS),
+# and SHA-256 collisions remain computationally infeasible.
 
 - name: Install matrix PHP + composer versions
   hosts: all
@@ -79,22 +83,22 @@
         loop_var: v
 
     # --- Composer (versioned phars with self-verifying checksums) ---
-    - name: Fetch official SHA-384 for each pinned composer patch from getcomposer.org
-      # composer.phar.sha384sum content format: hex digest possibly followed
-      # by " composer.phar". Capture only the hex digest. This avoids
-      # maintaining checksums in this playbook — if getcomposer.org is
-      # compromised, the URL fetch returning a tampered phar AND a matching
-      # tampered checksum is the only failure mode the role can't catch on
-      # its own (same root of trust as the upstream installer).
+    - name: Fetch official SHA-256 for each pinned composer patch from getcomposer.org
+      # composer.phar.sha256sum content format: hex digest followed by two
+      # spaces and "composer.phar". Capture only the hex digest. This
+      # avoids maintaining checksums in this playbook — if getcomposer.org
+      # is compromised, the URL fetch returning a tampered phar AND a
+      # matching tampered checksum is the only failure mode the role can't
+      # catch on its own (same root of trust as the upstream installer).
       ansible.builtin.uri:
-        url: "https://getcomposer.org/download/{{ item.patch }}/composer.phar.sha384sum"
+        url: "https://getcomposer.org/download/{{ item.patch }}/composer.phar.sha256sum"
         return_content: true
       register: composer_checksum_fetch
       loop: "{{ matrix_composer_versions }}"
       loop_control:
         label: "{{ item.patch }}"
 
-    - name: Build composer SHA-384 map (patch -> hex digest)
+    - name: Build composer SHA-256 map (patch -> hex digest)
       ansible.builtin.set_fact:
         composer_sha_map: >-
           {{ composer_sha_map | default({}) | combine({
@@ -108,7 +112,7 @@
       ansible.builtin.get_url:
         url: "https://getcomposer.org/download/{{ item.patch }}/composer.phar"
         dest: "/usr/local/bin/composer-{{ item.minor }}.phar"
-        checksum: "sha384:{{ composer_sha_map[item.patch] }}"
+        checksum: "sha256:{{ composer_sha_map[item.patch] }}"
         mode: "0755"
       loop: "{{ matrix_composer_versions }}"
       loop_control:
