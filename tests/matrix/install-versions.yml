@@ -268,8 +268,15 @@
         state: present
 
     - name: Download Apache Maven 3.9.9 tarball
+      # ALWAYS use archive.apache.org, NEVER dlcdn.apache.org for pinned
+      # versions. dlcdn is Apache's "current release" CDN — it only hosts
+      # the latest patch and rotates older ones off as new patches ship.
+      # archive.apache.org is the canonical permanent home for every
+      # released Apache artifact. Previous version of this task used
+      # dlcdn and 404'd the entire matrix every distro the moment a new
+      # maven patch shipped upstream.
       ansible.builtin.unarchive:
-        src: "https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz"
+        src: "https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz"
         dest: /opt
         remote_src: true
         creates: /opt/apache-maven-3.9.9
