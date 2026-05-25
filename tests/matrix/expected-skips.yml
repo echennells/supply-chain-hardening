@@ -1,0 +1,53 @@
+---
+# Known version-specific test behaviors that should NOT fail the matrix.
+#
+# Format: top-level key is ecosystem. Each entry is:
+#   - test:    the exact bats test name (the string after "ok N" / "not ok N")
+#     when:    Jinja-like dict of conditions { lang: "8.1", tool: "2.7" } —
+#              entry matches when ALL kv-pairs match the cell. Wildcards via
+#              comma-separated values, e.g. tool: "1.10,2.7,2.8".
+#     reason:  one-line explanation. Surfaced in the matrix JSON output.
+#     expect:  "skip" (test should self-skip; pass if it does) or
+#              "fail"  (test is expected to assert-fail on this cell;
+#                       pass if it returns "not ok").
+#
+# The driver compares each (cell, test, status) against this list:
+#   - test pass:          always counted as success
+#   - test "not ok":      success if matched entry says expect=fail; else FAIL
+#   - test skip:          success if matched entry says expect=skip; else
+#                         counted as success too (skip is rarely a failure
+#                         signal — but the matrix surfaces it in output)
+#
+# Initial entries (seeded from the wrapper investigation):
+
+composer:
+  - test: "LAYERED DEFENSE: composer-real alone (env-var layer still active) is still blocked"
+    when: { tool: "1.10,2.7,2.8" }
+    expect: fail
+    reason: >-
+      COMPOSER_SKIP_SCRIPTS env var was added in composer 2.9.0. On older
+      composer the env-var layer is silently a no-op, so composer-real
+      install (without the wrapper) runs scripts even though the env var
+      is set. The wrapper layer still blocks `composer install` — only the
+      belt-and-suspenders layer degrades.
+
+  - test: "Composer audit.block-insecure is enabled (Composer >=2.9 tier)"
+    when: { tool: "1.10,2.7,2.8" }
+    expect: fail
+    reason: >-
+      audit.block-insecure config key was added in composer 2.9.0. The role's
+      template tier logic correctly omits it on older composer, so the
+      asserted-present test fails. Tier-rendering test covers this case
+      synthetically; this entry handles the real binary.
+
+  - test: "Composer audit.block-abandoned is enabled (Composer >=2.9 tier)"
+    when: { tool: "1.10,2.7,2.8" }
+    expect: fail
+    reason: Same as block-insecure — config key requires composer 2.9.0+.
+
+  - test: "Composer audit.abandoned defaults to fail (Composer >=2.7; test env runs 2.9+)"
+    when: { tool: "1.10" }
+    expect: fail
+    reason: >-
+      audit.abandoned config key was added in composer 2.7.0. On composer 1.x
+      the role's template omits the entire audit block, so the assertion fails.

@@ -1,0 +1,115 @@
+---
+# Install all PHP + composer versions side-by-side on the matrix host.
+#
+# Idempotent: safe to re-run. Each version is installed to a deterministic
+# path so the per-cell switcher can pick the right one without ambiguity.
+#
+# Layout after a successful run:
+#   /usr/bin/php8.1, /usr/bin/php8.2, /usr/bin/php8.3      (from Sury)
+#   /usr/local/bin/composer-1.10.phar                       (pinned patch)
+#   /usr/local/bin/composer-2.7.phar
+#   /usr/local/bin/composer-2.8.phar
+#   /usr/local/bin/composer-2.9.phar
+#
+# Sury repo (https://packages.sury.org/php/) is the canonical source for
+# side-by-side PHP on Debian/Ubuntu and is used in production by enough
+# of the PHP world that it's the only practical choice for a matrix host.
+#
+# Composer phars are downloaded from getcomposer.org with SHA-384 checksums
+# fetched from getcomposer.org itself (composer.phar.sha384sum). Pinning
+# patch versions per minor line gives reproducibility — running the matrix
+# in May 2026 vs August 2026 tests the same composer binary. To roll
+# forward, bump the `patch` field for any minor below (the checksum is
+# refetched automatically; no maintenance burden in this playbook).
+
+- name: Install matrix PHP + composer versions
+  hosts: all
+  become: true
+  vars:
+    matrix_php_versions: ["8.1", "8.2", "8.3"]
+    matrix_composer_versions:
+      # Last 1.x release line. 1.10.27 is the final 1.x security release
+      # per composer's release notes (1.x EOL October 2022, security-only
+      # patches since).
+      - { minor: "1.10", patch: "1.10.27" }
+      # Last 2.7.x. Bump if composer publishes a newer 2.7 patch.
+      - { minor: "2.7", patch: "2.7.9" }
+      # Last 2.8.x. Bump if composer publishes a newer 2.8 patch.
+      - { minor: "2.8", patch: "2.8.12" }
+      # Latest stable at time of writing. Bump as composer releases.
+      - { minor: "2.9", patch: "2.9.8" }
+
+  tasks:
+    # --- PHP (via Sury) ---
+    - name: Install prereqs for adding the Sury PHP repository
+      ansible.builtin.apt:
+        name: [ca-certificates, apt-transport-https, lsb-release, gnupg, curl, software-properties-common]
+        state: present
+        update_cache: true
+
+    - name: Add Sury PHP repository signing key
+      ansible.builtin.get_url:
+        url: https://packages.sury.org/php/apt.gpg
+        dest: /usr/share/keyrings/sury-php.gpg
+        mode: "0644"
+
+    - name: Add Sury PHP apt source
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/sury-php.list
+        mode: "0644"
+        content: |
+          deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ {{ ansible_distribution_release }} main
+
+    - name: Install requested PHP versions side-by-side
+      # The role uses composer for path resolution, not PHP — but composer
+      # invocations need php-cli + the common ext set composer relies on
+      # (mbstring for unicode, xml for installed.json parse, zip for
+      # downloads). Without these, composer install errors before any
+      # script-dispatch decision is reached.
+      ansible.builtin.apt:
+        name:
+          - "php{{ v }}-cli"
+          - "php{{ v }}-mbstring"
+          - "php{{ v }}-xml"
+          - "php{{ v }}-zip"
+        state: present
+        update_cache: true
+      loop: "{{ matrix_php_versions }}"
+      loop_control:
+        loop_var: v
+
+    # --- Composer (versioned phars with self-verifying checksums) ---
+    - name: Fetch official SHA-384 for each pinned composer patch from getcomposer.org
+      # composer.phar.sha384sum content format: hex digest possibly followed
+      # by " composer.phar". Capture only the hex digest. This avoids
+      # maintaining checksums in this playbook — if getcomposer.org is
+      # compromised, the URL fetch returning a tampered phar AND a matching
+      # tampered checksum is the only failure mode the role can't catch on
+      # its own (same root of trust as the upstream installer).
+      ansible.builtin.uri:
+        url: "https://getcomposer.org/download/{{ item.patch }}/composer.phar.sha384sum"
+        return_content: true
+      register: composer_checksum_fetch
+      loop: "{{ matrix_composer_versions }}"
+      loop_control:
+        label: "{{ item.patch }}"
+
+    - name: Build composer SHA-384 map (patch -> hex digest)
+      ansible.builtin.set_fact:
+        composer_sha_map: >-
+          {{ composer_sha_map | default({}) | combine({
+            item.item.patch: (item.content | trim | regex_replace('^\\s*([0-9a-fA-F]+).*$', '\\1'))
+          }) }}
+      loop: "{{ composer_checksum_fetch.results }}"
+      loop_control:
+        label: "{{ item.item.patch }}"
+
+    - name: Download composer phars to versioned paths (checksum-verified)
+      ansible.builtin.get_url:
+        url: "https://getcomposer.org/download/{{ item.patch }}/composer.phar"
+        dest: "/usr/local/bin/composer-{{ item.minor }}.phar"
+        checksum: "sha384:{{ composer_sha_map[item.patch] }}"
+        mode: "0755"
+      loop: "{{ matrix_composer_versions }}"
+      loop_control:
+        label: "{{ item.minor }} ({{ item.patch }})"

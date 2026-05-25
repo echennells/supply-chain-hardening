@@ -1,0 +1,23 @@
+---
+# Cross-version test matrix declarations.
+#
+# Format: top-level keys are ecosystem names. Each ecosystem defines:
+#   lang_versions:  list of "language" versions to install (e.g. PHP, Node)
+#   tool_versions:  list of "tool" versions to install (e.g. composer, npm)
+#   cells:          list of {lang, tool} pairs to actually test
+#                   (cross-product if omitted; explicit if you want a subset)
+#   bats_file:      bats file(s) to run for this ecosystem's tests
+#
+# To add an ecosystem (e.g. npm × node): add a new top-level entry, drop a
+# matching switcher script at switchers/<ecosystem>.sh, and add install
+# logic to install-versions.yml. The driver (run.sh) takes an ecosystem
+# name and walks its cells.
+
+composer:
+  lang_versions: ["8.1", "8.2", "8.3"]
+  tool_versions: ["1.10", "2.7", "2.8", "2.9"]
+  # No explicit `cells:` block → full cross-product (3 × 4 = 12 cells).
+  bats_files:
+    - tests/bats/11-composer-adversarial.bats
+    - tests/bats/16-composer-behavioral.bats
+    - tests/bats/28-composer-tier-rendering.bats
