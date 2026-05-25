@@ -1,82 +1,168 @@
 ---
+# IMPORTANT — every include below uses the `apply: tags:` pattern, not just
+# bare `tags:` on the include itself. Reason: `include_tasks` is DYNAMIC,
+# which means tags on the include statement apply ONLY to the include
+# statement itself — NOT to the tasks inside the included file. With bare
+# `tags: [composer]` on the include, `ansible-playbook --tags composer`
+# would fire the include statement but then filter every included task out
+# (none have a `composer` tag, so they don't match the filter). The whole
+# role becomes a no-op under any `--tags` invocation.
+#
+# `apply: tags: [composer]` propagates the tags to every task inside the
+# included file (Ansible applies them as if each task had been written
+# with that tag). The outer `tags: [composer]` is still needed so the
+# include statement itself responds to the filter — without it, the
+# include runs unconditionally even when the user wanted only composer.
+#
+# Both layers are required. See:
+#   https://docs.ansible.com/ansible/latest/user_guide/playbooks_tags.html#adding-tags-to-includes
+#
+# This was a latent role bug — any user running `ansible-playbook site.yml
+# --tags <ecosystem>` was silently getting nothing applied. Surfaced by
+# the matrix's per-cell tag-scoped apply optimization (commit 1107963):
+# every cell ran the include but skipped every task inside, so wrappers
+# weren't deployed and config.json wasn't rendered, which made every
+# behavioral test fail or pass tautologically. Without the matrix this
+# would have stayed invisible.
+
 - name: Pre-flight input validation and conflict detection
-  ansible.builtin.include_tasks: preflight.yml
+  ansible.builtin.include_tasks:
+    file: preflight.yml
+    apply:
+      tags: always
   tags: always
 
 - name: Include npm hardening
-  ansible.builtin.include_tasks: npm.yml
+  ansible.builtin.include_tasks:
+    file: npm.yml
+    apply:
+      tags: [npm]
   tags: [npm]
 
 - name: Include pnpm hardening
-  ansible.builtin.include_tasks: pnpm.yml
+  ansible.builtin.include_tasks:
+    file: pnpm.yml
+    apply:
+      tags: [pnpm]
   tags: [pnpm]
 
 - name: Include yarn hardening
-  ansible.builtin.include_tasks: yarn.yml
+  ansible.builtin.include_tasks:
+    file: yarn.yml
+    apply:
+      tags: [yarn]
   tags: [yarn]
 
 - name: Include bun hardening
-  ansible.builtin.include_tasks: bun.yml
+  ansible.builtin.include_tasks:
+    file: bun.yml
+    apply:
+      tags: [bun]
   tags: [bun]
 
 - name: Include pip/python hardening
-  ansible.builtin.include_tasks: pip.yml
+  ansible.builtin.include_tasks:
+    file: pip.yml
+    apply:
+      tags: [pip, python]
   tags: [pip, python]
 
 - name: Include uv hardening
-  ansible.builtin.include_tasks: uv.yml
+  ansible.builtin.include_tasks:
+    file: uv.yml
+    apply:
+      tags: [uv, python]
   tags: [uv, python]
 
 - name: Include deno hardening
-  ansible.builtin.include_tasks: deno.yml
+  ansible.builtin.include_tasks:
+    file: deno.yml
+    apply:
+      tags: [deno]
   tags: [deno]
 
 - name: Include cargo/rust hardening
-  ansible.builtin.include_tasks: cargo.yml
+  ansible.builtin.include_tasks:
+    file: cargo.yml
+    apply:
+      tags: [cargo, rust]
   tags: [cargo, rust]
 
 - name: Include go hardening
-  ansible.builtin.include_tasks: go.yml
+  ansible.builtin.include_tasks:
+    file: go.yml
+    apply:
+      tags: [go]
   tags: [go]
 
 - name: Include composer/PHP hardening
-  ansible.builtin.include_tasks: composer.yml
+  ansible.builtin.include_tasks:
+    file: composer.yml
+    apply:
+      tags: [composer, php]
   tags: [composer, php]
 
 - name: Include bundler/Ruby hardening
-  ansible.builtin.include_tasks: bundler.yml
+  ansible.builtin.include_tasks:
+    file: bundler.yml
+    apply:
+      tags: [bundler, ruby]
   tags: [bundler, ruby]
 
 - name: Include Maven hardening
-  ansible.builtin.include_tasks: maven.yml
+  ansible.builtin.include_tasks:
+    file: maven.yml
+    apply:
+      tags: [maven, java]
   tags: [maven, java]
 
 - name: Include Gradle hardening
-  ansible.builtin.include_tasks: gradle.yml
+  ansible.builtin.include_tasks:
+    file: gradle.yml
+    apply:
+      tags: [gradle, java]
   tags: [gradle, java]
 
 - name: Include NuGet/.NET hardening
-  ansible.builtin.include_tasks: nuget.yml
+  ansible.builtin.include_tasks:
+    file: nuget.yml
+    apply:
+      tags: [nuget, dotnet]
   tags: [nuget, dotnet]
 
 - name: Include podman/container hardening
-  ansible.builtin.include_tasks: podman.yml
+  ansible.builtin.include_tasks:
+    file: podman.yml
+    apply:
+      tags: [podman, container]
   when: podman_enabled | bool
   tags: [podman, container]
 
 - name: Include npq pre-install auditing
-  ansible.builtin.include_tasks: npq.yml
+  ansible.builtin.include_tasks:
+    file: npq.yml
+    apply:
+      tags: [npq, npm]
   tags: [npq, npm]
 
 - name: Include socket firewall
-  ansible.builtin.include_tasks: socket.yml
+  ansible.builtin.include_tasks:
+    file: socket.yml
+    apply:
+      tags: [socket]
   when: socket_firewall_install | bool
   tags: [socket]
 
 - name: Include GitHub Actions hardening tools
-  ansible.builtin.include_tasks: github.yml
+  ansible.builtin.include_tasks:
+    file: github.yml
+    apply:
+      tags: [github, ci]
   tags: [github, ci]
 
 - name: Include shell environment hardening
-  ansible.builtin.include_tasks: shell_env.yml
+  ansible.builtin.include_tasks:
+    file: shell_env.yml
+    apply:
+      tags: [shell]
   tags: [shell]
