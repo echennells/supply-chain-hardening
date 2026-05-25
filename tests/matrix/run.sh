@@ -20,6 +20,10 @@
 
 set -euo pipefail
 
+# Surface set -e aborts with a line number — debugging silent failures
+# inside the loop body is impossible without this.
+trap 'echo "matrix: aborted at line $LINENO (exit $?)" >&2' ERR
+
 ECOSYSTEM="${1:-composer}"
 MATRIX_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$MATRIX_DIR/../.." && pwd)"
@@ -27,6 +31,14 @@ CELLS_FILE="$MATRIX_DIR/cells.yml"
 SKIPS_FILE="$MATRIX_DIR/expected-skips.yml"
 SWITCHER="$MATRIX_DIR/switchers/${ECOSYSTEM}.sh"
 RESULTS="$MATRIX_DIR/results.json"
+
+# Generated at startup from cells.yml / expected-skips.yml. All downstream
+# queries use jq against these JSON files rather than yq against YAML —
+# yq comes in two incompatible flavors (mikefarah/yq Go binary vs
+# kislyuk/yq Python wrapper) with different CLI flags; jq has one syntax.
+CELLS_JSON="${TMPDIR:-/tmp}/matrix-cells-$$.json"
+SKIPS_JSON="${TMPDIR:-/tmp}/matrix-skips-$$.json"
+trap 'rm -f "$CELLS_JSON" "$SKIPS_JSON"' EXIT
 
 # --- Sanity / preflight ---
 
@@ -40,11 +52,32 @@ done
 [[ -f "$SKIPS_FILE" ]]   || { echo "matrix: $SKIPS_FILE not found" >&2; exit 2; }
 [[ -x "$SWITCHER" ]]     || { echo "matrix: $SWITCHER not found or not executable" >&2; exit 2; }
 
-# --- Pull cell list (cross-product of lang × tool) and bats files ---
+# --- yq flavor abstraction: convert YAML to JSON, then use jq downstream ---
+#
+# mikefarah/yq (Go, distributed via snap and many distro packages):
+#   yq -o=json '.' file.yaml
+# kislyuk/yq (Python, what `apt install yq` gives on Debian/Ubuntu):
+#   yq . file.yaml      (default output is JSON since it pipes through jq)
+# Try the mikefarah syntax first; fall back to kislyuk. Either produces
+# the same JSON, which jq then handles uniformly with --arg.
+yq_to_json() {
+  local in="$1" out="$2"
+  if yq -o=json '.' "$in" > "$out" 2>/dev/null; then return 0; fi
+  if yq . "$in" > "$out" 2>/dev/null; then return 0; fi
+  return 1
+}
 
-lang_versions=($(yq -r ".${ECOSYSTEM}.lang_versions[]" "$CELLS_FILE"))
-tool_versions=($(yq -r ".${ECOSYSTEM}.tool_versions[]" "$CELLS_FILE"))
-bats_files=($(yq -r ".${ECOSYSTEM}.bats_files[]" "$CELLS_FILE"))
+yq_to_json "$CELLS_FILE" "$CELLS_JSON" \
+  || { echo "matrix: yq failed to convert $CELLS_FILE — neither mikefarah nor kislyuk syntax worked" >&2; exit 2; }
+yq_to_json "$SKIPS_FILE" "$SKIPS_JSON" \
+  || { echo "matrix: yq failed to convert $SKIPS_FILE — neither mikefarah nor kislyuk syntax worked" >&2; exit 2; }
+
+# --- Pull cell list (cross-product of lang × tool) and bats files ---
+# All-jq from here on. --arg is jq syntax (always present, never disputed).
+
+lang_versions=($(jq -r ".${ECOSYSTEM}.lang_versions[]" "$CELLS_JSON"))
+tool_versions=($(jq -r ".${ECOSYSTEM}.tool_versions[]" "$CELLS_JSON"))
+bats_files=($(jq -r ".${ECOSYSTEM}.bats_files[]" "$CELLS_JSON"))
 
 [[ "${#lang_versions[@]}" -gt 0 ]] || { echo "matrix: no lang_versions for $ECOSYSTEM in $CELLS_FILE" >&2; exit 2; }
 [[ "${#tool_versions[@]}" -gt 0 ]] || { echo "matrix: no tool_versions for $ECOSYSTEM in $CELLS_FILE" >&2; exit 2; }
@@ -54,17 +87,21 @@ bats_files=($(yq -r ".${ECOSYSTEM}.bats_files[]" "$CELLS_FILE"))
 
 # Look up the expected-skip status for a given test in a given cell.
 # Echoes "skip" or "fail" if matched, empty if no match. Wildcard semantics:
-# entries with comma-separated values match any one of them.
+# entries with comma-separated values match any one of them. The `|| true`
+# at the end ensures the function returns 0 even when jq finds no match —
+# without it, set -e + pipefail would propagate a non-zero exit through
+# `$(lookup_expected ...)` and the silent-failure mode from this commit
+# would re-appear.
 lookup_expected() {
   local test_name="$1" lang="$2" tool="$3"
-  yq -r --arg eco "$ECOSYSTEM" --arg t "$test_name" --arg l "$lang" --arg tl "$tool" '
+  jq -r --arg eco "$ECOSYSTEM" --arg t "$test_name" --arg l "$lang" --arg tl "$tool" '
     .[$eco] // [] |
     .[] | select(.test == $t) |
     select(
       ((.when.lang // "*") | split(",") | any(. == "*" or . == $l)) and
       ((.when.tool // "*") | split(",") | any(. == "*" or . == $tl))
     ) | .expect
-  ' "$SKIPS_FILE" | head -1
+  ' "$SKIPS_JSON" 2>/dev/null | head -1 || true
 }
 
 # Parse one bats file's TAP output. Emits TSV: status<TAB>test_name<TAB>reason.
@@ -184,6 +221,35 @@ printf "  expected-fail:   %d\n" "$expected_fails"
 printf "  expected-skip:   %d\n" "$expected_skips"
 printf "  skip (other):    %d\n" "$plain_skips"
 printf "  UNEXPECTED FAIL: %d\n" "$fails"
+
+# Sanity check: did every cell produce at least one result? A cell with
+# zero rows means switcher / role-apply / bats output parsing all silently
+# returned nothing — infrastructure failure, NOT clean green. Without this
+# guard, a script that bails inside the loop body (yq flag rejection, etc.)
+# produces an empty results.json and exits 0, which looks identical to a
+# real pass from CI's perspective.
+echo
+echo "===== per-cell row counts ====="
+empty_cells=0
+for lang in "${lang_versions[@]}"; do
+  for tool in "${tool_versions[@]}"; do
+    n=$(jq --arg l "$lang" --arg t "$tool" \
+        '[.[]|select(.lang==$l and .tool==$t)] | length' "$RESULTS")
+    if [[ "$n" -eq 0 ]]; then
+      printf "  %-6s %-6s  EMPTY (cell produced no results — infrastructure failure)\n" "$lang" "$tool"
+      empty_cells=$(( empty_cells + 1 ))
+    else
+      printf "  %-6s %-6s  %d rows\n" "$lang" "$tool" "$n"
+    fi
+  done
+done
+
+if [[ "$empty_cells" -gt 0 ]]; then
+  echo
+  echo "matrix: $empty_cells cell(s) produced zero results — driver-level failure, not test failures" >&2
+  echo "matrix: results.json kept at $RESULTS for debugging" >&2
+  exit 2
+fi
 
 if [[ "$fails" -gt 0 ]]; then
   echo
