@@ -18,8 +18,12 @@ load setup
 @test "maven: settings.xml forces HTTPS-only central mirror" {
   command -v mvn >/dev/null 2>&1 || skip "mvn not installed"
   assert_file_contains "$HOME/.m2/settings.xml" "https://repo.maven.apache.org/maven2"
-  # Belt-and-suspenders: no http:// (non-https) repository URL allowed
-  ! grep -qE "http://[^/]" "$HOME/.m2/settings.xml"
+  # Belt-and-suspenders: no <url>http://...</url> repository URL allowed.
+  # Scoping to <url> tags only (not bare http://) because the file's
+  # XML namespace declarations (xmlns, xsi:schemaLocation) contain
+  # http:// URIs by W3C convention — those are identifiers, not fetched,
+  # and matching them was the previous regex's bug.
+  ! grep -qE "<url>[^<]*http://" "$HOME/.m2/settings.xml"
 }
 
 @test "maven: settings.xml enforces strict checksum policy" {

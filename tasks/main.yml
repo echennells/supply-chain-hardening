@@ -68,11 +68,16 @@
   tags: [pip, python]
 
 - name: Include uv hardening
+  # NOTE: pip tag is intentional. uv.yml deploys the pip→uv path wrapper
+  # at /usr/local/bin/pip and /usr/local/bin/pip3. Without `pip` in the
+  # tag list, `--tags pip` would deploy /etc/pip.conf but not the wrapper,
+  # leaving pip-the-binary unhardened. Production users following
+  # --tags pip would get partial hardening with no error signal.
   ansible.builtin.include_tasks:
     file: uv.yml
     apply:
-      tags: [uv, python]
-  tags: [uv, python]
+      tags: [uv, python, pip]
+  tags: [uv, python, pip]
 
 - name: Include deno hardening
   ansible.builtin.include_tasks:
@@ -146,12 +151,19 @@
   tags: [npq, npm]
 
 - name: Include socket firewall
+  # NOTE: npm tag is intentional. socket.yml installs sfw (Socket
+  # Firewall) AND deploys the npm PATH wrapper at /usr/local/bin/npm
+  # that routes registry-fetching subcommands through sfw. The npm
+  # wrapper is the role's marquee npm protection — without `npm` in
+  # the tag list, `--tags npm` would deploy ~/.npmrc and /etc/npmrc
+  # but never install the wrapper, leaving the documented npm
+  # protection partially deployed.
   ansible.builtin.include_tasks:
     file: socket.yml
     apply:
-      tags: [socket]
+      tags: [socket, npm]
   when: socket_firewall_install | bool
-  tags: [socket]
+  tags: [socket, npm]
 
 - name: Include GitHub Actions hardening tools
   ansible.builtin.include_tasks:
@@ -161,8 +173,19 @@
   tags: [github, ci]
 
 - name: Include shell environment hardening
+  # NOTE: `always` tag is intentional. shell_env.yml deploys
+  # /etc/profile.d/supply-chain-hardening.sh and /etc/environment with
+  # env vars for every major ecosystem (NPM_CONFIG_*, PYTHONDONTWRITEBYTECODE,
+  # PIP_DISABLE_*, UV_*, GO*, COMPOSER_SKIP_SCRIPTS, etc.). These are
+  # baseline hardening that applies regardless of which ecosystem is
+  # being scoped via --tags. The COMPOSER_SKIP_SCRIPTS env var is the
+  # "belt-and-suspenders backup layer" that catches `php composer.phar`
+  # callers bypassing the wrapper — under the previous `tags: [shell]`,
+  # --tags composer deployed the wrapper but not the env-var backup,
+  # silently breaking the documented layered defense. Use --skip-tags
+  # always to opt out explicitly.
   ansible.builtin.include_tasks:
     file: shell_env.yml
     apply:
-      tags: [shell]
-  tags: [shell]
+      tags: always
+  tags: always
