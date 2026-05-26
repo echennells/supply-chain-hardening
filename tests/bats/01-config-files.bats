@@ -24,6 +24,20 @@ load setup
   assert_file_contains "$HOME/.config/uv/uv.toml" "exclude-newer"
 }
 
+@test "uv.toml: exclude-newer is RFC 3339 (NOT a relative duration like '48 hours')" {
+  # uv requires absolute RFC 3339 datetimes here. Relative strings ("48 hours",
+  # "2d") fail uv's TOML parser and break every uv invocation. Regression
+  # catcher for the bug introduced + fixed in the uv exclude-newer commit.
+  # Match "YYYY-MM-DDTHH:MM:SSZ" format on the exclude-newer line.
+  grep -qE '^exclude-newer = "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"$' "$HOME/.config/uv/uv.toml"
+  # Explicit: the file must NOT contain the broken "N hours" pattern
+  ! grep -qE '"[0-9]+ hours?"' "$HOME/.config/uv/uv.toml"
+}
+
+@test "uv.toml: parses as valid TOML (regression catcher for syntax errors)" {
+  python3 -c "import tomllib; tomllib.loads(open('$HOME/.config/uv/uv.toml').read())"
+}
+
 @test "uv.toml: index-strategy first-index (anti-dep-confusion)" {
   assert_file_contains "$HOME/.config/uv/uv.toml" 'index-strategy = "first-index"'
 }

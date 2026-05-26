@@ -20,7 +20,15 @@ release_age_hours: 48
 npm_minimum_release_age_days: "{{ (release_age_hours | int / 24) | int }}"     # 2 days
 pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" # 2880 min
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
-uv_exclude_newer: "{{ release_age_hours | int }} hours"                        # "48 hours"
+# uv requires an absolute RFC 3339 datetime here — "48 hours" or similar
+# relative-duration strings fail with "failed to parse year in date '48 hours'"
+# and break every uv invocation. The cutoff is computed at apply time from
+# release_age_hours by subtracting that many hours from the host's current
+# time. Note: this freezes the cutoff at apply time — re-apply the role to
+# advance it. Without a re-apply, packages published after the original apply
+# time still fall outside the cutoff window. For "always exactly N hours back"
+# semantics, schedule periodic role re-applies.
+uv_exclude_newer: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime((ansible_date_time.epoch | int) - (release_age_hours | int * 3600), true) }}"
 yarn_minimal_age_gate: "{{ (release_age_hours | int / 24) | int }}d"           # "2d"
 deno_minimum_dependency_age: "P{{ (release_age_hours | int / 24) | int }}D"    # "P2D"
 

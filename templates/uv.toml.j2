@@ -21,7 +21,10 @@ allow-insecure-host = [
 allow-insecure-host = []
 {% endif %}
 
-# Reject packages published less than {{ release_age_hours }} hours ago.
+# Reject packages published after {{ uv_exclude_newer }}
+# (release_age_hours = {{ release_age_hours }} subtracted from apply-time clock).
+# uv's exclude-newer requires an absolute RFC 3339 timestamp — NOT a relative
+# duration. The cutoff is frozen at apply time; re-apply the role to advance.
 exclude-newer = "{{ uv_exclude_newer }}"
 
 {% if uv_no_build %}
