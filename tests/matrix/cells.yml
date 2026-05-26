@@ -26,12 +26,15 @@ composer:
 # ~/.config/pnpm/config.yaml (YAML). The role deploys both files but each
 # version only honors one of them — this matrix proves both code paths
 # work against the real binaries instead of just template assumptions.
-# Node 20 and 22 are the current LTS line; pnpm 10 and 11 both work on
-# either Node major.
+# Node 20 and 22 are the current LTS line; pnpm 10 works on both, pnpm 11
+# requires Node >= 22.13 (uses node:sqlite). The (20, 11) combination is
+# physically invalid per pnpm 11's engine constraint — excluded below.
 pnpm:
   lang_versions: ["20", "22"]
   tool_versions: ["10", "11"]
-  # 2 × 2 = 4 cells.
+  # 2 × 2 = 4 nominal cells, minus 1 excluded = 3 cells.
+  excludes:
+    - { lang: "20", tool: "11" }  # pnpm 11 requires Node >= 22.13
   bats_files:
     - tests/bats/13-pnpm-adversarial.bats
 

@@ -147,7 +147,7 @@ For each (php, composer) pair, the driver:
 
 ## Adding a new ecosystem (e.g. npm × node)
 
-1. Add a top-level entry to `cells.yml` with `lang_versions`, `tool_versions`, and `bats_files`
+1. Add a top-level entry to `cells.yml` with `lang_versions`, `tool_versions`, and `bats_files`. Optional `excludes:` list filters specific `(lang, tool)` pairs out of the cross-product — useful for combinations that aren't physically valid (e.g., pnpm 11 requires Node ≥ 22.13 by engine constraint, so pnpm has `excludes: [{lang: "20", tool: "11"}]` to skip that combo).
 2. Write `switchers/<ecosystem>.sh` following the composer switcher's contract: take `<lang> <tool>` args, switch active versions, validate, exit 0
 3. Extend `install-versions.yml` to install the new versions side-by-side
 4. Add any expected-skip entries to `expected-skips.yml`

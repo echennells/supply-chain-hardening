@@ -150,6 +150,12 @@
     # isn't viable. Tarballs from nodejs.org are the standard pattern.
     # Pinned to current LTS patches; bump as new LTS patches release.
     - name: Download Node.js tarballs to /opt
+      # Node 22.13.1 (was 22.12.0): pnpm 11 requires Node >= 22.13 because
+      # it uses the node:sqlite built-in module. 22.12.0 only has it under
+      # the experimental flag, which pnpm 11 refuses. Bumping the matrix's
+      # pinned Node 22 patch fixes the pnpm 11 cells on Node 22.
+      # (pnpm 11 on Node 20 is fundamentally invalid — engine constraint —
+      # handled via the excludes list in cells.yml.)
       ansible.builtin.unarchive:
         src: "https://nodejs.org/dist/v{{ item.full }}/node-v{{ item.full }}-linux-x64.tar.xz"
         dest: /opt
@@ -157,7 +163,7 @@
         creates: "/opt/node-v{{ item.full }}-linux-x64"
       loop:
         - { major: "20", full: "20.18.1" }
-        - { major: "22", full: "22.12.0" }
+        - { major: "22", full: "22.13.1" }
 
     - name: Symlink Node directories to versioned paths (/opt/node-N)
       ansible.builtin.file:
@@ -166,7 +172,7 @@
         state: link
       loop:
         - { major: "20", full: "20.18.1" }
-        - { major: "22", full: "22.12.0" }
+        - { major: "22", full: "22.13.1" }
 
     # --- uv (side-by-side via GitHub release tarballs) ---
     # uv is a single statically-linked Rust binary distributed at

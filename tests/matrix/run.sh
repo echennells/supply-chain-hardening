@@ -98,6 +98,14 @@ lang_versions=($(jq -r ".${ECOSYSTEM}.lang_versions[]" "$CELLS_JSON"))
 tool_versions=($(jq -r ".${ECOSYSTEM}.tool_versions[]" "$CELLS_JSON"))
 bats_files=($(jq -r ".${ECOSYSTEM}.bats_files[]" "$CELLS_JSON"))
 
+# Excludes: optional list of {lang, tool} pairs to skip from the cross-
+# product. Use for cell combinations that are physically invalid
+# (e.g., pnpm 11 on Node 20 — pnpm 11's engine constraint forbids
+# Node <22.13). Without this, invalid combinations always fail and
+# bloat the unexpected-fail count with cells that no real user could
+# deploy. Format: each entry is "lang/tool". Empty list = no exclusions.
+excluded_cells=$(jq -r ".${ECOSYSTEM}.excludes // [] | .[] | \"\(.lang)/\(.tool)\"" "$CELLS_JSON")
+
 # Per-cell partial apply: only re-run the ecosystem's tasks instead of
 # the full site.yml. Saves ~25s per cell × N cells × 3 distros. The
 # role's tasks/main.yml tags every include task with at least the
@@ -173,6 +181,12 @@ unexpected_failures=0
 
 for lang in "${lang_versions[@]}"; do
   for tool in "${tool_versions[@]}"; do
+    # Skip cells the ecosystem's excludes list marks as invalid
+    if echo "$excluded_cells" | grep -qFx "$lang/$tool"; then
+      echo
+      echo "===== skipping excluded cell :: $ECOSYSTEM lang=$lang tool=$tool ====="
+      continue
+    fi
     cell_n=$(( cell_n + 1 ))
     echo
     echo "===== matrix cell $cell_n/$total_cells :: $ECOSYSTEM lang=$lang tool=$tool ====="
