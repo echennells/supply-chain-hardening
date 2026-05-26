@@ -143,6 +143,46 @@ for distro_dir in "$RESULTS_DIR"/*/; do
   done
 done
 
+# --- Schema validation ---
+# Every row in $AGGREGATE must have these fields populated. Why this matters:
+# the summary section below uses jq filters like `select(.resolved=="fail")`
+# and `group_by(.ecosystem)` — a row missing or null-valued on any of these
+# is silently dropped by the filter, which produces a false-green run.
+#
+# This guard catches "third class" silent-pass bugs preemptively. Two have
+# hit this matrix already:
+#   - empty cells (cf5c9f7): cells produced zero rows
+#   - missing-resolved (b37bc1d): rows existed but lacked resolved=fail
+# Both required a manual drill-in to discover. Any future emit-site that
+# forgets a field (new test type, new failure injection point, new
+# refactor that drops a key) would hit the same shape of silent pass.
+# Validating the schema at aggregation time stops that class once and
+# for all — bad rows fail loud, with row excerpts shown for debugging.
+echo
+echo "===== run-docker: validating aggregate schema ====="
+schema_violations=0
+for field in ecosystem distro lang tool test status resolved; do
+  count=$(jq --arg f "$field" \
+    '[.[] | select((.[$f] // "") | tostring | length == 0)] | length' \
+    "$AGGREGATE")
+  if [[ "$count" -gt 0 ]]; then
+    echo "SCHEMA VIOLATION: $count rows missing/empty required field '$field'" >&2
+    echo "  first 3 offending rows:" >&2
+    jq --arg f "$field" \
+      '[.[] | select((.[$f] // "") | tostring | length == 0)] | .[0:3]' \
+      "$AGGREGATE" >&2
+    schema_violations=$(( schema_violations + count ))
+  fi
+done
+if [[ "$schema_violations" -gt 0 ]]; then
+  echo >&2
+  echo "matrix: aggregate schema check failed — $schema_violations row-field violations" >&2
+  echo "matrix: aggregate kept at $AGGREGATE for debugging" >&2
+  echo "matrix: per-distro logs in $RESULTS_DIR/*.log" >&2
+  exit 2
+fi
+echo "schema OK — every row has all required fields populated"
+
 # --- Summary ---
 echo
 echo "===== aggregate summary ====="
