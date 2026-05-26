@@ -36,6 +36,11 @@ if [[ "$node_reported" != "$NODE_MAJOR" ]]; then
   exit 1
 fi
 
+# Upgrade corepack to latest before activation — same keyid issue as
+# pnpm.sh: corepack 0.29.4 (shipped with Node 20.18.1) can't verify
+# signatures from current npm registry keys on range/major specs.
+# corepack@latest has the up-to-date keyring.
+npm install -g --silent corepack@latest 2>/dev/null || true
 corepack enable 2>/dev/null
 corepack prepare "yarn@${YARN_VERSION}" --activate >/dev/null 2>&1
 

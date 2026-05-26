@@ -43,7 +43,15 @@ if [[ "$PIP_VERSION" = "bundled" ]]; then
   # Don't reinstall; use whatever the distro ships
   reported=$("$PYTHON_BIN" -m pip --version 2>/dev/null | sed -nE 's/^pip ([0-9.]+).*$/\1/p' | head -1)
 else
-  "$PYTHON_BIN" -m pip install --quiet --upgrade --break-system-packages "pip==$PIP_VERSION" 2>/dev/null \
+  # --ignore-installed is required on Ubuntu 24.04 (apt's python3-pip is
+  # 24.0 which omits the RECORD metadata file pip needs to uninstall the
+  # previous install; without --ignore-installed pip errors with
+  # "Cannot uninstall pip 24.0, RECORD file not found"). Harmless on
+  # bookworm (pip 23.0). On jammy (pip 22.x, no --break-system-packages
+  # flag) this first call errors with unknown-flag and the fallback
+  # without the flag runs — jammy doesn't enforce PEP 668 so the bare
+  # install succeeds there.
+  "$PYTHON_BIN" -m pip install --quiet --upgrade --break-system-packages --ignore-installed "pip==$PIP_VERSION" 2>/dev/null \
     || "$PYTHON_BIN" -m pip install --quiet --upgrade "pip==$PIP_VERSION"
   reported=$("$PYTHON_BIN" -m pip --version 2>/dev/null | sed -nE 's/^pip ([0-9.]+).*$/\1/p' | head -1)
   if [[ -z "$reported" ]] || [[ ! "$reported" =~ ^${PIP_VERSION//./\\.} ]]; then

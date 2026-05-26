@@ -49,6 +49,15 @@ fi
 # and is the supported way to switch package managers without globally
 # `npm install -g`-ing them. The --activate flag writes pnpm to a
 # corepack-managed shim in $PATH.
+# Upgrade corepack to latest before activation. Node 20.18.1 ships corepack
+# 0.29.4, whose embedded signing keyring doesn't recognize the keyid the
+# npm registry now uses for major-only/range specs (e.g. pnpm@10). corepack
+# 0.29.4 errors with:
+#   Internal Error: Cannot find matching keyid: {... keyid:"SHA256:..."}
+# corepack@latest has the current keyring. The role being tested doesn't
+# care which corepack version is in scope — the matrix's job is to verify
+# the role against pnpm versions, not corepack versions.
+npm install -g --silent corepack@latest 2>/dev/null || true
 corepack enable 2>/dev/null
 corepack prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null 2>&1
 
