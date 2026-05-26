@@ -116,4 +116,4 @@ These are scenarios the test suite does **not** cover. They're tracked here so a
 ## Issues found by testing
 
 1. **uv.toml config syntax error** — `require-hashes` was at the top level instead of under `[pip]`. uv silently rejected the entire config, disabling all uv hardening. Found during manual testing on n8n server.
-2. **npm allow-git=none doesn't block on npm 10.x** — config is accepted but only enforced in npm 11+. Test changed to verify config presence rather than behavioral blocking.
+2. **npm allow-git=none doesn't block on npm 10.x** — config is accepted but only enforced in npm 11+. The role deploys the key universally; older npm reads it but doesn't act on it. `tests/bats/03-npm.bats` has both a file-content check (always runs) and a behavioral check (skips on npm <11) — the behavioral check distinguishes "npm refused before network" (enforcement working) from "npm tried DNS for the bogus git URL" (key silently ignored).
