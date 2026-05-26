@@ -40,8 +40,17 @@ else
   ln -sf "$MAVEN_DIR/bin/mvn" /usr/local/bin/mvn
 fi
 
-# Verify
-reported=$(mvn --version 2>/dev/null | head -1 | sed -nE 's/^Apache Maven ([0-9.]+).*$/\1/p')
+# Verify. Debian's apt-shipped mvn wraps the "Apache Maven" line in ANSI
+# bold escape codes (\033[1m...\033[0m), so the bare version-extract
+# regex doesn't match — `reported` came back empty and the diagnostic
+# line printed "mvn= active" instead of "mvn=3.8.7 active". Cosmetic
+# only when MAVEN_VERSION="bundled" skips the equality check, but the
+# misleading output made transient maven failures harder to triage.
+# Strip ANSI escape sequences before the version match.
+reported=$(mvn --version 2>/dev/null \
+  | head -1 \
+  | sed -E 's/\x1b\[[0-9;]*m//g' \
+  | sed -nE 's/^Apache Maven ([0-9.]+).*$/\1/p')
 if [[ "$MAVEN_VERSION" != "bundled" ]] && [[ "$reported" != "$MAVEN_VERSION" ]]; then
   echo "switchers/maven.sh: expected maven $MAVEN_VERSION, got '$reported'" >&2
   exit 1
