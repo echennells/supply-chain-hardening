@@ -180,8 +180,15 @@ for lang in "${lang_versions[@]}"; do
     # Switch active versions for this cell
     if ! "$SWITCHER" "$lang" "$tool"; then
       echo "matrix: switcher failed for lang=$lang tool=$tool; counting cell as fail" >&2
-      jq --arg lang "$lang" --arg tool "$tool" \
-        '. += [{"lang":$lang,"tool":$tool,"test":"<switcher>","status":"fail","reason":"switcher exited nonzero"}]' \
+      # Inject a failure marker. CRITICAL: must set resolved="fail" AND
+      # the ecosystem field — without them, run-docker.sh's aggregator
+      # filters out the row (it only counts rows where resolved=="fail")
+      # and the orchestrator silently exits 0 on a broken run. This was
+      # the bug the matrix run on b96bb7e surfaced: 18 role-apply fails
+      # produced rows but no resolved field, length-0-guard in
+      # run-docker.sh didn't fire, EXIT 0 hid the breakage.
+      jq --arg ecosystem "$ECOSYSTEM" --arg lang "$lang" --arg tool "$tool" \
+        '. += [{"ecosystem":$ecosystem,"lang":$lang,"tool":$tool,"test":"<switcher>","status":"fail","resolved":"fail","reason":"switcher exited nonzero"}]' \
         "$RESULTS" > "$RESULTS.tmp" && mv "$RESULTS.tmp" "$RESULTS"
       unexpected_failures=$(( unexpected_failures + 1 ))
       continue
@@ -196,8 +203,10 @@ for lang in "${lang_versions[@]}"; do
         -i tests/matrix/inventory.ini \
         --tags "$ansible_tags" 2>&1) > "/tmp/matrix-apply-${lang}-${tool}.log" || {
       echo "matrix: site.yml apply FAILED for lang=$lang tool=$tool — see /tmp/matrix-apply-${lang}-${tool}.log" >&2
-      jq --arg lang "$lang" --arg tool "$tool" \
-        '. += [{"lang":$lang,"tool":$tool,"test":"<role-apply>","status":"fail","reason":"site.yml apply exited nonzero"}]' \
+      # Same fix as the <switcher> failure path above: must set
+      # resolved="fail" + ecosystem for the aggregator to count it.
+      jq --arg ecosystem "$ECOSYSTEM" --arg lang "$lang" --arg tool "$tool" \
+        '. += [{"ecosystem":$ecosystem,"lang":$lang,"tool":$tool,"test":"<role-apply>","status":"fail","resolved":"fail","reason":"site.yml apply exited nonzero"}]' \
         "$RESULTS" > "$RESULTS.tmp" && mv "$RESULTS.tmp" "$RESULTS"
       unexpected_failures=$(( unexpected_failures + 1 ))
       continue
