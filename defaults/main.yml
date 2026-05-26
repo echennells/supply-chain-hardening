@@ -22,13 +22,22 @@ pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" #
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
 # uv requires an absolute RFC 3339 datetime here — "48 hours" or similar
 # relative-duration strings fail with "failed to parse year in date '48 hours'"
-# and break every uv invocation. The cutoff is computed at apply time from
-# release_age_hours by subtracting that many hours from the host's current
-# time. Note: this freezes the cutoff at apply time — re-apply the role to
-# advance it. Without a re-apply, packages published after the original apply
-# time still fall outside the cutoff window. For "always exactly N hours back"
-# semantics, schedule periodic role re-applies.
-uv_exclude_newer: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime((ansible_date_time.epoch | int) - (release_age_hours | int * 3600), true) }}"
+# and break every uv invocation. Compute the cutoff via lookup('pipe', ...)
+# shelling out to GNU date because Ansible's strftime filter's `utc` arg
+# was only added in Ansible 2.13 — Ubuntu 22.04's apt ansible (2.12) rejects
+# the 3-arg form with "strftime() takes from 1 to 2 positional arguments
+# but 3 were given". The previous Jinja-strftime approach broke the role
+# on every jammy host.
+#
+# lookup('pipe', ...) runs on the controller; ansible_date_time.epoch is
+# the target's epoch. Both produce the same RFC 3339 from the same epoch
+# input, so this works correctly for remote-target apply too. Requires
+# GNU date on the controller (Linux yes; macOS controllers need
+# `brew install coreutils` for `date -u -d @...` syntax).
+#
+# Cutoff freezes at apply time — re-apply to advance. For "always exactly
+# N hours back" semantics, schedule periodic re-applies.
+uv_exclude_newer: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT%H:%M:%SZ') }}"
 yarn_minimal_age_gate: "{{ (release_age_hours | int / 24) | int }}d"           # "2d"
 deno_minimum_dependency_age: "P{{ (release_age_hours | int / 24) | int }}D"    # "P2D"
 
