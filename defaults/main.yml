@@ -75,6 +75,25 @@ bun_frozen_lockfile: true        # refuse install if package.json diverges from 
 bun_auto: "disable"              # disable bun's runtime auto-install (alternatives: auto, fallback, force)
 bun_save_text_lockfile: true     # text-format bun.lock (bun 1.2+); silently ignored on older
 
+# bun security scanner integration (opt-in).
+# Set to a scanner package name (e.g. "@socketsecurity/bun-security-scanner")
+# to hook bun install into the Bun.Security.Scanner API for malware /
+# typosquatting / supply-chain attack detection. The named package must be
+# installed in each project as a devDep — `bun add -d <name>` — for bun's
+# resolver to find it. Empty default = no [install.security] section
+# emitted, so `bun install` works in projects that haven't added the
+# scanner devDep.
+#
+# Note: this is the ONLY Socket integration path for bun. The role's sfw
+# (Socket Firewall) wrapper covers npm but not bun — sfw-free supports
+# npm/pnpm/yarn/pip/uv/cargo, not bun. The scanner API closes the gap.
+#
+# When using @socketsecurity/bun-security-scanner specifically, set
+# SOCKET_API_KEY in the calling process's env to authenticate against
+# your org's Socket settings; unauthenticated runs use Socket's free
+# public API with org-default policy.
+bun_security_scanner: ""
+
 # yarn settings
 yarn_enable_scripts: false
 # yarn settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)

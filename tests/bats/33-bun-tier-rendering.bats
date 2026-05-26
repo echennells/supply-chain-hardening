@@ -25,6 +25,7 @@ setup_file() {
     bun_frozen_lockfile: true
     bun_auto: "disable"
     bun_save_text_lockfile: true
+    bun_security_scanner: ""
   tasks:
     - ansible.builtin.template:
         src: $ROLE_DIR/templates/bunfig.toml.j2
@@ -104,4 +105,69 @@ assert_has_baseline() {
   local f="$TIER_DIR/bun-2.0.0-future.toml"
   assert_valid_toml "$f"
   grep -q "^saveTextLockfile = true$" "$f"
+}
+
+# --- bun_security_scanner role var conditional rendering ---
+# Separate rendering pass because it's role-var-conditional, not
+# version-tiered. Two cells: var set, var empty.
+
+@test "render: bun_security_scanner='' → no [install.security] section (default)" {
+  local out=/tmp/bun-render-no-scanner.toml
+  local playbook
+  playbook=$(mktemp --suffix=.yml)
+  cat > "$playbook" <<EOF
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    bun_minimum_release_age_seconds: 172800
+    bun_exact: true
+    bun_lifecycle_scripts: false
+    bun_frozen_lockfile: true
+    bun_auto: "disable"
+    bun_save_text_lockfile: true
+    bun_security_scanner: ""
+    bun_detected_version: "1.2.5"
+  tasks:
+    - ansible.builtin.template:
+        src: $ROLE_DIR/templates/bunfig.toml.j2
+        dest: $out
+        mode: "0644"
+EOF
+  ansible-playbook "$playbook" >/dev/null 2>&1
+  rm -f "$playbook"
+  assert_valid_toml "$out"
+  ! grep -q '^\[install\.security\]' "$out"
+  rm -f "$out"
+}
+
+@test "render: bun_security_scanner='@socketsecurity/bun-security-scanner' → section emitted" {
+  local out=/tmp/bun-render-scanner.toml
+  local playbook
+  playbook=$(mktemp --suffix=.yml)
+  cat > "$playbook" <<EOF
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    bun_minimum_release_age_seconds: 172800
+    bun_exact: true
+    bun_lifecycle_scripts: false
+    bun_frozen_lockfile: true
+    bun_auto: "disable"
+    bun_save_text_lockfile: true
+    bun_security_scanner: "@socketsecurity/bun-security-scanner"
+    bun_detected_version: "1.2.5"
+  tasks:
+    - ansible.builtin.template:
+        src: $ROLE_DIR/templates/bunfig.toml.j2
+        dest: $out
+        mode: "0644"
+EOF
+  ansible-playbook "$playbook" >/dev/null 2>&1
+  rm -f "$playbook"
+  assert_valid_toml "$out"
+  grep -q '^\[install\.security\]$' "$out"
+  grep -q 'scanner = "@socketsecurity/bun-security-scanner"' "$out"
+  rm -f "$out"
 }

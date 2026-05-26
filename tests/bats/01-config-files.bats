@@ -153,6 +153,14 @@ load setup
   assert_file_contains "$HOME/.bunfig.toml" 'auto = "disable"'
 }
 
+@test "bunfig: no [install.security] section by default (bun_security_scanner is opt-in)" {
+  # Default bun_security_scanner is "". The template should NOT emit the
+  # [install.security] block — otherwise `bun install` would fail for
+  # projects that haven't added the scanner package as a devDep.
+  # Users who want Socket integration set the role var to enable.
+  ! grep -q '^\[install\.security\]' "$HOME/.bunfig.toml"
+}
+
 # cargo
 @test "cargo config exists" {
   assert_file_exists "$HOME/.cargo/config.toml"

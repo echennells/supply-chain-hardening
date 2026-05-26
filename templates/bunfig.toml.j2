@@ -22,3 +22,15 @@ auto = "{{ bun_auto }}"
 {% if has_text_lockfile and bun_save_text_lockfile %}
 saveTextLockfile = true
 {% endif %}
+{% if bun_security_scanner | length > 0 %}
+
+# Hook bun install into a third-party security scanner that implements
+# Bun.Security.Scanner ({ version: '1', scan: async ({packages}) => Advisory[] }).
+# Socket publishes @socketsecurity/bun-security-scanner on npm — install
+# per-project with `bun add -d <name>` so bun's resolver finds it. If the
+# scanner package isn't installed in the project being installed against,
+# bun install will fail loudly — that's why this section is opt-in via
+# the bun_security_scanner role variable (empty by default).
+[install.security]
+scanner = "{{ bun_security_scanner }}"
+{% endif %}
