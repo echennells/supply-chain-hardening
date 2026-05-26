@@ -41,7 +41,17 @@ NPM_AGE_DAYS=$(( RELEASE_AGE_HOURS / 24 ))
 [[ "$NPM_AGE_DAYS" -lt 1 ]] && NPM_AGE_DAYS=1     # npm wants integer days
 PNPM_AGE_MINUTES=$(( RELEASE_AGE_HOURS * 60 ))
 YARN_AGE="${NPM_AGE_DAYS}d"
-UV_EXCLUDE_NEWER="${RELEASE_AGE_HOURS} hours"
+# uv requires an absolute RFC 3339 datetime — "48 hours" or similar
+# relative-duration strings fail uv's TOML parser with
+# "failed to parse year in date '48 hours'", breaking every uv
+# invocation. Same bug the Ansible role had in defaults/main.yml
+# (fixed in b96bb7e); the action re-introduced it independently
+# at the bash layer. GitHub Actions runners are always Linux with
+# GNU date, so `date -u -d "N hours ago"` is portable here.
+# (uv 0.11.4+ added relative-duration support for pylock.toml
+# lockfiles, NOT for the config-file exclude-newer setting; config
+# requires absolute datetimes on all uv versions.)
+UV_EXCLUDE_NEWER=$(date -u -d "${RELEASE_AGE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
 
 # ---- Helpers ----
 log()       { echo "[supply-chain-harden] $*"; }
