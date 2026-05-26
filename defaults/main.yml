@@ -83,6 +83,18 @@ pnpm_minimum_release_age_exclude: []
 # Non-empty list → switch to onlyBuiltDependencies semantics: only these
 # packages' build scripts are allowed to run; everything else is blocked.
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
+#
+# IMPORTANT: this allowlist is user-scoped only. /etc/npmrc carries the
+# strict default (`ignore-scripts=true`) for sudo / other-user / cron
+# coverage. The allowlist is written to ~/.config/pnpm/rc (and pnpm 11's
+# ~/.config/pnpm/config.yaml) for the deploying user. Consequence:
+# `sudo pnpm install` in a project requiring esbuild's postinstall will
+# hit /etc/npmrc's blanket block and the install will be broken, despite
+# the operator having configured the allowlist. This is intentional —
+# allowlists are user preferences, restrictions are system policy — but
+# it surprises users who expect the allowlist to apply system-wide. To
+# enable an allowlist for a non-deploying user, deploy a per-user
+# ~/.config/pnpm/rc under that user's home with the same setting.
 pnpm_built_dependencies: []
 
 # bun settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
@@ -163,7 +175,18 @@ deno_path_wrapper: true
 composer_audit_abandoned: "fail"        # ignore|report|fail (Composer >= 2.7)
 composer_audit_block_insecure: true     # Composer >= 2.9 only
 composer_audit_block_abandoned: true    # Composer >= 2.9 only
-composer_allow_plugins: false           # default-deny plugin execution; opt in via project composer.json
+# Composer plugin execution. Authoritative across BOTH config layers:
+#   - templates/composer-config.json.j2 writes "allow-plugins": <this>
+#   - templates/composer-wrapper.sh.j2 injects --no-plugins iff this is false
+# Setting to true is the documented opt-in path for users with legitimate
+# composer Plugin classes (composer/installers, phpstan/extension-installer,
+# etc.). Doing so still leaves --no-scripts injected, so post-install-cmd
+# and friends remain blocked. Default false = no plugins, no scripts.
+#
+# (--no-plugins was previously hardcoded in the wrapper regardless of this
+# var, making this knob decorative whenever composer_path_wrapper was on.
+# Both layers are now authoritative on the same var.)
+composer_allow_plugins: false
 
 # Composer PATH wrapper (default on; primary script-blocking layer).
 # Composer has no host-wide config/env knob for disabling script execution
@@ -179,10 +202,55 @@ composer_allow_plugins: false           # default-deny plugin execution; opt in 
 # next apply (env-var layer remains).
 composer_path_wrapper: true
 
+# cargo / Rust hardening.
+#
+# Cargo cannot block build.rs or proc-macro code execution — those gaps are
+# structural. The role's cargo hardening is therefore split across:
+#   1. ~/.cargo/config.toml — the small set of cargo-level knobs that mean
+#      something on Linux (git-fetch-with-cli, net.retry, optional install
+#      root).
+#   2. /etc/cargo/deny.toml — a reference cargo-deny policy. Not auto-applied
+#      to projects; copy or symlink into the project root, or pass via
+#      `cargo deny --config /etc/cargo/deny.toml check`.
+#   3. cargo-audit / cargo-deny / cargo-vet / cargo-cooldown — installed via
+#      cargo-binstall when cargo is present. Detection-oriented; users still
+#      need to wire them into CI.
+#
+# Set this to false on hosts where you ship your own deny.toml from another
+# config-management layer and don't want the role overwriting /etc/cargo/.
+cargo_deny_deploy: true
+
+# `cargo install` output root. Empty default = ~/.cargo/bin (cargo's
+# built-in default). Setting this to a system path (e.g. "/usr/local/cargo")
+# emits `[install] root = "<path>"` in the config — useful when you want
+# installed cargo binaries to land in a directory you can lock down with
+# stricter mode bits or immutable-filesystem mounts. Note: an empty
+# string is the explicit "don't emit the [install] block" signal, NOT
+# the same as "/" or "~/.cargo".
+cargo_install_root: ""
+
 # podman / container image hardening
 podman_enabled: false           # set true to install podman and deploy policy.json
 podman_disable_docker: false    # set true to stop and disable Docker
 podman_docker_compat: false     # set true to symlink docker.sock to podman
+# Registry allowlist. Entries can be bare hosts (`ghcr.io`) or
+# path-qualified (`ghcr.io/myorg`). The two consumers handle them
+# differently — by podman's design, not the role's choice:
+#
+#   /etc/containers/policy.json — honors the full entry. Path-qualified
+#     entries restrict allow-list enforcement to that sub-namespace
+#     (`ghcr.io/myorg/*` accepted; other `ghcr.io/*` rejected).
+#
+#   /etc/containers/registries.conf — strips `/.*` and dedupes. The
+#     `unqualified-search-registries` field is host-only (search registries
+#     don't have a notion of paths). Combined with `short-name-mode =
+#     "enforcing"`, this surface only affects the interactive prompt for
+#     short-name resolution (`podman pull alpine`).
+#
+# Practical implication: path-qualified entries are honored as a real
+# allow-restriction by policy.json. If you set `["ghcr.io/myorg"]`, you
+# get path-level enforcement at the gatekeeper layer, and `ghcr.io` as
+# a search registry for short-name prompts.
 podman_allowed_registries:
   - "docker.io"
   - "docker.io/library"

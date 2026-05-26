@@ -14,10 +14,16 @@ export NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
 export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
 export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
 export UV_LINK_MODE=copy
-# Prevent uv from reading /etc/uv/ system config files — defends against
-# an attacker injecting registry overrides via the system config path.
-# Added in uv 0.11.16; silently ignored on older versions (safe unconditional).
-export UV_NO_SYSTEM_CONFIG=1
+# Note: we deliberately do NOT set UV_NO_SYSTEM_CONFIG=1 here, even though
+# uv 0.11.16+ supports it as a "block /etc/uv/ overrides" defense. The
+# role deploys /etc/uv/uv.toml as the system-wide hardening fallback for
+# sudo / non-deploying-user invocations (see tasks/uv.yml). Setting the
+# env var would make uv ignore that file in PAM-loaded shells — the
+# exact case the fallback exists for. The "defends against malicious
+# /etc/uv/" reasoning is hollow anyway: an attacker who can write
+# root:root /etc/uv/uv.toml can also edit /etc/environment to unset the
+# env var. Defense lives in file permissions and integrity monitoring,
+# not in a self-disarming env var.
 
 # === Go ===
 # Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are emptied so
@@ -43,4 +49,11 @@ export GOTOOLCHAIN=local
 # slips through. The /usr/local/bin/composer wrapper is the primary
 # protection; this env var is the backup for shells that bypass it.
 export COMPOSER_SKIP_SCRIPTS='pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create'
+# COMPOSER_ALLOW_SUPERUSER=1 is also exported inside the composer wrapper
+# (templates/composer-wrapper.sh.j2). Both locations are needed — not a
+# duplication: the wrapper covers callers in non-PAM contexts (cron,
+# systemd ExecStart, container CMD) where /etc/profile.d/ never loads;
+# this profile.d export covers `php composer.phar` callers that bypass
+# the wrapper but inherit the PAM-loaded environment. Removing either
+# leaves a coverage gap.
 export COMPOSER_ALLOW_SUPERUSER=1

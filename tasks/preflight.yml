@@ -16,6 +16,47 @@
       package, override per invocation (e.g. `npm install --foreground-scripts
       --ignore-scripts=false`) rather than disabling globally.
 
+- name: Probe GNU date for uv_exclude_newer rendering
+  # defaults/main.yml renders uv_exclude_newer via
+  #   lookup('pipe', 'date -u -d @<epoch> +%Y-%m-%dT%H:%M:%SZ')
+  # which requires GNU date (Linux) or coreutils' `gdate` (macOS). BSD
+  # date (macOS default) lacks the `-d @<epoch>` syntax — the lookup
+  # silently returns an empty string, which then gets templated into
+  # /etc/uv/uv.toml as `exclude-newer = ""`. uv rejects empty datetime
+  # values with a parser error, breaking every uv invocation. This
+  # check fails loudly at preflight rather than silently at runtime.
+  ansible.builtin.command: date -u -d @0 +%Y-%m-%dT%H:%M:%SZ
+  register: gnu_date_probe
+  changed_when: false
+  failed_when: false
+
+- name: Fail when GNU date is unavailable on the controller
+  ansible.builtin.fail:
+    msg: |
+      The role's uv_exclude_newer default uses `lookup('pipe', 'date -u -d @<epoch>')`
+      which requires GNU date. Your controller's date refused the probe:
+
+        $ date -u -d @0 +%Y-%m-%dT%H:%M:%SZ
+        rc={{ gnu_date_probe.rc }}
+        {{ gnu_date_probe.stderr or gnu_date_probe.stdout }}
+
+      Fix:
+        - Linux: install coreutils (`apt install coreutils`) — usually already present.
+        - macOS: `brew install coreutils` and either:
+            * prepend the GNU prefix to PATH before running ansible:
+              `export PATH="$(brew --prefix)/opt/coreutils/libexec/gnubin:$PATH"`
+              (gives `date` GNU semantics for this shell only)
+            * OR override uv_exclude_newer to an explicit RFC 3339 string in
+              your inventory:
+              `-e 'uv_exclude_newer=2026-05-24T12:00:00Z'`
+          Do NOT symlink gdate over /usr/local/bin/date system-wide — other
+          macOS tools depend on BSD date semantics.
+        - To skip this check (and ship empty exclude-newer, which breaks uv):
+          `-e skip_gnu_date_check=true` — not recommended.
+  when:
+    - gnu_date_probe.rc != 0 or gnu_date_probe.stdout != "1970-01-01T00:00:00Z"
+    - not (skip_gnu_date_check | default(false) | bool)
+
 - name: Detect non-managed existing system config files
   # Each /etc/* file we deploy has a marker comment line. If a file
   # already exists without the marker, it was placed by someone or

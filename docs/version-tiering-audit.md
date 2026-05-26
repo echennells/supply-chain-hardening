@@ -22,9 +22,13 @@ Scope: **uv, yarn, bun** — chosen because their release cadence and security-f
 | `index-strategy = "first-index"` | **Dependency confusion** — refuses to fall through to a secondary index for a package that exists on the primary | All current uv |
 | `required-version = ">=X.Y"` | Catches "uv too old to honor our settings" at startup instead of silently | All current uv |
 | `allow-insecure-host = []` | Explicit empty list documents intent that no host gets TLS bypass | All current uv |
-| `UV_NO_SYSTEM_CONFIG=1` (env) | Prevents uv from reading `/etc/uv/` system config (where an attacker might inject registry overrides) | 0.11.16+; silently ignored on older |
+| ~~`UV_NO_SYSTEM_CONFIG=1` (env)~~ | ~~Prevents uv from reading `/etc/uv/` system config~~ | **WITHDRAWN** — see below |
 
-**Tiering verdict**: **No real tiering needed.** Almost everything works on every uv version — the role's `uv.toml.j2` is just undersized. The one exception (`UV_NO_SYSTEM_CONFIG`) is an env var that older uv silently ignores, so unconditional deploy is safe.
+**`UV_NO_SYSTEM_CONFIG=1` — withdrawn (was a misread)**
+
+Briefly implemented (commit `3194f99`), then removed. The audit recommended this as "defends against attacker-injected `/etc/uv/uv.toml`," but the role itself deploys `/etc/uv/uv.toml` (see `tasks/uv.yml`) as the system-wide fallback for sudo and non-deploying-user invocations. Setting the env var makes uv ignore that fallback in PAM-loaded shells — exactly the contexts the fallback exists for. Net-negative: it disables real hardening in real cases to defend against an attack that file permissions already block (an unprivileged attacker can't write `root:root` `/etc/uv/uv.toml`; a root attacker can also unset the env var). Defense for that scenario belongs in file permissions and integrity monitoring (auditd / fapolicyd / IMA), not in a self-disarming env var. Regression catcher: `tests/bats/02-env-vars.bats` asserts the env var is NOT set.
+
+**Tiering verdict**: **No real tiering needed.** All recommended settings work on every current uv version — the role's `uv.toml.j2` is just undersized.
 
 **Action**: Add the settings unconditionally. ~30 min implementation.
 

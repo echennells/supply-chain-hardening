@@ -63,7 +63,15 @@ setup() {
   grep -q -- "--no-scripts" "$composer_path"
 }
 
-@test "composer wrapper injects --no-plugins on every invocation" {
+@test "composer wrapper injects --no-plugins on every invocation (default composer_allow_plugins=false)" {
+  # The wrapper is now authoritative on composer_allow_plugins (see
+  # tests/bats/34-composer-wrapper-tier-rendering.bats for the
+  # render-both-values test). This integration test only exercises the
+  # deployed wrapper, which reflects the default false → flag present.
+  # If a user flips composer_allow_plugins=true in their inventory, the
+  # wrapper omits --no-plugins by design — this test would then fail and
+  # the user should set BATS_SKIP_PLUGIN_TEST=1 or rely on the
+  # tier-rendering test instead.
   composer_path=$(command -v composer)
   grep -q -- "--no-plugins" "$composer_path"
 }

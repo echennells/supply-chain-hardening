@@ -180,8 +180,16 @@ load setup
   assert_file_exists "$HOME/.cargo/config.toml"
 }
 
-@test "cargo config: check-revoke = true" {
-  assert_file_contains "$HOME/.cargo/config.toml" "check-revoke = true"
+@test "cargo config: [net] retry set (transient-failure handling)" {
+  assert_file_contains "$HOME/.cargo/config.toml" "retry = 3"
+}
+
+@test "cargo config: omits the cargo_install_root block when var is empty" {
+  # cargo_install_root defaults to "" which suppresses the [install]
+  # block entirely. If the template ever defaults this to a non-empty
+  # path, callers' `cargo install` output silently relocates — catch
+  # that drift here.
+  ! grep -q '^\[install\]' "$HOME/.cargo/config.toml"
 }
 
 # bundler

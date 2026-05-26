@@ -22,8 +22,16 @@ setup() {
   assert_env_equals NPM_CONFIG_FUND false
 }
 
-@test "env: UV_NO_SYSTEM_CONFIG=1 (prevent uv reading /etc/uv/ system config)" {
-  assert_env_equals UV_NO_SYSTEM_CONFIG 1
+@test "env: UV_NO_SYSTEM_CONFIG is NOT set (would self-disable /etc/uv/uv.toml fallback)" {
+  # Regression catcher. The role briefly set UV_NO_SYSTEM_CONFIG=1 as a
+  # "block malicious /etc/uv/" defense, but the role itself deploys
+  # /etc/uv/uv.toml as the sudo/non-deploying-user fallback. The env
+  # var would make uv ignore that file in PAM-loaded shells — exactly
+  # the contexts the fallback exists for. Removed in [this session].
+  # If this test fails, someone re-added the env var; check
+  # docs/version-tiering-audit.md for the withdrawal rationale before
+  # putting it back.
+  [ -z "$UV_NO_SYSTEM_CONFIG" ]
 }
 
 @test "env: GOSUMDB=sum.golang.org" {

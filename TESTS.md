@@ -18,21 +18,22 @@
 | 10-go-adversarial.bats | 9 | Simulated Go environment poisoning |
 | 11-composer-adversarial.bats | 4 | Composer script blocking verification |
 | 12-cross-ecosystem.bats | 13 | File permissions, non-interactive shell coverage |
-| 13-pnpm-adversarial.bats | 4 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher) |
+| 13-pnpm-adversarial.bats | 5 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher, block-exotic-subdeps behavioral) |
 | 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
-| 15-bun-adversarial.bats | 3 | Simulated bun lifecycle-script attacks |
+| 15-bun-adversarial.bats | 4 | Simulated bun lifecycle-script attacks + auto=disable behavioral |
 | 16-composer-behavioral.bats | 1 | Composer end-to-end blocking |
 | 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
-| 18-cargo-behavioral.bats | 3 | Cargo git-fetch-with-cli, SSL revocation |
+| 18-cargo-behavioral.bats | 9 | Cargo config (git-fetch-with-cli, retry), build.rs gap, /etc/cargo/deny.toml reference policy + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
 | 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
-| 21-podman.bats | 11 | Podman policy.json, registries, cosign |
+| 21-podman.bats | 14 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign |
 | 22-pip-wrapper-safety.bats | 4 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
 | 24-deno-path-wrapper.bats | 11 | Deno in-place PATH wrapper plumbing + end-to-end |
 | 25-integration-regressions.bats | 11 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
+| 34-composer-wrapper-tier-rendering.bats | 4 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
 
 ## Adversarial tests
 

@@ -1,12 +1,18 @@
 # Managed by ansible-supply-chain-security
+#
+# Note: podman's search-registry list is host-only — entries here MUST be
+# bare hosts (docker.io, ghcr.io), not paths (ghcr.io/myorg). The role's
+# podman_allowed_registries var may include path-qualified entries to
+# restrict policy.json at the sub-namespace level; this template strips
+# anything after the first / so registries.conf gets valid host values.
+# The path-level restriction is enforced by /etc/containers/policy.json,
+# not this file. See defaults/main.yml for the asymmetry note.
+#
+# short-name-mode = "enforcing" forces every short-name pull (`podman
+# pull alpine`) to resolve to a fully-qualified name interactively or
+# fail in non-interactive contexts. The search list below is consulted
+# to populate the interactive prompt.
 
 unqualified-search-registries = [{{ podman_allowed_registries | map('regex_replace', '/.*', '') | unique | map('to_json') | join(', ') }}]
 
-{% for registry in podman_allowed_registries | map('regex_replace', '/.*', '') | unique %}
-[[registry]]
-prefix = "{{ registry }}"
-location = "{{ registry }}"
-
-{% endfor %}
-# Enforce fully-qualified image names
 short-name-mode = "enforcing"

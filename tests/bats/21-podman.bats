@@ -50,6 +50,26 @@ assert "ghcr.io" in d["transports"]["docker"], "ghcr.io not in allowlist"
   assert_file_contains /etc/containers/registries.conf "short-name-mode"
 }
 
+@test "podman: registries.conf has no self-referential [[registry]] blocks" {
+  # Previous template emitted [[registry]] prefix = X / location = X
+  # blocks for each entry — pure no-ops in modern podman (the search
+  # registry list works without them). Removed for clarity. Catch
+  # re-introduction so a future template refactor doesn't quietly
+  # bring back the dead weight. If you genuinely need [[registry]]
+  # blocks for mirror redirects or insecure flags, that's a different
+  # change — drop this assertion intentionally and explain why.
+  ! grep -q '^\[\[registry\]\]' /etc/containers/registries.conf
+}
+
+@test "podman: registries.conf search list contains only bare hosts (no paths)" {
+  # registries.conf's unqualified-search-registries is host-only by
+  # podman design — paths like "ghcr.io/myorg" aren't valid search
+  # entries. The template strips /.*$ before emitting; this catches
+  # a regression where the stripping is lost (which would emit
+  # invalid TOML and break podman entirely).
+  ! grep -E 'unqualified-search-registries.*"[^"]*/[^"]*"' /etc/containers/registries.conf
+}
+
 @test "podman: policy.json passes podman strict parse (no unknown top-level keys)" {
   # podman's policy.json parser rejects unknown top-level keys (e.g. a
   # stray "_comment" left in by a template author). The structural JSON
