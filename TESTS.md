@@ -9,7 +9,7 @@
 | 01-config-files.bats | 33 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
 | 02-env-vars.bats | 12 | System-wide env vars in /etc/profile.d/ and /etc/environment |
 | 03-npm.bats | 3 | npm ignore-scripts behavioral test + config readback |
-| 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist |
+| 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check) |
 | 05-go.bats | 6 | Go env vars verified via `go env` |
 | 06-js-ecosystem.bats | 5 | pnpm, yarn, bun config verification |
 | 07-other-configs.bats | 7 | Composer, bundler, cargo, npq alias checks |
@@ -34,6 +34,7 @@
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
 | 34-composer-wrapper-tier-rendering.bats | 4 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
+| 35-cargo-config-tier-rendering.bats | 5 | cargo_install_root authority (renders cargo-config.toml.j2 with empty/set, asserts [install] block conditional, baseline keys unconditional, TOML-valid both ways) |
 
 ## Adversarial tests
 
