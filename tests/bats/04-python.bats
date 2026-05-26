@@ -30,6 +30,10 @@ load setup
   rm -rf /tmp/uv-test-env
 }
 
-@test "uv exclude-newer is configured" {
-  assert_file_contains "$HOME/.config/uv/uv.toml" 'exclude-newer = "48 hours"'
-}
+# Note: a previous "uv exclude-newer is configured" test asserted the
+# literal string 'exclude-newer = "48 hours"' — that string was a bug
+# (relative-duration strings break uv's TOML parser) fixed in b96bb7e
+# / e009b4b. Stricter assertions live in 01-config-files.bats which
+# checks for the RFC 3339 shape AND explicit absence of any "N hours"
+# pattern. Removing the stale assertion here rather than updating it
+# avoids two tests asserting the same thing in different files.
