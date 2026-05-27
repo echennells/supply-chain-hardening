@@ -1,0 +1,94 @@
+#!/bin/bash
+# /usr/local/bin/bun — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# WHAT THIS CLOSES
+#
+# bun's runtime auto-install silently downloads missing imports when you
+# `bun run script.ts` (or just `bun script.ts`). The "Cannot find module"
+# error you get from npm / node never fires — bun fetches the typo'd
+# package name from npm and executes it. Default behavior is "auto",
+# documented at https://bun.sh/docs/runtime/bunfig under [install].auto.
+#
+# WHY THIS WRAPPER EXISTS
+#
+# Setting `auto = "disable"` in ~/.bunfig.toml does NOT block this code
+# path. Per bun's docs verbatim: "Currently, bunfig.toml is only
+# automatically loaded for `bun run` in a local project (it doesn't
+# check for a global .bunfig.toml)." So the global config file the
+# role deploys only applies to `bun install` — `bun run` ignores it.
+#
+# This wrapper closes the gap by injecting --no-install on every
+# invocation that isn't a package-management subcommand. --no-install
+# is documented under "Dependency & Module Resolution" in bun's CLI
+# reference; it has been supported across bun 1.0 → 1.2.x.
+#
+# WHAT IT DOESN'T BREAK
+#
+# Package-management subcommands (install / add / remove / update /
+# upgrade / link / unlink / pm / outdated / why / audit / publish /
+# patch / init / create) skip the injection. Those commands consult
+# ~/.bunfig.toml as normal — that's where the OTHER hardening lives
+# (lifecycleScripts, minimumReleaseAge, frozenLockfile, scanner).
+#
+# `bun upgrade` is NOT injected against either — it's bun's self-update
+# subcommand and doesn't interact with auto-install at all.
+#
+# BUN VERSION COMPATIBILITY
+#
+# --no-install: supported since bun 1.0. Universal across runtime paths.
+# Subcommand names listed below are stable across bun 1.0–1.2.x. If bun
+# adds a new package-management subcommand in a future release that we
+# don't list here, the wrapper will inject --no-install for it. The
+# blast radius is "subcommand might error on the flag" — caught at
+# first invocation, fixable by adding the subcommand to the skip list.
+# Adding it preventatively for an unreleased subcommand isn't possible.
+#
+# BYPASS (per-invocation, for users who know what they need)
+#
+#   /usr/local/bin/bun-real script.ts             # go around the wrapper entirely
+#   bun -i script.ts                              # explicit --install=fallback opt-in
+#                                                 # (the -i flag overrides --no-install
+#                                                 # in bun's CLI parser — last-takes-precedence)
+#
+# DISABLE GLOBALLY
+#
+#   role var bun_path_wrapper=false (restores the real binary at this
+#   path on the next role apply).
+#
+# SELF-UPDATE CAVEAT
+#
+# `bun upgrade` writes a new bun binary to ~/.bun/bin/bun. If you're
+# wrapping at /usr/local/bin/bun, the upgrade doesn't touch the wrapper
+# — but the real binary at /usr/local/bin/bun-real may go stale. Re-
+# apply the role after a bun upgrade to refresh the backup. Same
+# self-update caveat applies to composer (composer self-update) and
+# deno (deno upgrade) wrappers.
+
+REAL_BUN='{{ bun_real_path }}'
+
+# Recursion guard — refuse to run if the embedded real-bun path is
+# empty, non-executable, or points back at ourselves. Same pattern as
+# composer, deno, npm, pip wrappers.
+if [ -z "$REAL_BUN" ] || [ ! -x "$REAL_BUN" ] || [ "$REAL_BUN" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real bun not found at '$REAL_BUN'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Detect package-management or bun-internal subcommand. For these, the
+# --no-install injection would either be wrong (install/add commands)
+# or irrelevant (upgrade, --version, --help). Pass through unchanged.
+#
+# The case patterns include short-form aliases bun supports (i for
+# install, a for add, rm for remove, un/uninstall for uninstall, etc.).
+case "$1" in
+  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision)
+    exec "$REAL_BUN" "$@"
+    ;;
+  *)
+    # Runtime path (bun run X, bun script.ts, bun test, bun build,
+    # bun repl, bun x via inline subcommand, bun -e ...). Inject
+    # --no-install to block silent auto-install of missing imports.
+    exec "$REAL_BUN" --no-install "$@"
+    ;;
+esac

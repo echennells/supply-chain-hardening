@@ -27,3 +27,111 @@
     src: bunfig.toml.j2
     dest: "{{ ansible_env.HOME }}/.bunfig.toml"
     mode: "0644"
+
+# --- bun PATH wrapper (closes the runtime auto-install gap) ---
+#
+# ~/.bunfig.toml's [install].auto = "disable" is the documented config
+# knob for blocking bun's silent runtime auto-install — but it does not
+# fire for `bun run` because bun only consults the GLOBAL bunfig for
+# `bun install`, not for `bun run`. The wrapper closes this gap by
+# injecting --no-install on every non-package-management invocation.
+# See templates/bun-wrapper.sh.j2 header for the full rationale.
+#
+# Self-update caveat: `bun upgrade` writes a fresh bun binary at
+# ~/.bun/bin/bun, which may then leave /usr/local/bin/bun-real stale.
+# The detection task below sees a fresh real binary and re-wraps on
+# the next role apply. Same pattern as composer/deno wrappers.
+
+- name: Find current bun path for wrapping
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/local/bin/bun /usr/bin/bun "$HOME/.bun/bin/bun"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      command -v bun 2>/dev/null
+    executable: /bin/bash
+  register: bun_binary_path
+  changed_when: false
+  failed_when: false
+  when: bun_path_wrapper | bool
+
+- name: Determine whether current bun binary is our wrapper or the real binary
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'supply-chain-hardening' '{{ bun_binary_path.stdout }}' 2>/dev/null; then
+        echo is_wrapper
+      else
+        echo is_real
+      fi
+    executable: /bin/bash
+  register: bun_binary_kind
+  changed_when: false
+  when:
+    - bun_path_wrapper | bool
+    - bun_binary_path is defined
+    - bun_binary_path.rc == 0
+    - bun_binary_path.stdout | length > 0
+
+- name: Check whether a bun-real backup exists (from prior wrapper run)
+  ansible.builtin.stat:
+    path: "{{ bun_binary_path.stdout }}-real"
+  register: bun_real_backup
+  when:
+    - bun_path_wrapper | bool
+    - bun_binary_path is defined
+    - bun_binary_path.rc == 0
+    - bun_binary_path.stdout | length > 0
+
+- name: Rename real bun to bun-real (refresh backup if bun upgrade overwrote wrapper)
+  # No gate on `not bun_real_backup.stat.exists`: if `bun upgrade` overwrote
+  # our wrapper, the existing backup is stale and the freshly-installed
+  # binary is what we want to preserve. Overwriting a stale backup with
+  # the current binary is the correct semantics. Same logic as composer.
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ bun_binary_path.stdout }} {{ bun_binary_path.stdout }}-real"
+  when:
+    - bun_path_wrapper | bool
+    - bun_binary_path is defined
+    - bun_binary_path.rc == 0
+    - bun_binary_path.stdout | length > 0
+    - bun_binary_kind.stdout == 'is_real'
+  changed_when: true
+
+- name: Deploy bun wrapper at the discovered bun path
+  become: true
+  ansible.builtin.template:
+    src: bun-wrapper.sh.j2
+    dest: "{{ bun_binary_path.stdout }}"
+    owner: root
+    group: root
+    mode: "0755"
+  vars:
+    bun_real_path: "{{ bun_binary_path.stdout }}-real"
+  when:
+    - bun_path_wrapper | bool
+    - bun_binary_path is defined
+    - bun_binary_path.rc == 0
+    - bun_binary_path.stdout | length > 0
+
+- name: Restore real bun (when bun_path_wrapper=false toggled after prior wrap)
+  # Mirror of the composer-wrapper restore path. If the operator flips
+  # bun_path_wrapper from true to false on a host that was previously
+  # wrapped, this restores the original binary so they're not stuck with
+  # a wrapper they explicitly opted out of.
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ bun_binary_path.stdout }}-real {{ bun_binary_path.stdout }}"
+  when:
+    - not (bun_path_wrapper | bool)
+    - bun_binary_path is defined
+    - bun_binary_path.rc == 0
+    - bun_binary_path.stdout | length > 0
+    - bun_binary_kind is defined
+    - bun_binary_kind.stdout == 'is_wrapper'
+    - bun_real_backup is defined
+    - bun_real_backup.stat.exists
+  changed_when: true

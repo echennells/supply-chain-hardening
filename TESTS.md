@@ -20,7 +20,7 @@
 | 12-cross-ecosystem.bats | 13 | File permissions, non-interactive shell coverage |
 | 13-pnpm-adversarial.bats | 5 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher, block-exotic-subdeps behavioral) |
 | 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
-| 15-bun-adversarial.bats | 4 | Simulated bun lifecycle-script attacks + auto=disable behavioral |
+| 15-bun-adversarial.bats | 5 | Simulated bun lifecycle-script attacks + bun PATH wrapper end-to-end blocks runtime auto-install + FIXTURE CONTROL (bun-real does auto-install when not wrapped) |
 | 16-composer-behavioral.bats | 1 | Composer end-to-end blocking |
 | 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
 | 18-cargo-behavioral.bats | 9 | Cargo config (git-fetch-with-cli, retry), build.rs gap, /etc/cargo/deny.toml reference policy + regression catchers for removed Windows-only / mislabeled keys |
@@ -35,6 +35,7 @@
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
 | 34-composer-wrapper-tier-rendering.bats | 4 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
 | 35-cargo-config-tier-rendering.bats | 5 | cargo_install_root authority (renders cargo-config.toml.j2 with empty/set, asserts [install] block conditional, baseline keys unconditional, TOML-valid both ways) |
+| 36-bun-wrapper-tier-rendering.bats | 6 | bun wrapper subcommand-routing (--no-install injected on runtime paths, skipped for package-mgmt subcommands and --version/--help, recursion guard present, catch-all wires to the inject branch) |
 
 ## Adversarial tests
 

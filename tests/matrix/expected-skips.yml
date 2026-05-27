@@ -79,6 +79,18 @@ pnpm:
       ignores it — config.yaml is what controls behavior on 11+. Test
       asserts an rc setting that pnpm 11 doesn't honor.
 
+  - test: "BEHAVIORAL: pnpm block-exotic-subdeps refuses tarball/http deps before network"
+    when: { tool: "10" }
+    expect: fail
+    reason: >-
+      block-exotic-subdeps runtime enforcement was added in pnpm 11.x.
+      pnpm 10 accepts the key in ~/.config/pnpm/rc but silently ignores
+      it at install time — the install proceeds with a DNS attempt
+      against the tarball URL. The role correctly writes the key on
+      both versions for forward-compat, but the behavioral check only
+      succeeds on pnpm 11+. Documented in defaults/main.yml near
+      pnpm_built_dependencies.
+
 yarn:
   # enableHardenedMode was added in Yarn 4.0. The role's
   # templates/yarnrc.yml.j2 conditionally emits the key only when

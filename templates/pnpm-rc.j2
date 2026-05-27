@@ -4,6 +4,12 @@ minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
 {% for pkg in pnpm_minimum_release_age_exclude %}
 minimum-release-age-exclude[]={{ pkg }}
 {% endfor %}
+; block-exotic-subdeps refuses git / http(s) / tarball-URL dependencies.
+; Runtime enforcement requires pnpm 11+. On pnpm 10 the key is accepted
+; into config but silently ignored — DNS/install proceeds for exotic
+; deps. Tier-tested via the matrix; the version gap is documented in
+; tests/matrix/expected-skips.yml so the behavioral test isn't flagged
+; as a regression on pnpm 10 cells.
 block-exotic-subdeps=true
 {% if pnpm_built_dependencies | length > 0 %}
 ; Explicit build-script allowlist (pnpm 11+). Listed packages may run build

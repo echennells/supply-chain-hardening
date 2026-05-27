@@ -6,9 +6,14 @@
 # lockfile — catches sneaky dep additions during build. Universal
 # across all bun versions.
 #
-# auto = "disable" prevents bun's runtime auto-install feature from
-# silently grabbing missing deps when you `bun run` something — a real
-# foot-gun in CI/agent contexts where deps should be deterministic.
+# auto = "disable" affects `bun install`'s fallback auto-install
+# behavior (controlled by this global bunfig). It does NOT block
+# `bun run`'s runtime auto-install because bun's docs are explicit:
+# "Currently, bunfig.toml is only automatically loaded for `bun run`
+# in a local project (it doesn't check for a global .bunfig.toml)."
+# The `bun run` gap is closed by /usr/local/bin/bun (the PATH wrapper
+# this role deploys when bun_path_wrapper=true), which injects
+# --no-install on every runtime invocation.
 #
 # saveTextLockfile uses text-format bun.lock (diff-able for audit)
 # instead of the binary bun.lockb. Added in bun 1.2; older bun ignores

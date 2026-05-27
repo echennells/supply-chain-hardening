@@ -101,7 +101,16 @@ pnpm_built_dependencies: []
 bun_exact: true                  # exact version pinning
 bun_lifecycle_scripts: false     # block postinstall/preinstall scripts
 bun_frozen_lockfile: true        # refuse install if package.json diverges from lockfile
-bun_auto: "disable"              # disable bun's runtime auto-install (alternatives: auto, fallback, force)
+bun_auto: "disable"              # alternatives: auto, fallback, force.
+# IMPORTANT: this setting affects `bun install` only — NOT `bun run`.
+# Per bun's docs: "Currently, bunfig.toml is only automatically loaded
+# for `bun run` in a local project (it doesn't check for a global
+# .bunfig.toml)." Setting auto="disable" in ~/.bunfig.toml stops `bun
+# install`'s fallback auto-install behavior but does NOT block `bun run
+# script.ts` from silently downloading missing imports. The runtime
+# auto-install gap is closed by the bun_path_wrapper (see below) which
+# injects --no-install on every runtime invocation. Keep this set to
+# "disable" anyway — it's defense-in-depth on the install path.
 bun_save_text_lockfile: true     # text-format bun.lock (bun 1.2+); silently ignored on older
 
 # bun security scanner integration (opt-in).
@@ -122,6 +131,21 @@ bun_save_text_lockfile: true     # text-format bun.lock (bun 1.2+); silently ign
 # your org's Socket settings; unauthenticated runs use Socket's free
 # public API with org-default policy.
 bun_security_scanner: ""
+
+# bun PATH wrapper (default on; closes the runtime auto-install gap).
+# bun has a "runtime auto-install" feature: `bun run script.ts` silently
+# downloads missing imports from npm and executes them, with no install
+# prompt, no lockfile update, no audit trail. This is convenient for
+# scripting and a real supply-chain hole — a typo'd package name becomes
+# the install vector (typosquat attack pattern). The wrapper at
+# /usr/local/bin/bun (or wherever bun is found) injects --no-install on
+# every non-package-management invocation, closing the gap. Set to
+# false to skip wrapping; the install-time protections (lifecycleScripts,
+# minimumReleaseAge, frozenLockfile, scanner) still apply via the
+# global ~/.bunfig.toml regardless of this var. See
+# templates/bun-wrapper.sh.j2 header for the full design + bypass
+# documentation.
+bun_path_wrapper: true
 
 # yarn settings
 yarn_enable_scripts: false
