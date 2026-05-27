@@ -350,54 +350,61 @@ jobs:
           ecosystems: bun
 
       # Rigorous diagnostic — test --no-install with a guaranteed-nonexistent
-      # package name. This isolates "is auto-install firing" from "is the
-      # package somehow already available" (cache, bundled, etc.):
-      #   - If bun errors with 404 / "not found in registry" / "ENOTFOUND" →
-      #     auto-install FIRED (and failed because the package doesn't exist
-      #     on npm). The --no-install flag was ignored.
-      #   - If bun errors with "Cannot find module" / "Could not resolve" with
-      #     no network attempt → auto-install was BLOCKED, the flag works.
+      # package name AND a fixture that forces actual resolution (uses the
+      # imported value, so bun can't tree-shake the import away).
+      #
+      # Previous version of this test had an unused `import x from "..."`
+      # which bun dead-code-eliminated → no resolution attempted → tests
+      # all "passed" silently regardless of flag behavior. The fix:
+      # side-effect import (`import "pkg"` without binding name) PLUS
+      # explicit require() PLUS actually-use-the-value patterns to make
+      # the resolution unavoidable.
+      #
+      # Expected outcomes:
+      #   - If --no-install BLOCKS: bun errors with "Cannot find module" /
+      #     "Could not resolve" / "Module not found" — no network attempt,
+      #     nothing in cache.
+      #   - If --no-install IGNORED: bun attempts npm registry fetch. For
+      #     fake pkg: 404 / "not found in registry". For real pkg: succeeds
+      #     and writes to ~/.bun/install/cache.
       - name: Rigorous test — does --no-install actually block auto-install?
         run: |
           mkdir -p /tmp/bun-rigorous && cd /tmp/bun-rigorous
           echo '{"name":"t"}' > package.json
           BUN_REAL="$(which bun)-real"
-
-          # Use a nonsense package name that demonstrably doesn't exist on npm.
           PKG="definitely-not-a-real-pkg-xyz-12345-abc-supplychain"
 
+          # Fixture that bun CANNOT dead-code-eliminate:
+          #   - require() runs at evaluation time, no tree-shake
+          #   - the value gets used (console.log forces evaluation)
           cat > script.ts <<EOF
-          import x from "$PKG";
-          console.log("RESOLVED");
+          const x = require("$PKG");
+          console.log("RESOLVED", typeof x, JSON.stringify(Object.keys(x || {})));
           EOF
 
-          echo "=== TEST 1: bun-real --no-install run (fake pkg; expect block if flag works) ==="
-          "$BUN_REAL" --no-install run script.ts 2>&1 | head -25 || true
-          echo "exit=$?"
+          echo "=== TEST 1: bun-real --no-install run (fake pkg; expect block) ==="
+          "$BUN_REAL" --no-install run script.ts; echo "exit=$?"
           echo ""
 
           echo "=== TEST 2: bun-real run (no flag; control — should attempt + fail) ==="
-          "$BUN_REAL" run script.ts 2>&1 | head -25 || true
-          echo "exit=$?"
+          "$BUN_REAL" run script.ts; echo "exit=$?"
           echo ""
 
-          echo "=== TEST 3: bun-real --install=disable run (try the bunfig-config value as a CLI flag) ==="
-          "$BUN_REAL" --install=disable run script.ts 2>&1 | head -25 || true
-          echo "exit=$?"
+          echo "=== TEST 3: bun-real --install=disable run (try the bunfig config value as CLI) ==="
+          "$BUN_REAL" --install=disable run script.ts; echo "exit=$?"
           echo ""
 
-          # Test with a REAL package — what does bun do when --no-install
-          # is set but the package exists on npm? Does it still fetch it?
+          # Real package with cleared cache. require() forces resolution;
+          # we use the result to prevent any DCE.
           cat > script-real.ts <<'EOF'
-          import x from "is-positive";
-          console.log("REAL_RESOLVED");
+          const isPositive = require("is-positive");
+          console.log("REAL_RESOLVED", typeof isPositive, isPositive(5));
           EOF
-          rm -rf ~/.bun/install/cache  # ensure no pre-cached state
+          rm -rf ~/.bun/install/cache
           echo "=== TEST 4: bun-real --no-install run with REAL pkg + cleared cache ==="
-          "$BUN_REAL" --no-install run script-real.ts 2>&1 | head -25 || true
-          echo "exit=$?"
+          "$BUN_REAL" --no-install run script-real.ts; echo "exit=$?"
           echo "--- ~/.bun/install/cache contents after run ---"
-          find ~/.bun/install/cache -maxdepth 2 -type d 2>/dev/null | head -10 || echo "(no cache dir)"
+          find ~/.bun/install/cache -maxdepth 2 2>/dev/null | head -10 || echo "(no cache dir)"
 
       # bun run X with a missing import would silently download it without
       # the wrapper. With the wrapper injecting --no-install, bun must
