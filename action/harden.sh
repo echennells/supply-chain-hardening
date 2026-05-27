@@ -360,9 +360,10 @@ harden_composer() {
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
   write_env COMPOSER_ALLOW_SUPERUSER 1
 
-  # PATH wrapper at /usr/local/bin/composer. Injects --no-scripts on every
-  # invocation; --no-plugins is conditional on COMPOSER_ALLOW_PLUGINS to
-  # support legitimate plugin opt-in (composer/installers etc.).
+  # PATH wrapper at the DISCOVERED composer location (wrap in-place —
+  # same fix as bun). Wrapping at /usr/local/bin/composer breaks when
+  # composer is installed elsewhere (e.g., /usr/bin/composer via apt)
+  # because the user's PATH might resolve apt composer first.
   local real_composer
   real_composer=$(command -v composer 2>/dev/null || true)
   if [[ -z "$real_composer" ]]; then
@@ -371,18 +372,18 @@ harden_composer() {
     return 0
   fi
 
-  if [[ "$real_composer" == "/usr/local/bin/composer" ]]; then
-    if grep -q "supply-chain-harden" /usr/local/bin/composer 2>/dev/null; then
-      real_composer=/usr/local/bin/composer-real
-      if [[ ! -x "$real_composer" ]]; then
-        echo "::warning::composer wrapper present but composer-real missing; skipping re-wrap"
-        end_section
-        return 0
-      fi
+  local wrapper_target="$real_composer"
+  if grep -q "supply-chain-harden" "$real_composer" 2>/dev/null; then
+    if [[ -x "${real_composer}-real" ]]; then
+      real_composer="${real_composer}-real"
     else
-      sudo mv /usr/local/bin/composer /usr/local/bin/composer-real
-      real_composer=/usr/local/bin/composer-real
+      echo "::warning::composer wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      end_section
+      return 0
     fi
+  else
+    sudo mv "$real_composer" "${real_composer}-real"
+    real_composer="${real_composer}-real"
   fi
 
   local maybe_no_plugins="--no-plugins"
@@ -390,19 +391,19 @@ harden_composer() {
     maybe_no_plugins=""
   fi
 
-  cat <<EOF | sudo tee /usr/local/bin/composer >/dev/null
+  cat <<EOF | sudo tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_COMPOSER='$real_composer'
-if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "/usr/local/bin/composer" ]; then
+if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "$wrapper_target" ]; then
   echo "[supply-chain-harden] error: real composer not found at '\$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
 fi
 export COMPOSER_ALLOW_SUPERUSER=1
 exec "\$REAL_COMPOSER" --no-scripts $maybe_no_plugins "\$@"
 EOF
-  sudo chmod 755 /usr/local/bin/composer
-  log "composer: wrapper deployed (--no-scripts$([[ -n "$maybe_no_plugins" ]] && echo " --no-plugins"))"
+  sudo chmod 755 "$wrapper_target"
+  log "composer: wrapper deployed at $wrapper_target (--no-scripts$([[ -n "$maybe_no_plugins" ]] && echo " --no-plugins"))"
   end_section
 }
 
@@ -439,13 +440,15 @@ EOF
   HARDENED+=("bun")
   TOOL_VERSIONS["bun"]="$bun_version"
 
-  # PATH wrapper at /usr/local/bin/bun. Closes the runtime
-  # auto-install gap that ~/.bunfig.toml cannot close (bun's docs:
-  # "Currently, bunfig.toml is only automatically loaded for `bun run`
-  # in a local project (it doesn't check for a global .bunfig.toml).")
-  # Injects --no-install on every invocation that isn't a package-mgmt
-  # subcommand. Same wrapper design as the Ansible role's
-  # templates/bun-wrapper.sh.j2 + tasks/bun.yml self-update logic.
+  # PATH wrapper at the DISCOVERED bun location (wrap in-place — same
+  # pattern as deno). Critical for CI runners where bun is commonly
+  # installed at ~/.bun/bin/bun (via official installer's $GITHUB_PATH
+  # prepend) which comes BEFORE /usr/local/bin in resolution order.
+  # A wrapper at /usr/local/bin/bun would be silently bypassed in that
+  # configuration. Closes the runtime auto-install gap that
+  # ~/.bunfig.toml cannot close (bun's docs: "Currently, bunfig.toml
+  # is only automatically loaded for `bun run` in a local project (it
+  # doesn't check for a global .bunfig.toml).")
   local real_bun
   real_bun=$(command -v bun 2>/dev/null || true)
   if [[ -z "$real_bun" ]]; then
@@ -454,30 +457,31 @@ EOF
     return 0
   fi
 
-  # If bun is already at /usr/local/bin/bun, we'd recurse — move it aside.
-  # If a previous run already wrapped it, the binary IS the wrapper; check
-  # for the marker and re-wrap by moving the existing -real (if present)
-  # back, then re-wrapping the fresh bun.
-  if [[ "$real_bun" == "/usr/local/bin/bun" ]]; then
-    if grep -q "supply-chain-harden" /usr/local/bin/bun 2>/dev/null; then
-      # Already our wrapper — leave -real alone, just re-deploy wrapper
-      real_bun=/usr/local/bin/bun-real
-      if [[ ! -x "$real_bun" ]]; then
-        echo "::warning::bun wrapper present but bun-real missing; skipping re-wrap"
-        end_section
-        return 0
-      fi
+  local wrapper_target="$real_bun"
+  # If the discovered bun IS our wrapper from a prior step (re-run within
+  # the same job), find the real binary at -real and re-wrap.
+  if grep -q "supply-chain-harden" "$real_bun" 2>/dev/null; then
+    if [[ -x "${real_bun}-real" ]]; then
+      real_bun="${real_bun}-real"
     else
-      sudo mv /usr/local/bin/bun /usr/local/bin/bun-real
-      real_bun=/usr/local/bin/bun-real
+      echo "::warning::bun wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      end_section
+      return 0
     fi
+  else
+    # Move the real binary to -real, then deploy wrapper at the original
+    # location so PATH-resolved invocations hit the wrapper. Use sudo
+    # because ~/.bun/bin is owned by the runner user but /usr/local/bin
+    # isn't, and we want this to work in both cases.
+    sudo mv "$real_bun" "${real_bun}-real"
+    real_bun="${real_bun}-real"
   fi
 
-  cat <<EOF | sudo tee /usr/local/bin/bun >/dev/null
+  cat <<EOF | sudo tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_BUN='$real_bun'
-if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "/usr/local/bin/bun" ]; then
+if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "$wrapper_target" ]; then
   echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
   exit 127
 fi
@@ -491,8 +495,8 @@ case "\${1:-}" in
     ;;
 esac
 EOF
-  sudo chmod 755 /usr/local/bin/bun
-  log "bun: wrapper deployed at /usr/local/bin/bun (injects --no-install for runtime paths)"
+  sudo chmod 755 "$wrapper_target"
+  log "bun: wrapper deployed at $wrapper_target (injects --no-install for runtime paths)"
   end_section
 }
 
