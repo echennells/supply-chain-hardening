@@ -2,19 +2,21 @@ name: 'Supply Chain Hardening'
 description: >-
   Block malicious package installs in CI at the package-manager layer. Sets
   ignore-scripts, minimum-release-age (cooldown), wheels-only, and related
-  defenses for npm, pnpm, yarn, pip, and uv. Defenses apply to every step
-  after this action runs.
+  defenses for 14 ecosystems (npm, pnpm, yarn, bun, deno, pip, uv, cargo,
+  go, composer, bundler, maven, gradle, nuget). Defenses apply to every
+  step after this action runs.
 author: 'echennells'
 
 inputs:
   ecosystems:
     description: >-
       Comma-separated subset of package managers to harden. Supported:
-      npm, pnpm, yarn, pip, uv. Default covers the JavaScript and Python
-      ecosystems that account for nearly all observed supply-chain attacks
-      against CI runners.
+      npm, pnpm, yarn, bun, deno, pip, uv, cargo, go, composer, bundler,
+      maven, gradle, nuget. Default covers every supported ecosystem so
+      the action is secure-by-default; specify a narrower list to opt out
+      of specific ecosystems (e.g., `ecosystems: 'npm,pnpm,pip,uv'`).
     required: false
-    default: 'npm,pnpm,yarn,pip,uv'
+    default: 'npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget'
   release_age_hours:
     description: >-
       Reject packages newer than this many hours. The 2026 AntV / Shai-Hulud
@@ -46,6 +48,14 @@ inputs:
       sudo, which all stock GitHub runners have.
     required: false
     default: 'true'
+  composer_allow_plugins:
+    description: >-
+      Allow composer Plugin class execution (e.g., composer/installers,
+      phpstan/extension-installer). Default false — wrapper injects
+      --no-plugins. Set to true if your workflow legitimately needs a
+      composer plugin; --no-scripts injection still applies regardless.
+    required: false
+    default: 'false'
 
 outputs:
   ecosystems-hardened:
@@ -57,6 +67,13 @@ outputs:
   sfw-installed:
     description: 'true if Socket Firewall was installed and the npm wrapper deployed.'
     value: ${{ steps.harden.outputs.sfw_installed }}
+  tool-versions:
+    description: >-
+      JSON map of detected tool versions per ecosystem ({"npm":"10.5.0","bun":"","composer":"2.9.8"}).
+      Empty string means the tool wasn't installed in this runner. Downstream
+      steps can use this for conditional logic (e.g., skip a job that needs
+      a specific composer version).
+    value: ${{ steps.harden.outputs.tool_versions }}
 
 runs:
   using: 'composite'
@@ -69,6 +86,7 @@ runs:
         STRICT: ${{ inputs.strict }}
         INSTALL_SFW: ${{ inputs.install_sfw }}
         WRITE_ETC: ${{ inputs.write_etc }}
+        COMPOSER_ALLOW_PLUGINS: ${{ inputs.composer_allow_plugins }}
       run: ${{ github.action_path }}/harden.sh
 
 branding:
