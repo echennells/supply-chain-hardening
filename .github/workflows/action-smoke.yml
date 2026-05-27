@@ -349,6 +349,30 @@ jobs:
         with:
           ecosystems: bun
 
+      # Diagnostic: confirm which bun is in PATH and that it's the wrapper.
+      - name: Diagnostic — bun path resolution + wrapper contents + flag behavior
+        run: |
+          echo "=== which bun ==="
+          which bun
+          echo "=== head /path/to/bun ==="
+          head -5 "$(which bun)" || true
+          echo "=== bun-real exists? ==="
+          ls -la "$(which bun)-real" 2>/dev/null || echo "no -real backup"
+          echo "=== bun --version (via wrapper) ==="
+          bun --version || true
+          echo "=== direct bun-real --no-install run on missing import ==="
+          mkdir -p /tmp/bun-diag && cd /tmp/bun-diag
+          cat > script.ts <<'EOF'
+          import isPositive from "is-positive";
+          console.log("DIRECT_AUTOINSTALL_FIRED");
+          EOF
+          echo '{"name":"bun-diag"}' > package.json
+          # Run bun-real DIRECTLY with --no-install to see if the flag does what we claim
+          "$(which bun)-real" --no-install run script.ts 2>&1 || true
+          echo "--- node_modules after direct flag test ---"
+          ls node_modules 2>/dev/null && echo "FOUND" || echo "NONE"
+          rm -rf /tmp/bun-diag node_modules
+
       # bun run X with a missing import would silently download it without
       # the wrapper. With the wrapper injecting --no-install, bun must
       # fail-loud instead.
@@ -360,12 +384,18 @@ jobs:
           console.log("auto-install fired");
           EOF
           echo '{"name":"bun-victim"}' > package.json
-          if bun run script.ts >/dev/null 2>&1; then
-            echo "::error::bun ran the script — wrapper did NOT block runtime auto-install"
+          echo "=== invoking bun run script.ts ==="
+          bun run script.ts 2>&1 || true
+          rc=$?
+          echo "rc=$rc, node_modules:"
+          ls node_modules 2>/dev/null && nm_present=yes || nm_present=no
+          echo "nm_present=$nm_present"
+          if [ "$nm_present" = "yes" ]; then
+            echo "::error::node_modules created — wrapper did NOT block auto-install"
             exit 1
           fi
-          if [ -d node_modules ]; then
-            echo "::error::node_modules created — wrapper did NOT block auto-install"
+          if [ "$rc" = "0" ]; then
+            echo "::error::bun ran the script (rc=0) — wrapper did NOT block runtime auto-install"
             exit 1
           fi
           echo "✓ bun wrapper blocked runtime auto-install"
