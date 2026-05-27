@@ -369,8 +369,15 @@ jobs:
           EOF
           echo '{"name":"bun-victim"}' > package.json
           echo "=== invoking bun run script.ts ==="
-          bun run script.ts 2>&1 || true
+          # IMPORTANT: do NOT use `bun ... || true` here — || true makes
+          # $? always 0 regardless of bun's actual exit code, and the test
+          # cannot then distinguish "wrapper blocked, bun errored" from
+          # "bun ran the script successfully."
+          set +e
+          output=$(bun run script.ts 2>&1)
           rc=$?
+          set -e
+          echo "$output"
           echo "rc=$rc"
           ls node_modules 2>/dev/null && nm_present=yes || nm_present=no
           echo "nm_present=$nm_present"
@@ -382,7 +389,11 @@ jobs:
             echo "::error::bun ran the script (rc=0) — wrapper did NOT block runtime auto-install"
             exit 1
           fi
-          echo "✓ bun wrapper blocked runtime auto-install"
+          # Sanity-check the failure is the right shape (Cannot find package),
+          # not a syntax error or other unexpected mode.
+          echo "$output" | grep -qiE "cannot find|could not resolve|not found|is-positive" \
+            || { echo "::error::bun errored but not with the expected resolution-blocked shape"; exit 1; }
+          echo "✓ bun wrapper blocked runtime auto-install (rc=$rc, error matched expected shape)"
 
       - name: bun install (package mgmt) still works through the wrapper
         run: |
