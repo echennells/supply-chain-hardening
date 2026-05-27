@@ -44,9 +44,15 @@ setup() {
   # `bun run`, assert the wrapper makes bun fail-loud instead of
   # silently downloading.
   cd /tmp && rm -rf bun-auto-test && mkdir bun-auto-test && cd bun-auto-test
+  # IMPORTANT: use require() with the value actually used. `import x from
+  # "pkg"` with x unused gets DCE'd by bun's TS runtime BEFORE module
+  # resolution → no resolution attempt → no auto-install → test passes
+  # regardless of whether the wrapper blocked anything. require() runs
+  # at evaluation time and can't be tree-shaken; using the result
+  # prevents any subsequent DCE pass from eliminating the call.
   cat > script.ts <<'EOF'
-import isPositive from "is-positive";
-console.log("auto-install fired");
+const isPositive = require("is-positive");
+console.log("auto-install fired", typeof isPositive, isPositive(5));
 EOF
   echo '{"name":"bun-auto-test"}' > package.json
   result=$(bun run script.ts 2>&1 || true)
@@ -81,9 +87,11 @@ EOF
   [ -x /usr/local/bin/bun-real ] || skip "bun-real not present (bun_path_wrapper may be false)"
 
   cd /tmp && rm -rf bun-control-test && mkdir bun-control-test && cd bun-control-test
+  # Same fixture shape as the BEHAVIORAL test above — require()-based
+  # so bun can't tree-shake the resolution away.
   cat > script.ts <<'EOF'
-import isPositive from "is-positive";
-console.log("auto-install fired");
+const isPositive = require("is-positive");
+console.log("auto-install fired", typeof isPositive, isPositive(5));
 EOF
   echo '{"name":"bun-control-test"}' > package.json
   # Use env -i to strip any wrapper-relevant env vars (NPM_*, etc.).
