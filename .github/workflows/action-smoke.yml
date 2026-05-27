@@ -349,78 +349,29 @@ jobs:
         with:
           ecosystems: bun
 
-      # Rigorous diagnostic — test --no-install with a guaranteed-nonexistent
-      # package name AND a fixture that forces actual resolution (uses the
-      # imported value, so bun can't tree-shake the import away).
+      # bun run X with a missing import would silently auto-install it
+      # without the wrapper. With the wrapper injecting --no-install, bun
+      # must fail-loud instead.
       #
-      # Previous version of this test had an unused `import x from "..."`
-      # which bun dead-code-eliminated → no resolution attempted → tests
-      # all "passed" silently regardless of flag behavior. The fix:
-      # side-effect import (`import "pkg"` without binding name) PLUS
-      # explicit require() PLUS actually-use-the-value patterns to make
-      # the resolution unavoidable.
-      #
-      # Expected outcomes:
-      #   - If --no-install BLOCKS: bun errors with "Cannot find module" /
-      #     "Could not resolve" / "Module not found" — no network attempt,
-      #     nothing in cache.
-      #   - If --no-install IGNORED: bun attempts npm registry fetch. For
-      #     fake pkg: 404 / "not found in registry". For real pkg: succeeds
-      #     and writes to ~/.bun/install/cache.
-      - name: Rigorous test — does --no-install actually block auto-install?
-        run: |
-          mkdir -p /tmp/bun-rigorous && cd /tmp/bun-rigorous
-          echo '{"name":"t"}' > package.json
-          BUN_REAL="$(which bun)-real"
-          PKG="definitely-not-a-real-pkg-xyz-12345-abc-supplychain"
-
-          # Fixture that bun CANNOT dead-code-eliminate:
-          #   - require() runs at evaluation time, no tree-shake
-          #   - the value gets used (console.log forces evaluation)
-          cat > script.ts <<EOF
-          const x = require("$PKG");
-          console.log("RESOLVED", typeof x, JSON.stringify(Object.keys(x || {})));
-          EOF
-
-          echo "=== TEST 1: bun-real --no-install run (fake pkg; expect block) ==="
-          "$BUN_REAL" --no-install run script.ts; echo "exit=$?"
-          echo ""
-
-          echo "=== TEST 2: bun-real run (no flag; control — should attempt + fail) ==="
-          "$BUN_REAL" run script.ts; echo "exit=$?"
-          echo ""
-
-          echo "=== TEST 3: bun-real --install=disable run (try the bunfig config value as CLI) ==="
-          "$BUN_REAL" --install=disable run script.ts; echo "exit=$?"
-          echo ""
-
-          # Real package with cleared cache. require() forces resolution;
-          # we use the result to prevent any DCE.
-          cat > script-real.ts <<'EOF'
-          const isPositive = require("is-positive");
-          console.log("REAL_RESOLVED", typeof isPositive, isPositive(5));
-          EOF
-          rm -rf ~/.bun/install/cache
-          echo "=== TEST 4: bun-real --no-install run with REAL pkg + cleared cache ==="
-          "$BUN_REAL" --no-install run script-real.ts; echo "exit=$?"
-          echo "--- ~/.bun/install/cache contents after run ---"
-          find ~/.bun/install/cache -maxdepth 2 2>/dev/null | head -10 || echo "(no cache dir)"
-
-      # bun run X with a missing import would silently download it without
-      # the wrapper. With the wrapper injecting --no-install, bun must
-      # fail-loud instead.
+      # FIXTURE NOTE: use require() with the result actually USED. The
+      # `import x from "pkg"` form (with x never referenced) gets
+      # DCE'd by bun's TS runtime BEFORE resolution — bun never tries
+      # to fetch the package, the script "succeeds," and the test
+      # passes for the wrong reason. require() runs at evaluation time
+      # and can't be tree-shaken; using the result via typeof/call
+      # prevents any subsequent DCE pass from eliminating it.
       - name: bun run must refuse runtime auto-install
         run: |
           mkdir -p /tmp/bun-victim && cd /tmp/bun-victim
           cat > script.ts <<'EOF'
-          import isPositive from "is-positive";
-          console.log("auto-install fired");
+          const isPositive = require("is-positive");
+          console.log("auto-install fired", typeof isPositive, isPositive(5));
           EOF
           echo '{"name":"bun-victim"}' > package.json
           echo "=== invoking bun run script.ts ==="
           bun run script.ts 2>&1 || true
           rc=$?
-          echo "rc=$rc, node_modules:"
+          echo "rc=$rc"
           ls node_modules 2>/dev/null && nm_present=yes || nm_present=no
           echo "nm_present=$nm_present"
           if [ "$nm_present" = "yes" ]; then
