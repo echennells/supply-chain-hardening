@@ -208,6 +208,44 @@ marker never appeared regardless of hardening.
 that runs the fixture WITHOUT hardening and asserts the marker DOES
 appear. If the control fails, the fixture is tautological.
 
+### Tautological fixture: dead-code-eliminated imports
+
+A variant of the above, surfaced during the bun PATH wrapper work:
+the smoke test used `import x from "is-positive"` (with `x` never
+referenced) to verify the wrapper blocked runtime auto-install. The
+test "passed" reliably because bun's TS runtime dead-code-eliminates
+unused imports BEFORE attempting resolution — bun never tried to
+fetch the package, so the wrapper's `--no-install` injection never
+mattered, so the test couldn't distinguish "wrapper works" from
+"wrapper doesn't exist." Three iterations of the wrapper code were
+debugged against this broken test before the diagnostic step proved
+the wrapper was correct all along and the test fixture was the bug.
+
+**Principle**: when the target runtime can tree-shake unused
+constructs, write fixtures using forms the runtime cannot eliminate
+— `require()` calls (run at evaluation time, not statically analyzed)
+plus *use* the result (`typeof x`, function call, log the value).
+"Import X but don't use X" is invisible to most modern runtimes.
+
+### Test logic that swallows the assertion signal
+
+A specific shell pitfall caught in the same bun wrapper iteration:
+
+```bash
+bun run script.ts 2>&1 || true   # || true makes the pipeline exit 0
+rc=$?                              # captures `true`'s rc — always 0
+```
+
+The `|| true` neutralizes the subsequent `$?` capture, so any
+"if rc=0 then wrapper failed" check fires unconditionally even when
+the wrapper correctly blocked and bun exited non-zero.
+
+**Principle**: in test code, never use `|| true` immediately before
+capturing `$?`. Use `set +e; output=$(...); rc=$?; set -e` instead
+to capture the real exit code. The `|| true` idiom belongs in
+production code paths where the rc doesn't matter — not in tests
+where the rc IS the assertion.
+
 ### Minimum-supported-version testing
 
 A 3-arg `strftime(fmt, time, utc=True)` works on Ansible 2.13+. Ubuntu
