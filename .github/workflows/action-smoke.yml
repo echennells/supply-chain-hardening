@@ -334,6 +334,199 @@ jobs:
           fi
           echo "✓ bcrypt downloaded but native bindings absent (install script blocked)"
 
+  action-blocks-bun-auto-install:
+    name: 'Action: bun PATH wrapper blocks runtime auto-install on bun run'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+
+      - uses: ./action
+        with:
+          ecosystems: bun
+
+      # bun run X with a missing import would silently download it without
+      # the wrapper. With the wrapper injecting --no-install, bun must
+      # fail-loud instead.
+      - name: bun run must refuse runtime auto-install
+        run: |
+          mkdir -p /tmp/bun-victim && cd /tmp/bun-victim
+          cat > script.ts <<'EOF'
+          import isPositive from "is-positive";
+          console.log("auto-install fired");
+          EOF
+          echo '{"name":"bun-victim"}' > package.json
+          if bun run script.ts >/dev/null 2>&1; then
+            echo "::error::bun ran the script — wrapper did NOT block runtime auto-install"
+            exit 1
+          fi
+          if [ -d node_modules ]; then
+            echo "::error::node_modules created — wrapper did NOT block auto-install"
+            exit 1
+          fi
+          echo "✓ bun wrapper blocked runtime auto-install"
+
+      - name: bun install (package mgmt) still works through the wrapper
+        run: |
+          # Wrapper SKIPS --no-install injection for package-mgmt subcommands.
+          # bun install must work normally so users can still install deps.
+          mkdir -p /tmp/bun-install-test && cd /tmp/bun-install-test
+          echo '{"name":"t","dependencies":{"is-positive":"3.1.0"}}' > package.json
+          bun install 2>&1 | tail -3
+          test -d node_modules/is-positive || { echo "::error::bun install was blocked by the wrapper — wrapper subcommand routing is broken"; exit 1; }
+          echo "✓ bun install works (wrapper correctly skipped --no-install for package-mgmt subcommand)"
+
+  action-blocks-composer-script:
+    name: 'Action: composer wrapper blocks lifecycle script'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install composer
+        run: |
+          curl -sS https://getcomposer.org/installer | php
+          sudo mv composer.phar /usr/local/bin/composer
+          composer --version
+
+      - uses: ./action
+        with:
+          ecosystems: composer
+
+      - name: composer install must NOT run post-install-cmd from project composer.json
+        run: |
+          rm -f /tmp/marker-composer-script
+          mkdir -p /tmp/composer-victim && cd /tmp/composer-victim
+          cat > composer.json <<'EOF'
+          {
+            "name": "victim/test",
+            "scripts": {
+              "post-install-cmd": "touch /tmp/marker-composer-script"
+            }
+          }
+          EOF
+          composer install --no-interaction 2>&1 | tail -3 || true
+          if [ -f /tmp/marker-composer-script ]; then
+            echo "::error::composer ran post-install-cmd — wrapper did NOT inject --no-scripts"
+            exit 1
+          fi
+          echo "✓ composer wrapper blocked post-install-cmd"
+
+      - name: composer audit tier present in config
+        run: |
+          # composer was just installed via upstream installer → 2.9.x → tier 1
+          grep -q '"block-insecure": true' "$HOME/.config/composer/config.json"
+          grep -q '"block-abandoned": true' "$HOME/.config/composer/config.json"
+          echo "✓ tier-1 audit settings present (composer 2.9+ detected)"
+
+  action-go-env-set:
+    name: 'Action: go env vars propagate to subsequent steps'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: go
+
+      - name: Go env vars set
+        run: |
+          test "$GOSUMDB" = "sum.golang.org"
+          test "$GOPROXY" = "https://proxy.golang.org,direct"
+          test "$GOFLAGS" = "-mod=readonly"
+          test "$GOTOOLCHAIN" = "local"
+          test -z "$GOPRIVATE"
+          test -z "$GONOPROXY"
+          test -z "$GOINSECURE"
+          echo "✓ all 7 Go env vars set as expected"
+
+  action-cargo-config:
+    name: 'Action: cargo config has hardening keys'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: cargo
+
+      - name: Cargo config written with expected hardening
+        run: |
+          test -f "$HOME/.cargo/config.toml"
+          grep -q "git-fetch-with-cli = true" "$HOME/.cargo/config.toml"
+          grep -q "retry = 3" "$HOME/.cargo/config.toml"
+          # Catch regression where the old decorative keys come back
+          ! grep -q "check-revoke" "$HOME/.cargo/config.toml"
+          ! grep -q "dep-info-basedir" "$HOME/.cargo/config.toml"
+          echo "✓ cargo config has git-fetch-with-cli + retry, omits Windows-only check-revoke"
+
+  action-bundler-maven-gradle-nuget-configs:
+    name: 'Action: bundler/maven/gradle/nuget configs deployed'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: bundler,maven,gradle,nuget
+
+      - name: All four configs present with expected hardening keys
+        run: |
+          grep -q 'BUNDLE_FROZEN: "true"' "$HOME/.bundle/config"
+          grep -q 'BUNDLE_DEPLOYMENT: "true"' "$HOME/.bundle/config"
+          grep -q "central-https-only" "$HOME/.m2/settings.xml"
+          grep -q "failOnDynamicVersions" "$HOME/.gradle/init.gradle.kts"
+          grep -q '"require"' "$HOME/.config/NuGet/NuGet.Config"
+          grep -q "api.nuget.org" "$HOME/.config/NuGet/NuGet.Config"
+          echo "✓ all four ecosystem configs deployed with expected keys"
+
+  action-per-step-skip:
+    name: 'Action: SUPPLY_CHAIN_HARDEN_SKIP env var bypasses hardening'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        id: harden
+        env:
+          SUPPLY_CHAIN_HARDEN_SKIP: 'true'
+
+      - name: Action output reflects skip (empty ecosystems list)
+        run: |
+          test -z "${{ steps.harden.outputs.ecosystems-hardened }}"
+          # Defensive sanity: skip path should NOT have created any config files
+          test ! -f "$HOME/.npmrc" || { echo "::error::SKIP did not actually skip — .npmrc was created"; exit 1; }
+          echo "✓ SUPPLY_CHAIN_HARDEN_SKIP=true correctly bypassed hardening"
+
+  action-tool-versions-output:
+    name: 'Action: tool-versions output is valid JSON with expected keys'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm,pnpm,pip
+
+      - name: tool-versions output parses as JSON
+        run: |
+          versions='${{ steps.harden.outputs.tool-versions }}'
+          echo "tool-versions: $versions"
+          echo "$versions" | jq . >/dev/null
+          # Expected keys present (corresponding to requested ecosystems)
+          for key in npm pnpm pip; do
+            echo "$versions" | jq -e ".\"$key\"" >/dev/null \
+              || { echo "::error::tool-versions JSON missing key: $key"; exit 1; }
+          done
+          # npm version should be a non-empty string (npm is preinstalled on runners)
+          npm_v=$(echo "$versions" | jq -r '.npm')
+          [[ -n "$npm_v" ]] || { echo "::error::npm version detection returned empty"; exit 1; }
+          echo "✓ tool-versions output structure validated; npm=$npm_v"
+
   action-external-reference:
     name: 'Action: works when consumed by external ref (uses owner/repo/path@branch)'
     runs-on: ubuntu-24.04
