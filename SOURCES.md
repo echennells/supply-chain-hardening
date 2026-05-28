@@ -12,7 +12,7 @@ These directly influenced settings in the playbook.
 | [Supply chain hardening gist](https://gist.github.com/eapotapov/ae8c5eebf05776918f46a3f61c56cd43) | Evgeny Potapov (ApexData) | Release age configs for npm, pnpm, Yarn, Bun, uv, pip, Deno. Wheels-only enforcement for pip/uv. pip-dependency-cooldown script (credited to Seth Larson) |
 | [npm-security-best-practices](https://github.com/lirantal/npm-security-best-practices) | Liran Tal | `allow-git=none`, lockfile-lint, npq integration, pnpm `blockExoticSubdeps`, Socket Firewall |
 | [pypi-security-best-practices](https://github.com/lirantal/pypi-security-best-practices) | Liran Tal | uv `require-hashes` + `verify-hashes`, uv-secure, zizmor + pinact for GitHub Actions |
-| [package-manager-hardening](https://github.com/jordanconway/package-manager-hardening) | Jordan Conway | uv hash verification, Bun `lifecycleScripts=false` + `exact=true`, Go `GOTOOLCHAIN=local`, Yarn exact pinning |
+| [package-manager-hardening](https://github.com/jordanconway/package-manager-hardening) | Jordan Conway | uv hash verification, Bun `exact=true`, Go `GOTOOLCHAIN=local`, Yarn exact pinning (NOTE: upstream listed `lifecycleScripts=false` for Bun; we shipped that copy-paste for weeks before catching that the real bun key is `ignoreScripts` with inverted semantics — corrected 2026-05-28) |
 | [BufferZoneCorp attack analysis](https://socket.dev/blog/malicious-ruby-gems-and-go-modules-steal-secrets-poison-ci) | Socket.dev | Go hardening: pin GOPROXY, clear GONOSUMCHECK/GONOSUMDB to prevent CI env poisoning |
 
 ## Secondary sources

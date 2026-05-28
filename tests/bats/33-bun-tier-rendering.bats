@@ -21,7 +21,7 @@ setup_file() {
   vars:
     bun_minimum_release_age_seconds: 172800
     bun_exact: true
-    bun_lifecycle_scripts: false
+    bun_ignore_scripts: true
     bun_frozen_lockfile: true
     bun_auto: "disable"
     bun_save_text_lockfile: true
@@ -57,7 +57,7 @@ assert_valid_toml() {
 
 assert_has_baseline() {
   local f="$1"
-  for key in minimumReleaseAge exact lifecycleScripts frozenLockfile auto; do
+  for key in minimumReleaseAge exact ignoreScripts frozenLockfile auto; do
     grep -q "^${key} = \|^${key}=" "$f" || { echo "missing $key in $f" >&2; return 1; }
   done
 }
@@ -122,7 +122,7 @@ assert_has_baseline() {
   vars:
     bun_minimum_release_age_seconds: 172800
     bun_exact: true
-    bun_lifecycle_scripts: false
+    bun_ignore_scripts: true
     bun_frozen_lockfile: true
     bun_auto: "disable"
     bun_save_text_lockfile: true
@@ -152,7 +152,7 @@ EOF
   vars:
     bun_minimum_release_age_seconds: 172800
     bun_exact: true
-    bun_lifecycle_scripts: false
+    bun_ignore_scripts: true
     bun_frozen_lockfile: true
     bun_auto: "disable"
     bun_save_text_lockfile: true

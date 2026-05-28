@@ -99,7 +99,15 @@ pnpm_built_dependencies: []
 
 # bun settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
 bun_exact: true                  # exact version pinning
-bun_lifecycle_scripts: false     # block postinstall/preinstall scripts
+# Block bun's lifecycle scripts (preinstall/install/postinstall/prepare).
+# RENAMED 2026-05-28 from bun_lifecycle_scripts (which set the made-up key
+# `lifecycleScripts = false` that bun silently ignored). Real bun key per
+# https://bun.sh/docs/runtime/bunfig is `install.ignoreScripts` with
+# inverted semantics: true = block, false = allow. Default true = blocked.
+# Behavior change for anyone who relied on the (broken) default: the
+# protection now actually fires. If your workflow needs lifecycle scripts
+# to run (rare), set this to false explicitly.
+bun_ignore_scripts: true
 bun_frozen_lockfile: true        # refuse install if package.json diverges from lockfile
 bun_auto: "disable"              # alternatives: auto, fallback, force.
 # IMPORTANT: this setting affects `bun install` only — NOT `bun run`.
@@ -140,7 +148,7 @@ bun_security_scanner: ""
 # the install vector (typosquat attack pattern). The wrapper at
 # /usr/local/bin/bun (or wherever bun is found) injects --no-install on
 # every non-package-management invocation, closing the gap. Set to
-# false to skip wrapping; the install-time protections (lifecycleScripts,
+# false to skip wrapping; the install-time protections (ignoreScripts,
 # minimumReleaseAge, frozenLockfile, scanner) still apply via the
 # global ~/.bunfig.toml regardless of this var. See
 # templates/bun-wrapper.sh.j2 header for the full design + bypass

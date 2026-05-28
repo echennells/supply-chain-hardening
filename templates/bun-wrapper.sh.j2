@@ -29,7 +29,7 @@
 # upgrade / link / unlink / pm / outdated / why / audit / publish /
 # patch / init / create) skip the injection. Those commands consult
 # ~/.bunfig.toml as normal — that's where the OTHER hardening lives
-# (lifecycleScripts, minimumReleaseAge, frozenLockfile, scanner).
+# (ignoreScripts, minimumReleaseAge, frozenLockfile, scanner).
 #
 # `bun upgrade` is NOT injected against either — it's bun's self-update
 # subcommand and doesn't interact with auto-install at all.

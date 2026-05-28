@@ -64,7 +64,7 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 **Currently deployed** (`templates/bunfig.toml.j2`, 3 settings):
 - `minimumReleaseAge` — age gate
 - `exact = true` — exact version pinning
-- `lifecycleScripts = false` — script blocking
+- `ignoreScripts = true` — script blocking (corrected 2026-05-28 from the made-up `lifecycleScripts = false` which bun silently ignored; see commit message)
 
 **Findings:**
 

@@ -151,8 +151,12 @@ load setup
 }
 
 # bun
-@test "bunfig: lifecycleScripts = false" {
-  assert_file_contains "$HOME/.bunfig.toml" "lifecycleScripts = false"
+@test "bunfig: ignoreScripts = true (real bun key, not the made-up 'lifecycleScripts')" {
+  # Earlier versions wrote `lifecycleScripts = false` — silently inert.
+  # Real key per https://bun.sh/docs/runtime/bunfig is `ignoreScripts`
+  # with inverted semantics. Catches regression to the wrong key.
+  assert_file_contains "$HOME/.bunfig.toml" "ignoreScripts = true"
+  ! grep -q "^lifecycleScripts" "$HOME/.bunfig.toml"
 }
 
 @test "bunfig: exact = true" {

@@ -48,6 +48,17 @@ inputs:
       sudo, which all stock GitHub runners have.
     required: false
     default: 'true'
+  pnpm_built_dependencies:
+    description: >-
+      Comma-separated allowlist of package names whose build scripts ARE
+      allowed to run (pnpm 11+ `onlyBuiltDependencies` semantic). Default
+      empty = block all build scripts via `ignore-scripts=true`. Set to
+      e.g. `esbuild,sharp` if your project legitimately needs build
+      scripts for native bindings. Mirrors the role's
+      `pnpm_built_dependencies` var; empty default keeps action behavior
+      strictly more secure than the role's user-allowlist-by-default.
+    required: false
+    default: ''
   composer_allow_plugins:
     description: >-
       Allow composer Plugin class execution (e.g., composer/installers,
@@ -87,6 +98,7 @@ runs:
         INSTALL_SFW: ${{ inputs.install_sfw }}
         WRITE_ETC: ${{ inputs.write_etc }}
         COMPOSER_ALLOW_PLUGINS: ${{ inputs.composer_allow_plugins }}
+        PNPM_BUILT_DEPENDENCIES: ${{ inputs.pnpm_built_dependencies }}
       run: ${{ github.action_path }}/harden.sh
 
 branding:

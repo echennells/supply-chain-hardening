@@ -22,6 +22,7 @@ STRICT="${STRICT:-true}"
 INSTALL_SFW="${INSTALL_SFW:-false}"
 WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
+PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 
 # CI-specific: per-step opt-out. If a workflow step needs to bypass
 # hardening (e.g., bootstrap step that legitimately needs install scripts),
@@ -171,31 +172,85 @@ harden_pnpm() {
   section "pnpm"
   mkdir -p "$HOME/.config/pnpm"
 
+  # Parse pnpm_built_dependencies input (comma-separated allowlist).
+  # When non-empty: switch from blanket ignore-scripts=true to
+  # onlyBuiltDependencies semantic — listed packages CAN run build
+  # scripts, everything else is blocked. Mirrors role's pnpm_built_dependencies.
+  local -a pnpm_allowlist=()
+  if [[ -n "$PNPM_BUILT_DEPENDENCIES" ]]; then
+    # Reject control chars in the raw input. bash's `read -ra <<<` truncates
+    # at newline, so without this check a multi-line input would silently
+    # drop everything after the first \n. Fail loud instead.
+    #
+    # NOTE: grep '[[:cntrl:]]' won't match newlines — grep reads line-by-line
+    # so the newline is consumed as line separator before pattern matching.
+    # Use bash globbing instead which sees the raw string.
+    if [[ "$PNPM_BUILT_DEPENDENCIES" == *$'\n'* || \
+          "$PNPM_BUILT_DEPENDENCIES" == *$'\r'* || \
+          "$PNPM_BUILT_DEPENDENCIES" == *$'\t'* ]]; then
+      echo "::error::pnpm_built_dependencies must not contain control characters (newlines, tabs, CR). Use comma-separated format: 'esbuild,sharp'"
+      exit 2
+    fi
+    IFS=',' read -ra _raw_pkgs <<< "$PNPM_BUILT_DEPENDENCIES"
+    for pkg in "${_raw_pkgs[@]}"; do
+      pkg=$(echo "$pkg" | xargs)  # trim whitespace
+      [[ -z "$pkg" ]] && continue
+      # Validate: package names are letters/digits/underscore/period/hyphen/slash, optional @scope prefix.
+      # Same regex as role's tasks/pnpm.yml. Reject anything else (special
+      # chars, shell metacharacters) — defense against injection into the
+      # deployed config file.
+      if ! [[ "$pkg" =~ ^@?[a-zA-Z0-9_./-]+$ ]]; then
+        echo "::error::pnpm_built_dependencies entry '$pkg' contains invalid characters; refusing to deploy"
+        exit 2
+      fi
+      pnpm_allowlist+=("$pkg")
+    done
+  fi
+
   # pnpm 11+ format (YAML, camelCase). This is the load-bearing file
   # for pnpm 11 — it ignores ~/.npmrc, ~/.config/pnpm/rc (the older
   # ini-format file), and /etc/npmrc for non-auth settings.
-  cat > "$HOME/.config/pnpm/config.yaml" <<EOF
-# Managed by supply-chain-harden action
-ignoreScripts: true
-minimumReleaseAge: $PNPM_AGE_MINUTES
-minimumReleaseAgeStrict: $STRICT
-minimumReleaseAgeExclude: []
-blockExoticSubdeps: true
-EOF
+  {
+    echo "# Managed by supply-chain-harden action"
+    if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
+      echo "ignoreScripts: false"
+      echo "onlyBuiltDependencies:"
+      for pkg in "${pnpm_allowlist[@]}"; do
+        echo "  - $pkg"
+      done
+    else
+      echo "ignoreScripts: true"
+    fi
+    echo "minimumReleaseAge: $PNPM_AGE_MINUTES"
+    echo "minimumReleaseAgeStrict: $STRICT"
+    echo "minimumReleaseAgeExclude: []"
+    echo "blockExoticSubdeps: true"
+  } > "$HOME/.config/pnpm/config.yaml"
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
   # both major versions; pnpm 10 still reads this file.
-  cat > "$HOME/.config/pnpm/rc" <<EOF
-; Managed by supply-chain-harden action
-minimum-release-age=$PNPM_AGE_MINUTES
-minimum-release-age-strict=$STRICT
-block-exotic-subdeps=true
-ignore-scripts=true
-EOF
+  {
+    echo "; Managed by supply-chain-harden action"
+    echo "minimum-release-age=$PNPM_AGE_MINUTES"
+    echo "minimum-release-age-strict=$STRICT"
+    echo "block-exotic-subdeps=true"
+    if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
+      echo "ignore-scripts=false"
+      for pkg in "${pnpm_allowlist[@]}"; do
+        echo "only-built-dependencies[]=$pkg"
+      done
+    else
+      echo "ignore-scripts=true"
+    fi
+  } > "$HOME/.config/pnpm/rc"
 
   HARDENED+=("pnpm")
   TOOL_VERSIONS["pnpm"]=$(detect_version pnpm "pnpm --version")
-  log "pnpm: ignoreScripts=true (config.yaml + rc), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+  if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
+    log "pnpm: onlyBuiltDependencies=[${pnpm_allowlist[*]}], minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+  else
+    log "pnpm: ignoreScripts=true (blanket block), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+  fi
   end_section
 }
 
@@ -424,12 +479,18 @@ harden_bun() {
   # ~/.bunfig.toml — install-time hardening. NOTE: per bun's docs,
   # this file is NOT consulted for `bun run`; only for `bun install`.
   # The runtime auto-install gap is closed by the wrapper below.
+  #
+  # ignoreScripts (NOT lifecycleScripts — earlier action versions wrote
+  # the wrong key which bun silently ignored) blocks bun install's
+  # preinstall/install/postinstall/prepare hooks. Fixed 2026-05-28 after
+  # a fresh audit caught the made-up key. Same bug-shape as the original
+  # composer COMPOSER_NO_SCRIPTS bug we shipped + later fixed.
   cat > "$HOME/.bunfig.toml" <<EOF
 # Managed by supply-chain-harden action
 [install]
 minimumReleaseAge = $BUN_AGE_SECONDS
 exact = true
-lifecycleScripts = false
+ignoreScripts = true
 frozenLockfile = true
 auto = "disable"
 EOF
@@ -788,8 +849,12 @@ tool_versions_json="{"
 first=true
 for key in "${!TOOL_VERSIONS[@]}"; do
   if [[ "$first" == "true" ]]; then first=false; else tool_versions_json+=","; fi
-  # Escape any quotes in the version (none expected, but defensive).
-  v=$(printf '%s' "${TOOL_VERSIONS[$key]}" | sed 's/"/\\"/g')
+  # JSON-escape the value. detect_version's grep filters to [0-9.] in
+  # the normal path so these escapes are belt-and-suspenders, but if a
+  # future contributor populates TOOL_VERSIONS bypassing detect_version,
+  # this prevents JSON corruption. Escape backslash FIRST (otherwise the
+  # backslash from \" gets double-escaped).
+  v=$(printf '%s' "${TOOL_VERSIONS[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')
   tool_versions_json+="\"$key\":\"$v\""
 done
 tool_versions_json+="}"
