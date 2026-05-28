@@ -508,6 +508,285 @@ jobs:
           grep -q "api.nuget.org" "$HOME/.config/NuGet/NuGet.Config"
           echo "✓ all four ecosystem configs deployed with expected keys"
 
+  action-bundler-behavioral-frozen:
+    name: 'Action: bundler BUNDLE_FROZEN actually rejects out-of-sync Gemfile.lock'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: bundler
+
+      # Behavioral: BUNDLE_FROZEN=true requires Gemfile and Gemfile.lock
+      # to be in sync. If they're not, `bundle install` must refuse.
+      # Build a project where the Gemfile adds a dep not in the lockfile,
+      # then confirm bundler rejects.
+      - name: bundle install must refuse out-of-sync Gemfile.lock
+        run: |
+          mkdir -p /tmp/bundler-victim && cd /tmp/bundler-victim
+          cat > Gemfile <<'EOF'
+          source 'https://rubygems.org'
+          gem 'rake', '13.0.6'
+          EOF
+          # Pretend the lockfile says we already locked an OLDER rake version.
+          # BUNDLE_FROZEN should refuse to update it.
+          cat > Gemfile.lock <<'EOF'
+          GEM
+            remote: https://rubygems.org/
+            specs:
+              rake (13.0.0)
+
+          PLATFORMS
+            ruby
+
+          DEPENDENCIES
+            rake (= 13.0.0)
+
+          BUNDLED WITH
+             2.4.10
+          EOF
+          set +e
+          output=$(bundle install 2>&1)
+          rc=$?
+          set -e
+          echo "$output"
+          echo "rc=$rc"
+          if [ "$rc" = "0" ]; then
+            echo "::error::bundle install succeeded — BUNDLE_FROZEN did NOT block out-of-sync lockfile"
+            exit 1
+          fi
+          echo "$output" | grep -qiE "frozen|deployment|out.of.sync|update.*not.*allowed|cannot.*update|dependencies were changed" \
+            || { echo "::error::bundle errored but not with the expected frozen-mode shape:"; echo "$output"; exit 1; }
+          echo "✓ bundler BUNDLE_FROZEN correctly blocked out-of-sync lockfile"
+
+  action-maven-behavioral-https-only:
+    name: 'Action: maven mirror actually blocks HTTP-only repository'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: ./action
+        with:
+          ecosystems: maven
+
+      # Behavioral: the action's settings.xml has
+      #   <mirrorOf>external:http:*</mirrorOf> + <blocked>true</blocked>
+      # which should cause Maven to refuse any HTTP-only repo at resolve time.
+      # Build a pom that declares an HTTP-only repo + attempts to resolve from it.
+      - name: mvn must refuse HTTP-only repository at resolve time
+        run: |
+          mkdir -p /tmp/maven-victim && cd /tmp/maven-victim
+          cat > pom.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>victim</groupId>
+            <artifactId>victim</artifactId>
+            <version>1.0</version>
+            <packaging>pom</packaging>
+            <repositories>
+              <repository>
+                <id>http-repo</id>
+                <url>http://repo.example.com/maven2</url>
+              </repository>
+            </repositories>
+          </project>
+          EOF
+          # Force resolution attempt against the HTTP repo by asking Maven
+          # to fetch a non-stock artifact. We expect a blocked-mirror error.
+          set +e
+          output=$(mvn -B dependency:resolve -DincludeArtifactIds=does-not-exist 2>&1)
+          rc=$?
+          set -e
+          echo "$output" | tail -30
+          echo "rc=$rc"
+          # Maven prints "blocked mirror" when a repo matches a <blocked> mirror.
+          # Older Maven (<3.8.1) doesn't recognize <blocked> — fail this test
+          # there so we know our setup-java pin needs review.
+          if echo "$output" | grep -qiE "blocked.*mirror|http.*blocked|mirror.*blocked|external:http:.*blocked"; then
+            echo "✓ maven blocked HTTP-only repo via <blocked> mirror"
+            exit 0
+          fi
+          # Acceptable alternative: Maven 3.8+ refuses HTTP repos with an error
+          # about non-https. Either signal is fine.
+          if echo "$output" | grep -qiE "non.https|http url|protocol http"; then
+            echo "✓ maven rejected HTTP repo (different signal but same effect)"
+            exit 0
+          fi
+          echo "::error::maven did NOT block the HTTP repo. settings.xml may not be effective. Output above."
+          exit 1
+
+  action-gradle-behavioral-dynamic-version:
+    name: 'Action: gradle init script actually rejects dynamic versions'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: ./action
+        with:
+          ecosystems: gradle
+
+      # Behavioral: ~/.gradle/init.gradle.kts has
+      #   resolutionStrategy { failOnDynamicVersions() }
+      # which should cause Gradle to reject any dynamic version selector
+      # (1.+, latest.release, 1.0-SNAPSHOT, etc.).
+      - name: gradle must reject dynamic version selectors
+        run: |
+          mkdir -p /tmp/gradle-victim && cd /tmp/gradle-victim
+          cat > settings.gradle.kts <<'EOF'
+          rootProject.name = "victim"
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins { java }
+          repositories { mavenCentral() }
+          dependencies {
+            // Dynamic version — must be refused by init script.
+            implementation("com.google.guava:guava:33.+")
+          }
+          EOF
+          set +e
+          # `gradle dependencies` triggers resolution which fires failOnDynamicVersions
+          output=$(gradle --no-daemon --init-script "$HOME/.gradle/init.gradle.kts" dependencies 2>&1)
+          rc=$?
+          set -e
+          echo "$output" | tail -30
+          echo "rc=$rc"
+          if [ "$rc" = "0" ]; then
+            echo "::error::gradle resolved a dynamic version — init script did NOT block"
+            exit 1
+          fi
+          echo "$output" | grep -qiE "dynamic version|failOnDynamicVersions" \
+            || { echo "::error::gradle errored but not with the expected dynamic-version-blocked shape"; exit 1; }
+          echo "✓ gradle init script blocked dynamic version selector"
+
+  action-nuget-behavioral-cert-valid:
+    name: 'Action: nuget cert fingerprint accepts current nuget.org packages'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-dotnet@3e891b0cb619bf60e2c25674b222b8940e2c1c25 # v4.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: ./action
+        with:
+          ecosystems: nuget
+
+      # Behavioral: the action's NuGet.Config sets
+      #   signatureValidationMode = require
+      # and pins a SHA256 cert fingerprint for nuget.org. If the fingerprint
+      # is correct and current, restoring a real nuget package succeeds.
+      # If the fingerprint is stale or wrong, even a popular package like
+      # Newtonsoft.Json fails with a signature-validation error.
+      #
+      # This is essentially a control test: a healthy NuGet should restore
+      # cleanly under our config. If it fails, our cert pin is wrong.
+      - name: dotnet restore must succeed under require-mode + pinned cert
+        run: |
+          mkdir -p /tmp/nuget-victim && cd /tmp/nuget-victim
+          dotnet new console -o app --no-restore >/dev/null
+          cd app
+          dotnet add package Newtonsoft.Json --version 13.0.3 >/dev/null
+          set +e
+          output=$(dotnet restore 2>&1)
+          rc=$?
+          set -e
+          echo "$output" | tail -20
+          echo "rc=$rc"
+          if [ "$rc" != "0" ]; then
+            # NU3008 = signature validation failure
+            if echo "$output" | grep -qiE "NU3008|signature.*invalid|certificate.*not.*trusted"; then
+              echo "::error::nuget cert fingerprint is STALE or WRONG — Newtonsoft.Json failed signature validation"
+              echo "Action's harden_nuget needs an updated cert fingerprint"
+              exit 1
+            fi
+            echo "::error::dotnet restore failed for an unexpected reason"
+            exit 1
+          fi
+          echo "✓ nuget cert fingerprint is current — signed packages from nuget.org install cleanly"
+
+  action-pnpm-allowlist-input:
+    name: 'Action: pnpm_built_dependencies input correctly switches to allowlist mode'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: pnpm
+          pnpm_built_dependencies: 'esbuild,sharp'
+
+      - name: config.yaml + rc reflect onlyBuiltDependencies allowlist
+        run: |
+          # pnpm 11+ format: ignoreScripts=false + onlyBuiltDependencies list
+          grep -q '^ignoreScripts: false$' "$HOME/.config/pnpm/config.yaml"
+          grep -q '^onlyBuiltDependencies:$' "$HOME/.config/pnpm/config.yaml"
+          grep -q '^  - esbuild$' "$HOME/.config/pnpm/config.yaml"
+          grep -q '^  - sharp$' "$HOME/.config/pnpm/config.yaml"
+          # pnpm 10 format: ini-style allowlist entries
+          grep -q '^ignore-scripts=false$' "$HOME/.config/pnpm/rc"
+          grep -q '^only-built-dependencies\[\]=esbuild$' "$HOME/.config/pnpm/rc"
+          grep -q '^only-built-dependencies\[\]=sharp$' "$HOME/.config/pnpm/rc"
+          echo "✓ pnpm allowlist correctly emitted in both pnpm 10 + 11 formats"
+
+      - name: Rejection of injection attempts (control char + special chars)
+        run: |
+          # Subshell so we can capture the action's exit without failing this step.
+          set +e
+          # newline injection
+          PNPM_BUILT_DEPENDENCIES="$(printf 'esbuild,sharp\nrm=evil')" \
+            ECOSYSTEMS=pnpm INSTALL_SFW=false WRITE_ETC=false STRICT=true \
+            RELEASE_AGE_HOURS=48 COMPOSER_ALLOW_PLUGINS=false \
+            bash ./action/harden.sh 2>&1 | head -5
+          newline_rc=$?
+          # special-char injection
+          PNPM_BUILT_DEPENDENCIES='esbuild,foo;rm -rf /' \
+            ECOSYSTEMS=pnpm INSTALL_SFW=false WRITE_ETC=false STRICT=true \
+            RELEASE_AGE_HOURS=48 COMPOSER_ALLOW_PLUGINS=false \
+            bash ./action/harden.sh 2>&1 | head -5
+          special_rc=$?
+          set -e
+          if [ "$newline_rc" = "0" ] || [ "$special_rc" = "0" ]; then
+            echo "::error::injection guard didn't fire (newline_rc=$newline_rc, special_rc=$special_rc)"
+            exit 1
+          fi
+          echo "✓ injection guards rejected both newline and special-char inputs"
+
+  action-bun-ignorescripts-key-check:
+    name: 'Action: bunfig.toml uses ignoreScripts (real key) not lifecycleScripts (made-up)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: ./action
+        with:
+          ecosystems: bun
+
+      # Regression catcher for the bug we just fixed. Earlier versions wrote
+      # `lifecycleScripts = false` which bun silently ignored — install-time
+      # scripts ran despite the claim. Real bun key is `ignoreScripts`.
+      - name: bunfig.toml has ignoreScripts=true, NOT lifecycleScripts
+        run: |
+          grep -qE '^ignoreScripts = true$' "$HOME/.bunfig.toml" \
+            || { echo "::error::~/.bunfig.toml missing ignoreScripts=true (real bun key)"; cat "$HOME/.bunfig.toml"; exit 1; }
+          if grep -q '^lifecycleScripts' "$HOME/.bunfig.toml"; then
+            echo "::error::~/.bunfig.toml still contains the made-up 'lifecycleScripts' key — regression"
+            exit 1
+          fi
+          echo "✓ bunfig.toml uses real bun key ignoreScripts (not the made-up lifecycleScripts)"
+
   action-per-step-skip:
     name: 'Action: SUPPLY_CHAIN_HARDEN_SKIP env var bypasses hardening'
     runs-on: ubuntu-24.04
