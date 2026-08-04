@@ -125,6 +125,22 @@ load setup
   assert_file_contains "$HOME/.config/pnpm/config.yaml" "blockExoticSubdeps: true"
 }
 
+@test "pnpm rc: verify-store-integrity=true (default path)" {
+  assert_file_contains "$HOME/.config/pnpm/rc" "verify-store-integrity=true"
+}
+
+@test "pnpm rc: prefer-frozen-lockfile=true (default path; deterministic pins, no hard-freeze)" {
+  assert_file_contains "$HOME/.config/pnpm/rc" "prefer-frozen-lockfile=true"
+}
+
+@test "pnpm config.yaml: verifyStoreIntegrity true (pnpm 11+ store hash-check)" {
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" "verifyStoreIntegrity: true"
+}
+
+@test "pnpm config.yaml: preferFrozenLockfile true (pnpm 11+ deterministic pins)" {
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" "preferFrozenLockfile: true"
+}
+
 # yarn
 @test "yarnrc: enableScripts false" {
   assert_file_contains "$HOME/.yarnrc.yml" "enableScripts: false"
