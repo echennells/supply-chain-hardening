@@ -40,6 +40,67 @@
   loop: "{{ pnpm_built_dependencies + pnpm_minimum_release_age_exclude }}"
   when: (pnpm_built_dependencies | length + pnpm_minimum_release_age_exclude | length) > 0
 
+- name: Validate pnpm_allowlist_conflict_action
+  # Guard against a typo silently mis-routing the doubly-exempt check below:
+  # an unrecognized value would make neither the assert (== 'fail') nor the
+  # warn (== 'warn') branch fire, so a genuinely dangerous config would pass
+  # unchecked. Constrain to the two supported modes up front.
+  ansible.builtin.assert:
+    that:
+      - pnpm_allowlist_conflict_action in ['fail', 'warn']
+    fail_msg: >-
+      pnpm_allowlist_conflict_action must be 'fail' or 'warn', got
+      '{{ pnpm_allowlist_conflict_action }}'.
+
+- name: Detect packages exempt from BOTH script-blocking and the age gate
+  # A package on pnpm_built_dependencies may run build scripts; a package on
+  # pnpm_minimum_release_age_exclude skips the age gate. A package on BOTH has
+  # zero supply-chain gates — a compromised release runs on install with no
+  # cooldown. This is the trusted-package-takeover hole (Shai-Hulud / keyv,
+  # 2026-08). Compute the intersection so we can refuse or warn.
+  ansible.builtin.set_fact:
+    pnpm_doubly_exempt: "{{ pnpm_built_dependencies | intersect(pnpm_minimum_release_age_exclude) }}"
+
+- name: Fail when a package is exempt from both script-blocking and the age gate
+  ansible.builtin.assert:
+    that:
+      - pnpm_doubly_exempt | length == 0
+    fail_msg: >-
+      These packages are on BOTH pnpm_built_dependencies (may run build
+      scripts) and pnpm_minimum_release_age_exclude (skip the age gate):
+      {{ pnpm_doubly_exempt | join(', ') }}. That removes every supply-chain
+      gate for them — a compromised release runs immediately, no cooldown.
+      Remove each from one of the two lists, or set
+      pnpm_allowlist_conflict_action=warn to override deliberately.
+    success_msg: "pnpm allowlists: no package is exempt from both gates."
+  when: pnpm_allowlist_conflict_action == 'fail'
+
+- name: Warn when a package is exempt from both gates (override mode)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING (pnpm_allowlist_conflict_action=warn):
+      {{ pnpm_doubly_exempt | join(', ') }}
+      {{ 'is' if pnpm_doubly_exempt | length == 1 else 'are' }}
+      exempt from BOTH script-blocking and the age gate — no supply-chain
+      gate remains for {{ 'it' if pnpm_doubly_exempt | length == 1 else 'them' }}.
+  when:
+    - pnpm_allowlist_conflict_action == 'warn'
+    - pnpm_doubly_exempt | length > 0
+
+- name: Report active pnpm allowlist exemptions
+  # Surfaces what the operator has exempted and by which mechanism, so a
+  # committed exemption is a visible, reviewable decision rather than a silent
+  # config line. Only shown when something is actually exempted, so the
+  # default (fully-locked) apply stays quiet — the default path is unchanged.
+  ansible.builtin.debug:
+    msg: |-
+      pnpm allowlist exemptions active on this host:
+        build scripts allowed (flips ignore-scripts=false on pnpm <= 10) for:
+          {{ pnpm_built_dependencies | join(', ') if pnpm_built_dependencies | length > 0 else '(none — all build scripts blocked)' }}
+        age gate skipped for:
+          {{ pnpm_minimum_release_age_exclude | join(', ') if pnpm_minimum_release_age_exclude | length > 0 else '(none — all packages age-gated)' }}
+  when: (pnpm_built_dependencies | length + pnpm_minimum_release_age_exclude | length) > 0
+
 - name: Create pnpm config directory
   ansible.builtin.file:
     path: "{{ pnpm_config_dir }}"

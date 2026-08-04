@@ -65,6 +65,34 @@ pnpm_minimum_release_age_exclude: []
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 pnpm_built_dependencies: []
 
+# Store integrity + lockfile determinism. Both default to pnpm's own
+# defaults; the role emits them explicitly so a lower-precedence config
+# can't silently disable them and so an audit can see the posture.
+#
+# verify-store-integrity: pnpm verifies each package's content hash against
+# the lockfile before linking it into node_modules — catches store tampering
+# and lockfile/content mismatch. pnpm default true; we pin it true.
+pnpm_verify_store_integrity: true
+# prefer-frozen-lockfile: when the lockfile is present and up to date, install
+# straight from it (deterministic, pinned versions) instead of re-resolving,
+# so a freshly-published malicious version can't enter via resolution.
+# IMPORTANT: this does NOT hard-fail on lockfile drift — that is
+# `frozen-lockfile`, which the role deliberately does NOT force globally.
+# Forcing frozen-lockfile in a user's global config breaks the ordinary
+# edit-package.json-then-`pnpm install` dev loop ("Cannot proceed with the
+# frozen installation"). pnpm already turns frozen-lockfile on automatically
+# in CI; keep hard-freeze a CI / per-project concern, not a global default.
+pnpm_prefer_frozen_lockfile: true
+# What to do when a package appears on BOTH pnpm_built_dependencies (allowed
+# to run build scripts) AND pnpm_minimum_release_age_exclude (skips the age
+# gate). That combination strips every supply-chain gate from one package
+# name — a compromised release of it executes on install with no cooldown,
+# which is exactly the trusted-package-takeover shape of the Shai-Hulud /
+# keyv npm worm (2026-08). Almost always a mistake. "fail" (default; matches
+# the role's fail-loud posture) aborts the apply and names the offenders;
+# "warn" prints the warning and continues for operators who truly intend it.
+pnpm_allowlist_conflict_action: "fail"
+
 # yarn settings
 yarn_enable_scripts: false
 

@@ -36,3 +36,11 @@ minimumReleaseAgeExclude:
 minimumReleaseAgeExclude: []
 {% endif %}
 blockExoticSubdeps: true
+# Store integrity + lockfile determinism (see defaults/main.yml). These are
+# standard pnpm settings readable from the global config — unlike
+# onlyBuiltDependencies, which pnpm 11 rejects here. verifyStoreIntegrity
+# hash-checks the store against the lockfile; preferFrozenLockfile installs
+# from an up-to-date lockfile without re-resolving. Neither hard-fails on
+# drift — hard freeze (frozenLockfile) is left to CI.
+verifyStoreIntegrity: {{ pnpm_verify_store_integrity | bool | lower }}
+preferFrozenLockfile: {{ pnpm_prefer_frozen_lockfile | bool | lower }}

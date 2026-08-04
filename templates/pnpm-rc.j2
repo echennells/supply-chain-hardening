@@ -5,6 +5,14 @@ minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
 minimum-release-age-exclude[]={{ pkg }}
 {% endfor %}
 block-exotic-subdeps=true
+; Store integrity + lockfile determinism (see defaults/main.yml for rationale).
+; verify-store-integrity: hash-check store contents against the lockfile.
+; prefer-frozen-lockfile: install from an up-to-date lockfile without
+; re-resolving (deterministic pins). Neither hard-fails on drift — hard
+; freeze (frozen-lockfile) is intentionally left to CI so dev installs that
+; legitimately update the lockfile keep working.
+verify-store-integrity={{ pnpm_verify_store_integrity | bool | lower }}
+prefer-frozen-lockfile={{ pnpm_prefer_frozen_lockfile | bool | lower }}
 {% if pnpm_built_dependencies | length > 0 %}
 ; Explicit build-script allowlist (pnpm 11+). Listed packages may run build
 ; scripts; everything else is blocked. Override /etc/npmrc's
