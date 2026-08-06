@@ -10,7 +10,7 @@ test: build
 	docker run --rm $(IMAGE_NAME)
 
 test-matrix:
-	@for node in 20 22; do \
+	@for node in 20 22 24; do \
 		echo "\n=== Testing with Node $$node ===" ; \
 		docker build -t $(IMAGE_NAME)-node$$node --build-arg NODE_VERSION=$$node -f tests/Dockerfile . && \
 		docker run --rm $(IMAGE_NAME)-node$$node || exit 1 ; \
