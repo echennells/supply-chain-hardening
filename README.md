@@ -84,7 +84,9 @@ Deployed to `/etc/profile.d/supply-chain-hardening.sh` (sourced by login shells)
 
 For the `✗` rows — most notably long-lived agent processes started as container CMDs or systemd services — the **config files layer** below is what actually protects them. The env vars are a redundancy layer that helps when an agent runs inside a PAM-launched shell.
 
-Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MINIMUM_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
+Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_AUDIT`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MIN_RELEASE_AGE`), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`), PHP (`COMPOSER_NO_SCRIPTS`).
+
+> **Release-age units differ by package manager** (a recurring source of confusion): npm's `min-release-age` is in **days**, integer only — a value like `48h` fails installs with `Invalid time value`, and `2880` means ~8 years (silently resolving ancient versions, e.g. `dotenv@6.0.0` instead of current). pnpm's `minimumReleaseAge` is in **minutes**. The role derives both from `release_age_hours`, so the default 48h gate is **npm `2`, pnpm `2880`**. npm reads the env form as `NPM_CONFIG_MIN_RELEASE_AGE` (matching the `min-release-age` config key) — not `…MINIMUM…`.
 
 **Go has one env-var-only protection** — `GOTOOLCHAIN=local` (prevents `go install` from auto-fetching a newer toolchain than the host has, which an attacker could use to ship malicious build constraints). Go has no config-file equivalent, so this protection vanishes for systemd services and Docker `CMD`-style direct-exec callers. If you run Go-touching agents under systemd, add `Environment=GOTOOLCHAIN=local` to the unit file; for Docker, set it via `ENV` in the image or `-e` on `docker run`. Every other env-var protection has a config-file backstop and is unaffected.
 

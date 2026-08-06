@@ -22,6 +22,20 @@ setup() {
   assert_env_equals NPM_CONFIG_FUND false
 }
 
+@test "env: NPM_CONFIG_MIN_RELEASE_AGE=2 (correct npm key; 48h gate expressed in days)" {
+  # npm's config key is `min-release-age` (unit: days) → env NPM_CONFIG_MIN_RELEASE_AGE.
+  # release_age_hours=48 → npm_minimum_release_age_days=2.
+  assert_env_equals NPM_CONFIG_MIN_RELEASE_AGE 2
+}
+
+@test "env: NPM_CONFIG_MINIMUM_RELEASE_AGE is NOT emitted (npm rejects it as Unknown env config)" {
+  # Regression catcher: the MINIMUM_ variant maps to npm's `minimum-release-age`,
+  # which npm does not recognize — it warns "Unknown env config" and will hard-error
+  # in a future npm major. The env-var age gate must use the real key.
+  ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/profile.d/supply-chain-hardening.sh
+  ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/environment
+}
+
 @test "env: COMPOSER_NO_SCRIPTS=1" {
   assert_env_equals COMPOSER_NO_SCRIPTS 1
 }
@@ -44,6 +58,10 @@ setup() {
 
 @test "/etc/environment has NPM_CONFIG_IGNORE_SCRIPTS" {
   assert_file_contains /etc/environment "NPM_CONFIG_IGNORE_SCRIPTS=true"
+}
+
+@test "/etc/environment has NPM_CONFIG_MIN_RELEASE_AGE (correct key, days unit)" {
+  assert_file_contains /etc/environment "NPM_CONFIG_MIN_RELEASE_AGE=2"
 }
 
 @test "/etc/environment has GOSUMDB" {
