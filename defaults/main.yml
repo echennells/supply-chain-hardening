@@ -38,7 +38,14 @@ bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}" 
 # Cutoff freezes at apply time — re-apply to advance. For "always exactly
 # N hours back" semantics, schedule periodic re-applies.
 uv_exclude_newer: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT%H:%M:%SZ') }}"
-yarn_minimal_age_gate: "{{ (release_age_hours | int / 24) | int }}d"           # "2d"
+# Yarn's npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES. A duration-suffix
+# string ("2d", "7d") hits a parser bug that yields NaN and silently disables
+# the gate entirely — and yarn has no second age-gate layer to fall back on.
+# Verified against yarn 4.10.3 (2026-08): "36500d" let a fresh package install;
+# 52560000 (minutes) correctly blocked it. Must also render UNQUOTED so it
+# lands as a YAML number rather than a string. Deriving in minutes also avoids
+# the /24 truncation that turned any release_age_hours < 24 into "0d" (gate off).
+yarn_minimal_age_gate: "{{ (release_age_hours | int * 60) | int }}"            # 2880 min
 deno_minimum_dependency_age: "P{{ (release_age_hours | int / 24) | int }}D"    # "P2D"
 
 # npm settings

@@ -1,0 +1,73 @@
+#!/bin/bash
+# bunx — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# WHAT THIS CLOSES
+#
+# `bunx <pkg>` downloads a package from npm and executes it, in one step.
+# It is the bun equivalent of `npx` and it is a genuine supply-chain hole:
+# a typo'd or typosquatted name is fetched and run immediately, with no
+# age gate and no lifecycle-script blocking.
+#
+# WHY THE OTHER LAYERS DON'T COVER IT
+#
+# bunx is a SEPARATE entry point from `bun` — the official installer
+# creates ~/.bun/bin/bunx alongside ~/.bun/bin/bun. Wrapping only the
+# `bun` binary (see bun-wrapper.sh.j2) leaves bunx completely unhardened.
+# The global ~/.bunfig.toml does not apply to it either, so none of
+# minimumReleaseAge / ignoreScripts / frozenLockfile reach this path.
+# Verified 2026-08: `bunx cowsay` auto-downloaded and executed on a host
+# where the bun wrapper was already deployed.
+#
+# HOW IT WORKS
+#
+# --no-install is documented in bun's CLI reference as "Skip installation
+# if package is not already installed", and it fails CLOSED:
+#
+#   $ bunx --no-install cowsay hi
+#   error: Could not find an existing 'cowsay' binary to run.
+#          Stopping because --no-install was passed.
+#   exit=1
+#
+# So after this wrapper, bunx will only run tools that are already
+# installed; it refuses to silently fetch-and-execute a new one.
+#
+# TWO IMPLEMENTATION SUBTLETIES
+#
+#  1. bun decides it is in "bunx mode" from argv[0]. We therefore invoke
+#     the real binary with bash's `exec -a bunx` to preserve argv[0].
+#     A plain `exec` would run it in ordinary `bun` mode and silently
+#     change the semantics of every bunx invocation.
+#
+#  2. bunx is normally a SYMLINK to the bun binary. Pointing this wrapper
+#     at `bunx-real` would resolve through that symlink to the bun
+#     *wrapper*, which would re-inject flags and lose argv[0]. So we
+#     point directly at the real bun binary instead.
+#
+# BYPASS (per-invocation, for users who know what they need)
+#
+#   bun x <pkg>                       # explicit, still goes through bun wrapper
+#   {{ bun_real_path }} x <pkg>       # go around the wrapper entirely
+#
+# DISABLE GLOBALLY
+#
+#   role var bun_path_wrapper=false (restores the real bunx at this path
+#   on the next role apply).
+
+REAL_BUN='{{ bun_real_path }}'
+
+# Recursion guard — same pattern as the bun/composer/deno/npm wrappers.
+if [ -z "$REAL_BUN" ] || [ ! -x "$REAL_BUN" ] || [ "$REAL_BUN" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real bun not found at '$REAL_BUN'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Metadata flags don't resolve or execute a package — pass them through
+# untouched so `bunx --version` / `--help` behave normally.
+case "${1:-}" in
+  --version|-v|--help|-h|--revision)
+    exec -a bunx "$REAL_BUN" "$@"
+    ;;
+esac
+
+exec -a bunx "$REAL_BUN" --no-install "$@"

@@ -10,7 +10,11 @@
 # on unknown keys but don't error. The role omits it on detected <4.0
 # to keep logs clean; when Yarn isn't detectable at apply time we assume
 # modern and emit it (downside on 3.x is a single warning per install).
-npmMinimalAgeGate: "{{ yarn_minimal_age_gate }}"
+# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES and must be unquoted — a
+# quoted/suffixed value ("2d") parses to NaN and silently disables the gate.
+# Emitted unconditionally for forward-compat: on Yarn <4.10 the key is unknown
+# (one warning per install) but becomes active as soon as Yarn is upgraded.
+npmMinimalAgeGate: {{ yarn_minimal_age_gate }}
 enableScripts: {{ yarn_enable_scripts | lower }}
 defaultSemverRangePrefix: ""
 enableTelemetry: false

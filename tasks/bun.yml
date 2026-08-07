@@ -45,13 +45,20 @@
 - name: Find current bun path for wrapping
   ansible.builtin.shell:
     cmd: |
-      for p in /usr/local/bin/bun /usr/bin/bun "$HOME/.bun/bin/bun"; do
+      # Probe the user-install path FIRST. bun's official installer writes to
+      # ~/.bun/bin and PREPENDS that dir to PATH, so when bun exists in both
+      # places the ~/.bun copy is what actually resolves — wrapping
+      # /usr/local/bin/bun would leave the real binary shadowing our wrapper.
+      # Verified 2026-08: `command -v bun` returned /root/.bun/bin/bun on a
+      # host where the role had wrapped /usr/local/bin/bun. Same ordering
+      # rationale as tasks/deno.yml.
+      for p in "$HOME/.bun/bin/bun" /usr/local/bin/bun /usr/bin/bun; do
         if [ -x "$p" ]; then
           echo "$p"
           exit 0
         fi
       done
-      command -v bun 2>/dev/null
+      PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v bun 2>/dev/null
     executable: /bin/bash
   register: bun_binary_path
   changed_when: false
@@ -115,6 +122,85 @@
     - bun_path_wrapper | bool
     - bun_binary_path is defined
     - bun_binary_path.rc == 0
+    - bun_binary_path.stdout | length > 0
+
+# --- bunx wrapper (SEPARATE entry point) ---
+#
+# bunx is its own binary — bun's official installer creates ~/.bun/bin/bunx
+# alongside ~/.bun/bin/bun. Wrapping only `bun` leaves `bunx <pkg>` as a fully
+# unhardened fetch-and-execute path: no age gate, no script blocking, and the
+# global ~/.bunfig.toml does not apply to it. Verified 2026-08 (`bunx cowsay`
+# auto-downloaded and ran on a host with the bun wrapper deployed).
+# These tasks mirror the bun wrapper tasks above.
+
+- name: Find current bunx path for wrapping
+  ansible.builtin.shell:
+    cmd: |
+      for p in "$HOME/.bun/bin/bunx" /usr/local/bin/bunx /usr/bin/bunx; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v bunx 2>/dev/null
+    executable: /bin/bash
+  register: bunx_binary_path
+  changed_when: false
+  failed_when: false
+  when: bun_path_wrapper | bool
+
+- name: Determine whether current bunx binary is our wrapper or the real one
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'supply-chain-hardening' '{{ bunx_binary_path.stdout }}' 2>/dev/null; then
+        echo is_wrapper
+      else
+        echo is_real
+      fi
+    executable: /bin/bash
+  register: bunx_binary_kind
+  changed_when: false
+  when:
+    - bun_path_wrapper | bool
+    - bunx_binary_path is defined
+    - bunx_binary_path.rc == 0
+    - bunx_binary_path.stdout | length > 0
+
+- name: Rename real bunx to bunx-real (kept only so the wrapper can be undone)
+  # NOTE: the wrapper deliberately does NOT exec through bunx-real. bunx is
+  # normally a symlink to the bun binary, so after `bun` is wrapped that
+  # symlink resolves to our bun wrapper — execing it would re-inject flags
+  # and lose argv[0] (which is how bun detects bunx mode). The wrapper
+  # targets the real bun binary directly instead; this backup exists purely
+  # so bun_path_wrapper=false can restore the original.
+  become: true
+  ansible.builtin.command:
+    cmd: "mv {{ bunx_binary_path.stdout }} {{ bunx_binary_path.stdout }}-real"
+  when:
+    - bun_path_wrapper | bool
+    - bunx_binary_path is defined
+    - bunx_binary_path.rc == 0
+    - bunx_binary_path.stdout | length > 0
+    - bunx_binary_kind.stdout == 'is_real'
+  changed_when: true
+
+- name: Deploy bunx wrapper at the discovered bunx path
+  become: true
+  ansible.builtin.template:
+    src: bunx-wrapper.sh.j2
+    dest: "{{ bunx_binary_path.stdout }}"
+    owner: root
+    group: root
+    mode: "0755"
+  vars:
+    # Points at the REAL BUN binary, not bunx-real — see template header.
+    bun_real_path: "{{ bun_binary_path.stdout }}-real"
+  when:
+    - bun_path_wrapper | bool
+    - bunx_binary_path is defined
+    - bunx_binary_path.rc == 0
+    - bunx_binary_path.stdout | length > 0
+    - bun_binary_path is defined
     - bun_binary_path.stdout | length > 0
 
 - name: Restore real bun (when bun_path_wrapper=false toggled after prior wrap)

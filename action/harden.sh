@@ -59,7 +59,11 @@ PNPM_AGE_MINUTES=$(( RELEASE_AGE_HOURS * 60 ))
 BUN_AGE_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
-YARN_AGE="${NPM_AGE_DAYS}d"
+# Yarn's npmMinimalAgeGate is INTEGER MINUTES. A duration-suffix string
+# ("2d") parses to NaN and silently disables the gate entirely — yarn has no
+# second age-gate layer, so the cooldown simply vanishes. Verified against
+# yarn 4.10.3 (2026-08). Must also be emitted UNQUOTED (see harden_yarn).
+YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
 # uv requires an absolute RFC 3339 datetime — "48 hours" or similar
 # relative-duration strings fail uv's TOML parser with
 # "failed to parse year in date '48 hours'", breaking every uv
@@ -147,7 +151,14 @@ harden_npm() {
   write_env NPM_CONFIG_SAVE_EXACT      true
   write_env NPM_CONFIG_FUND            false
   write_env NPM_CONFIG_UPDATE_NOTIFIER false
-  write_env NPM_CONFIG_MINIMUM_RELEASE_AGE "$NPM_AGE_DAYS"
+  # npm's config key is `min-release-age` (days), so the env form is
+  # NPM_CONFIG_MIN_RELEASE_AGE. The MINIMUM_ variant is not a key npm knows:
+  # it is ignored ("Unknown env config") and will hard-error in a future npm
+  # major — and because this is written to $GITHUB_ENV it would apply to every
+  # subsequent step in the job. The env layer matters because it outranks a
+  # project-local ./.npmrc, which is the only thing standing between an
+  # attacker-controlled checkout and `min-release-age=0`.
+  write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
 
   local content
   content="; Managed by supply-chain-harden action
@@ -163,8 +174,24 @@ allow-git=none"
   echo "$content" | write_etc /etc/npmrc
 
   HARDENED+=("npm")
-  TOOL_VERSIONS["npm"]=$(detect_version npm "npm --version")
-  log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d"
+  local npm_version
+  npm_version=$(detect_version npm "npm --version")
+  TOOL_VERSIONS["npm"]="$npm_version"
+
+  # `min-release-age` was added in npm 11.10.0. Below that npm does not know
+  # the key AT ALL — it is absent from `npm config ls -l`, so neither the
+  # npmrc files nor the env var enforce anything and the age gate is silently
+  # inert. Verified on npm 10.9.8 (2026-08). Node 20 and 22 both ship npm 10.x,
+  # so this is the common case, not an edge case. Warn loudly instead of
+  # logging success. NOTE: `npm config get min-release-age` is NOT a valid way
+  # to check this — npm echoes back unknown keys, so it reports the value as
+  # healthy while enforcing nothing.
+  if [[ -n "$npm_version" ]] && ! version_ge "$npm_version" "11.10.0"; then
+    echo "::warning::npm $npm_version does not support min-release-age (added in npm 11.10.0) — the npm AGE GATE IS INACTIVE on this runner. ignore-scripts, audit, save-exact and the other npm protections still apply."
+    log "npm: ignore-scripts=true, age gate UNAVAILABLE (npm $npm_version < 11.10.0)"
+  else
+    log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d"
+  fi
   end_section
 }
 
@@ -267,7 +294,7 @@ harden_yarn() {
 
   {
     echo "# Managed by supply-chain-harden action"
-    echo "npmMinimalAgeGate: \"$YARN_AGE\""
+    echo "npmMinimalAgeGate: $YARN_AGE"
     echo "enableScripts: false"
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
@@ -281,7 +308,7 @@ harden_yarn() {
 
   {
     echo "# Managed by supply-chain-harden action"
-    echo "npmMinimalAgeGate: \"$YARN_AGE\""
+    echo "npmMinimalAgeGate: $YARN_AGE"
     echo "enableScripts: false"
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
@@ -295,7 +322,7 @@ harden_yarn() {
 
   HARDENED+=("yarn")
   TOOL_VERSIONS["yarn"]="$yarn_version"
-  log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}m$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
   end_section
 }
 
@@ -558,6 +585,52 @@ esac
 EOF
   sudo chmod 755 "$wrapper_target"
   log "bun: wrapper deployed at $wrapper_target (injects --no-install for runtime paths)"
+
+  # --- bunx: a SEPARATE entry point that must be wrapped too ---
+  #
+  # `bunx <pkg>` fetch-and-executes with no age gate and no script blocking —
+  # the global ~/.bunfig.toml does not apply to it, so wrapping `bun` alone
+  # leaves the hole wide open. Verified 2026-08: `bunx cowsay` auto-downloaded
+  # and ran the package on a host where the bun wrapper was deployed.
+  #
+  # Two subtleties drive the implementation:
+  #  1. bun decides it is in "bunx mode" from argv[0], so we must preserve
+  #     argv[0]=bunx — hence bash's `exec -a`. A plain exec would run the
+  #     binary in ordinary `bun` mode and change the semantics.
+  #  2. bunx is normally a SYMLINK to the bun binary. If we pointed the
+  #     wrapper at `bunx-real`, that symlink would now resolve to the bun
+  #     *wrapper* we just installed, which would re-inject and lose argv[0].
+  #     So we point straight at the real binary ($real_bun) instead.
+  #
+  # --no-install is documented ("Skip installation if package is not already
+  # installed") and fails CLOSED — exit 1 with "Could not find an existing
+  # '<pkg>' binary to run. Stopping because --no-install was passed."
+  local real_bunx
+  real_bunx=$(command -v bunx 2>/dev/null || true)
+  if [[ -n "$real_bunx" ]]; then
+    if ! grep -q "supply-chain-harden" "$real_bunx" 2>/dev/null; then
+      sudo mv "$real_bunx" "${real_bunx}-real"
+    fi
+    cat <<EOF | sudo tee "$real_bunx" >/dev/null
+#!/bin/bash
+# Managed by supply-chain-harden action
+REAL_BUN='$real_bun'
+if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ]; then
+  echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
+  exit 127
+fi
+case "\${1:-}" in
+  --version|-v|--help|-h|--revision)
+    exec -a bunx "\$REAL_BUN" "\$@"
+    ;;
+esac
+exec -a bunx "\$REAL_BUN" --no-install "\$@"
+EOF
+    sudo chmod 755 "$real_bunx"
+    log "bunx: wrapper deployed at $real_bunx (injects --no-install; fails closed)"
+  else
+    log "bunx not found — no bunx wrapper deployed"
+  fi
   end_section
 }
 
