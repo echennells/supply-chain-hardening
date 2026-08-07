@@ -31,12 +31,23 @@ setup() {
   rm -rf /tmp/pnpm-attack-test
 }
 
-@test "BEHAVIORAL: pnpm block-exotic-subdeps refuses tarball/http deps before network" {
+@test "BEHAVIORAL: pnpm block-exotic-subdeps refuses tarball/http deps before network (pnpm >=11 only)" {
   # File-content tests in 01-config-files.bats assert block-exotic-subdeps=true
   # is written to ~/.config/pnpm/rc. This test verifies pnpm actually honors
   # the key — same shape as the npm allow-git=none behavioral test in
   # 03-npm.bats. Distinguishes "pnpm refused before network" (enforcement
   # working) from "pnpm attempted DNS" (key silently ignored).
+  #
+  # blockExoticSubdeps / block-exotic-subdeps is a pnpm 11+ control. pnpm 10
+  # accepts the key in config and silently ignores it — verified empirically
+  # against pnpm 10.34.5, which fetched the tarball URL and surfaced ENOTFOUND.
+  # The test container pins pnpm@10 on Node <22 (pnpm 11 requires Node >=22),
+  # so this skips there rather than asserting a control the runtime lacks.
+  # The pnpm 10 exposure is documented in README.md → Limitations.
+  pnpm_major=$(pnpm --version 2>/dev/null | sed -nE 's/^([0-9]+)\..*/\1/p' | head -1)
+  [[ "$pnpm_major" =~ ^[0-9]+$ ]] || skip "couldn't parse pnpm major version"
+  [[ "$pnpm_major" -ge 11 ]] || skip "block-exotic-subdeps enforcement requires pnpm >=11 (got: $(pnpm --version 2>/dev/null))"
+
   cd /tmp && rm -rf pnpm-exotic-test && mkdir pnpm-exotic-test && cd pnpm-exotic-test
   pnpm init >/dev/null 2>&1
   # Tarball URL pointing at a non-resolvable host. If block-exotic-subdeps
