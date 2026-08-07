@@ -64,11 +64,30 @@ teardown_file() {
   # bun --version / -v / --help / -h should not get --no-install
   # injected — these are bare-metadata commands; injection would
   # either be silently ignored or break depending on parser.
-  for arg in -- -h --help -v --version --revision; do
+  #
+  # `--` is NOT in this list on purpose — see the dedicated assertion below.
+  for arg in -h --help -v --version --revision; do
     pattern=$(printf '%s' "$arg" | sed 's/[][|.\\*?(){}^$+]/\\&/g')
     grep -qE "(^|[[:space:](|])${pattern}[|)]" "$WRAPPER_DIR/bun-wrapper.sh" \
       || { echo "FAIL: flag '$arg' not in wrapper's skip list" >&2; return 1; }
   done
+}
+
+@test "bun-wrapper: '--' must NOT skip injection (it is a runtime path, not metadata)" {
+  # INVERTED on purpose, and load-bearing.
+  #
+  # `--` terminates flag parsing, so `bun -- script.ts` runs script.ts —
+  # a runtime invocation, which is precisely what this wrapper exists to
+  # gate. Putting `--` in the skip list hands every caller a one-token,
+  # undocumented bypass of the auto-install control.
+  #
+  # This is a regression catcher for 2cb25b1, which added `--` to satisfy
+  # the assertion above. That assertion had listed `--` since the wrapper
+  # was written (3391ee0) but could never fail: its pattern `[|]--[|)]`
+  # matches neither `|--version|` nor `|--revision)`. The expectation was
+  # never verified, the test never ran on its origin branch, and when it
+  # finally executed the wrapper was changed to match it.
+  ! grep -qE "(^|[[:space:](|])--[|)]" "$WRAPPER_DIR/bun-wrapper.sh"
 }
 
 @test "bun-wrapper: runtime paths receive --no-install via exec line" {

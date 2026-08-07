@@ -16,6 +16,16 @@
       package, override per invocation (e.g. `npm install --foreground-scripts
       --ignore-scripts=false`) rather than disabling globally.
 
+- name: Determine the unescalated invoking user
+  # `become: false` pins this to the account that actually launched ansible,
+  # regardless of what the play escalates to afterwards. This is what makes
+  # the guard below escalation-METHOD agnostic — see its DETECTION note.
+  become: false
+  ansible.builtin.command: id -un
+  register: preflight_invoking_user
+  changed_when: false
+  check_mode: false
+
 - name: Refuse to run when privilege escalation would mis-target per-user config
   # THE FAILURE THIS PREVENTS
   # Per-user destinations are "{{ ansible_env.HOME }}/.npmrc" and friends.
@@ -28,30 +38,52 @@
   # the worst outcome for a security role, so this fails loudly instead.
   #
   # DETECTION
-  # sudo exports SUDO_USER as the invoking account. It is set only when a
-  # non-root user escalated, which is exactly the broken case:
-  #   dev, no become  -> HOME=/home/dev, SUDO_USER unset      (intended)
-  #   dev + --become  -> HOME=/root,     SUDO_USER=dev        (THIS BUG)
-  #   root directly   -> HOME=/root,     SUDO_USER unset      (legitimate)
-  #   root + --become -> HOME=/root,     SUDO_USER unset      (legitimate)
-  # So keying on SUDO_USER != root fires on the bug and never on the two
-  # legitimate root paths.
+  # The invariant is "per-user config is about to land in /root, and root is
+  # not who invoked us". Two independent signals, because neither alone covers
+  # the space:
+  #   1. `id -un` under become:false — the real invoking account. Catches
+  #      escalation by ANY method (sudo, su, doas, pbrun, ansible_become_*).
+  #   2. SUDO_USER — catches the case where the ansible PROCESS is already
+  #      root because it was launched under sudo, so signal 1 reports root.
+  #
+  #   dev, no become        -> HOME=/home/dev, id=dev,  SUDO_USER unset  (intended)
+  #   dev + --become        -> HOME=/root,     id=dev,  SUDO_USER unset  (BUG, sig 1)
+  #   dev + become_method su-> HOME=/root,     id=dev,  SUDO_USER unset  (BUG, sig 1)
+  #   sudo ansible-playbook -> HOME=/root,     id=root, SUDO_USER=dev    (BUG, sig 2)
+  #   sudo -i, then run     -> HOME=/root,     id=root, SUDO_USER=dev    (BUG, sig 2)
+  #   root login directly   -> HOME=/root,     id=root, SUDO_USER unset  (legitimate)
+  #   root + --become       -> HOME=/root,     id=root, SUDO_USER unset  (legitimate)
+  #
+  # NOTE on the two sudo-derived rows: `sudo ansible-playbook` and a `sudo -i`
+  # shell are indistinguishable from each other by environment, and both write
+  # to /root. They are therefore treated identically — refused, with the
+  # documented opt-in below. A previous revision of this comment claimed a
+  # `sudo -i` root shell left SUDO_USER unset; it does not, and the old test
+  # covered only a genuine root login, so that claim was never exercised.
+  #
+  # Everything is additionally conditioned on HOME being /root: if per-user
+  # config is landing somewhere sane, there is nothing to refuse.
   ansible.builtin.assert:
     that:
-      - ansible_env.SUDO_USER is not defined or ansible_env.SUDO_USER == 'root'
+      - >-
+        ansible_env.HOME != '/root'
+        or (
+          preflight_invoking_user.stdout | trim == 'root'
+          and (ansible_env.SUDO_USER is not defined or ansible_env.SUDO_USER == 'root')
+        )
     fail_msg: |
       Refusing to run: privilege escalation would write per-user config to the
       wrong home directory.
 
-      Detected: escalated from user '{{ ansible_env.SUDO_USER | default('?') }}',
-      so ansible_env.HOME is '{{ ansible_env.HOME }}'.
+      Detected: ansible was invoked by '{{ preflight_invoking_user.stdout | trim }}'
+      {% if ansible_env.SUDO_USER is defined %}(under sudo from '{{ ansible_env.SUDO_USER }}'){% endif %}
+      but ansible_env.HOME is '{{ ansible_env.HOME }}'.
 
       Every per-user file (~/.npmrc, ~/.config/pnpm/rc, ~/.yarnrc.yml,
       ~/.bunfig.toml, ~/.cargo/config.toml, ~/.config/uv/uv.toml, ...) would be
-      written under '{{ ansible_env.HOME }}' rather than
-      '/home/{{ ansible_env.SUDO_USER | default('<user>') }}', and $HOME-relative
-      tool detection would skip every tool install — with no error and a
-      failed=0 recap.
+      written under '{{ ansible_env.HOME }}' rather than the intended user's
+      home, and $HOME-relative tool detection would skip every tool install —
+      with no error and a failed=0 recap.
 
       Run the role WITHOUT global escalation:
 

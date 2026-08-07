@@ -81,8 +81,18 @@ fi
 #
 # The case patterns include short-form aliases bun supports (i for
 # install, a for add, rm for remove, un/uninstall for uninstall, etc.).
+#
+# `--` IS DELIBERATELY NOT IN THIS LIST. It terminates flag parsing, so
+# `bun -- script.ts` is a RUNTIME invocation and must receive --no-install
+# like any other. Listing it here would hand every caller a one-token
+# bypass of the only control this wrapper provides, and an undocumented
+# one at that. It was briefly added in 2cb25b1 to satisfy a rendering test
+# (36-bun-wrapper-tier-rendering.bats) whose assertion had never actually
+# executed — the old grep pattern `[|]--[|)]` could not match. Injecting
+# before `--` is safe: --no-install is consumed by bun's own parser, which
+# is what `--` terminates.
 case "$1" in
-  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision|--)
+  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision)
     exec "$REAL_BUN" "$@"
     ;;
   *)

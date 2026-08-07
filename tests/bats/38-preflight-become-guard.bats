@@ -93,3 +93,37 @@ run_pf() {
   [ "$status" -eq 0 ]
   ! echo "$output" | grep -q "Refusing to run"
 }
+
+@test "become-guard: a sudo-derived root shell (sudo -i) is REFUSED, like sudo ansible-playbook" {
+  # The case the original guard's comment table got wrong. It claimed
+  #   "root directly -> HOME=/root, SUDO_USER unset (legitimate)"
+  # and the "no false positive" test above exercises only a genuine root
+  # login, where that is true. But `sudo -i` / `sudo su -` is how most
+  # operators actually become root, and sudo DOES export SUDO_USER into the
+  # resulting shell. Such a run is environmentally identical to
+  # `sudo ansible-playbook` and writes to /root just the same, so it must be
+  # treated identically: refused, with the documented opt-in.
+  #
+  # This test pins that behavior in both directions — it fails if the guard
+  # stops catching sudo-derived root, and it fails if someone "fixes" the
+  # false positive by exempting SUDO_USER without exempting the equivalent
+  # sudo ansible-playbook invocation.
+  command -v sudo >/dev/null 2>&1 || skip "sudo not available"
+  run su "$TEST_USER" -c "sudo -i bash -c 'cd /tmp && ansible-playbook pf-guard.yml' 2>&1"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "Refusing to run"
+  echo "$output" | grep -q "$TEST_USER"
+}
+
+@test "become-guard: detection is escalation-method agnostic (not sudo-only)" {
+  # The guard's primary signal is `id -un` under become:false, which reports
+  # the real invoking account no matter how the play escalates. This is what
+  # closes the original SUDO_USER-only blind spot: become_method su / doas /
+  # pbrun set no SUDO_USER, so a SUDO_USER-only guard would let the
+  # mis-target through silently.
+  #
+  # Asserting on the role source rather than spawning a doas host: the
+  # invariant is that the guard does not depend on SUDO_USER alone.
+  grep -q "become: false" "$ROLE_DIR/tasks/preflight.yml"
+  grep -q "preflight_invoking_user" "$ROLE_DIR/tasks/preflight.yml"
+}

@@ -212,7 +212,49 @@
   tags: always
 
 - name: Confirm full coverage (no protections skipped)
+  # SCOPE-QUALIFIED ON PURPOSE.
+  #
+  # The tasks that append to `skipped_protections` live in tag-scoped includes
+  # (go.yml -> [go], github.yml -> [github, ci], socket.yml -> [socket, npm]
+  # plus `when: socket_firewall_install`). These two summary tasks are
+  # `tags: always`. So a scoped run — `--tags npm`, `--tags shell`, or any run
+  # with socket_firewall_install=false — never executes the producers, leaving
+  # the list empty and printing an unqualified all-clear for a run that applied
+  # a fraction of the role.
+  #
+  # That is the exact failure this summary was added to eliminate, in a worse
+  # form: an operator or agent can cite an affirmative ✓ as evidence of
+  # coverage. Only claim full coverage when the run was actually full.
   ansible.builtin.debug:
     msg: "✓ All applicable protections were applied — no prerequisites missing."
-  when: skipped_protections | default([]) | length == 0
+  when:
+    - skipped_protections | default([]) | length == 0
+    - ansible_run_tags | default(['all']) == ['all']
+    - ansible_skip_tags | default([]) | length == 0
+    - socket_firewall_install | bool
+  tags: always
+
+- name: Report coverage for a scope-limited run
+  ansible.builtin.debug:
+    msg: |-
+      ✓ No missing prerequisites within this run's scope.
+      ⚠ This was NOT a full run, so this is not a statement of full coverage:
+      {% if ansible_run_tags | default(['all']) != ['all'] %}
+        - limited to tags: {{ ansible_run_tags | join(', ') }}
+      {% endif %}
+      {% if ansible_skip_tags | default([]) | length > 0 %}
+        - skipping tags: {{ ansible_skip_tags | join(', ') }}
+      {% endif %}
+      {% if not (socket_firewall_install | bool) %}
+        - socket_firewall_install=false — Socket Firewall and the npm PATH
+          wrapper were not evaluated.
+      {% endif %}
+      Protections outside that scope were never evaluated and may be absent.
+      Re-run without the restriction for a full coverage report.
+  when:
+    - skipped_protections | default([]) | length == 0
+    - >-
+      ansible_run_tags | default(['all']) != ['all']
+      or ansible_skip_tags | default([]) | length > 0
+      or not (socket_firewall_install | bool)
   tags: always

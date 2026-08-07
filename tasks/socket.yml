@@ -79,7 +79,41 @@
   # skips. The wrapper degrades to a per-invocation warning on every npm call,
   # so the operator gets a wrapper that filters nothing. Re-check the real
   # post-install state and let the wrapper depend on it.
-  ansible.builtin.command: which sfw
+  #
+  # DETECTION MUST BE AS ROBUST AS THE npm DETECTOR ABOVE.
+  # This result is now a HARD GATE on the role's marquee npm protection, so a
+  # false negative here silently withholds the wrapper AND emits a message
+  # asserting the opposite of the truth. A bare `which sfw` is not good enough:
+  #   - it runs WITHOUT become, while the install above runs WITH become
+  #     (`npm install -g sfw@2` lands in root's npm prefix), and
+  #   - it trusts the ambient PATH, which this very file distrusts for npm.
+  # On nvm / volta / fnm / asdf hosts — the exact managers the npm detector
+  # enumerates — or wherever /usr/local/bin is absent from Ansible's PATH,
+  # bare `which` reports "missing" for an sfw that is installed.
+  # Canonical-path-first, then an augmented-PATH fallback.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/local/bin/sfw /usr/bin/sfw "$HOME/.local/bin/sfw" \
+               "$HOME/.volta/bin/sfw" "$HOME/.asdf/shims/sfw" "$HOME/.nodenv/shims/sfw"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.nvm/versions/node/*/bin/sfw; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/sfw; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v sfw 2>/dev/null
+    executable: /bin/bash
   register: sfw_final
   changed_when: false
   failed_when: false
@@ -154,12 +188,18 @@
     # sfw must actually exist — the wrapper's whole purpose is to route npm
     # through it. Without this, a Node-18 host got a wrapper with no helper.
     - sfw_final.rc == 0
+    - sfw_final.stdout | length > 0
 
 - name: Record skipped protection — npm PATH wrapper (sfw unavailable)
+  # Wording note: this says "not refreshed", not "not deployed". Nothing in
+  # this role REMOVES an existing /usr/local/bin/npm wrapper, so on a re-apply
+  # where sfw has since disappeared a wrapper from an earlier run is still on
+  # disk. Claiming it "was NOT deployed" would be false in that case, and the
+  # operator would go looking for an absent file instead of a stale one.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['npm PATH wrapper — requested (npm_path_wrapper=true) but Socket Firewall is not installed, so the wrapper was NOT deployed. npm calls are unfiltered.'] }}
+      {{ (skipped_protections | default([])) + ['npm PATH wrapper — requested (npm_path_wrapper=true) but Socket Firewall was not found after the install step, so the wrapper was not deployed or refreshed. npm calls are unfiltered. If /usr/local/bin/npm exists from an earlier run it is now stale and warns on every invocation.'] }}
   when:
     - npm_path_wrapper | bool
     - npm_for_socket.rc == 0
-    - sfw_final.rc != 0
+    - sfw_final.rc != 0 or sfw_final.stdout | length == 0
