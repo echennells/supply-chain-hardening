@@ -111,6 +111,7 @@
   ansible.builtin.command: date -u -d @0 +%Y-%m-%dT%H:%M:%SZ
   register: gnu_date_probe
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Fail when GNU date is unavailable on the controller
@@ -165,6 +166,7 @@
     executable: /bin/bash
   register: etc_preflight
   changed_when: false
+  check_mode: false
   failed_when: false
   become: true
 

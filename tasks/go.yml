@@ -21,6 +21,7 @@
     executable: /bin/bash
   register: go_check
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Install govulncheck (with toolchain auto-fetch for this install only)

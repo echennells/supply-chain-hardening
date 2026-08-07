@@ -32,6 +32,7 @@
     executable: /bin/bash
   register: deno_path
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Determine whether current deno binary is our wrapper or the real binary
@@ -45,6 +46,7 @@
     executable: /bin/bash
   register: deno_kind
   changed_when: false
+  check_mode: false
   when:
     - deno_path.rc == 0
     - deno_path.stdout | length > 0

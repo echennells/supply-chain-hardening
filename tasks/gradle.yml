@@ -5,6 +5,7 @@
   ansible.builtin.command: which gradle
   register: gradle_check
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Create Gradle init.d directory

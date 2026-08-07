@@ -16,6 +16,7 @@
     executable: /bin/bash
   register: bun_version_check
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Set bun_detected_version fact
@@ -62,6 +63,7 @@
     executable: /bin/bash
   register: bun_binary_path
   changed_when: false
+  check_mode: false
   failed_when: false
   when: bun_path_wrapper | bool
 
@@ -76,6 +78,7 @@
     executable: /bin/bash
   register: bun_binary_kind
   changed_when: false
+  check_mode: false
   when:
     - bun_path_wrapper | bool
     - bun_binary_path is defined
@@ -146,6 +149,7 @@
     executable: /bin/bash
   register: bunx_binary_path
   changed_when: false
+  check_mode: false
   failed_when: false
   when: bun_path_wrapper | bool
 
@@ -160,6 +164,7 @@
     executable: /bin/bash
   register: bunx_binary_kind
   changed_when: false
+  check_mode: false
   when:
     - bun_path_wrapper | bool
     - bunx_binary_path is defined

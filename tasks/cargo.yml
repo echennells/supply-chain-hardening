@@ -55,6 +55,7 @@
     executable: /bin/bash
   register: cargo_check
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Bootstrap cargo-binstall (prebuilt — avoids multi-minute source compile of audit tools)

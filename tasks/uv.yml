@@ -64,6 +64,7 @@
     executable: /bin/bash
   register: uv_binary_path
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Deploy pip wrapper to /usr/local/bin (system-wide, delegates to uv)

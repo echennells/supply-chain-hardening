@@ -113,6 +113,40 @@
     dest: "{{ pnpm_config_dir }}/rc"
     mode: "0644"
 
+- name: Detect pnpm major version (for exotic-subdep enforcement reporting)
+  # blockExoticSubdeps is a pnpm 11+ control. The role emits it to config.yaml
+  # unconditionally so the protection is live the moment a host upgrades, but
+  # on pnpm 10 nothing enforces it and the ini-format files cannot carry it
+  # either (see the note in templates/pnpm-rc.j2). Rather than leave that as a
+  # silent gap, detect the version and report it.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      for p in /usr/local/bin/pnpm /usr/bin/pnpm "$HOME/.local/share/pnpm/pnpm"; do
+        if [ -x "$p" ]; then
+          "$p" --version 2>/dev/null | sed -nE 's/^([0-9]+)\..*/\1/p'
+          exit 0
+        fi
+      done
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" \
+        command -v pnpm >/dev/null 2>&1 && pnpm --version 2>/dev/null | sed -nE 's/^([0-9]+)\..*/\1/p'
+    executable: /bin/bash
+  register: pnpm_major_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Record skipped protection — exotic-subdep blocking (pnpm < 11)
+  # Fires only when pnpm is actually installed AND older than 11. An absent
+  # pnpm is not a gap worth reporting: nothing on the host can use it.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pnpm exotic-dependency blocking (blockExoticSubdeps) — requires pnpm >= 11, found pnpm ' ~ (pnpm_major_version.stdout | trim) ~ '. git / http(s) / tarball-URL dependencies are NOT refused on this host; no pnpm 10 config key can enforce it.'] }}
+  when:
+    - pnpm_major_version.stdout | trim | length > 0
+    - pnpm_major_version.stdout | trim | int > 0
+    - pnpm_major_version.stdout | trim | int < 11
+
 - name: Deploy hardened pnpm config.yaml (YAML format — required for pnpm 11+)
   # pnpm 11 stopped reading ~/.npmrc, ~/.config/pnpm/rc, /etc/npmrc,
   # and NPM_CONFIG_* env vars for non-auth settings. Without this file,

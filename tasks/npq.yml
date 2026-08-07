@@ -29,12 +29,14 @@
     executable: /bin/bash
   register: npm_for_npq
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Check if npq is already installed
   ansible.builtin.command: which npq-hero
   register: npq_check
   changed_when: false
+  check_mode: false
   failed_when: false
   when: npm_for_npq.rc == 0
 

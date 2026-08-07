@@ -220,3 +220,44 @@ load setup
   fi
   [ "$changed" = "0" ]
 }
+
+# --- check-mode support ---------------------------------------------------
+# QA found that `--check` was not merely imprecise but actively misleading:
+# the pre-flight GNU-date probe skipped, came back empty, and hard-aborted the
+# run claiming date was missing on a host where it works; and every tool-detection
+# probe skipped, so deployed protections were reported as skipped and the
+# coverage summary rendered empty values ("found Node ."). Root cause: Ansible
+# does not execute command/shell under --check, and no task set check_mode.
+#
+# Every read-only probe declares `changed_when: false`, which is the author
+# asserting it mutates nothing — so running it under check mode is safe by
+# construction. These two tests keep that invariant paired.
+
+@test "check-mode: every changed_when:false probe also sets check_mode:false" {
+  local missing=0
+  for f in "$ROLE_DIR"/tasks/*.yml; do
+    # Report any `changed_when: false` whose immediately following line is
+    # not `check_mode:`. Paired insertion is the convention in this role.
+    while IFS= read -r lineno; do
+      next=$(sed -n "$((lineno + 1))p" "$f")
+      if ! echo "$next" | grep -qE '^\s*check_mode:'; then
+        echo "MISSING check_mode: false -> $(basename "$f"):$lineno" >&2
+        missing=$((missing + 1))
+      fi
+    done < <(grep -nE '^\s*changed_when:\s*false\s*$' "$f" | cut -d: -f1)
+  done
+  [ "$missing" -eq 0 ]
+}
+
+@test "check-mode: a dry run completes instead of aborting at preflight" {
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  cd "$ROLE_DIR"
+  # The specific regression: --check aborted at the GNU date probe with
+  # "Your controller's date refused the probe / rc=0", i.e. it reported a
+  # success rc while claiming failure. A dry run must simply complete.
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --check -e podman_enabled=false
+  echo "$output" | tail -30
+  ! echo "$output" | grep -q "refused the probe"
+  [ "$status" -eq 0 ]
+}

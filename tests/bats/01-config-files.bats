@@ -73,8 +73,16 @@ load setup
   assert_file_contains "$HOME/.config/pnpm/rc" "ignore-scripts=true"
 }
 
-@test "pnpm rc: block-exotic-subdeps=true" {
-  assert_file_contains "$HOME/.config/pnpm/rc" "block-exotic-subdeps=true"
+@test "pnpm rc: block-exotic-subdeps is NOT emitted (dead in every pnpm version)" {
+  # INVERTED on purpose. The key used to be written here and did nothing:
+  #   - pnpm 10 reads this file but silently ignores the key (verified against
+  #     10.34.5, which went to DNS for a tarball dep — CI run 31215536075).
+  #   - pnpm 11+ enforces the key but does not read this file at all.
+  # There is no pnpm version in which this line has an effect, so emitting it
+  # was coverage that did not exist. The live emission is blockExoticSubdeps
+  # in config.yaml (asserted below); a pnpm older than 11 is now reported
+  # through the end-of-run coverage summary instead.
+  ! grep -qE '^block-exotic-subdeps=' "$HOME/.config/pnpm/rc"
 }
 
 @test "pnpm rc: minimum-release-age-strict=true" {
@@ -244,7 +252,10 @@ load setup
   # pnpm's resolution chain includes /etc/npmrc. Verifying pnpm-specific
   # keys here confirms both tools are covered by one file.
   assert_file_contains "/etc/npmrc" "minimum-release-age-strict="
-  assert_file_contains "/etc/npmrc" "block-exotic-subdeps=true"
+  # block-exotic-subdeps is deliberately absent — inert for every reader of
+  # this file. npm has no such setting, pnpm 10 ignores it, and pnpm 11 does
+  # not read /etc/npmrc. See the pnpm rc test above.
+  ! grep -qE '^block-exotic-subdeps=' /etc/npmrc
 }
 
 @test "/etc/yarnrc.yml: enableScripts false (sudo-safe yarn hardening)" {

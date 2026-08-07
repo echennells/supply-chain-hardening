@@ -3,6 +3,7 @@
   ansible.builtin.command: which sfw
   register: sfw_check
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Check if npm is available for socket install
@@ -32,6 +33,7 @@
     executable: /bin/bash
   register: npm_for_socket
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Check Node.js version (sfw requires >= 20)
@@ -42,6 +44,7 @@
     executable: /bin/bash
   register: node_major_version
   changed_when: false
+  check_mode: false
   failed_when: false
   when: npm_for_socket.rc == 0
 
@@ -56,7 +59,7 @@
 
 - name: Warn if Node too old for Socket Firewall
   ansible.builtin.debug:
-    msg: "WARNING: Socket Firewall requires Node >= 20 but found Node {{ node_major_version.stdout }}. Skipping sfw install."
+    msg: "WARNING: Socket Firewall requires Node >= 20 but found Node {{ node_major_version.stdout | trim | default('<undetected>', true) }}. Skipping sfw install."
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int < 20
@@ -67,7 +70,7 @@
   # in the task stream.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall (sfw) — requires Node >= 20, found Node ' ~ node_major_version.stdout ~ '. npm installs are not threat-intel filtered.'] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall (sfw) — requires Node >= 20, found Node ' ~ (node_major_version.stdout | trim | default('<undetected>', true)) ~ '. npm installs are not threat-intel filtered.'] }}
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int < 20
@@ -81,9 +84,10 @@
   # post-install state and let the wrapper depend on it.
   #
   # DETECTION MUST BE AS ROBUST AS THE npm DETECTOR ABOVE.
-  # This result is now a HARD GATE on the role's marquee npm protection, so a
-  # false negative here silently withholds the wrapper AND emits a message
-  # asserting the opposite of the truth. A bare `which sfw` is not good enough:
+  # This result gates the wrapper (jointly with the npq probe below) and drives
+  # what the coverage summary reports, so a false negative here degrades a
+  # protection AND emits a message asserting the opposite of the truth. A bare
+  # `which sfw` is not good enough:
   #   - it runs WITHOUT become, while the install above runs WITH become
   #     (`npm install -g sfw@2` lands in root's npm prefix), and
   #   - it trusts the ambient PATH, which this very file distrusts for npm.
@@ -116,6 +120,7 @@
     executable: /bin/bash
   register: sfw_final
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Ensure sfw cache directory is writable
@@ -167,10 +172,38 @@
     executable: /bin/bash
   register: npm_real_path
   changed_when: false
+  check_mode: false
   failed_when: false
   when:
     - npm_path_wrapper | bool
     - npm_for_socket.rc == 0
+
+- name: Re-check npq availability (the wrapper's other helper)
+  # The wrapper is NOT sfw-only. templates/npm-wrapper.sh.j2 has a deliberate
+  # fallback ladder:
+  #   TTY + npq-hero + sfw -> exec sfw npq-hero      (both layers)
+  #   TTY + npq-hero, none -> exec npq-hero          (reputation prompt only)
+  #   non-TTY + sfw        -> exec sfw npm           (threat intel only)
+  #   neither              -> warn loudly + passthrough
+  # So npq alone is still real protection for interactive callers. Gating
+  # deployment on sfw ALONE (as this file briefly did) meant a Node-18 host —
+  # where the sfw install is skipped — got no wrapper at all, downgrading it
+  # from "npq reputation prompts" to "nothing". That traded degraded coverage
+  # for none, to avoid a case the wrapper already handles explicitly.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/local/bin/npq-hero /usr/bin/npq-hero "$HOME/.local/bin/npq-hero"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npq-hero 2>/dev/null
+    executable: /bin/bash
+  register: npq_final
+  changed_when: false
+  check_mode: false
+  failed_when: false
 
 - name: Deploy npm PATH wrapper to /usr/local/bin
   become: true
@@ -185,10 +218,14 @@
     - npm_for_socket.rc == 0
     - npm_real_path.rc == 0
     - npm_real_path.stdout | length > 0
-    # sfw must actually exist — the wrapper's whole purpose is to route npm
-    # through it. Without this, a Node-18 host got a wrapper with no helper.
-    - sfw_final.rc == 0
-    - sfw_final.stdout | length > 0
+    # At least ONE helper must exist. A wrapper with neither sfw nor npq adds
+    # only a per-invocation warning, which is noise rather than protection —
+    # that was the real defect behind coupling this to sfw. But either helper
+    # alone is genuine coverage (see the fallback ladder above), so require
+    # sfw OR npq, not sfw specifically.
+    - >-
+      (sfw_final.rc == 0 and sfw_final.stdout | length > 0)
+      or (npq_final.rc == 0 and npq_final.stdout | length > 0)
 
 - name: Record skipped protection — npm PATH wrapper (sfw unavailable)
   # Wording note: this says "not refreshed", not "not deployed". Nothing in
@@ -198,8 +235,24 @@
   # operator would go looking for an absent file instead of a stale one.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['npm PATH wrapper — requested (npm_path_wrapper=true) but Socket Firewall was not found after the install step, so the wrapper was not deployed or refreshed. npm calls are unfiltered. If /usr/local/bin/npm exists from an earlier run it is now stale and warns on every invocation.'] }}
+      {{ (skipped_protections | default([])) + ['npm PATH wrapper — requested (npm_path_wrapper=true) but NEITHER Socket Firewall nor npq was found, so the wrapper was not deployed or refreshed. npm calls are unfiltered. If /usr/local/bin/npm exists from an earlier run it is now stale and warns on every invocation.'] }}
   when:
     - npm_path_wrapper | bool
     - npm_for_socket.rc == 0
     - sfw_final.rc != 0 or sfw_final.stdout | length == 0
+    - npq_final.rc != 0 or npq_final.stdout | length == 0
+
+- name: Record degraded protection — npm wrapper deployed without Socket Firewall
+  # Deployed and useful (npq reputation prompts for interactive callers), but
+  # non-interactive callers — scripts, agents, CI, the population this role
+  # most targets — get the warn-and-passthrough branch. That is a real gap and
+  # should not read as full npm coverage.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall threat-intel filtering for npm — the npm PATH wrapper WAS deployed and npq covers interactive callers, but sfw is absent, so non-interactive npm calls (scripts, agents, CI) are passed through unfiltered with a warning.'] }}
+  when:
+    - npm_path_wrapper | bool
+    - npm_for_socket.rc == 0
+    - sfw_final.rc != 0 or sfw_final.stdout | length == 0
+    - npq_final.rc == 0
+    - npq_final.stdout | length > 0

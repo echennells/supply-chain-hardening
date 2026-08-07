@@ -4,13 +4,23 @@ minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
 {% for pkg in pnpm_minimum_release_age_exclude %}
 minimum-release-age-exclude[]={{ pkg }}
 {% endfor %}
-; block-exotic-subdeps refuses git / http(s) / tarball-URL dependencies.
-; Runtime enforcement requires pnpm 11+. On pnpm 10 the key is accepted
-; into config but silently ignored — DNS/install proceeds for exotic
-; deps. Tier-tested via the matrix; the version gap is documented in
-; tests/matrix/expected-skips.yml so the behavioral test isn't flagged
-; as a regression on pnpm 10 cells.
-block-exotic-subdeps=true
+; block-exotic-subdeps is deliberately NOT emitted here.
+;
+; It refuses git / http(s) / tarball-URL dependencies, and runtime
+; enforcement requires pnpm 11+. Writing it to THIS file is dead in both
+; directions:
+;   - pnpm 10 reads this file but silently ignores the key. Verified
+;     empirically against pnpm 10.34.5, which proceeded to a DNS lookup for
+;     `pnpm add https://does-not-resolve.invalid/pkg.tgz`.
+;   - pnpm 11+ enforces the key but does not read this file at all (it reads
+;     only ~/.config/pnpm/config.yaml for non-auth settings).
+; So no pnpm version exists in which this line does anything.
+;
+; The live emission is `blockExoticSubdeps: true` in pnpm-config.yaml.j2.
+; When the detected pnpm is older than 11, tasks/pnpm.yml records the gap in
+; the end-of-run "protections NOT applied" summary instead of leaving an inert
+; key behind that reads like coverage. Same principle as 111e21b (composer:
+; stop shipping fake script-blocking protection).
 ; Store integrity + lockfile determinism (see defaults/main.yml for rationale).
 ; verify-store-integrity: hash-check store contents against the lockfile.
 ; prefer-frozen-lockfile: install from an up-to-date lockfile without

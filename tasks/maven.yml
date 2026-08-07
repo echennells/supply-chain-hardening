@@ -5,6 +5,7 @@
   ansible.builtin.command: which mvn
   register: mvn_check
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Create Maven config directory

@@ -26,7 +26,12 @@ minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
 {% for pkg in pnpm_minimum_release_age_exclude %}
 minimum-release-age-exclude[]={{ pkg }}
 {% endfor %}
-block-exotic-subdeps=true
+; block-exotic-subdeps is deliberately NOT emitted here — it would be inert
+; for every reader of this file. npm has no such setting; pnpm 10 reads this
+; file but silently ignores the key (verified against 10.34.5); pnpm 11+
+; honors the key but does not read /etc/npmrc. The live emission is
+; `blockExoticSubdeps: true` in the per-user config.yaml, and a pnpm older
+; than 11 is reported via the end-of-run coverage summary.
 {% if pnpm_built_dependencies | length > 0 %}
 ; Build-script allowlist. Note: `ignore-scripts=true` above is a hard
 ; block in pnpm and takes precedence — under sudo, even allowlisted
