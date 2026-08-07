@@ -21,7 +21,13 @@ npm_minimum_release_age_days: "{{ (release_age_hours | int / 24) | int }}"     #
 pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" # 2880 min
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
 uv_exclude_newer: "{{ release_age_hours | int }} hours"                        # "48 hours"
-yarn_minimal_age_gate: "{{ (release_age_hours | int / 24) | int }}d"           # "2d"
+# Yarn's npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES — not a duration
+# string. The previous "{{ days }}d" form ("2d") parses to NaN and yarn
+# SILENTLY applies no age filtering at all: no warning, no error, gate absent.
+# Verified on yarn 4.10.3 — "36500d" (100 years) installed a fresh package,
+# while 52560000 (the same 100 years in minutes) correctly blocked it.
+# Minutes also avoid the sub-24h truncation the days form had.
+yarn_minimal_age_gate: "{{ (release_age_hours | int * 60) | int }}"            # 2880 min
 deno_minimum_dependency_age: "P{{ (release_age_hours | int / 24) | int }}D"    # "P2D"
 
 # npm settings

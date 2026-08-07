@@ -1,5 +1,9 @@
 # Managed by ansible-supply-chain-security
-npmMinimalAgeGate: "{{ yarn_minimal_age_gate }}"
+#
+# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES, emitted unquoted. A
+# unit-suffixed value ("2d") parses to NaN and silently disables the gate —
+# yarn emits no warning, so the failure is invisible. Keep this an integer.
+npmMinimalAgeGate: {{ yarn_minimal_age_gate }}
 enableScripts: {{ yarn_enable_scripts | lower }}
 defaultSemverRangePrefix: ""
 enableTelemetry: false
