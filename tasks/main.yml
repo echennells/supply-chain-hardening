@@ -80,3 +80,30 @@
 - name: Include shell environment hardening
   ansible.builtin.include_tasks: shell_env.yml
   tags: [shell]
+
+# --- End-of-run coverage summary -------------------------------------------
+# For an agent-facing hardening role the single most valuable output is
+# "here is what did NOT get applied, and why". Without this, a protection
+# that skipped (Node too old for sfw, Go missing for govulncheck/pinact)
+# is visible only as one `skipping: [host]` line buried in the task stream,
+# while the recap still prints failed=0 — reading as full success.
+# Ecosystem tasks append to `skipped_protections`; this reports the total.
+# Generalizes the pattern already used by "Report active pnpm allowlist
+# exemptions".
+- name: Report protections that were NOT applied
+  ansible.builtin.debug:
+    msg: |-
+      ⚠ {{ skipped_protections | length }} protection(s) were NOT applied on this host:
+      {% for item in skipped_protections %}
+        {{ loop.index }}. {{ item }}
+      {% endfor %}
+      Everything else in the role applied normally. Install the missing
+      prerequisite and re-run to close these gaps.
+  when: skipped_protections | default([]) | length > 0
+  tags: always
+
+- name: Confirm full coverage (no protections skipped)
+  ansible.builtin.debug:
+    msg: "✓ All applicable protections were applied — no prerequisites missing."
+  when: skipped_protections | default([]) | length == 0
+  tags: always

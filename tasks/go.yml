@@ -44,3 +44,11 @@
   environment:
     GOTOOLCHAIN: auto
   when: go_check.rc == 0
+
+- name: Record skipped protection — govulncheck (Go absent)
+  # Feeds the end-of-run summary in main.yml so the skip is surfaced once at
+  # the end instead of only as `skipping: [localhost]` inside the task stream.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['govulncheck — Go is not installed, so Go vulnerability scanning was not set up.'] }}
+  when: go_check.rc != 0

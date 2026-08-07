@@ -23,7 +23,19 @@ Apply it to a bare host, inside a sandbox, or to a container image — anywhere 
 
 ### Container image hardening (Podman)
 
-Installs podman, disables Docker, and deploys `/etc/containers/policy.json` with a registry allowlist. Unlike Docker's `DOCKER_CONTENT_TRUST` env var, podman's policy.json is enforced by the runtime — it can't be bypassed by unsetting a variable or passing a CLI flag.
+**Opt-in — off by default.** When enabled, installs podman and deploys `/etc/containers/policy.json` with a registry allowlist. Unlike Docker's `DOCKER_CONTENT_TRUST` env var, podman's policy.json is enforced by the runtime — it can't be bypassed by unsetting a variable or passing a CLI flag.
+
+Two **independent** gates, both `false` by default — enabling the first does **not** touch Docker:
+
+```yaml
+podman_enabled: false         # install podman + deploy policy.json
+podman_disable_docker: false  # stop and disable the Docker daemon
+podman_docker_compat: false   # symlink docker.sock -> podman
+```
+
+```bash
+ansible-playbook site.yml -e podman_enabled=true -e podman_disable_docker=true
+```
 
 - Default policy: reject all registries, allowlist docker.io, ghcr.io, quay.io, mcr.microsoft.com, gcr.io
 - Docker CLI compatibility via socket symlink (survives reboot)
@@ -182,6 +194,18 @@ ansible-playbook site.yml --tags cargo        # Rust only
 ansible-playbook site.yml --tags go           # Go only
 ansible-playbook site.yml --tags java         # Maven + Gradle
 ansible-playbook site.yml --tags github       # zizmor + pinact
+```
+
+> **GitHub Actions hardening is detection-only, and opt-in by nature.** Unlike every
+> other ecosystem in this role — where deployed config changes behavior whether or not
+> the caller knows about it — the `github` tag only *installs* two tools: `zizmor`
+> (workflow auditor) and `pinact` (Actions SHA-pinner). The role does not run them,
+> does not scan your workflows, and does not pin anything. You must invoke them
+> yourself (e.g. `zizmor .github/workflows/`, `pinact run`). Both are skipped when
+> their prerequisite is missing (`uv` for zizmor, Go for pinact) and are reported in
+> the end-of-run "protections NOT applied" summary.
+
+```bash
 ansible-playbook site.yml --tags shell        # env vars only
 ```
 
@@ -202,7 +226,11 @@ AI agents install packages unpredictably. You can't control what package manager
 - **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
 - **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally. No config can prevent this — it's an ecosystem-level gap. See [TESTS.md](TESTS.md) for details.
 - **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.
-- **Container image hardening requires podman.** Docker has no daemon-level policy enforcement. The playbook installs podman with `policy.json` registry restrictions and disables Docker.
+- **Container image hardening requires podman, and is opt-in.** Docker has no daemon-level policy enforcement. When `podman_enabled=true`, the playbook installs podman with `policy.json` registry restrictions; disabling the Docker daemon is a **separate** gate (`podman_disable_docker=true`). Both default to `false`, so a default run neither installs podman nor touches Docker.
+
+- **`--check` (dry run) over-reports changes.** Tool-install tasks are gated on `when:` conditions that read a registered detection task, and Ansible does not execute `command`/`shell` tasks under `--check`. Those registrations come back empty, the gates evaluate differently, and tasks report `changed` that a real run would skip. Treat a `--check` diff as an upper bound, not a plan — the real run typically changes materially fewer things.
+
+- **Do not run the role with global `--become` / `sudo ansible-playbook`.** Facts are gathered under the play's become settings, so escalating from a non-root account sets `ansible_env.HOME=/root` and every per-user config lands in root's home instead of the intended user's. The role escalates per task where root is required, so plain `ansible-playbook site.yml` still applies all system-wide hardening. Pre-flight refuses this invocation; override with `-e accept_root_home_targeting=true` if you really do mean to harden root's home.
 
 ## Sources
 

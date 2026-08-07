@@ -16,6 +16,58 @@
       package, override per invocation (e.g. `npm install --foreground-scripts
       --ignore-scripts=false`) rather than disabling globally.
 
+- name: Refuse to run when privilege escalation would mis-target per-user config
+  # THE FAILURE THIS PREVENTS
+  # Per-user destinations are "{{ ansible_env.HOME }}/.npmrc" and friends.
+  # Facts are gathered under the play's become settings, so running the role
+  # with `--become` (or `sudo ansible-playbook`) from a non-root account makes
+  # ansible_env.HOME = /root. Every per-user config then lands in root's home
+  # instead of the operator's, and $HOME-relative tool detection (cargo, uv)
+  # looks in /root, finds nothing, and skips every tool install — while the
+  # recap still reports failed=0. A clean success on an unhardened machine is
+  # the worst outcome for a security role, so this fails loudly instead.
+  #
+  # DETECTION
+  # sudo exports SUDO_USER as the invoking account. It is set only when a
+  # non-root user escalated, which is exactly the broken case:
+  #   dev, no become  -> HOME=/home/dev, SUDO_USER unset      (intended)
+  #   dev + --become  -> HOME=/root,     SUDO_USER=dev        (THIS BUG)
+  #   root directly   -> HOME=/root,     SUDO_USER unset      (legitimate)
+  #   root + --become -> HOME=/root,     SUDO_USER unset      (legitimate)
+  # So keying on SUDO_USER != root fires on the bug and never on the two
+  # legitimate root paths.
+  ansible.builtin.assert:
+    that:
+      - ansible_env.SUDO_USER is not defined or ansible_env.SUDO_USER == 'root'
+    fail_msg: |
+      Refusing to run: privilege escalation would write per-user config to the
+      wrong home directory.
+
+      Detected: escalated from user '{{ ansible_env.SUDO_USER | default('?') }}',
+      so ansible_env.HOME is '{{ ansible_env.HOME }}'.
+
+      Every per-user file (~/.npmrc, ~/.config/pnpm/rc, ~/.yarnrc.yml,
+      ~/.bunfig.toml, ~/.cargo/config.toml, ~/.config/uv/uv.toml, ...) would be
+      written under '{{ ansible_env.HOME }}' rather than
+      '/home/{{ ansible_env.SUDO_USER | default('<user>') }}', and $HOME-relative
+      tool detection would skip every tool install — with no error and a
+      failed=0 recap.
+
+      Run the role WITHOUT global escalation:
+
+          ansible-playbook site.yml                  # not: --become
+          ansible-playbook site.yml --connection=local --limit localhost
+
+      The role already escalates per task (become: true) exactly where root is
+      required — /etc/npmrc, /etc/profile.d, /etc/environment, the PATH wrappers
+      — so system-wide hardening still applies in full.
+
+      If you genuinely intend to harden root's home directory, opt in:
+
+          ansible-playbook site.yml -e accept_root_home_targeting=true
+    success_msg: "Privilege context OK — per-user config targets {{ ansible_env.HOME }}."
+  when: not (accept_root_home_targeting | default(false) | bool)
+
 - name: Detect non-managed existing system config files
   # Each /etc/* file we deploy has a marker comment line. If a file
   # already exists without the marker, it was placed by someone or

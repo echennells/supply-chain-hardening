@@ -61,6 +61,29 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int < 20
 
+- name: Record skipped protection — Socket Firewall (Node too old)
+  # Feeds the end-of-run "protections NOT applied" summary in main.yml, so a
+  # skip is reported once at the end rather than only as a debug line buried
+  # in the task stream.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall (sfw) — requires Node >= 20, found Node ' ~ node_major_version.stdout ~ '. npm installs are not threat-intel filtered.'] }}
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int < 20
+
+- name: Re-check sfw availability after the install attempt
+  # The npm PATH wrapper below execs sfw. Gating the wrapper on the ORIGINAL
+  # sfw_check (taken before the install) would deploy a wrapper whose helper
+  # may never have been installed — e.g. on Node 18, where the install task
+  # skips. The wrapper degrades to a per-invocation warning on every npm call,
+  # so the operator gets a wrapper that filters nothing. Re-check the real
+  # post-install state and let the wrapper depend on it.
+  ansible.builtin.command: which sfw
+  register: sfw_final
+  changed_when: false
+  failed_when: false
+
 - name: Ensure sfw cache directory is writable
   become: true
   ansible.builtin.file:
@@ -105,3 +128,15 @@
     - npm_for_socket.rc == 0
     - npm_real_path.rc == 0
     - npm_real_path.stdout | length > 0
+    # sfw must actually exist — the wrapper's whole purpose is to route npm
+    # through it. Without this, a Node-18 host got a wrapper with no helper.
+    - sfw_final.rc == 0
+
+- name: Record skipped protection — npm PATH wrapper (sfw unavailable)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['npm PATH wrapper — requested (npm_path_wrapper=true) but Socket Firewall is not installed, so the wrapper was NOT deployed. npm calls are unfiltered.'] }}
+  when:
+    - npm_path_wrapper | bool
+    - npm_for_socket.rc == 0
+    - sfw_final.rc != 0

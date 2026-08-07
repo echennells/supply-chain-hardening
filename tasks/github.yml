@@ -29,6 +29,12 @@
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/zizmor' }}"
   when: uv_for_github.rc == 0
 
+- name: Record skipped protection — zizmor (uv absent)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['zizmor — uv is not installed, so the GitHub Actions workflow auditor was not set up.'] }}
+  when: uv_for_github.rc != 0
+
 - name: Check if go is installed (for pinact)
   # Canonical-path-first detection. See tasks/go.yml for the same logic.
   ansible.builtin.shell:
@@ -58,3 +64,9 @@
   environment:
     GOTOOLCHAIN: auto
   when: go_for_github.rc == 0
+
+- name: Record skipped protection — pinact (Go absent)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pinact — Go is not installed, so GitHub Actions SHA-pinning tooling was not set up.'] }}
+  when: go_for_github.rc != 0
