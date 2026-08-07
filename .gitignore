@@ -1,2 +1,23 @@
 .reviews/
 .ansible/
+
+# Scratch clone of github.com/tyrchen/sbe used while writing SBE_DEVC_NOTES.md.
+# It was committed as a bare gitlink by the 4373f35 merge — a pointer with no
+# .gitmodules, so it was unresolvable on a fresh clone and a latent path for
+# unreviewed third-party code to enter the repo. Untracked on purpose.
+sbe/
+
+# Security-review working artifacts. These are point-in-time notes about a
+# specific branch or commit range — they go stale the moment the code moves,
+# and a stale finding read as current is worse than no finding. The durable
+# conclusions belong in README.md (Limitations), TESTS.md (coverage gaps), or
+# docs/design-principles.md instead. Anchored to the repo root so anything
+# deliberately curated under docs/ stays tracked.
+/DIFFERENTIAL_REVIEW*.md
+/SHARP_EDGES*.md
+/INSECURE_DEFAULTS*.md
+/VARIANT_ANALYSIS*.md
+/TOB_REVIEW*.md
+/FIX_PLAN.md
+/VERIFICATION_REQUESTS.md
+/SBE_DEVC_NOTES.md
