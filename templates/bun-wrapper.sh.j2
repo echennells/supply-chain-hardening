@@ -82,7 +82,7 @@ fi
 # The case patterns include short-form aliases bun supports (i for
 # install, a for add, rm for remove, un/uninstall for uninstall, etc.).
 case "$1" in
-  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision)
+  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision|--)
     exec "$REAL_BUN" "$@"
     ;;
   *)

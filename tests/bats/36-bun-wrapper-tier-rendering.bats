@@ -55,7 +55,7 @@ teardown_file() {
   # bun add would gain --no-install which would either silently
   # do-nothing or error depending on bun's parser — either way wrong.
   for cmd in install i add a remove rm uninstall un update up upgrade link unlink pm outdated why audit publish patch patch-commit init create; do
-    grep -qE "[|]${cmd}[|)]" "$WRAPPER_DIR/bun-wrapper.sh" \
+    grep -qE "(^|[[:space:](|])${cmd}[|)]" "$WRAPPER_DIR/bun-wrapper.sh" \
       || { echo "FAIL: subcommand '$cmd' not in wrapper's skip list" >&2; return 1; }
   done
 }
@@ -66,7 +66,7 @@ teardown_file() {
   # either be silently ignored or break depending on parser.
   for arg in -- -h --help -v --version --revision; do
     pattern=$(printf '%s' "$arg" | sed 's/[][|.\\*?(){}^$+]/\\&/g')
-    grep -qE "[|]${pattern}[|)]" "$WRAPPER_DIR/bun-wrapper.sh" \
+    grep -qE "(^|[[:space:](|])${pattern}[|)]" "$WRAPPER_DIR/bun-wrapper.sh" \
       || { echo "FAIL: flag '$arg' not in wrapper's skip list" >&2; return 1; }
   done
 }

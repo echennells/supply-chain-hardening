@@ -59,7 +59,11 @@ teardown_file() {
   # --no-scripts MUST still be present (script execution has no opt-in).
   grep -qE 'exec ".*REAL_COMPOSER.*" --no-scripts "\$@"' "$f"
   # --no-plugins MUST be absent.
-  ! grep -q -- "--no-plugins" "$f"
+  # Anchor to the exec line. The wrapper's header comments legitimately
+  # discuss --no-plugins when explaining the flag, and a bare grep matches
+  # those comments (false positive) even though the injection is correctly
+  # omitted from the exec.
+  ! grep -qE '^exec .*--no-plugins' "$f"
 }
 
 @test "wrapper-render: --no-scripts is unconditional across both renderings" {

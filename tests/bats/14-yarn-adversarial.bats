@@ -23,6 +23,19 @@ setup() {
 write_yarn_package_json() {
   local yarn_v
   yarn_v=$(yarn --version 2>/dev/null || echo "4.9.1")
+  # Yarn 1.x (classic) does NOT read ~/.yarnrc.yml — that file is a Yarn 2+
+  # (berry) format, and classic ignores it entirely. So on a host whose active
+  # yarn is 1.x, the role's yarn hardening does not apply at all and these
+  # adversarial tests would "fail" by measuring an unhardened yarn rather than
+  # a defect in the role. The single-version container ships yarn 1.22 from
+  # apt, which is exactly that case.
+  #
+  # Pin to a berry version so the tests exercise the config the role actually
+  # deploys. Matrix runs (which activate a real berry version) still use their
+  # own version, because that value is >= 2 and is kept as-is.
+  case "$yarn_v" in
+    1.*) yarn_v="4.9.1" ;;
+  esac
   printf '{"name":"yarn-test","packageManager":"yarn@%s"}\n' "$yarn_v" > package.json
 }
 

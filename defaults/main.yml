@@ -37,7 +37,12 @@ bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}" 
 #
 # Cutoff freezes at apply time — re-apply to advance. For "always exactly
 # N hours back" semantics, schedule periodic re-applies.
-uv_exclude_newer: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT%H:%M:%SZ') }}"
+# Rounded DOWN to midnight UTC on purpose. A per-second timestamp changes on
+# every apply, so the rendered uv.toml differs every run and the role is never
+# idempotent (re-apply always reports changed). Truncating to the day makes
+# same-day re-applies a no-op. Rounding down also only ever makes the gate
+# MORE restrictive (cutoff moves further into the past), so it fails safe.
+uv_exclude_newer: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') }}"
 # Yarn's npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES. A duration-suffix
 # string ("2d", "7d") hits a parser bug that yields NaN and silently disables
 # the gate entirely — and yarn has no second age-gate layer to fall back on.

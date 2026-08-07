@@ -32,14 +32,18 @@ setup() {
   # versions emitted it as if it were a Linux SSL hardening knob. The
   # template now omits it; this test catches a regression where it
   # comes back.
-  ! grep -q "check-revoke" "$HOME/.cargo/config.toml"
+  # Anchor to an actual key assignment — the template legitimately MENTIONS
+  # this key in a comment explaining why it is not emitted, and a bare grep
+  # matches that comment (false positive).
+  ! grep -qE '^[[:space:]]*check-revoke[[:space:]]*=' "$HOME/.cargo/config.toml"
 }
 
 @test "cargo: config drops the mislabeled dep-info-basedir key" {
   # dep-info-basedir is a build-artifact path prefix, not a locking or
   # security knob. Previous role versions emitted it with a "locked
   # deps" comment that was outright false. Template now omits it.
-  ! grep -q "dep-info-basedir" "$HOME/.cargo/config.toml"
+  # Anchor to an actual key assignment (see note above — comment false positive).
+  ! grep -qE '^[[:space:]]*dep-info-basedir[[:space:]]*=' "$HOME/.cargo/config.toml"
 }
 
 @test "cargo: config sets [net] retry = 3" {
