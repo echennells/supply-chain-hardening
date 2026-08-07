@@ -28,7 +28,7 @@
       NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
       NPM_CONFIG_FUND={{ npm_fund | lower }}
       NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
-      NPM_CONFIG_MINIMUM_RELEASE_AGE={{ npm_minimum_release_age_days }}
+      NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}
       PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
       PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
       UV_LINK_MODE=copy

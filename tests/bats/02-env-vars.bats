@@ -27,11 +27,24 @@ setup() {
   # "block malicious /etc/uv/" defense, but the role itself deploys
   # /etc/uv/uv.toml as the sudo/non-deploying-user fallback. The env
   # var would make uv ignore that file in PAM-loaded shells — exactly
-  # the contexts the fallback exists for. Removed in [this session].
-  # If this test fails, someone re-added the env var; check
-  # docs/version-tiering-audit.md for the withdrawal rationale before
-  # putting it back.
+  # the contexts the fallback exists for.
   [ -z "$UV_NO_SYSTEM_CONFIG" ]
+}
+
+@test "env: NPM_CONFIG_MIN_RELEASE_AGE=2 (correct npm key; 48h gate expressed in days)" {
+  # npm's config key is `min-release-age` (unit: days) → env NPM_CONFIG_MIN_RELEASE_AGE.
+  # release_age_hours=48 → npm_minimum_release_age_days=2.
+  assert_env_equals NPM_CONFIG_MIN_RELEASE_AGE 2
+}
+
+@test "env: NPM_CONFIG_MINIMUM_RELEASE_AGE is NOT emitted (npm rejects it as Unknown env config)" {
+  # Regression catcher: the MINIMUM_ variant maps to npm's `minimum-release-age`,
+  # which npm does not recognize — it warns "Unknown env config" and will hard-error
+  # in a future npm major. The env-var age gate must use the real key.
+  # NOTE: COMPOSER_NO_SCRIPTS test intentionally dropped here — that var is a
+  # made-up name the role no longer emits; COMPOSER_SKIP_SCRIPTS is tested below.
+  ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/profile.d/supply-chain-hardening.sh
+  ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/environment
 }
 
 @test "env: GOSUMDB=sum.golang.org" {
@@ -67,6 +80,10 @@ setup() {
 
 @test "/etc/environment has NPM_CONFIG_IGNORE_SCRIPTS" {
   assert_file_contains /etc/environment "NPM_CONFIG_IGNORE_SCRIPTS=true"
+}
+
+@test "/etc/environment has NPM_CONFIG_MIN_RELEASE_AGE (correct key, days unit)" {
+  assert_file_contains /etc/environment "NPM_CONFIG_MIN_RELEASE_AGE=2"
 }
 
 @test "/etc/environment has GOSUMDB" {

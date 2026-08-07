@@ -17,6 +17,18 @@
 
 load setup
 
+# This file renders role templates and includes the role, so it needs ROLE_DIR.
+# The shared setup.bash exports it on some branches but not others (it isn't on
+# main's base), so resolve it here to keep this file self-sufficient.
+if [ -z "${ROLE_DIR:-}" ]; then
+  if [ -d /opt/ansible-supply-chain-security ]; then
+    ROLE_DIR=/opt/ansible-supply-chain-security
+  else
+    ROLE_DIR="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+  fi
+  export ROLE_DIR
+fi
+
 RENDER_DIR=/tmp/pnpm-allowlist-renders
 
 setup_file() {
