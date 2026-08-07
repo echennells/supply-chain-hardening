@@ -9,7 +9,7 @@
 | 01-config-files.bats | 33 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
 | 02-env-vars.bats | 12 | System-wide env vars in /etc/profile.d/ and /etc/environment |
 | 03-npm.bats | 3 | npm ignore-scripts behavioral test + config readback |
-| 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist |
+| 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check) |
 | 05-go.bats | 6 | Go env vars verified via `go env` |
 | 06-js-ecosystem.bats | 5 | pnpm, yarn, bun config verification |
 | 07-other-configs.bats | 7 | Composer, bundler, cargo, npq alias checks |
@@ -18,21 +18,24 @@
 | 10-go-adversarial.bats | 9 | Simulated Go environment poisoning |
 | 11-composer-adversarial.bats | 4 | Composer script blocking verification |
 | 12-cross-ecosystem.bats | 13 | File permissions, non-interactive shell coverage |
-| 13-pnpm-adversarial.bats | 4 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher) |
+| 13-pnpm-adversarial.bats | 5 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher, block-exotic-subdeps behavioral) |
 | 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
-| 15-bun-adversarial.bats | 3 | Simulated bun lifecycle-script attacks |
+| 15-bun-adversarial.bats | 5 | Simulated bun lifecycle-script attacks + bun PATH wrapper end-to-end blocks runtime auto-install + FIXTURE CONTROL (bun-real does auto-install when not wrapped) |
 | 16-composer-behavioral.bats | 1 | Composer end-to-end blocking |
 | 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
-| 18-cargo-behavioral.bats | 3 | Cargo git-fetch-with-cli, SSL revocation |
+| 18-cargo-behavioral.bats | 9 | Cargo config (git-fetch-with-cli, retry), build.rs gap, /etc/cargo/deny.toml reference policy + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
 | 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
-| 21-podman.bats | 11 | Podman policy.json, registries, cosign |
+| 21-podman.bats | 14 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign |
 | 22-pip-wrapper-safety.bats | 4 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
 | 24-deno-path-wrapper.bats | 11 | Deno in-place PATH wrapper plumbing + end-to-end |
 | 25-integration-regressions.bats | 11 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
+| 34-composer-wrapper-tier-rendering.bats | 4 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
+| 35-cargo-config-tier-rendering.bats | 5 | cargo_install_root authority (renders cargo-config.toml.j2 with empty/set, asserts [install] block conditional, baseline keys unconditional, TOML-valid both ways) |
+| 36-bun-wrapper-tier-rendering.bats | 6 | bun wrapper subcommand-routing (--no-install injected on runtime paths, skipped for package-mgmt subcommands and --version/--help, recursion guard present, catch-all wires to the inject branch) |
 
 ## Adversarial tests
 
@@ -78,7 +81,6 @@ No actual malware is used. All fixtures are local packages with scripts that wri
 | Non-interactive npm env vars | `bash -c` gets NPM_CONFIG_IGNORE_SCRIPTS=true |
 | Non-interactive Python env vars | `bash -c` gets PYTHONDONTWRITEBYTECODE=1 |
 | Non-interactive Go env vars | `bash -c` gets GOSUMDB=sum.golang.org |
-| Non-interactive Composer env vars | `bash -c` gets COMPOSER_NO_SCRIPTS=1 |
 | Clean markers | No attack marker files exist after full test run |
 
 ## How the test container works
@@ -117,4 +119,4 @@ These are scenarios the test suite does **not** cover. They're tracked here so a
 ## Issues found by testing
 
 1. **uv.toml config syntax error** — `require-hashes` was at the top level instead of under `[pip]`. uv silently rejected the entire config, disabling all uv hardening. Found during manual testing on n8n server.
-2. **npm allow-git=none doesn't block on npm 10.x** — config is accepted but only enforced in npm 11+. Test changed to verify config presence rather than behavioral blocking.
+2. **npm allow-git=none doesn't block on npm 10.x** — config is accepted but only enforced in npm 11+. The role deploys the key universally; older npm reads it but doesn't act on it. `tests/bats/03-npm.bats` has both a file-content check (always runs) and a behavioral check (skips on npm <11) — the behavioral check distinguishes "npm refused before network" (enforcement working) from "npm tried DNS for the bogus git URL" (key silently ignored).

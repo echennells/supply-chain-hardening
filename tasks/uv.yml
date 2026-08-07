@@ -31,6 +31,12 @@
   # exclude-newer (age gate) and no-build (wheels-only), the two
   # protections that block fresh malicious releases and setup.py
   # execution respectively.
+  #
+  # IMPORTANT: do NOT pair this with UV_NO_SYSTEM_CONFIG=1 in
+  # /etc/environment or /etc/profile.d/. uv 0.11.16+ honors that env
+  # var by skipping this file entirely — and PAM-loaded shells (login,
+  # interactive sudo with env_reset) will see the env var, defeating
+  # this fallback in exactly the contexts it exists for.
   become: true
   ansible.builtin.template:
     src: uv.toml.j2

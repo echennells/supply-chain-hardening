@@ -17,7 +17,9 @@
 
 load setup
 
-ROLE_DIR="/opt/ansible-supply-chain-security"
+# ROLE_DIR is autodetected by setup.bash and works in both the Docker test
+# image and any local clone. Do not hardcode the Docker path here — it
+# silently breaks every test below when bats is run outside Docker.
 
 # ---- Structural regression catchers (H1, H2, H3) ----
 #

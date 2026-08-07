@@ -22,10 +22,18 @@ load setup
 @test "pip wrapper has a defensive guard against missing uv" {
   # Wrapper must refuse to run if its embedded uv path is empty or
   # non-executable, instead of falling through to `exec  pip "$@"`.
+  # Skip when no uv is on PATH — the role intentionally doesn't deploy
+  # the pip wrapper in that case (deploying a pip→uv redirect with no
+  # uv would just produce a recursion bomb), so asserting wrapper
+  # contents would fail for the wrong reason. The skip preserves the
+  # property under test ("when deployed, the wrapper has the guard")
+  # while admitting the role's correct refusal to deploy.
+  command -v uv >/dev/null 2>&1 || skip "uv not on PATH; role correctly skipped wrapper deploy"
   assert_file_contains /usr/local/bin/pip "refusing to recurse"
 }
 
 @test "pip3 wrapper has a defensive guard against missing uv" {
+  command -v uv >/dev/null 2>&1 || skip "uv not on PATH; role correctly skipped wrapper deploy"
   assert_file_contains /usr/local/bin/pip3 "refusing to recurse"
 }
 
@@ -33,7 +41,7 @@ load setup
   # The when: condition must depend only on actual uv presence.
   # Specifically: must NOT include `ansible_user_id is defined`, which is
   # always true after gather_facts.
-  taskfile=/opt/ansible-supply-chain-security/tasks/uv.yml
+  taskfile="$ROLE_DIR/tasks/uv.yml"
   [ -f "$taskfile" ] || skip "role source not available at $taskfile"
 
   ! grep -qE "ansible_user_id[[:space:]]+is[[:space:]]+defined" "$taskfile"

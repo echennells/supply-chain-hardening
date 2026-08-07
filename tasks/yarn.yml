@@ -1,6 +1,32 @@
 ---
 # Yarn supply chain hardening
-# Config deployed unconditionally
+# Config deployed unconditionally; one setting (enableHardenedMode) is
+# tiered based on detected Yarn version — see template comment for the
+# version gate. The role uses the same detect-and-template pattern that
+# composer uses for its audit-block tier (see tasks/composer.yml).
+
+- name: Detect installed Yarn version (empty if not installed or fails)
+  # Yarn typically comes via corepack which dynamically resolves the
+  # version from package.json's packageManager field — without a project
+  # context (and no globally-activated yarn), `yarn --version` may error.
+  # The `|| exit 0` swallows that case; template treats empty as
+  # "assume modern (4.0+)" since modern Yarn is overwhelmingly the
+  # common case when Yarn is installed at all. Older Yarn 3.x just gets
+  # a warning if `enableHardenedMode` is emitted — not a hard error —
+  # but omitting it on detected <4.0 keeps logs clean.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      command -v yarn >/dev/null 2>&1 || exit 0
+      yarn --version 2>/dev/null | head -1
+    executable: /bin/bash
+  register: yarn_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Set yarn_detected_version fact
+  ansible.builtin.set_fact:
+    yarn_detected_version: "{{ yarn_version_check.stdout | default('') | trim }}"
 
 - name: Deploy hardened global .yarnrc.yml
   ansible.builtin.template:

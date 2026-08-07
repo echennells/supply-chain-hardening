@@ -1,13 +1,39 @@
-# Cargo supply chain hardening
+# Cargo supply-chain hardening — system defaults.
+#
+# Cargo's hardening surface is narrow. The biggest gaps cargo CANNOT close:
+#   - build.rs always executes during `cargo build` / `cargo install`
+#   - proc-macro crates execute Rust code at compile time
+#   - Cargo has no equivalent of npm's --ignore-scripts
+#
+# This config sets the cargo-level knobs that actually have meaning on
+# Linux, then defers the bulk of defense to companion tools (cargo-audit,
+# cargo-deny, cargo-vet) installed alongside this config by the role.
+#
+# What previous versions of this file got wrong:
+#   - [http] check-revoke is a Windows-only setting (CertGetCertificateChain
+#     CRL/OCSP toggle). Linux cargo ignores it. Removed.
+#   - [build] dep-info-basedir is a build-artifact path prefix, not a
+#     locking/security knob. Removed.
 
 [net]
-# Use git CLI for fetches (respects system SSH/proxy config)
+# Use git CLI for fetches so SSH config, proxy settings, system CA bundles,
+# and TLS material under /etc/ssl are respected. Cargo's internal libgit2
+# path ignores ~/.ssh/config — fetches of git dependencies behind a
+# corporate proxy or auth-required mirror silently fail or fall back to
+# unauthenticated paths.
 git-fetch-with-cli = true
 
-[http]
-# Verify SSL certificates
-check-revoke = true
+# Retry transient network failures. Not security per se, but a missing
+# retry on an interrupted crate fetch can cause CI to fall back to a
+# cached older revision in ways that mask version-pin drift.
+retry = 3
+{% if cargo_install_root | default('') | length > 0 %}
 
-[build]
-# Use locked dependencies when Cargo.lock exists
-dep-info-basedir = "."
+[install]
+# `cargo install` output location. Default ~/.cargo/bin is per-user and
+# writable from any process running as that user. Setting this to a
+# system-managed path lets you wrap the directory with stricter
+# permissions, immutable-filesystem mounts, or AppArmor rules. Opt-in
+# via the cargo_install_root role var.
+root = "{{ cargo_install_root }}"
+{% endif %}

@@ -50,6 +50,40 @@ assert "ghcr.io" in d["transports"]["docker"], "ghcr.io not in allowlist"
   assert_file_contains /etc/containers/registries.conf "short-name-mode"
 }
 
+@test "podman: registries.conf has no self-referential [[registry]] blocks" {
+  # Previous template emitted [[registry]] prefix = X / location = X
+  # blocks for each entry — pure no-ops in modern podman (the search
+  # registry list works without them). Removed for clarity. Catch
+  # re-introduction so a future template refactor doesn't quietly
+  # bring back the dead weight. If you genuinely need [[registry]]
+  # blocks for mirror redirects or insecure flags, that's a different
+  # change — drop this assertion intentionally and explain why.
+  ! grep -q '^\[\[registry\]\]' /etc/containers/registries.conf
+}
+
+@test "podman: registries.conf search list contains only bare hosts (no paths)" {
+  # registries.conf's unqualified-search-registries is host-only by
+  # podman design — paths like "ghcr.io/myorg" aren't valid search
+  # entries. The template strips /.*$ before emitting; this catches
+  # a regression where the stripping is lost (which would emit
+  # invalid TOML and break podman entirely).
+  ! grep -E 'unqualified-search-registries.*"[^"]*/[^"]*"' /etc/containers/registries.conf
+}
+
+@test "podman: policy.json passes podman strict parse (no unknown top-level keys)" {
+  # podman's policy.json parser rejects unknown top-level keys (e.g. a
+  # stray "_comment" left in by a template author). The structural JSON
+  # tests above won't catch this — the file is valid JSON, just contains
+  # an extra key. Only podman itself surfaces it, with:
+  #   Error: invalid policy in "/etc/containers/policy.json": Unknown key "..."
+  # When podman rejects the policy, EVERY pull fails — including from
+  # allowed registries — which the systemd-gated pull tests below would
+  # catch only on a real systemd host. This test catches it in CI too,
+  # because it only needs the podman binary, not systemd.
+  run podman image trust show
+  [ "$status" -eq 0 ]
+}
+
 @test "podman: cosign runs on this host" {
   # Behavioral check that strengthens the prior `which cosign` test.
   # If the arch mapping in tasks/podman.yml downloads the wrong binary
@@ -83,8 +117,16 @@ assert "ghcr.io" in d["transports"]["docker"], "ghcr.io not in allowlist"
   [ "$status" -eq 0 ]
 }
 
-@test "podman: docker.sock symlink points to podman" {
+@test "podman: docker.sock symlink points to podman (only when podman_docker_compat=true)" {
   [ -e /run/systemd/system ] || skip "not a full systemd host (container environment)"
+  # The role only creates /run/docker.sock when podman_docker_compat=true
+  # (default false per defaults/main.yml). Skip when the symlink isn't
+  # present — its absence means the user didn't opt into Docker compat,
+  # not that the role failed. The assertion below is still meaningful
+  # when the user DID opt in (it would catch the symlink pointing at the
+  # wrong target).
+  [ -L /run/docker.sock ] || [ -L /var/run/docker.sock ] \
+    || skip "docker.sock symlink not present (podman_docker_compat=false in role vars)"
   target=$(readlink /run/docker.sock 2>/dev/null || readlink /var/run/docker.sock 2>/dev/null)
   [[ "$target" =~ "podman" ]]
 }

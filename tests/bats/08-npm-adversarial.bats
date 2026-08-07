@@ -118,7 +118,19 @@ setup() {
   rm -f /tmp/postinstall-marker
   cd /tmp && rm -rf user-rc-bypass-test && mkdir user-rc-bypass-test && cd user-rc-bypass-test
   npm init -y >/dev/null 2>&1
-  npm install /opt/test-fixtures/npm-postinstall-pkg 2>/dev/null || true
+  # Run in a subshell with NPM_CONFIG_IGNORE_SCRIPTS unset so the
+  # documented non-PAM scenario is exercised regardless of caller context.
+  # When bats is invoked via SSH/sudo/cron, pam_env loads /etc/environment
+  # and puts NPM_CONFIG_IGNORE_SCRIPTS=true into scope — that beats the
+  # user-level .npmrc per npm precedence (env > user > global) and blocks
+  # the bypass this test is documenting. The unset reproduces the Docker
+  # CMD / systemd-no-EnvironmentFile / agent-process environment the test
+  # name calls out. The unset is scoped to this subshell only, so it
+  # can't leak into later tests.
+  (
+    unset NPM_CONFIG_IGNORE_SCRIPTS
+    npm install /opt/test-fixtures/npm-postinstall-pkg 2>/dev/null
+  ) || true
   marker_present=$([ -f /tmp/postinstall-marker ] && echo "yes" || echo "no")
 
   # Restore role-deployed .npmrc BEFORE asserting (cleanup-first pattern)

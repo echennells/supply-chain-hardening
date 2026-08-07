@@ -1,0 +1,111 @@
+# System-wide cargo-deny policy template.
+#
+# Deployed at /etc/cargo/deny.toml as a reference baseline. cargo-deny does
+# NOT auto-merge a system-wide config with a project's deny.toml — `cargo
+# deny check` looks for `deny.toml` in the current working directory only.
+#
+# To use this baseline in a project:
+#   cp /etc/cargo/deny.toml ./deny.toml          # one-shot copy
+#   # ...then tune per-project from this starting point.
+# Or invoke explicitly:
+#   cargo deny --config /etc/cargo/deny.toml check
+#
+# Strictness here favors CI usability over zero-tolerance. Three knobs are
+# `deny` because they're security-critical and rarely break legitimate
+# projects: yanked crates, unknown registries, unknown git sources. The
+# noisier checks (multiple-versions, wildcards) are `warn` because
+# legitimate dedup-blocked projects exist mid-migration and we don't want
+# this template to turn into "ignored config" via reflexive overrides.
+#
+# Targets the cargo-deny 0.14+ TOML schema. Older cargo-deny versions
+# (< 0.14) used `[advisories] vulnerability =` / `unmaintained =` fields
+# that were superseded by the advisory-database severity model.
+
+[graph]
+# Don't enable all features when walking the dep graph — only the ones the
+# default workspace build actually pulls. Enabling all features can drag
+# in optional deps the production build never sees, polluting the report
+# with non-applicable findings.
+all-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+# RustSec advisory database. Refreshed by `cargo deny check` from
+# the URLs below.
+db-path = "$CARGO_HOME/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Refuse builds that pull yanked crate versions. Yanks usually mean the
+# author identified a defect or vulnerability and pulled the version from
+# being newly resolved — a yanked crate already in your Cargo.lock is the
+# canonical "you're holding a bad version" signal.
+yanked = "deny"
+# Per-advisory ignore list. Populate with RUSTSEC IDs you're knowingly
+# accepting, e.g. ["RUSTSEC-2023-0071"]. Each entry should have a
+# comment explaining why the project accepts the risk.
+ignore = []
+
+[bans]
+# Wildcards (`foo = "*"`) make typosquatting easier and version pins
+# meaningless. Warn rather than deny — workspace path crates often use
+# wildcard versions intentionally — but surface them in reports so you
+# can audit which wildcards are intentional.
+wildcards = "warn"
+# Multiple versions of the same crate inflate the attack surface (more
+# unique transitive deps to vet). Warn-only because dedupe is sometimes
+# impossible mid-ecosystem migration.
+multiple-versions = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+# Specific banned crates. Populate when you've identified crates you
+# never want pulled in — e.g. unmaintained alternatives to a preferred
+# crate, or crates flagged by your security team. Example:
+#   deny = [{ name = "openssl-sys", reason = "use rustls instead" }]
+deny = []
+skip = []
+skip-tree = []
+
+[licenses]
+# Confidence threshold for license inference from SPDX expressions.
+# 0.93 is cargo-deny's documented sensible default — high enough to
+# avoid false matches on ambiguous license text, low enough to catch
+# the common-case variants.
+confidence-threshold = 0.93
+# Permissive defaults. The role does NOT enforce specific licenses
+# system-wide — that's a per-project legal call. This allowlist covers
+# the licenses overwhelmingly common in the Rust ecosystem; tighten
+# (or expand) per-project based on your org's legal requirements.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "Zlib",
+]
+exceptions = []
+
+[sources]
+# Refuse crates from unknown registries / git repos. Combined with the
+# allow-registry list below, this blocks the typosquat-via-alt-registry
+# attack pattern where a project's Cargo.toml has been tampered to point
+# at an attacker-controlled mirror.
+unknown-registry = "deny"
+unknown-git = "deny"
+# Default crates.io only. Add internal registries here if your org
+# publishes private crates: e.g. "https://internal.example.com/index".
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Git dependencies are an inherent supply-chain risk (no checksumming
+# against the crates.io database). Default empty = no git deps allowed.
+# Populate when you have legitimate forks or unreleased deps:
+#   allow-git = ["https://github.com/your-org/fork-of-thing"]
+allow-git = []

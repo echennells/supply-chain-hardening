@@ -1,9 +1,43 @@
+{%- set v = yarn_detected_version | default('', true) -%}
+{%- set has_hardened_mode = v == '' or v is version('4.0.0', '>=') -%}
 # Managed by ansible-supply-chain-security
 #
-# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES, emitted unquoted. A
-# unit-suffixed value ("2d") parses to NaN and silently disables the gate —
-# yarn emits no warning, so the failure is invisible. Keep this an integer.
+# enableHardenedMode (Yarn 4.0+) is the highest-value setting here — it
+# instructs Yarn to query remote registries to validate that lockfile
+# content matches what upstream actually published. This catches
+# lockfile-tampering attacks (an attacker modifies yarn.lock to point at
+# a malicious version). Yarn >= 4.0 honors the key; older versions warn
+# on unknown keys but don't error. The role omits it on detected <4.0
+# to keep logs clean; when Yarn isn't detectable at apply time we assume
+# modern and emit it (downside on 3.x is a single warning per install).
+# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES and must be unquoted — a
+# quoted/suffixed value ("2d") parses to NaN and silently disables the gate.
+# Emitted unconditionally for forward-compat: on Yarn <4.10 the key is unknown
+# (one warning per install) but becomes active as soon as Yarn is upgraded.
 npmMinimalAgeGate: {{ yarn_minimal_age_gate }}
 enableScripts: {{ yarn_enable_scripts | lower }}
 defaultSemverRangePrefix: ""
 enableTelemetry: false
+enableImmutableInstalls: {{ yarn_enable_immutable_installs | bool | lower }}
+enableImmutableCache: {{ yarn_enable_immutable_cache | bool | lower }}
+checksumBehavior: {{ yarn_checksum_behavior }}
+{% if yarn_unsafe_http_whitelist | length > 0 %}
+unsafeHttpWhitelist:
+{% for host in yarn_unsafe_http_whitelist %}
+  - "{{ host }}"
+{% endfor %}
+{% else %}
+unsafeHttpWhitelist: []
+{% endif %}
+{% if has_hardened_mode and yarn_enable_hardened_mode %}
+enableHardenedMode: true
+{% endif %}
+
+{# approvedGitRepositories intentionally NOT emitted: yarn 4.10.3 rejects it
+   with "Usage Error: Unrecognized or legacy configuration settings found",
+   which hard-fails EVERY yarn command (verified 2026-08 in-container). It is
+   not a recognized setting in yarn 4.10's 100-key schema, and 4.10+ is exactly
+   where npmMinimalAgeGate above becomes active — so emitting it would break
+   yarn precisely on the versions this hardening targets. The
+   yarn_approved_git_repositories variable is retained in defaults for
+   compatibility but is not rendered. #}

@@ -14,9 +14,18 @@
 
 load setup
 
-# Resolve the wrapper location once per test rather than hardcoding /usr/local/bin
+# Resolve the wrapper location once per test rather than hardcoding /usr/local/bin.
+# Operators commonly symlink deno into /usr/local/bin (e.g. /usr/local/bin/deno ->
+# ~/.deno/bin/deno) to expose a user-installed binary system-wide. The role
+# discovers and wraps at the symlink TARGET (~/.deno/bin/deno) and writes
+# <target>-real there. A bare `command -v deno` returns the SYMLINK path on
+# such hosts, so derived `<deno_path>-real` lookups would point to a
+# nonexistent /usr/local/bin/deno-real and fail forever. readlink -f follows
+# the symlink chain to the canonical path the role actually wrapped — same
+# answer as command -v on hosts with no symlink (Docker test image), correct
+# answer on hosts with one.
 get_deno_path() {
-  command -v deno
+  readlink -f "$(command -v deno)"
 }
 
 @test "deno wrapper installed at the discovered deno location" {
@@ -126,7 +135,7 @@ EOF
   # preserving a stale backup. The wrapper would then be redeployed pointing
   # at the OLD deno, masking the user's upgrade (including any CVE patches).
   # This static check catches a regression that reintroduces the condition.
-  taskfile=/opt/ansible-supply-chain-security/tasks/deno.yml
+  taskfile="$ROLE_DIR/tasks/deno.yml"
   [ -f "$taskfile" ] || skip "role source not available at $taskfile"
   # Match only an active YAML list-item condition, not the explanatory comment
   # in the file that documents *why* this gate must not exist.

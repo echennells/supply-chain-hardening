@@ -24,6 +24,28 @@ load setup
   assert_file_contains "$HOME/.config/uv/uv.toml" "exclude-newer"
 }
 
+@test "uv.toml: exclude-newer is RFC 3339 (NOT a relative duration like '48 hours')" {
+  # uv requires absolute RFC 3339 datetimes here. Relative strings ("48 hours",
+  # "2d") fail uv's TOML parser and break every uv invocation. Regression
+  # catcher for the bug introduced + fixed in the uv exclude-newer commit.
+  # Match "YYYY-MM-DDTHH:MM:SSZ" format on the exclude-newer line.
+  grep -qE '^exclude-newer = "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"$' "$HOME/.config/uv/uv.toml"
+  # Explicit: the file must NOT contain the broken "N hours" pattern
+  ! grep -qE '"[0-9]+ hours?"' "$HOME/.config/uv/uv.toml"
+}
+
+@test "uv.toml: parses as valid TOML (regression catcher for syntax errors)" {
+  python3 -c "import tomllib; tomllib.loads(open('$HOME/.config/uv/uv.toml').read())"
+}
+
+@test "uv.toml: index-strategy first-index (anti-dep-confusion)" {
+  assert_file_contains "$HOME/.config/uv/uv.toml" 'index-strategy = "first-index"'
+}
+
+@test "uv.toml: allow-insecure-host explicit (default empty = no TLS bypass)" {
+  assert_file_contains "$HOME/.config/uv/uv.toml" "allow-insecure-host"
+}
+
 @test "uv.toml: no-build = true" {
   assert_file_contains "$HOME/.config/uv/uv.toml" "no-build = true"
 }
@@ -80,8 +102,7 @@ load setup
   # scripts — including allowlisted ones. We can't easily test the
   # non-default vars path end-to-end, so assert against the template
   # source: the override line must be present in the allowlist branch.
-  local template="/opt/ansible-supply-chain-security/templates/pnpm-rc.j2"
-  [ -f "$template" ] || template="${BATS_TEST_DIRNAME}/../../templates/pnpm-rc.j2"
+  local template="$ROLE_DIR/templates/pnpm-rc.j2"
   assert_file_contains "$template" "ignore-scripts=false"
 }
 
@@ -125,13 +146,53 @@ load setup
   assert_file_contains "$HOME/.yarnrc.yml" "enableScripts: false"
 }
 
+@test "yarnrc: enableImmutableInstalls true (lockfile-change refusal)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableInstalls: true"
+}
+
+@test "yarnrc: enableImmutableCache true (prevent cache mutation during install)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableCache: true"
+}
+
+@test "yarnrc: checksumBehavior throw (error on hash mismatch)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "checksumBehavior: throw"
+}
+
+@test "yarnrc: approvedGitRepositories present (allowlist for git deps; empty = block all)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "approvedGitRepositories"
+}
+
+@test "yarnrc: unsafeHttpWhitelist present (empty = HTTPS-only enforcement)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "unsafeHttpWhitelist"
+}
+
 # bun
-@test "bunfig: lifecycleScripts = false" {
-  assert_file_contains "$HOME/.bunfig.toml" "lifecycleScripts = false"
+@test "bunfig: ignoreScripts = true (real bun key, not the made-up 'lifecycleScripts')" {
+  # Earlier versions wrote `lifecycleScripts = false` — silently inert.
+  # Real key per https://bun.sh/docs/runtime/bunfig is `ignoreScripts`
+  # with inverted semantics. Catches regression to the wrong key.
+  assert_file_contains "$HOME/.bunfig.toml" "ignoreScripts = true"
+  ! grep -q "^lifecycleScripts" "$HOME/.bunfig.toml"
 }
 
 @test "bunfig: exact = true" {
   assert_file_contains "$HOME/.bunfig.toml" "exact = true"
+}
+
+@test "bunfig: frozenLockfile = true (refuse install on lockfile divergence)" {
+  assert_file_contains "$HOME/.bunfig.toml" "frozenLockfile = true"
+}
+
+@test "bunfig: auto = disable (block runtime auto-install foot-gun)" {
+  assert_file_contains "$HOME/.bunfig.toml" 'auto = "disable"'
+}
+
+@test "bunfig: no [install.security] section by default (bun_security_scanner is opt-in)" {
+  # Default bun_security_scanner is "". The template should NOT emit the
+  # [install.security] block — otherwise `bun install` would fail for
+  # projects that haven't added the scanner package as a devDep.
+  # Users who want Socket integration set the role var to enable.
+  ! grep -q '^\[install\.security\]' "$HOME/.bunfig.toml"
 }
 
 # cargo
@@ -139,13 +200,16 @@ load setup
   assert_file_exists "$HOME/.cargo/config.toml"
 }
 
-@test "cargo config: check-revoke = true" {
-  assert_file_contains "$HOME/.cargo/config.toml" "check-revoke = true"
+@test "cargo config: [net] retry set (transient-failure handling)" {
+  assert_file_contains "$HOME/.cargo/config.toml" "retry = 3"
 }
 
-# composer
-@test "composer: scripts-are-disabled" {
-  assert_file_contains "$HOME/.config/composer/config.json" "scripts-are-disabled"
+@test "cargo config: omits the cargo_install_root block when var is empty" {
+  # cargo_install_root defaults to "" which suppresses the [install]
+  # block entirely. If the template ever defaults this to a non-empty
+  # path, callers' `cargo install` output silently relocates — catch
+  # that drift here.
+  ! grep -q '^\[install\]' "$HOME/.cargo/config.toml"
 }
 
 # bundler

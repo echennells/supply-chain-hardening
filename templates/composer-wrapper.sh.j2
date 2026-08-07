@@ -1,0 +1,64 @@
+#!/bin/bash
+# /usr/local/bin/composer — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# Composer has no host-wide config-file or env-var mechanism for disabling
+# script and plugin execution. The only real primitives are the --no-scripts
+# / --no-plugins CLI flags (universal) and COMPOSER_SKIP_SCRIPTS=<event,list>
+# (composer 2.9+ only). This wrapper injects --no-scripts on every
+# invocation. --no-plugins is also injected by default, but the role var
+# composer_allow_plugins controls it: set composer_allow_plugins=true
+# to drop --no-plugins here AND write "allow-plugins": true to config.json
+# so users with legitimate plugin needs (e.g. composer/installers in CI)
+# get a real opt-in without disabling the whole wrapper.
+#
+# --no-scripts is always injected. Script execution is much higher-risk
+# than plugin execution (arbitrary shell on every composer op vs. composer
+# Plugin classes loaded by composer.json), so there's no matching opt-in
+# for scripts. Users who need scripts run composer-real with cleared env.
+#
+# Composer accepts global flags anywhere on the command line (Symfony
+# Console behavior) and ignores them for subcommands where they don't
+# apply (--version, help, etc.), so injection is safe across all
+# subcommands.
+#
+# Bypass (per-invocation, for users who know what they need):
+#   COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install
+# Both halves are required. Just `composer-real install` alone is still
+# blocked by COMPOSER_SKIP_SCRIPTS in /etc/environment + /etc/profile.d
+# (belt-and-suspenders layer for PAM-loaded shells, intentional). Clearing
+# the env var AND going around the wrapper is the documented bypass.
+#
+# Disable globally:
+#   role var composer_path_wrapper=false (restores the real binary at this
+#   path on next apply). The env-var layer remains active unless you also
+#   remove the role's /etc/environment + /etc/profile.d entries.
+#
+# Self-update caveat: `composer self-update` writes a new composer.phar
+# to wherever composer is invoked from — overwriting this wrapper. After a
+# self-update, re-apply the role to restore wrapping. (Same caveat applies
+# to the deno wrapper after a deno installer re-run.)
+
+REAL_COMPOSER='{{ composer_real_path }}'
+
+# Recursion guard — refuse to run if the embedded real-composer path is
+# empty, non-executable, or points back at ourselves. Same pattern as the
+# pip→uv, npm→sfw, and deno wrappers.
+if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real composer not found at '$REAL_COMPOSER'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Suppress the "Do not run Composer as root" warning when invoked in
+# CI/container/agent contexts where running as root is intentional and
+# unavoidable. Doesn't change any security posture — composer already
+# runs as the caller's UID regardless.
+export COMPOSER_ALLOW_SUPERUSER=1
+
+{% if composer_allow_plugins | bool %}
+# composer_allow_plugins=true → omit --no-plugins. The JSON config also
+# carries "allow-plugins": true so the two layers agree.
+exec "$REAL_COMPOSER" --no-scripts "$@"
+{% else %}
+exec "$REAL_COMPOSER" --no-scripts --no-plugins "$@"
+{% endif %}

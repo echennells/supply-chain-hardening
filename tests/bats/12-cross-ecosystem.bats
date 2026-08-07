@@ -71,9 +71,9 @@ setup() {
   [ "$result" = "sum.golang.org" ]
 }
 
-@test "SYSTEM: profile.d exports Composer vars when sourced" {
-  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh && echo $COMPOSER_NO_SCRIPTS')
-  [ "$result" = "1" ]
+@test "SYSTEM: profile.d exports Composer skip-scripts list when sourced" {
+  result=$(bash -c 'source /etc/profile.d/supply-chain-hardening.sh && echo $COMPOSER_SKIP_SCRIPTS')
+  [[ "$result" == *"post-install-cmd"* ]]
 }
 
 # --- Honest test of the /etc/environment limit ---
