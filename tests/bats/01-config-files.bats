@@ -158,8 +158,16 @@ load setup
   assert_file_contains "$HOME/.yarnrc.yml" "checksumBehavior: throw"
 }
 
-@test "yarnrc: approvedGitRepositories present (allowlist for git deps; empty = block all)" {
-  assert_file_contains "$HOME/.yarnrc.yml" "approvedGitRepositories"
+@test "yarnrc: approvedGitRepositories is NOT emitted (yarn 4.10 rejects it and hard-fails)" {
+  # INVERTED on purpose. This key was previously emitted as a git-dep allowlist,
+  # but yarn 4.10.3 does not recognize it and aborts with
+  #   "Usage Error: Unrecognized or legacy configuration settings found:
+  #    approvedGitRepositories"
+  # which breaks EVERY yarn command (verified in-container 2026-08 — all 9
+  # other keys the role emits are accepted; this one alone is fatal). It also
+  # breaks yarn precisely on 4.10+, the versions where npmMinimalAgeGate
+  # becomes active. Emitting it is strictly worse than omitting it.
+  ! grep -qE '^approvedGitRepositories:' "$HOME/.yarnrc.yml"
 }
 
 @test "yarnrc: unsafeHttpWhitelist present (empty = HTTPS-only enforcement)" {

@@ -62,7 +62,11 @@ assert_valid_yaml() {
 
 assert_has_baseline() {
   local f="$1"
-  for key in npmMinimalAgeGate enableScripts enableImmutableInstalls enableImmutableCache checksumBehavior approvedGitRepositories unsafeHttpWhitelist; do
+  # approvedGitRepositories is deliberately NOT in this list: yarn 4.10.3
+  # rejects the key outright ("Usage Error: Unrecognized or legacy
+  # configuration settings found"), which hard-fails EVERY yarn command.
+  # See the inverted assertion in 01-config-files.bats.
+  for key in npmMinimalAgeGate enableScripts enableImmutableInstalls enableImmutableCache checksumBehavior unsafeHttpWhitelist; do
     grep -q "^${key}:" "$f" || { echo "missing $key in $f" >&2; return 1; }
   done
 }
