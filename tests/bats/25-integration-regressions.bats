@@ -261,3 +261,34 @@ load setup
   ! echo "$output" | grep -q "refused the probe"
   [ "$status" -eq 0 ]
 }
+
+@test "no optional tool install may abort the play" {
+  # THE MOST EXPENSIVE BUG THIS SUITE HAS MISSED.
+  #
+  # tasks/go.yml installed govulncheck with GOTOOLCHAIN=auto to let go fetch a
+  # newer toolchain — but GOTOOLCHAIN only exists in Go >= 1.21. Stock Ubuntu
+  # 22.04 ships Go 1.18.1 and Debian 12 ships 1.19.8, so `go install` failed,
+  # the task had no failed_when, and the play DIED — taking 11 downstream
+  # includes with it: composer, bundler, maven, gradle, nuget, podman, npq,
+  # socket (sfw + the npm PATH wrapper), github, shell_env (the entire env-var
+  # layer) and verify. Two of three declared supported platforms, left half
+  # hardened.
+  #
+  # The invariant: config deployment is the load-bearing protection. An
+  # optional scanner that will not install is a coverage gap to report, never
+  # a reason to abandon the remaining ecosystems.
+  local fatal=0
+  while IFS= read -r hit; do
+    local f="${hit%%:*}"
+    local ln="${hit#*:}"; ln="${ln%%:*}"
+    # walk forward to the end of the task block, looking for failed_when
+    local blk
+    blk=$(awk -v s="$ln" 'NR>=s { if (NR>s && /^- name: /) exit; print }' "$f")
+    if ! echo "$blk" | grep -qE '^\s*(failed_when|ignore_errors):'; then
+      echo "FATAL install task: $f:$ln" >&2
+      echo "$blk" | head -3 >&2
+      fatal=$((fatal + 1))
+    fi
+  done < <(grep -nE '^- name: Install ' "$ROLE_DIR"/tasks/*.yml)
+  [ "$fatal" -eq 0 ]
+}

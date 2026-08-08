@@ -156,3 +156,41 @@ EOF
   echo "$output" | grep "npm lifecycle scripts blocked" | grep -q "OK"
   [ "$status" -eq 1 ]
 }
+
+@test "verify: BEHAVIORAL — a wrapper outside /usr/local/bin is found, not reported absent" {
+  # QA found the inverse of the npm false OK: a WORKING protection reported as
+  # absent. Only npm and pip/pip3 deploy to /usr/local/bin — composer, deno,
+  # bun and bunx are written to the DISCOVERED binary path (on stock Ubuntu
+  # 24.04 that is /usr/bin/composer). The probe looked in one directory, so it
+  # said "not deployed" for a wrapper that was installed and working.
+  cat > "$FAKEBIN/composer" <<'EOF'
+#!/bin/bash
+# supply-chain-hardening wrapper
+[ "$1" = "--version" ] && echo "Composer version 2.9.0 2025-11-01"
+EOF
+  cp "$FAKEBIN/composer" "$FAKEBIN/composer-real"
+  chmod +x "$FAKEBIN/composer" "$FAKEBIN/composer-real"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  echo "$output" | grep "composer PATH wrapper" | grep -q "active at"
+  ! echo "$output" | grep "composer PATH wrapper" | grep -q "not deployed"
+}
+
+@test "verify: composer audit blocking is version-tiered, not assumed" {
+  # Distro composer is routinely below the floors the role targets:
+  # jammy 2.2.6, bookworm 2.5.5, noble 2.7.1 — none reach the 2.9 needed for
+  # audit.block-insecure / block-abandoned. Before this row existed the
+  # verifier emitted nothing at all for composer, which read as "fine".
+  mk() { printf '#!/bin/bash\n[ "$1" = "--version" ] && echo "Composer version %s 2024-01-01"\n' "$1" > "$FAKEBIN/composer"; chmod +x "$FAKEBIN/composer"; }
+
+  mk 2.9.0
+  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  echo "$output" | grep "composer audit blocking" | grep -q "OK"
+
+  mk 2.7.1
+  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  echo "$output" | grep "composer audit blocking" | grep -q "GAP"
+
+  mk 2.2.6
+  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  echo "$output" | grep "composer audit blocking" | grep -q "below 2.7"
+}

@@ -22,6 +22,12 @@
   failed_when: false
 
 - name: Install zizmor (GitHub Actions workflow auditor)
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   # Use absolute uv path — same reasoning as tasks/uv.yml. Bare `uv`
   # exits 127 on hosts where uv is in ~/.local/bin but PATH wasn't
   # exported to ansible's connection environment.
@@ -29,6 +35,16 @@
     cmd: "{{ uv_for_github.stdout }} tool install zizmor"
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/zizmor' }}"
   when: uv_for_github.rc == 0
+  register: zizmor_install
+  failed_when: false
+
+- name: Record skipped protection — zizmor (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['zizmor — install failed. The GitHub Actions workflow auditor is not set up.'] }}
+  when:
+    - zizmor_install is defined
+    - zizmor_install.rc | default(0) != 0
 
 - name: Record skipped protection — zizmor (uv absent)
   ansible.builtin.set_fact:
@@ -54,6 +70,12 @@
   failed_when: false
 
 - name: Install pinact (with toolchain auto-fetch for this install only)
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   # Same toolchain collision as govulncheck in tasks/go.yml: pinact may
   # require a newer go than the host's stock version, and GOTOOLCHAIN=local
   # (set by the role's own hardening) prevents go from auto-fetching a
@@ -66,6 +88,16 @@
   environment:
     GOTOOLCHAIN: auto
   when: go_for_github.rc == 0
+  register: pinact_install
+  failed_when: false
+
+- name: Record skipped protection — pinact (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pinact — install failed (needs Go >= 1.21 for GOTOOLCHAIN auto-fetch). Actions SHA-pinning tooling is not set up.'] }}
+  when:
+    - pinact_install is defined
+    - pinact_install.rc | default(0) != 0
 
 - name: Record skipped protection — pinact (Go absent)
   ansible.builtin.set_fact:

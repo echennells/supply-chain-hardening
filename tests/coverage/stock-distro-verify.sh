@@ -43,9 +43,18 @@ apt-get update -qq >/dev/null 2>&1
 # and re-create the blind spot this script exists to remove.
 apt-get install -y -qq --no-install-recommends \
   ansible python3 python3-pip nodejs npm golang-go composer curl ca-certificates \
+  yarnpkg \
   >/dev/null 2>&1 || true
 
 echo
+# apt ships yarn classic as `yarnpkg`. Symlink it to `yarn` so the verifier
+# measures it — this is exactly the yarn 1.x case the README now documents as
+# receiving no hardening at all, and it went untested because the binary name
+# differs from the one everything looks for.
+if command -v yarnpkg >/dev/null 2>&1 && ! command -v yarn >/dev/null 2>&1; then
+  ln -sf "$(command -v yarnpkg)" /usr/local/bin/yarn
+fi
+
 echo "--- tool versions this host actually has ---"
 for t in ansible node npm yarn pnpm bun composer python3 pip3 go; do
   if command -v "$t" >/dev/null 2>&1; then

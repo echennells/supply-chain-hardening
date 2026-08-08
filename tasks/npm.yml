@@ -71,8 +71,24 @@
   when: npm_check.rc == 0
 
 - name: Install lockfile-lint globally
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   ansible.builtin.command: npm install -g lockfile-lint
   changed_when: true
   when:
     - npm_check.rc == 0
     - lockfile_lint_check.rc != 0
+  register: lockfile_lint_install
+  failed_when: false
+
+- name: Record skipped protection — lockfile-lint (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['lockfile-lint — install failed. Lockfile URL/integrity linting is not set up.'] }}
+  when:
+    - lockfile_lint_install is defined
+    - lockfile_lint_install.rc | default(0) != 0

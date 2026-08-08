@@ -8,6 +8,10 @@
 #   podman_docker_compat: true   — symlinks docker.sock to podman socket
 
 - name: Install podman and fuse-overlayfs (Debian/Ubuntu)
+  # NON-FATAL BY DESIGN — see the same note in tasks/go.yml. podman is opt-in,
+  # so a failure here is worth reporting loudly, but five includes sit after
+  # this one (npq, socket, github, shell_env, verify) and shell_env carries the
+  # entire env-var layer. An unavailable package must not cost those.
   become: true
   ansible.builtin.apt:
     name:
@@ -16,6 +20,16 @@
     state: present
     update_cache: true
   when: ansible_os_family == 'Debian'
+  register: podman_install
+  failed_when: false
+
+- name: Record skipped protection — podman (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['podman — requested via podman_enabled=true but the package install FAILED. Container registry policy is not enforced; any policy.json deployed below has no runtime to enforce it.'] }}
+  when:
+    - podman_install is defined
+    - podman_install is failed or podman_install.rc | default(0) != 0
 
 - name: Create containers config directory
   become: true
@@ -43,6 +57,10 @@
     cosign_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'arm', 'ppc64le': 'ppc64le', 's390x': 's390x'}[ansible_architecture] | default('') }}"
 
 - name: Install cosign for image signature verification
+  # NON-FATAL BY DESIGN. This reaches out to GitHub releases at apply time, so
+  # it fails on any host without egress, behind a proxy, or during a GitHub
+  # blip. cosign is a manual verification helper — losing it must never take
+  # out the env-var layer deployed by shell_env.yml further down.
   become: true
   ansible.builtin.get_url:
     url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ cosign_arch }}"
@@ -51,6 +69,16 @@
   when:
     - ansible_system == 'Linux'
     - cosign_arch | length > 0
+  register: cosign_install
+  failed_when: false
+
+- name: Record skipped protection — cosign (download failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cosign — download from GitHub releases failed (no egress, proxy, or upstream blip). Manual container image signature verification is not available.'] }}
+  when:
+    - cosign_install is defined
+    - cosign_install is failed
 
 - name: Notify when cosign install was skipped (unsupported platform)
   ansible.builtin.debug:

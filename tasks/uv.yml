@@ -108,6 +108,12 @@
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
 - name: Install uv-managed tools
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   # Use the absolute uv path we already discovered, not bare `uv`. Ansible's
   # connection environment doesn't include ~/.local/bin (uv installer's
   # default location); the installer only adds it to ~/.bashrc, which
@@ -122,3 +128,13 @@
     - uv-secure
     - pip-audit
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+  register: uv_tools_install
+  failed_when: false
+
+- name: Record skipped protection — uv-managed tools (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['uv-managed audit tools (uv-secure / pip-audit) — install failed. Python dependency scanning is not set up.'] }}
+  when:
+    - uv_tools_install is defined
+    - uv_tools_install.rc | default(0) != 0

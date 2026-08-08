@@ -49,6 +49,12 @@
   when: npm_for_socket.rc == 0
 
 - name: Install Socket Firewall Free via npm (requires Node >= 20)
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   become: true
   ansible.builtin.command: npm install -g sfw@2
   when:
@@ -56,6 +62,16 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
   changed_when: true
+  register: sfw_install
+  failed_when: false
+
+- name: Record skipped protection — Socket Firewall (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — install failed. npm installs are not threat-intel filtered.'] }}
+  when:
+    - sfw_install is defined
+    - sfw_install.rc | default(0) != 0
 
 - name: Warn if Node too old for Socket Firewall
   ansible.builtin.debug:

@@ -75,6 +75,12 @@
   failed_when: false
 
 - name: Install cargo auditing tools (prebuilt via binstall when present, source-build fallback)
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   ansible.builtin.shell:
     cmd: |
       set -e
@@ -91,3 +97,13 @@
     - cargo-vet
     - cargo-cooldown
   when: cargo_check.rc == 0
+  register: cargo_tools_install
+  failed_when: false
+
+- name: Record skipped protection — cargo auditing tools (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo auditing tools (cargo-audit / cargo-deny) — install failed. Rust dependency scanning is not set up.'] }}
+  when:
+    - cargo_tools_install is defined
+    - cargo_tools_install.rc | default(0) != 0

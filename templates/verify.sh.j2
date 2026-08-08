@@ -227,18 +227,54 @@ fi
 # ------------------------------------------------------- PATH wrappers -------
 # Wrappers are the weakest evidence class in the whole role: existence proves
 # nothing about whether callers resolve through them.
-for w in npm pip pip3 bun composer deno; do
-  p="/usr/local/bin/$w"
-  if [ -f "$p" ] && grep -q "supply-chain-hardening" "$p" 2>/dev/null; then
-    if [ -x "/usr/local/bin/${w}-real" ]; then
-      row WEAK PRESENT "$w PATH wrapper" "wrapper installed; callers bypassing PATH are unaffected"
+#
+# CHECK THE PATH CALLERS ACTUALLY HIT, NOT A FIXED DIRECTORY.
+# An earlier version of this loop only looked in /usr/local/bin. But only npm
+# and pip/pip3 deploy there — composer, deno, bun and bunx are written to the
+# DISCOVERED binary path (composer.yml "Deploy composer wrapper at the
+# discovered composer path", dest: {{ composer_binary_path.stdout }}). On a
+# stock Ubuntu 24.04 that is /usr/bin/composer, so the probe reported "not
+# deployed" for a wrapper that was installed and working. That is the same
+# defect as the npm false OK, pointing the other way: a real protection
+# reported as absent. Under-reporting is the safer direction, but it is still
+# wrong, and a verifier that cries wolf gets ignored.
+for w in npm pip pip3 bun bunx composer deno; do
+  have "$w" || continue
+  p=$(command -v "$w" 2>/dev/null)   # what callers resolve to
+  if [ -n "$p" ] && grep -q "supply-chain-hardening" "$p" 2>/dev/null; then
+    if [ -x "${p}-real" ]; then
+      row WEAK PRESENT "$w PATH wrapper" "active at $p; callers bypassing PATH are unaffected"
     else
-      row GAP PRESENT "$w PATH wrapper" "wrapper present but ${w}-real missing — wrapper refuses to run"
+      row GAP PRESENT "$w PATH wrapper" "wrapper at $p but ${w}-real missing — the recursion guard makes it refuse to run"
     fi
-  elif have "$w"; then
-    row WEAK PRESENT "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary"
+  elif [ -f "/usr/local/bin/$w" ] && grep -q "supply-chain-hardening" "/usr/local/bin/$w" 2>/dev/null; then
+    # Deployed, but something earlier on PATH shadows it — the wrapper exists
+    # and is bypassed on every call, which reads as coverage and is not.
+    row GAP PRESENT "$w PATH wrapper" "wrapper is at /usr/local/bin/$w but $w resolves to $p — the wrapper is shadowed and never runs"
+  else
+    row WEAK PRESENT "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary at $p"
   fi
 done
+
+# ------------------------------------------------------------ composer ------
+if have composer; then
+  cv=$(composer --version --no-plugins 2>/dev/null | sed -nE 's/.*version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)
+  cmaj=${cv%%.*}; crest=${cv#*.}; cmin=${crest%%.*}
+  # Version-tiered, matching what the role renders. audit.block-* needs 2.9;
+  # audit.abandoned=fail needs 2.7. Distro composer is routinely below both:
+  # jammy 2.2.6, bookworm 2.5.5, noble 2.7.1.
+  if [ -n "${cmaj:-}" ] && [ -n "${cmin:-}" ]; then
+    if [ "$cmaj" -gt 2 ] 2>/dev/null || { [ "$cmaj" -eq 2 ] && [ "$cmin" -ge 9 ]; } 2>/dev/null; then
+      row OK FUNCTIONAL "composer audit blocking" "composer $cv supports audit.block-insecure / block-abandoned"
+    elif [ "$cmaj" -eq 2 ] && [ "$cmin" -ge 7 ] 2>/dev/null; then
+      row GAP FUNCTIONAL "composer audit blocking" "composer $cv supports audit.abandoned=fail but NOT block-insecure/block-abandoned (needs >= 2.9); advisories do not refuse installs"
+    else
+      row GAP FUNCTIONAL "composer audit blocking" "composer $cv is below 2.7 — no audit blocking of any kind is available"
+    fi
+  else
+    row WEAK PRESENT "composer audit blocking" "could not parse composer version"
+  fi
+fi
 
 # ---------------------------------------------------------------- go ---------
 if have go; then

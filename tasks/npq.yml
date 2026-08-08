@@ -86,6 +86,12 @@
   when: npm_for_npq.rc == 0
 
 - name: Install npq globally
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
   # Gated on the RUNTIME threshold. Installing npq on an older Node would
   # succeed (npm only warns about engines), put a binary on PATH, and give
   # the host a silent passthrough that reads as protection.
@@ -96,6 +102,16 @@
     - npq_check.rc != 0
     - npq_node_version.stdout | trim | length > 0
     - npq_node_version.stdout | trim is version('20.13.0', '>=')
+  register: npq_install
+  failed_when: false
+
+- name: Record skipped protection — npq globally (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['npq — install failed. Pre-install reputation checking is not set up.'] }}
+  when:
+    - npq_install is defined
+    - npq_install.rc | default(0) != 0
 
 - name: Verify npq actually functions (not merely present)
   # THE POINT OF THIS TASK. Runs the real binary and looks for npq's own

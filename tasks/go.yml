@@ -24,6 +24,18 @@
   check_mode: false
   failed_when: false
 
+- name: Detect Go version (GOTOOLCHAIN below only exists in Go >= 1.21)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      "{{ go_check.stdout }}" version 2>/dev/null | sed -nE 's/.*go([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p'
+    executable: /bin/bash
+  register: go_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: go_check.rc == 0
+
 - name: Install govulncheck (with toolchain auto-fetch for this install only)
   # Three things collide here without this fix:
   #   1. `go install golang.org/x/vuln/cmd/govulncheck@latest` requires a
@@ -39,12 +51,54 @@
   # value that protects user `go install` calls. Also uses the absolute go
   # path we already discovered — bare `go` wouldn't be reachable on hosts
   # where ansible's connection PATH lacks /usr/local/go/bin.
+  #
+  # ...AND THAT FIX ONLY WORKS ON GO >= 1.21.
+  # GOTOOLCHAIN was introduced in Go 1.21. On older Go it is simply an unknown
+  # environment variable: go ignores it, cannot fetch a newer toolchain, and
+  # `go install ...@latest` fails — which is collision (3) above, unmitigated.
+  # This task had no failed_when, so that aborted the play.
+  #
+  # Measured on stock distros: Ubuntu 22.04 ships Go 1.18.1 and Debian 12 ships
+  # 1.19.8, so the role DIED HERE on two of its three declared supported
+  # platforms, taking 11 downstream includes with it — composer, bundler,
+  # maven, gradle, nuget, podman, npq, socket (sfw + the npm wrapper), github,
+  # shell_env (the ENTIRE env-var layer), and verify. The host was left half
+  # hardened by a run that reported a failure nobody connected to those
+  # ecosystems.
+  #
+  # Two independent fixes, because either alone leaves a hole:
+  #   1. gate on Go >= 1.21 so we do not attempt an install that cannot work
+  #   2. failed_when: false so a future govulncheck/toolchain problem degrades
+  #      to a reported gap instead of taking out half the role. An optional
+  #      vulnerability scanner must never cost the load-bearing config layer.
   ansible.builtin.command:
     cmd: "{{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@latest"
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/govulncheck' }}"
   environment:
     GOTOOLCHAIN: auto
-  when: go_check.rc == 0
+  register: govulncheck_install
+  failed_when: false
+  when:
+    - go_check.rc == 0
+    - go_version.stdout | default('') | trim | length > 0
+    - go_version.stdout | trim is version('1.21', '>=')
+
+- name: Record skipped protection — govulncheck (Go too old for toolchain fetch)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['govulncheck — Go ' ~ (go_version.stdout | default('') | trim | default('<undetected>', true)) ~ ' is older than 1.21, so GOTOOLCHAIN auto-fetch is unavailable and govulncheck cannot be installed. Go vulnerability scanning is not set up. Stock Ubuntu 22.04 (1.18) and Debian 12 (1.19) are both below this floor.'] }}
+  when:
+    - go_check.rc == 0
+    - go_version.stdout | default('') | trim | length == 0
+      or go_version.stdout | trim is version('1.21', '<')
+
+- name: Record skipped protection — govulncheck (install failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['govulncheck — install failed on Go ' ~ (go_version.stdout | default('') | trim) ~ '. Go vulnerability scanning is not set up. The rest of the role still applied.'] }}
+  when:
+    - govulncheck_install is defined
+    - govulncheck_install.rc | default(0) != 0
 
 - name: Record skipped protection — govulncheck (Go absent)
   # Feeds the end-of-run summary in main.yml so the skip is surfaced once at
