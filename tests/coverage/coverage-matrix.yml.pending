@@ -1,0 +1,48 @@
+name: Stock-distro coverage
+
+# Answers a question the main test suite structurally cannot: on a host with
+# only the package managers apt provides, which protections actually enforce?
+#
+# tests/Dockerfile builds from nodesource and upstream tarballs, so the bats
+# suite has always measured the role against current toolchains. The role's
+# protections cluster at the newest tool versions, and real hosts run distro
+# packages one to three years behind — so a fully green suite says nothing
+# about the deployment target. This workflow measures the target.
+#
+# It never fails the build. A GAP is a fact to publish, not a regression.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly. Distro packages and tool floors both move; the answer decays.
+    - cron: "0 6 * * 1"
+
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - "ubuntu:22.04"
+          - "ubuntu:24.04"
+          - "debian:12"
+    name: "${{ matrix.image }}"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Apply the role on a stock ${{ matrix.image }} and verify
+        run: |
+          docker run --rm -v "$PWD:/role" "${{ matrix.image }}" \
+            bash /role/tests/coverage/stock-distro-verify.sh 2>&1 | tee result.txt
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.image }}"
+            echo
+            echo '```'
+            sed -n '/tool versions this host actually has/,$p' result.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
