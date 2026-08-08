@@ -330,3 +330,9 @@ podman_allowed_registries:
   - "quay.io"
   - "mcr.microsoft.com"
   - "gcr.io"
+
+# --- post-apply verification ------------------------------------------------
+# Prove protections are in effect rather than merely written. See tasks/verify.yml
+# for why this is a separate question from the coverage summary.
+verify_protections: true       # run /usr/local/bin/supply-chain-verify after applying
+verify_fail_on_gap: false      # fail the play when a protection is not in effect

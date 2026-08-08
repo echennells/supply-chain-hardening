@@ -258,3 +258,12 @@
       or ansible_skip_tags | default([]) | length > 0
       or not (socket_firewall_install | bool)
   tags: always
+
+# Runs last, after every ecosystem has been applied, because it inspects the
+# resulting state of the host rather than the role's own bookkeeping.
+- name: Verify protections are actually in effect
+  ansible.builtin.include_tasks:
+    file: verify.yml
+    apply:
+      tags: [verify]
+  tags: [verify, always]

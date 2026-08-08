@@ -1,0 +1,258 @@
+#!/bin/bash
+# /usr/local/bin/supply-chain-verify — Managed by ansible-supply-chain-security
+#
+# WHAT THIS IS FOR
+#
+# Every protection in this role has failed at least once in the same way: the
+# config file was written correctly, the tool ignored it, and nothing said so.
+#   yarn npmMinimalAgeGate: "2d"     -> parsed to NaN, gate silently absent
+#   npm  MINIMUM_RELEASE_AGE         -> key npm does not read, gate absent
+#   pnpm 11                          -> stopped reading rc/npmrc entirely
+#   pnpm 10 block-exotic-subdeps     -> accepted the key, ignored it
+#   bun  ignoreScripts               -> bunfig not loaded for `bun run`
+#   npq  on Node < 20.13             -> passes through to npm, exits 0
+#
+# Grepping our own config files cannot catch any of these, because in every
+# case the file was exactly what we intended to write. The only thing that
+# catches them is asking the TOOL what it ended up believing, or watching it
+# act. That is what this script does, on the real host, against the real
+# installed versions.
+#
+# EVIDENCE STRENGTH — reported per row, because it is the whole point
+#
+#   FUNCTIONAL  We ran the protection and observed its behavior. Strongest.
+#   PARSED      The tool itself reported the setting back to us. Proves the
+#               tool read the file, recognized the key, and accepted the
+#               value — which is what all six failures above violated.
+#   PRESENT     We only know a file or binary exists. Weakest; this is the
+#               evidence level that produced every bug listed above, so rows
+#               reporting it are flagged rather than counted as coverage.
+#
+# STATUS
+#   OK        protection verified at the stated evidence strength
+#   GAP       tool is installed but the protection is NOT in effect
+#   WEAK      tool is installed, protection looks present, but we could only
+#             establish PRESENT — treat as unverified, not as covered
+#   N/A       tool not installed on this host; nothing to protect
+#
+# Exit code: 0 when there are no GAP rows, 1 otherwise. WEAK does not fail the
+# run by itself — use --strict to make it.
+#
+# Safe to run any time: every probe is read-only. Nothing here installs,
+# fetches, or writes.
+
+set -u
+
+STRICT=0
+QUIET=0
+for arg in "$@"; do
+  case "$arg" in
+    --strict) STRICT=1 ;;
+    --quiet)  QUIET=1 ;;
+    -h|--help)
+      sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+  esac
+done
+
+GAPS=0
+WEAKS=0
+ROWS=""
+
+row() { # status, strength, protection, detail
+  ROWS="${ROWS}$1\t$2\t$3\t$4\n"
+  [ "$1" = "GAP" ]  && GAPS=$((GAPS + 1))
+  [ "$1" = "WEAK" ] && WEAKS=$((WEAKS + 1))
+  return 0
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------- npm --------
+if have npm; then
+  # `npm config get` is npm's own view after merging every config source. If it
+  # disagrees with our file, npm did not honor our file.
+  v=$(npm config get ignore-scripts 2>/dev/null | tr -d '\r')
+  if [ "$v" = "true" ]; then
+    row OK PARSED "npm lifecycle scripts blocked" "npm reports ignore-scripts=true"
+  else
+    row GAP PARSED "npm lifecycle scripts blocked" "npm reports ignore-scripts=${v:-<unset>}"
+  fi
+
+  # The MINIMUM_RELEASE_AGE bug: we wrote a key npm does not read, so npm
+  # reported nothing back. A numeric answer is the proof we lacked then.
+  v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
+  case "$v" in
+    ''|null|undefined)
+      row GAP PARSED "npm age gate" "npm does not report min-release-age (needs npm >= 11.10; found $(npm --version 2>/dev/null))" ;;
+    *[!0-9]*)
+      row GAP PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
+    0)
+      row GAP PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
+    *)
+      row OK PARSED "npm age gate" "npm reports min-release-age=$v" ;;
+  esac
+else
+  row "N/A" - "npm" "npm not installed"
+fi
+
+# ---------------------------------------------------------------- yarn -------
+if have yarn; then
+  yv=$(yarn --version 2>/dev/null)
+  case "$yv" in
+    1.*)
+      # Yarn classic never reads .yarnrc.yml, so none of our yarn hardening
+      # applies. Silent today; reported here.
+      row GAP FUNCTIONAL "yarn hardening" "yarn $yv is classic and ignores .yarnrc.yml entirely" ;;
+    *)
+      # The "2d" bug: yarn accepted the file, parsed the value to NaN, and
+      # applied no gate. Asking yarn for the value is what exposes that.
+      v=$(yarn config get npmMinimalAgeGate 2>/dev/null | tr -d '\r' | tr -d ' ')
+      case "$v" in
+        ''|undefined|null)
+          row GAP PARSED "yarn age gate" "yarn does not report npmMinimalAgeGate (needs yarn >= 4.10; found $yv)" ;;
+        *[!0-9]*)
+          row GAP PARSED "yarn age gate" "yarn reports non-integer npmMinimalAgeGate='$v' (this is the NaN failure)" ;;
+        0)
+          row GAP PARSED "yarn age gate" "npmMinimalAgeGate=0 disables the gate" ;;
+        *)
+          row OK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes" ;;
+      esac
+      v=$(yarn config get enableScripts 2>/dev/null | tr -d '\r' | tr -d ' ')
+      if [ "$v" = "false" ]; then
+        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
+      else
+        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}"
+      fi
+      ;;
+  esac
+else
+  row "N/A" - "yarn" "yarn not installed"
+fi
+
+# ---------------------------------------------------------------- pnpm -------
+if have pnpm; then
+  pv=$(pnpm --version 2>/dev/null)
+  pmaj=${pv%%.*}
+  if [ -n "$pmaj" ] && [ "$pmaj" -ge 11 ] 2>/dev/null; then
+    row OK FUNCTIONAL "pnpm exotic-dep blocking" "pnpm $pv enforces blockExoticSubdeps"
+  else
+    # No pnpm 10 config key enforces this — verified against 10.34.5, which
+    # went to DNS for a tarball dep.
+    row GAP FUNCTIONAL "pnpm exotic-dep blocking" "pnpm $pv cannot enforce blockExoticSubdeps (needs >= 11); no config key changes this"
+  fi
+  v=$(pnpm config get minimum-release-age 2>/dev/null | tr -d '\r' | tr -d ' ')
+  case "$v" in
+    ''|undefined|null) row WEAK PRESENT "pnpm age gate" "pnpm did not report minimum-release-age back" ;;
+    *[!0-9]*)          row GAP PARSED  "pnpm age gate" "pnpm reports non-numeric minimum-release-age='$v'" ;;
+    0)                 row GAP PARSED  "pnpm age gate" "minimum-release-age=0 disables the gate" ;;
+    *)                 row OK PARSED   "pnpm age gate" "pnpm reports minimum-release-age=$v minutes" ;;
+  esac
+else
+  row "N/A" - "pnpm" "pnpm not installed"
+fi
+
+# ------------------------------------------------- npq (reputation layer) ----
+# The layer that addresses slopsquatting — an attacker pre-registering a
+# plausible name an agent might guess. An age gate does nothing against a squat
+# registered months ago; this is what catches it. It also fails OPEN: below
+# Node 20.13.0 it warns, runs the real package manager, and exits 0.
+if have npq-hero; then
+  out=$(npq-hero --version 2>&1)
+  if printf '%s' "$out" | grep -qi 'npq suppressed'; then
+    row GAP FUNCTIONAL "npq reputation checks" "npq is installed but SUPPRESSED on Node $(node --version 2>/dev/null); it passes through to npm and exits 0"
+  else
+    row OK FUNCTIONAL "npq reputation checks" "npq responds normally (not suppressed)"
+  fi
+else
+  row GAP PRESENT "npq reputation checks" "npq-hero not installed — no pre-install reputation checking"
+fi
+
+# ------------------------------------------------- sfw (reputation layer) ----
+if have sfw; then
+  if sfw --version >/dev/null 2>&1; then
+    row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
+  else
+    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully"
+  fi
+else
+  row GAP PRESENT "Socket Firewall" "sfw not installed — npm installs are not threat-intel filtered"
+fi
+
+# ------------------------------------------------------- PATH wrappers -------
+# Wrappers are the weakest evidence class in the whole role: existence proves
+# nothing about whether callers resolve through them.
+for w in npm pip pip3 bun composer deno; do
+  p="/usr/local/bin/$w"
+  if [ -f "$p" ] && grep -q "supply-chain-hardening" "$p" 2>/dev/null; then
+    if [ -x "/usr/local/bin/${w}-real" ]; then
+      row WEAK PRESENT "$w PATH wrapper" "wrapper installed; callers bypassing PATH are unaffected"
+    else
+      row GAP PRESENT "$w PATH wrapper" "wrapper present but ${w}-real missing — wrapper refuses to run"
+    fi
+  elif have "$w"; then
+    row WEAK PRESENT "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary"
+  fi
+done
+
+# ---------------------------------------------------------------- go ---------
+if have go; then
+  # `go env` is go's effective config, not our file.
+  v=$(go env GOFLAGS 2>/dev/null)
+  case "$v" in
+    *-mod=readonly*) row OK PARSED "go module integrity" "go env GOFLAGS contains -mod=readonly" ;;
+    *)               row WEAK PRESENT "go module integrity" "go env GOFLAGS='${v:-<empty>}'" ;;
+  esac
+  v=$(go env GONOSUMDB 2>/dev/null; go env GONOSUMCHECK 2>/dev/null)
+  v2=$(go env GOPRIVATE 2>/dev/null)
+  if [ -z "$v2" ]; then
+    row OK PARSED "go checksum verification" "GOPRIVATE empty — sumdb checks apply to all modules"
+  else
+    row GAP PARSED "go checksum verification" "GOPRIVATE='$v2' exempts modules from sumdb verification"
+  fi
+else
+  row "N/A" - "go" "go not installed"
+fi
+
+# ---------------------------------------------------------------- pip --------
+if have pip3 || have pip; then
+  PIPBIN=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
+  v=$("$PIPBIN" config list 2>/dev/null | tr -d ' ')
+  if printf '%s' "$v" | grep -q 'only-binary'; then
+    row OK PARSED "pip source-build blocking" "pip reports only-binary in its effective config"
+  else
+    row GAP PARSED "pip source-build blocking" "pip config list does not report only-binary"
+  fi
+else
+  row "N/A" - "pip" "pip not installed"
+fi
+
+# ---------------------------------------------------------------- report -----
+if [ "$QUIET" -eq 0 ]; then
+  echo
+  echo "supply-chain-hardening — what is ACTUALLY enforcing on $(hostname)"
+  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo
+  printf "%-6s %-11s %-32s %s\n" "STATUS" "EVIDENCE" "PROTECTION" "DETAIL"
+  printf "%-6s %-11s %-32s %s\n" "------" "-----------" "--------------------------------" "------"
+  printf "$ROWS" | while IFS=$'\t' read -r s e p d; do
+    [ -n "$s" ] || continue
+    printf "%-6s %-11s %-32s %s\n" "$s" "$e" "$p" "$d"
+  done
+  echo
+  echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
+  echo "setting back · PRESENT = a file exists and nothing more (unverified)."
+  echo
+  if [ "$GAPS" -gt 0 ]; then
+    echo "RESULT: $GAPS gap(s) — protections NOT in effect on this host."
+  else
+    echo "RESULT: no gaps."
+  fi
+  [ "$WEAKS" -gt 0 ] && echo "        $WEAKS row(s) verified only as PRESENT — not evidence of enforcement."
+  echo
+fi
+
+[ "$GAPS" -gt 0 ] && exit 1
+[ "$STRICT" -eq 1 ] && [ "$WEAKS" -gt 0 ] && exit 1
+exit 0

@@ -1,0 +1,75 @@
+---
+# Post-apply verification: prove protections are IN EFFECT, not merely written.
+#
+# WHY THIS EXISTS
+#
+# Every protection failure this project has shipped had the same shape: the
+# config file was exactly what we intended, the tool ignored it, and the run
+# reported success. yarn's "2d" parsing to NaN, npm's MINIMUM_RELEASE_AGE key,
+# pnpm 11 dropping the ini files, pnpm 10 accepting block-exotic-subdeps and
+# ignoring it, bun not loading bunfig for `bun run`, npq passing through to npm
+# and exiting 0 on old Node. Six instances, six one-off fixes.
+#
+# The end-of-run coverage summary added in d82df2e reports which TASKS skipped.
+# That is a different question from whether the protections that did not skip
+# are actually doing anything — and it is the wrong question, because five of
+# the six failures above happened in tasks that completed successfully.
+#
+# So this asks the tools instead of asking ourselves, on the real host, against
+# the real installed versions, after everything has been applied.
+
+- name: Deploy the verification command
+  # Shipped as a standalone binary, not just an end-of-play step, so operators
+  # and agents can answer "what is actually protecting this box right now?"
+  # at any time — including long after the apply, when versions have drifted
+  # underneath us. That drift is how several of these bugs arrived.
+  become: true
+  ansible.builtin.template:
+    src: verify.sh.j2
+    dest: /usr/local/bin/supply-chain-verify
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Verify which protections are actually in effect
+  # Read-only: nothing here installs, fetches, or writes. rc 1 means gaps were
+  # found, which is information rather than a task failure, so it is captured
+  # instead of raised.
+  ansible.builtin.command: /usr/local/bin/supply-chain-verify
+  register: verification
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: verify_protections | bool
+
+- name: Report what is actually enforcing
+  ansible.builtin.debug:
+    msg: "{{ verification.stdout_lines }}"
+  when:
+    - verify_protections | bool
+    - verification.stdout_lines is defined
+
+- name: Fail when protections are not in effect
+  # Off by default: on an existing host a gap is usually a fact about the
+  # environment (Node too old for the reputation layer), not a defect in the
+  # run, and failing every such play would train operators to ignore it.
+  # Turn on where the host is expected to be fully covered — CI images, golden
+  # images, anything an agent will run untrusted package installs on.
+  ansible.builtin.fail:
+    msg: |
+      Verification found protections that are NOT in effect on this host.
+
+      This is not a warning about missing prerequisites — it means a
+      protection this role reports as applied is not actually doing anything.
+      See the table above; each row states how it was established:
+
+        FUNCTIONAL  we ran it and watched what happened
+        PARSED      the tool reported the setting back to us
+        PRESENT     a file exists and nothing more — not evidence
+
+      Re-run `/usr/local/bin/supply-chain-verify` at any time.
+      Set verify_fail_on_gap=false to make this advisory.
+  when:
+    - verify_protections | bool
+    - verify_fail_on_gap | bool
+    - verification.rc | default(0) != 0
