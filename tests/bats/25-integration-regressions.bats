@@ -51,20 +51,45 @@ load setup
     | grep -qE 'cmd:.*\{\{ *uv_for_github\.stdout *\}\} tool install zizmor'
 }
 
+# Extract one task block: from its `- name:` line to the next top-level
+# `- name:`. Structural, so it cannot be broken by editing comments.
+#
+# Both catchers below used `grep -A <n>` instead. When 8edfcb8 added ~20 lines
+# of comment documenting the Go 1.21 finding, the distance from the task name
+# to `environment:` grew to 38 lines in go.yml and 16 in github.yml, past
+# windows of 25 and 15 — so both tests failed while GOTOOLCHAIN: auto was still
+# right there (go.yml:78, github.yml:89). The comment explaining a fix broke the
+# test guarding that fix. A fixed offset asserts proximity; what these tests
+# actually mean to assert is membership in the task.
+task_block() { # file, task-name substring
+  awk -v pat="$2" '
+    /^- name: / { inblk = index($0, pat) > 0 }
+    inblk { print }
+  ' "$1"
+}
+
 @test "H3 regression catcher: tasks/go.yml scopes GOTOOLCHAIN=auto for govulncheck install" {
   # Bug: govulncheck requires go newer than Ubuntu 24.04's stock 1.22,
   # and the role's GOTOOLCHAIN=local hardening prevents auto-fetch. Fix
   # scopes GOTOOLCHAIN=auto to just this install task via the
   # environment: keyword, keeping global hardening intact.
-  task_file="${ROLE_DIR}/tasks/go.yml"
-  grep -A 25 'name: Install govulncheck' "$task_file" \
-    | grep -qE 'GOTOOLCHAIN: *auto'
+  task_block "${ROLE_DIR}/tasks/go.yml" 'Install govulncheck' \
+    | grep -qE '^\s*GOTOOLCHAIN: *auto'
 }
 
 @test "H3 regression catcher: tasks/github.yml scopes GOTOOLCHAIN=auto for pinact install" {
-  task_file="${ROLE_DIR}/tasks/github.yml"
-  grep -A 15 'name: Install pinact' "$task_file" \
-    | grep -qE 'GOTOOLCHAIN: *auto'
+  task_block "${ROLE_DIR}/tasks/github.yml" 'Install pinact' \
+    | grep -qE '^\s*GOTOOLCHAIN: *auto'
+}
+
+@test "H3: GOTOOLCHAIN=auto stays SCOPED to the install task, never global" {
+  # The other half of the invariant, which neither catcher checked: the fix is
+  # only correct because the auto-fetch is scoped to one task. If GOTOOLCHAIN
+  # auto ever appears at play level or in the env-var layer it would undo the
+  # GOTOOLCHAIN=local hardening for every user `go install` on the host — the
+  # exact protection those tasks are carefully working around.
+  ! grep -qE '^\s*GOTOOLCHAIN=auto' "$ROLE_DIR"/templates/*.j2 2>/dev/null
+  ! grep -qE 'GOTOOLCHAIN.*auto' "$ROLE_DIR"/tasks/shell_env.yml 2>/dev/null
 }
 
 # ---- Runtime regression catcher: bare-uv fails on stripped PATH ----
