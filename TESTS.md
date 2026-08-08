@@ -1,27 +1,27 @@
 # Tests
 
-193 automated tests verify the supply chain hardening works. Run with `make test`.
+337 automated tests verify the supply chain hardening works. Run with `make test`.
 
 ## Test structure
 
 | File | Tests | What it covers |
 |---|---|---|
-| 01-config-files.bats | 33 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
-| 02-env-vars.bats | 12 | System-wide env vars in /etc/profile.d/ and /etc/environment |
-| 03-npm.bats | 3 | npm ignore-scripts behavioral test + config readback |
+| 01-config-files.bats | 49 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
+| 02-env-vars.bats | 17 | System-wide env vars in /etc/profile.d/ and /etc/environment |
+| 03-npm.bats | 4 | npm ignore-scripts behavioral test + config readback |
 | 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check) |
 | 05-go.bats | 6 | Go env vars verified via `go env` |
-| 06-js-ecosystem.bats | 5 | pnpm, yarn, bun config verification |
-| 07-other-configs.bats | 7 | Composer, bundler, cargo, npq alias checks |
+| 06-js-ecosystem.bats | 7 | pnpm, yarn, bun config verification |
+| 07-other-configs.bats | 8 | Composer, bundler, cargo, npq alias checks |
 | 08-npm-adversarial.bats | 7 | Simulated npm supply chain attacks (incl. CLI-flag + user-config bypass attempts) |
 | 09-python-adversarial.bats | 4 | Simulated Python supply chain attacks (incl. M1 documented bypass) |
 | 10-go-adversarial.bats | 9 | Simulated Go environment poisoning |
-| 11-composer-adversarial.bats | 4 | Composer script blocking verification |
+| 11-composer-adversarial.bats | 14 | Composer script blocking verification |
 | 12-cross-ecosystem.bats | 13 | File permissions, non-interactive shell coverage |
 | 13-pnpm-adversarial.bats | 5 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher, block-exotic-subdeps behavioral) |
 | 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
 | 15-bun-adversarial.bats | 5 | Simulated bun lifecycle-script attacks + bun PATH wrapper end-to-end blocks runtime auto-install + FIXTURE CONTROL (bun-real does auto-install when not wrapped) |
-| 16-composer-behavioral.bats | 1 | Composer end-to-end blocking |
+| 16-composer-behavioral.bats | 4 | Composer end-to-end blocking |
 | 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
 | 18-cargo-behavioral.bats | 9 | Cargo config (git-fetch-with-cli, retry), build.rs gap, /etc/cargo/deny.toml reference policy + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
@@ -30,17 +30,23 @@
 | 22-pip-wrapper-safety.bats | 4 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
 | 24-deno-path-wrapper.bats | 11 | Deno in-place PATH wrapper plumbing + end-to-end |
-| 25-integration-regressions.bats | 11 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency |
+| 25-integration-regressions.bats | 15 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
 | 34-composer-wrapper-tier-rendering.bats | 4 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
 | 35-cargo-config-tier-rendering.bats | 5 | cargo_install_root authority (renders cargo-config.toml.j2 with empty/set, asserts [install] block conditional, baseline keys unconditional, TOML-valid both ways) |
-| 36-bun-wrapper-tier-rendering.bats | 6 | bun wrapper subcommand-routing (--no-install injected on runtime paths, skipped for package-mgmt subcommands and --version/--help, recursion guard present, catch-all wires to the inject branch) |
+| 36-bun-wrapper-tier-rendering.bats | 7 | bun wrapper subcommand-routing (--no-install injected on runtime paths, skipped for package-mgmt subcommands and --version/--help, recursion guard present, catch-all wires to the inject branch) |
 | 37-pnpm-allowlist-hardening.bats | 13 | pnpm build-script allowlist + doubly-exempt guard |
 | 38-preflight-become-guard.bats | 7 | Refuses invocations where escalation would mis-target per-user config; escalation-method agnostic (sudo/su/doas), covers sudo -i |
 | 39-verify-behavioral.bats | 11 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers) and asserts each is caught |
 | 40-upgrade-convergence.bats | 4 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again |
 | 41-tty-interactive.bats | 5 | The npm wrapper's interactive branch under a real pty (script -qec): TTY routes through npq, non-TTY skips it, sfw-absent still reaches npq, read-only subcommands bypass both |
+| 28-composer-tier-rendering.bats | 6 | Composer audit-tier authority (renders composer-config.json.j2 across 2.2 / 2.7 / 2.9 and asserts each tier's keys) |
+| 29-maven-behavioral.bats | 4 | Maven settings.xml — HTTPS-only mirror, checksum policy |
+| 30-gradle-behavioral.bats | 4 | Gradle init script — repository pinning, verification metadata |
+| 31-nuget-behavioral.bats | 5 | NuGet.Config — signed-package policy, source pinning |
+| 32-yarn-tier-rendering.bats | 6 | yarn tier authority (enableHardenedMode conditional on >= 4.0, baseline keys unconditional, approvedGitRepositories deliberately absent) |
+| 33-bun-tier-rendering.bats | 9 | bun tier authority (saveTextLockfile conditional on 1.2+, scanner opt-in, baseline bunfig keys unconditional) |
 
 ## Adversarial tests
 
