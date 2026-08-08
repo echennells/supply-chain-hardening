@@ -69,30 +69,67 @@ row() { # status, strength, protection, detail
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Does npm actually IMPLEMENT a config key, or is it merely echoing our file
+# back at us?
+#
+# This distinction cost a false OK in this very script. `npm config get <key>`
+# returns whatever is in the config for ANY key, implemented or not:
+#
+#   $ echo 'this-key-does-not-exist=hello' >> ~/.npmrc
+#   $ npm config get this-key-does-not-exist
+#   hello
+#
+# So a value coming back proves npm READ the file — not that npm honors the
+# key. On npm 10.9.8, `npm config get min-release-age` happily returns our
+# value while npm has no such feature (it landed in 11.10.0). That is the same
+# silently-ignored-setting failure the whole script exists to catch, reproduced
+# inside the detector.
+#
+# The discriminator: ask npm with our config and env stripped away. A key npm
+# implements has a built-in default; a key it does not know returns
+# "undefined" even though our file sets it.
+npm_implements() {
+  local key="$1" tmp v
+  tmp=$(mktemp -d 2>/dev/null) || return 1
+  : > "$tmp/u"; : > "$tmp/g"
+  # env -i also drops NPM_CONFIG_*, which otherwise supplies the value and
+  # recreates the exact false positive.
+  v=$(env -i PATH="$PATH" HOME="$tmp" npm config get "$key" \
+        --userconfig="$tmp/u" --globalconfig="$tmp/g" 2>/dev/null | head -1 | tr -d '\r')
+  rm -rf "$tmp"
+  [ -n "$v" ] && [ "$v" != "undefined" ]
+}
+
 # ---------------------------------------------------------------- npm --------
 if have npm; then
   # `npm config get` is npm's own view after merging every config source. If it
   # disagrees with our file, npm did not honor our file.
-  v=$(npm config get ignore-scripts 2>/dev/null | tr -d '\r')
-  if [ "$v" = "true" ]; then
-    row OK PARSED "npm lifecycle scripts blocked" "npm reports ignore-scripts=true"
+  if ! npm_implements ignore-scripts; then
+    row GAP FUNCTIONAL "npm lifecycle scripts blocked" "npm $(npm --version 2>/dev/null) does not implement ignore-scripts"
   else
-    row GAP PARSED "npm lifecycle scripts blocked" "npm reports ignore-scripts=${v:-<unset>}"
+    v=$(npm config get ignore-scripts 2>/dev/null | tr -d '\r')
+    if [ "$v" = "true" ]; then
+      row OK PARSED "npm lifecycle scripts blocked" "npm implements ignore-scripts and reports true"
+    else
+      row GAP PARSED "npm lifecycle scripts blocked" "npm reports ignore-scripts=${v:-<unset>}"
+    fi
   fi
 
-  # The MINIMUM_RELEASE_AGE bug: we wrote a key npm does not read, so npm
-  # reported nothing back. A numeric answer is the proof we lacked then.
-  v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
-  case "$v" in
-    ''|null|undefined)
-      row GAP PARSED "npm age gate" "npm does not report min-release-age (needs npm >= 11.10; found $(npm --version 2>/dev/null))" ;;
-    *[!0-9]*)
-      row GAP PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
-    0)
-      row GAP PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
-    *)
-      row OK PARSED "npm age gate" "npm reports min-release-age=$v" ;;
-  esac
+  # The age gate needs BOTH checks, and the implementation check comes first.
+  # npm echoes back keys it does not implement, so the value alone is not
+  # evidence — see npm_implements() above.
+  nv=$(npm --version 2>/dev/null)
+  if ! npm_implements min-release-age; then
+    row GAP FUNCTIONAL "npm age gate" "npm $nv does NOT implement min-release-age (added in npm 11.10.0). Our config sets it and npm echoes it back, but nothing enforces it."
+  else
+    v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
+    case "$v" in
+      ''|null|undefined) row GAP PARSED "npm age gate" "npm implements min-release-age but reports no value" ;;
+      *[!0-9]*)          row GAP PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
+      0)                 row GAP PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
+      *)                 row OK  PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)" ;;
+    esac
+  fi
 else
   row "N/A" - "npm" "npm not installed"
 fi
@@ -142,12 +179,19 @@ if have pnpm; then
     # went to DNS for a tarball dep.
     row GAP FUNCTIONAL "pnpm exotic-dep blocking" "pnpm $pv cannot enforce blockExoticSubdeps (needs >= 11); no config key changes this"
   fi
+  # DELIBERATELY WEAKER THAN THE npm ROW. pnpm is known to accept config keys
+  # it does not implement and silently ignore them — that is precisely how
+  # block-exotic-subdeps behaved on 10.34.5. So a value echoed back by
+  # `pnpm config get` proves pnpm read the file and nothing more, and there is
+  # no pnpm equivalent of the npm_implements() discriminator (pnpm has no
+  # documented way to ask "do you know this key"). Reporting OK here would
+  # repeat the npm false positive, so a good-looking value caps out at WEAK.
   v=$(pnpm config get minimum-release-age 2>/dev/null | tr -d '\r' | tr -d ' ')
   case "$v" in
-    ''|undefined|null) row WEAK PRESENT "pnpm age gate" "pnpm did not report minimum-release-age back" ;;
-    *[!0-9]*)          row GAP PARSED  "pnpm age gate" "pnpm reports non-numeric minimum-release-age='$v'" ;;
-    0)                 row GAP PARSED  "pnpm age gate" "minimum-release-age=0 disables the gate" ;;
-    *)                 row OK PARSED   "pnpm age gate" "pnpm reports minimum-release-age=$v minutes" ;;
+    ''|undefined|null) row GAP  PRESENT "pnpm age gate" "pnpm did not report minimum-release-age back" ;;
+    *[!0-9]*)          row GAP  PARSED  "pnpm age gate" "pnpm reports non-numeric minimum-release-age='$v'" ;;
+    0)                 row GAP  PARSED  "pnpm age gate" "minimum-release-age=0 disables the gate" ;;
+    *)                 row WEAK PRESENT "pnpm age gate" "pnpm echoes minimum-release-age=$v, but pnpm echoes unimplemented keys too — not proof of enforcement" ;;
   esac
 else
   row "N/A" - "pnpm" "pnpm not installed"

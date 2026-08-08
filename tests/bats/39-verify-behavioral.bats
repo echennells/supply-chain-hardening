@@ -114,3 +114,45 @@ EOF
     ! echo "$wrapper_rows" | grep -q "FUNCTIONAL"
   fi
 }
+
+@test "verify: BEHAVIORAL — an npm that ECHOES an unimplemented key is a GAP, not OK" {
+  # The false positive this script itself shipped. `npm config get <key>`
+  # returns whatever is in the config for ANY key, implemented or not:
+  #
+  #   $ echo 'this-key-does-not-exist=hello' >> ~/.npmrc
+  #   $ npm config get this-key-does-not-exist
+  #   hello
+  #
+  # So on npm 10.9.8 the verifier reported "OK PARSED npm age gate" for
+  # min-release-age, a feature that did not land until npm 11.10.0 — a green
+  # row for a protection doing nothing, which is the exact failure the whole
+  # script exists to catch. CI showed this OK on Node 20 and 22 while passing.
+  #
+  # This stand-in reproduces the shape: it echoes our value normally, but has
+  # no built-in default when asked with config and env stripped.
+  cat > "$FAKEBIN/npm" <<'EOF'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "10.9.8"; exit 0; }
+clean=0
+for a in "$@"; do case "$a" in --userconfig=*|--globalconfig=*) clean=1 ;; esac; done
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+  case "$3" in
+    min-release-age)
+      # implemented? no. clean query must reveal that.
+      if [ "$clean" = "1" ]; then echo "undefined"; else echo "2"; fi ;;
+    ignore-scripts)
+      if [ "$clean" = "1" ]; then echo "false"; else echo "true"; fi ;;
+    *) echo "undefined" ;;
+  esac
+fi
+EOF
+  chmod +x "$FAKEBIN/npm"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  # the age gate must be reported as a GAP despite npm echoing "2"
+  echo "$output" | grep "npm age gate" | grep -q "GAP"
+  echo "$output" | grep "npm age gate" | grep -q "does NOT implement"
+  # ...while a genuinely implemented key on the same tool still reads OK,
+  # so this is discrimination and not blanket pessimism
+  echo "$output" | grep "npm lifecycle scripts blocked" | grep -q "OK"
+  [ "$status" -eq 1 ]
+}
