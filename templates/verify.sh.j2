@@ -258,7 +258,12 @@ done
 
 # ------------------------------------------------------------ composer ------
 if have composer; then
-  cv=$(composer --version --no-plugins 2>/dev/null | sed -nE 's/.*version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -1)
+  # Composer 2.2.x prints "Composer 2.2.6 <date>"; 2.7+ prints "Composer version
+  # 2.7.1 <date>". Requiring the word "version" silently failed to parse exactly
+  # the OLDEST composer — the one with the largest gap — and reported
+  # "could not parse" where the answer should have been "no audit blocking at
+  # all". Measured on stock Ubuntu 22.04.
+  cv=$(composer --version --no-plugins 2>/dev/null | sed -nE 's/.*[Cc]omposer( version)? ([0-9]+\.[0-9]+\.[0-9]+).*/\2/p' | head -1)
   cmaj=${cv%%.*}; crest=${cv#*.}; cmin=${crest%%.*}
   # Version-tiered, matching what the role renders. audit.block-* needs 2.9;
   # audit.abandoned=fail needs 2.7. Distro composer is routinely below both:
@@ -281,8 +286,19 @@ if have go; then
   # `go env` is go's effective config, not our file.
   v=$(go env GOFLAGS 2>/dev/null)
   case "$v" in
-    *-mod=readonly*) row OK PARSED "go module integrity" "go env GOFLAGS contains -mod=readonly" ;;
-    *)               row WEAK PRESENT "go module integrity" "go env GOFLAGS='${v:-<empty>}'" ;;
+    *-mod=readonly*)
+      row OK PARSED "go module integrity" "go env GOFLAGS contains -mod=readonly" ;;
+    *)
+      # The role delivers GOFLAGS through /etc/profile.d + /etc/environment,
+      # which only a PAM-launched or login shell loads. An empty value in a
+      # docker exec / systemd / CMD context is the DOCUMENTED non-PAM gap, not
+      # a misconfiguration — and saying "not configured" would send an operator
+      # to fix a file that is already correct. Distinguish the two.
+      if grep -qs -- "-mod=readonly" /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
+        row WEAK PRESENT "go module integrity" "GOFLAGS is empty in THIS process, but -mod=readonly is present in /etc/environment or /etc/profile.d — non-PAM contexts (docker exec, systemd, CMD) do not load it. Verify from a login shell."
+      else
+        row GAP PARSED "go module integrity" "GOFLAGS='${v:-<empty>}' and -mod=readonly is not in /etc/environment or /etc/profile.d either"
+      fi ;;
   esac
   v=$(go env GONOSUMDB 2>/dev/null; go env GONOSUMCHECK 2>/dev/null)
   v2=$(go env GOPRIVATE 2>/dev/null)

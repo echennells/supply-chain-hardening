@@ -58,7 +58,13 @@ fi
 echo "--- tool versions this host actually has ---"
 for t in ansible node npm yarn pnpm bun composer python3 pip3 go; do
   if command -v "$t" >/dev/null 2>&1; then
-    v=$("$t" --version 2>&1 | head -1)
+    # `go` takes `go version`, not `--version` — the old form printed
+    # "flag provided but not defined: -version" in every distro column.
+    if [ "$t" = "go" ]; then
+      v=$("$t" version 2>&1 | head -1)
+    else
+      v=$("$t" --version 2>&1 | head -1)
+    fi
     printf "  %-10s %s\n" "$t" "$v"
   else
     printf "  %-10s (absent)\n" "$t"
