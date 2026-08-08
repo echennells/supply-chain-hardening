@@ -190,15 +190,30 @@
   # where the sfw install is skipped — got no wrapper at all, downgrading it
   # from "npq reputation prompts" to "nothing". That traded degraded coverage
   # for none, to avoid a case the wrapper already handles explicitly.
+  #
+  # FUNCTIONAL, NOT PRESENT. npq fails open: on Node < 20.13.0 it prints one
+  # line to stderr, passes through to the real package manager, and exits 0.
+  # An earlier version of this probe used `command -v npq-hero`, which meant a
+  # host with a dead npq satisfied the "at least one helper" gate below and
+  # got a wrapper whose only helper vets nothing. Presence is not coverage —
+  # run it and look for npq's own suppression signal. Self-contained rather
+  # than reading a fact from npq.yml, because `--tags socket` runs this file
+  # without running npq.yml.
   ansible.builtin.shell:
     cmd: |
       for p in /usr/local/bin/npq-hero /usr/bin/npq-hero "$HOME/.local/bin/npq-hero"; do
         if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
+          NPQ="$p"
+          break
         fi
       done
-      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npq-hero 2>/dev/null
+      [ -n "${NPQ:-}" ] || NPQ=$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npq-hero 2>/dev/null)
+      [ -n "${NPQ:-}" ] || exit 1
+      out=$("$NPQ" --version 2>&1)
+      if printf '%s' "$out" | grep -qi 'npq suppressed'; then
+        exit 1
+      fi
+      echo "$NPQ"
     executable: /bin/bash
   register: npq_final
   changed_when: false

@@ -1,6 +1,36 @@
 ---
 # npq pre-install reputation checks
 # Aliases deployed system-wide via /etc/profile.d/
+#
+# WHY THIS FILE CHECKS FUNCTION, NOT PRESENCE
+#
+# npq bails out on old Node — but it bails out *quietly*, and in the worst
+# possible shape. bin/npq-hero.js line 6:
+#
+#   cliSupport.isEnvSupport() || (cliSupport.noSupportError() && cliSupport.packageManagerPassthrough())
+#
+# packageManagerPassthrough() spawns the real package manager with the same
+# argv and then `process.exit(result.status)`. So on an unsupported Node,
+# `npq-hero install lodash` prints one line to stderr, runs plain `npm install
+# lodash` with NO reputation checking, and exits 0. The binary is on PATH, it
+# returns success, and it vets nothing.
+#
+# That is fatal for this role specifically, because we deploy
+# `alias npm='npq-hero'` below: every aliased npm install on such a host looks
+# protected and isn't. A `which npq-hero` check — which is what this file used
+# to do — reports full coverage in exactly that situation.
+#
+# THE THRESHOLD IS NOT THE ONE IN package.json
+#
+# npq 3.23.3 declares `engines: {node: ">=24.0.0", npm: ">=11.10.0"}`, but the
+# runtime gate in lib/helpers/cliSupportHandler.js is:
+#
+#   semver.satisfies(process.versions.node, '>=20.13.0')
+#
+# Verified against both 3.19.6 and 3.23.3 — same 20.13.0 check in both, so
+# pinning an older npq does NOT rescue an older Node. 20.13.0 is the real
+# boundary and the one this file gates on. The declared `engines` floor only
+# affects npm's EBADENGINE warning at install time.
 
 - name: Check if npm is installed
   # Canonical-path-first detection across system + Node-manager install
@@ -32,6 +62,21 @@
   check_mode: false
   failed_when: false
 
+- name: Detect full Node.js version (npq needs >= 20.13.0 at runtime)
+  # Full x.y.z, not just the major: the boundary is 20.13.0, so Node 20.9
+  # is unsupported while 20.13 is fine. A major-only check would get this
+  # wrong in both directions.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      node --version 2>/dev/null | sed 's/^v//'
+    executable: /bin/bash
+  register: npq_node_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: npm_for_npq.rc == 0
+
 - name: Check if npq is already installed
   ansible.builtin.command: which npq-hero
   register: npq_check
@@ -41,13 +86,58 @@
   when: npm_for_npq.rc == 0
 
 - name: Install npq globally
+  # Gated on the RUNTIME threshold. Installing npq on an older Node would
+  # succeed (npm only warns about engines), put a binary on PATH, and give
+  # the host a silent passthrough that reads as protection.
   ansible.builtin.command: npm install -g npq
   changed_when: true
   when:
     - npm_for_npq.rc == 0
     - npq_check.rc != 0
+    - npq_node_version.stdout | trim | length > 0
+    - npq_node_version.stdout | trim is version('20.13.0', '>=')
+
+- name: Verify npq actually functions (not merely present)
+  # THE POINT OF THIS TASK. Runs the real binary and looks for npq's own
+  # suppression signal rather than trusting that an installed binary works.
+  # On an unsupported Node this prints "npq suppressed due to old node
+  # version" to stderr and then passes through to npm, exiting 0 — so the
+  # exit code is useless here and the message is the only honest signal.
+  ansible.builtin.shell:
+    cmd: |
+      out=$(npq-hero --version 2>&1)
+      if printf '%s' "$out" | grep -qi 'npq suppressed'; then
+        echo "SUPPRESSED"
+      else
+        echo "FUNCTIONAL"
+      fi
+    executable: /bin/bash
+  register: npq_functional_probe
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - npm_for_npq.rc == 0
+    - npq_check.rc == 0 or npq_node_version.stdout | trim is version('20.13.0', '>=')
+
+- name: Establish npq functional status
+  ansible.builtin.set_fact:
+    npq_functional: >-
+      {{ (npq_functional_probe.stdout | default('') | trim) == 'FUNCTIONAL' }}
+
+- name: Record skipped protection — npq (Node too old for reputation checks)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['npq pre-install reputation checks — npq requires Node >= 20.13.0 at runtime, found Node ' ~ (npq_node_version.stdout | default('') | trim | default('<undetected>', true)) ~ '. Package reputation is NOT being checked before install. Note npq fails OPEN: if a binary is present it prints one warning and passes through to the package manager, exiting 0. No npq version lowers this floor.'] }}
+  when:
+    - npm_for_npq.rc == 0
+    - not npq_functional
 
 - name: Deploy npq aliases and config system-wide
+  # Only when npq actually works. Deploying `alias npm='npq-hero'` against a
+  # suppressed npq is worse than deploying nothing: it routes every
+  # interactive npm install through a passthrough that vets nothing, while
+  # presenting as the protection layer.
   become: true
   ansible.builtin.copy:
     dest: /etc/profile.d/npq-aliases.sh
@@ -62,3 +152,15 @@
       alias npm='npq-hero'
       alias yarn='NPQ_PKG_MGR=yarn npq-hero'
       alias pnpm='NPQ_PKG_MGR=pnpm npq-hero'
+  when: npq_functional
+
+- name: Remove npq aliases when npq is non-functional
+  # Upgrade path: a host hardened by an earlier version of this role already
+  # has the alias file, deployed before the functional check existed. Leaving
+  # it would preserve exactly the false-protection state this file now
+  # prevents, so it is actively removed rather than merely not re-written.
+  become: true
+  ansible.builtin.file:
+    path: /etc/profile.d/npq-aliases.sh
+    state: absent
+  when: not npq_functional
