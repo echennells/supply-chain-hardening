@@ -331,12 +331,39 @@ cargo_wrapper_dispatch() {
   grep -q 'supply-chain-hardening' "$w" 2>/dev/null || return 1
   tmp=$(mktemp -d 2>/dev/null) || return 1
   printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$tmp/real"
-  chmod +x "$tmp/real" 2>/dev/null
+  # Neutralise sfw for THIS probe with a pass-through stub placed first on
+  # PATH. The wrapper prefixes network commands with sfw, so a broken sfw would
+  # otherwise swallow the probe's output and make the verifier report "cargo is
+  # not wrapped" — a false GAP on the age gate caused by an unrelated component.
+  # sfw's own health is reported by its own row.
+  printf '#!/bin/sh\nexec "$@"\n' > "$tmp/sfw"
+  chmod +x "$tmp/real" "$tmp/sfw" 2>/dev/null
   sed "s|^REAL_CARGO=.*|REAL_CARGO='$tmp/real'|" "$w" > "$tmp/cargo" 2>/dev/null
   chmod +x "$tmp/cargo" 2>/dev/null
   : > "$tmp/Cargo.lock"
-  ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && ./cargo build 2>/dev/null )
+  ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo build 2>/dev/null )
   rm -rf "$tmp"
+}
+
+# Separate probe for the sfw hop: it cannot be read out of cargo_wrapper_dispatch
+# above, because when sfw is in play IT execs the stub, so the stub's own output
+# never mentions sfw. Here a stub `sfw` is put first on PATH and we observe
+# whether the wrapper actually calls it.
+cargo_wrapper_uses_sfw() {
+  local w tmp out
+  w=$(command -v cargo 2>/dev/null) || return 1
+  [ -n "$w" ] || return 1
+  grep -q 'supply-chain-hardening' "$w" 2>/dev/null || return 1
+  tmp=$(mktemp -d 2>/dev/null) || return 1
+  printf '#!/bin/sh\necho SFW-INVOKED\nexit 0\n' > "$tmp/sfw"
+  printf '#!/bin/sh\nexit 0\n' > "$tmp/real"
+  chmod +x "$tmp/sfw" "$tmp/real" 2>/dev/null
+  sed "s|^REAL_CARGO=.*|REAL_CARGO='$tmp/real'|" "$w" > "$tmp/cargo" 2>/dev/null
+  chmod +x "$tmp/cargo" 2>/dev/null
+  : > "$tmp/Cargo.lock"
+  out=$( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo build 2>/dev/null )
+  rm -rf "$tmp"
+  printf '%s\n' "$out" | grep -q 'SFW-INVOKED'
 }
 
 if have cargo; then
@@ -364,6 +391,28 @@ if have cargo; then
     row WEAK FUNCTIONAL "cargo publish-age gate" "wrapper injects --locked but cargo-cooldown is absent — protects projects with a committed Cargo.lock, does nothing for \`cargo update\` or a fresh checkout with no lockfile"
   else
     row GAP FUNCTIONAL "cargo publish-age gate" "cargo is wrapped but the wrapper applied neither the cooldown route nor --locked"
+  fi
+  # Threat-intel layer, reported separately because it covers a DIFFERENT axis:
+  # cooldown blocks by publish time and only at resolution; sfw blocks by intel
+  # at download time and therefore also covers a lockfile written elsewhere.
+  # Neither subsumes the other, so a single merged row would hide which half is
+  # missing.
+  if [ -z "$cdisp" ]; then
+    :   # unwrapped; the GAP row above already says cargo is unprotected
+  elif ! have sfw; then
+    row GAP PRESENT "cargo threat-intel filtering" "sfw not installed — crate downloads are not filtered, so a lockfile written elsewhere pinning a known-malicious crate is fetched normally (needs Node >= 20)"
+  elif ! timeout 60 sfw --help >/dev/null 2>&1; then
+    # The operator's builds are failing RIGHT NOW and this row is the fastest
+    # way to learn why: the wrapper prefixes cargo with sfw, so a non-runnable
+    # sfw propagates its exit code out of every build. Measured exit 9.
+    row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is present but CANNOT EXECUTE — the wrapper prefixes cargo with it, so EVERY cargo build on this host is failing. Re-apply the role (it will move the broken binary aside), or remove sfw / set cargo_socket_firewall=false"
+  elif ! cargo_wrapper_uses_sfw; then
+    row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is installed but the wrapper does not route cargo through it (cargo_socket_firewall=false?)"
+  else
+    # Deliberately WEAK, not OK. Measured: with no network sfw prints "fetch
+    # failed", exits 0, and the build proceeds UNFILTERED. Presence of the
+    # route is not evidence that filtering happened on any given run.
+    row WEAK FUNCTIONAL "cargo threat-intel filtering" "wrapper routes cargo through sfw; note sfw FAILS OPEN — if it cannot reach Socket it warns, exits 0 and the build proceeds unfiltered"
   fi
 else
   row "N/A" - "cargo" "cargo not installed"

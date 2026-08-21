@@ -257,6 +257,57 @@ STUB
   [[ "$output" == *"can write a lockfile entry for a freshly published crate"* ]]
 }
 
+# ---- Socket Firewall (threat-intel layer) ----
+#
+# sfw covers the axis the age gate cannot: it filters the DOWNLOAD, so it
+# applies to a lockfile written on someone else's machine, and it never
+# participates in version selection so it cannot rewrite a lockfile.
+#
+# The binding constraint is availability. Measured upstream behaviour:
+#   corrupt sfw binary -> FAILS CLOSED, propagating exit 9. Prefixing cargo
+#     unconditionally would break every build on the host.
+#   no network         -> FAILS OPEN, warns and exits 0, build unfiltered.
+# So the wrapper must only use sfw when it is actually present, and must never
+# make cargo's availability depend on it existing.
+
+stub_sfw() {
+  printf '#!/bin/sh\necho SFW-USED\nexec "$@"\n' > "$PROBE_DIR/sfw"
+  chmod +x "$PROBE_DIR/sfw"
+}
+
+@test "cargo: network commands are routed through sfw when it is present" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  stub_sfw
+  [[ "$(probe build)" == SFW-USED* ]]
+}
+
+@test "cargo: sfw absent must NOT break cargo (availability over filtering)" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  # probe() uses a PATH that contains no sfw at all.
+  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"SFW-USED"* ]]
+}
+
+@test "cargo: non-network subcommands skip sfw (no proxy startup cost)" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  stub_sfw
+  # `cargo --version` must not spin up a filtering proxy.
+  [[ "$(probe --version)" != *"SFW-USED"* ]]
+}
+
+@test "cargo: sfw wraps the real cargo, not the wrapper (no recursion)" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  stub_sfw
+  # SFW-USED must appear exactly once: sfw execs cargo-real directly, so the
+  # wrapper is not re-entered through it.
+  [ "$(probe build | grep -c 'SFW-USED')" -eq 1 ]
+}
+
 # ---- pass-through and guards ----
 
 @test "cargo: non-resolving subcommands pass through untouched" {

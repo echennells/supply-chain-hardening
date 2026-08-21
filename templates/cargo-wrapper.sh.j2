@@ -120,9 +120,56 @@ fi
 # non-rustup cargo (a real binary at /usr/bin/cargo) setting argv[0] to
 # "cargo" is exactly what it would have been anyway, so this is safe for
 # both install shapes and needs no detection.
+# --- Socket Firewall (threat-intel filtering at the NETWORK layer) ---
+#
+# Complements the age gate along the axis it cannot cover. cooldown blocks by
+# TIME and only at resolution, so a lockfile written elsewhere slips past it
+# (lockfile-baseline=floor). sfw blocks by THREAT INTEL at DOWNLOAD time, so it
+# applies no matter where the version came from — and, crucially, it never
+# participates in version selection, so it cannot rewrite or downgrade a
+# lockfile. The lockfile still wins; the fetch is what gets refused.
+#
+#   fresh + unflagged            -> age gate catches it
+#   flagged + foreign lockfile   -> sfw catches it
+#   fresh + unflagged + foreign  -> neither (documented residual)
+#
+# MEASURED FAILURE MODES, both of which shape the code below:
+#
+#   Corrupt sfw binary  -> FAILS CLOSED. `sfw cargo build` propagated exit 9
+#     while plain cargo built fine. Prefixing unconditionally would take out
+#     every build on the host, so presence is checked before use and the role
+#     health-checks sfw at apply time exactly as it does cargo-cooldown.
+#   No network          -> FAILS OPEN. sfw printed "unexpected error: fetch
+#     failed", exited 0, and the build proceeded UNFILTERED. Availability is
+#     preserved, but on an air-gapped or degraded host sfw silently provides no
+#     protection. supply-chain-verify says so rather than implying coverage.
+#
+# Only network-touching subcommands are prefixed: spinning up a filtering proxy
+# for `cargo --version` is pure latency.
+sfw_prefix() {
+{% if cargo_socket_firewall | bool %}
+  case "$CMD" in
+    build|b|check|c|test|t|run|r|bench|doc|d|update|add|remove|rm|\
+generate-lockfile|fetch|vendor|install|publish|package)
+      command -v sfw >/dev/null 2>&1 && printf 'sfw'
+      ;;
+  esac
+{% endif %}
+  return 0
+}
+
 run_real() {
+  local pfx
+  pfx=$(sfw_prefix)
   if [ -n "$TOOLCHAIN" ]; then
-    exec -a cargo "$REAL_CARGO" "$TOOLCHAIN" "$@"
+    set -- "$TOOLCHAIN" "$@"
+  fi
+  if [ -n "$pfx" ]; then
+    # No `exec -a` here: sfw execs the child itself, so we cannot set its
+    # argv[0]. That is safe because cargo-real is an argv[0] shim on rustup
+    # hosts (it re-execs rustup as "cargo"), and on a non-rustup cargo argv[0]
+    # is not consulted at all.
+    exec "$pfx" "$REAL_CARGO" "$@"
   fi
   exec -a cargo "$REAL_CARGO" "$@"
 }

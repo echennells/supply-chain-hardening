@@ -334,6 +334,29 @@ cargo_cooldown_enforce: true
 # and only warns — a fail-open posture, so it is not the default.
 cargo_cooldown_violation_action: deny
 
+# Route cargo's network-touching commands through Socket Firewall (default on).
+#
+# sfw is upstream-supported for cargo (`sfw cargo fetch`) even though the role
+# previously wired it only to npm. It covers the case the age gate structurally
+# cannot: a lockfile written on someone else's machine. Because it filters the
+# DOWNLOAD rather than the resolution, it never rewrites or downgrades a
+# lockfile — the lockfile still wins, the fetch is what gets refused.
+#
+# Requires Node >= 20, same as the npm path. Measured failure modes:
+#   - a corrupt sfw binary FAILS CLOSED (propagates its exit code and breaks
+#     the build), so the role health-checks it at apply time and the wrapper
+#     checks presence before prefixing;
+#   - with no network sfw FAILS OPEN (warns, exits 0, build proceeds
+#     unfiltered), so on air-gapped hosts it provides no protection. That is
+#     the safer direction for availability and the worse one for security;
+#     supply-chain-verify reports it rather than implying coverage.
+#
+# Residual risk worth knowing: the sfw npm package is a shim that downloads the
+# LATEST firewall binary at runtime, so a future upstream release can change
+# behaviour on a host that has not been re-applied. Set this false if you need
+# the cargo toolchain's availability to depend on nothing but local state.
+cargo_socket_firewall: true
+
 # Exact (crate, version) pairs admitted regardless of age, e.g.
 #   cargo_cooldown_allow_exact:
 #     - { crate: serde, version: "1.0.218" }

@@ -287,3 +287,56 @@
     - sfw_final.rc != 0 or sfw_final.stdout | length == 0
     - npq_final.rc == 0
     - npq_final.stdout | length > 0
+
+# --- cargo coverage (sfw supports cargo upstream: `sfw cargo fetch`) ---
+# These live HERE, not in tasks/cargo.yml, because sfw is installed above and
+# cargo hardening runs earlier in main.yml (:96 vs :153). Checking sfw health
+# from cargo.yml reported "absent" on every first apply — sfw genuinely was
+# absent at that point, and installed moments later.
+- name: Verify Socket Firewall can execute before letting cargo depend on it
+  # A corrupt sfw FAILS CLOSED: measured, `sfw cargo build` propagated exit 9
+  # while plain cargo built fine. Since the wrapper prefixes network commands
+  # with sfw, a broken binary would break every build on the host. Same
+  # discipline as the cooldown backend: run it, and if it cannot run, say so
+  # and let the wrapper skip it (the wrapper's own `command -v sfw` guard means
+  # an absent sfw is simply not used — cargo keeps working).
+  # DETECTING IS NOT ENOUGH — DISARM IT. Measured: with sfw broken, `cargo
+  # build` exits 9 on every invocation, and an earlier version of this task
+  # merely reported that fact, so re-applying the role left the host's cargo
+  # just as broken as before. Moving the binary aside makes the wrapper's
+  # `command -v sfw` guard fail, which is precisely how the wrapper degrades
+  # safely. Same treatment as a non-runnable cargo-cooldown.
+  #
+  # This matters more for sfw than for cooldown: the sfw npm package fetches
+  # the LATEST firewall binary at runtime, so it can start failing on a host
+  # that has not changed. Re-applying the role is the recovery path, and it has
+  # to actually recover.
+  ansible.builtin.shell:
+    cmd: |
+      P=$(command -v sfw 2>/dev/null) || { echo absent; exit 0; }
+      [ -n "$P" ] || { echo absent; exit 0; }
+      if timeout 60 sfw --help >/dev/null 2>&1; then
+        echo works
+      elif mv -f "$P" "$P.broken" 2>/dev/null && ! command -v sfw >/dev/null 2>&1; then
+        echo quarantined
+      else
+        echo broken
+      fi
+    executable: /bin/bash
+  register: cargo_sfw_health
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_socket_firewall | bool
+
+- name: Record skipped protection — Socket Firewall unavailable for cargo
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall for cargo — sfw is ' ~ (cargo_sfw_health.stdout | default('') | trim) ~ '. Crate downloads are NOT threat-intel filtered, so a lockfile written elsewhere that pins a known-malicious crate will still be fetched. sfw needs Node >= 20; install it and re-apply to close this.'] }}
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_socket_firewall | bool
+    - cargo_sfw_health is defined
+    - cargo_sfw_health.stdout | default('') | trim in ['absent', 'broken', 'quarantined']
