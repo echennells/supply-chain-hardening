@@ -243,6 +243,110 @@ manifest_dir() {
 #
 # Restoring Cargo.toml matters as much as Cargo.lock: `cargo add too-new-crate`
 # must leave the project unchanged, not half-applied.
+# --- `cargo install` age gate ---
+#
+# WHY NOT REUSE cargo-cooldown HERE (it was tried, and it silently did nothing)
+#
+# The obvious approach is to borrow cooldown's resolver: write a scratch
+# project that depends on the requested crate, run `cargo cooldown check`, and
+# install whatever it settles on. That is what this function did first, and it
+# was decorative for precisely the crates `cargo install` exists to install:
+#
+#   warning: ignoring invalid dependency `ripgrep` which is missing a lib target
+#
+# Binary-only crates (ripgrep, xsv, every cargo-* subcommand) have no lib
+# target, so cargo DROPS them from the dependency graph. cooldown then checks an
+# empty graph and returns success. Library crates denied correctly, which is
+# exactly what hid the hole. A gate that passes everything it was built to stop,
+# while reporting success, is worse than no gate.
+#
+# So this asks the registry directly: what is the publish date of the version
+# that would actually be installed? crates.io records that server-side, which is
+# the same fact the whole age-gate model rests on.
+#
+# FAILS LOUD, NEVER SILENTLY OPEN. Any inability to answer — no curl, no
+# python3, network failure, unparseable response, unknown crate — returns
+# non-zero, and the caller prints that the invocation is NOT age-gated. It never
+# claims coverage it did not verify.
+gate_cargo_install() {
+{% if cargo_cooldown_enforce | bool %}
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  local a spec="" crate="" want="" verdict ver
+  local skip_value=0
+  for a in "${@:2}"; do
+    if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
+    case "$a" in
+      --git|--path|--index|--registry|--branch|--tag|--rev)
+        return 1 ;;                       # no registry publish date to gate on
+      --root|--target|--profile|--bin|--example|--features|-j|--jobs)
+        skip_value=1 ;;                   # flag consumes the next token
+      -*) ;;
+      *)
+        [ -n "$spec" ] && return 1        # several crates at once: don't guess
+        spec="$a" ;;
+    esac
+  done
+  [ -n "$spec" ] || return 1              # e.g. `cargo install --list`
+
+  crate="${spec%%@*}"
+  [ "$spec" = "$crate" ] || want="${spec#*@}"
+
+  verdict=$(curl -sS --max-time 20 \
+      -H 'User-Agent: supply-chain-hardening (cargo install age gate)' \
+      "https://crates.io/api/v1/crates/${crate}/versions" 2>/dev/null \
+    | python3 -c '
+import sys, json, datetime
+try:
+    want = sys.argv[1] or None
+    min_h = float(sys.argv[2])
+    vs = [v for v in json.load(sys.stdin).get("versions", []) if not v.get("yanked")]
+    if not vs:
+        print("ERR"); raise SystemExit
+    if want:
+        v = next((x for x in vs if x.get("num") == want), None)
+        if v is None:
+            print("ERR"); raise SystemExit
+    else:
+        v = vs[0]                      # crates.io returns newest first
+    t = datetime.datetime.fromisoformat(v["created_at"].replace("Z", "+00:00"))
+    age_h = (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() / 3600.0
+    print(("OK " if age_h >= min_h else "TOO_NEW ") + v["num"] + " %.1f" % age_h)
+except SystemExit:
+    raise
+except Exception:
+    print("ERR")
+' "$want" '{{ release_age_hours | int }}' 2>/dev/null)
+
+  case "$verdict" in
+    "OK "*)
+      ver=$(printf '%s' "$verdict" | cut -d" " -f2)
+      ;;
+    "TOO_NEW "*)
+      ver=$(printf '%s' "$verdict" | cut -d" " -f2)
+      age=$(printf '%s' "$verdict" | cut -d" " -f3)
+      echo "[supply-chain-hardening] REFUSING 'cargo install $spec': ${crate} ${ver} was published ${age} hours ago, inside the {{ release_age_hours | int }}-hour publish-age window." >&2
+      echo "[supply-chain-hardening] This is the arrayref pattern — a compromised maintainer account publishing a release that is pulled within hours. Install an older release explicitly (cargo install ${crate}@<version>) if you have a reason to trust it." >&2
+      exit 1
+      ;;
+    *)
+      return 1                            # could not determine: caller warns
+      ;;
+  esac
+
+  # Pin the exact version we verified, so cargo cannot re-resolve to newest.
+  local -a newargs=()
+  for a in "$@"; do
+    if [ "$a" = "$spec" ]; then newargs+=("$crate@$ver"); else newargs+=("$a"); fi
+  done
+  has_resolution_flag "$@" || newargs+=(--locked)
+  run_real "${newargs[@]}"
+{% else %}
+  return 1
+{% endif %}
+}
+
 run_lockfile_writer() {
   local dir lock tmp had_lock rc
   dir=$(manifest_dir) || run_real "$@"     # no manifest: nothing to gate
@@ -324,10 +428,28 @@ case "$CMD" in
     fi
     ;;
   install)
-    # No workspace lockfile applies to `cargo install`; --locked makes it
-    # honour the Cargo.lock the crate was published with instead of
-    # re-resolving every transitive dependency to newest-compatible at
-    # install time. That re-resolution is precisely the arrayref vector.
+    # `cargo install` takes the NEWEST version by default and no workspace
+    # lockfile applies, so before this it was the plainest hole left: the
+    # normal way to install a CLI tool, ungated. --locked alone only makes it
+    # honour the lockfile the crate was PUBLISHED with — it says nothing about
+    # how old that crate is, so `cargo install ripgrep` five minutes after a
+    # maintainer compromise installed the compromised release.
+    #
+    # gate_cargo_install re-uses cargo-cooldown rather than reimplementing an
+    # age check: it asks the gate to resolve the crate in a scratch project,
+    # which honours the configured window, allow rules and per-registry
+    # settings automatically, then installs the exact version the gate
+    # accepted. It returns non-zero for anything it does not understand
+    # (--git, --path, several crates at once), and the caller then warns
+    # rather than silently implying coverage.
+    # `cargo install --list` installs nothing; it just prints what is already
+    # installed. Injecting --locked there is noise at best.
+    for a in "$@"; do
+      case "$a" in --list|--help|-h) run_real "$@" ;; esac
+    done
+    # On success gate_cargo_install execs and never returns.
+    gate_cargo_install "$@" || \
+      echo "[supply-chain-hardening] warning: 'cargo install' is NOT age-gated for this invocation (git/path source, several crates, or no cargo-cooldown). --locked still applies, which pins transitive deps but does not check how old the crate is." >&2
     if ! has_resolution_flag "$@"; then
       shift
       run_real install --locked "$@"

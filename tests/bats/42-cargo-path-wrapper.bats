@@ -175,12 +175,20 @@ teardown() {
   [ "$(probe build --frozen)" = "build --frozen" ]
 }
 
-@test "cargo: install gets --locked so it honours the published lockfile" {
+@test "cargo: install always gets --locked, whatever the age check decides" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe without-cooldown
   # Without --locked, cargo install re-resolves every transitive dep to
   # newest-compatible at install time — the arrayref vector exactly.
-  [ "$(probe install ripgrep)" = "install --locked ripgrep" ]
+  #
+  # The crate spec may come back rewritten as name@version: when the age check
+  # can reach crates.io it pins the exact version it verified, so asserting a
+  # literal argv here would fail on a networked host and pass on an isolated
+  # one. Assert the invariant instead.
+  out="$(probe install ripgrep)"
+  [[ "$out" == install* ]]
+  [[ "$out" == *"--locked"* ]]
+  [[ "$out" == *"ripgrep"* ]]
 }
 
 @test "cargo: no lockfile means no --locked (would be a hard error)" {
@@ -255,6 +263,56 @@ STUB
   # --locked cannot help a command whose purpose is to CHANGE the lockfile, so
   # the wrapper must say so rather than implying coverage it does not have.
   [[ "$output" == *"can write a lockfile entry for a freshly published crate"* ]]
+}
+
+# ---- cargo install age gate ----
+#
+# `cargo install` takes the NEWEST version and no workspace lockfile applies, so
+# it was the plainest hole after the lockfile-laundering fix.
+#
+# The first implementation reused cargo-cooldown via a scratch project, and was
+# DECORATIVE for exactly the crates cargo install exists for: binary-only crates
+# (ripgrep, xsv, every cargo-* tool) have no lib target, so cargo dropped them
+# from the dependency graph ("ignoring invalid dependency ... missing a lib
+# target"), cooldown checked an empty graph, and the gate returned success while
+# installing anything. It now asks crates.io for the publish date directly.
+#
+# The age check itself needs the network, so these tests pin the dispatch and —
+# more importantly — the FAIL-LOUD paths. Every branch that cannot determine an
+# age must say so rather than implying coverage.
+
+@test "cargo: install without a crate spec passes through (e.g. --list)" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  # Must not warn about age-gating, and must not mangle the command.
+  [[ "$(probe install --list)" == "install --list"* ]]
+}
+
+@test "cargo: install from a git source warns that it is NOT age-gated" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' install --git https://example.invalid/x 2>&1 >/dev/null"
+  # A git ref has no registry publish timestamp, so there is nothing to gate on.
+  # Saying so is the requirement; silently passing would imply coverage.
+  [[ "$output" == *"NOT age-gated for this invocation"* ]]
+}
+
+@test "cargo: install of several crates at once warns rather than guessing" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' install alpha beta 2>&1 >/dev/null"
+  [[ "$output" == *"NOT age-gated for this invocation"* ]]
+}
+
+@test "cargo: --locked is never dropped just because the age check was unavailable" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  # --locked pins transitive deps to the published lockfile; it is the weaker
+  # half but must survive every path through the install branch.
+  PATH_NO_NET="$PROBE_DIR:/bin"   # no curl/python3 -> age check cannot run
+  out="$( cd "$PROBE_DIR/proj" && PATH="$PATH_NO_NET" "$PROBE_DIR/cargo" install ripgrep 2>/dev/null | tr "\n" " " )"
+  [[ "$out" == *"--locked"* ]]
+  [[ "$out" == *"ripgrep"* ]]
 }
 
 # ---- Socket Firewall (threat-intel layer) ----
