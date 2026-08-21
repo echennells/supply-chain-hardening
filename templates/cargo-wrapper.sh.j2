@@ -1,0 +1,291 @@
+#!/bin/bash
+# cargo — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security.
+#
+# WHAT THIS CLOSES
+#
+# Cargo executes build.rs and proc-macro code at COMPILE time with the
+# building user's full privileges, before any of your code is called.
+# There is no --ignore-scripts equivalent; templates/cargo-config.toml.j2
+# documents that dead end. So the only lever that actually prevents
+# execution is controlling WHICH VERSIONS ARE ALLOWED TO RESOLVE.
+#
+# Calibrated against a real incident (2026-08-20): arrayref 0.3.10,
+# published from a compromised maintainer account, added a first-ever
+# dependency on the proc-macro1 typosquat, whose build.rs downloaded and
+# executed a remote binary during `cargo build`. Live for 86 minutes.
+# blake3 depended on arrayref ^0.3.5.
+#
+# TWO CONTROLS, APPLIED IN ORDER OF STRENGTH
+#
+#   1. PUBLISH-AGE GATE — route resolution-affecting commands through
+#      `cargo cooldown`, which refuses versions younger than the window in
+#      $CARGO_HOME/cooldown.toml. Every poisoned release in the incident
+#      above was pulled inside two hours; a one-day window makes all of
+#      them unresolvable. This is the control that actually prevents the
+#      attack rather than detecting it afterwards.
+#
+#   2. --locked — when a Cargo.lock exists, forbid cargo from silently
+#      changing resolution to satisfy a build, so a new transitive
+#      dependency is a hard error instead of silent code execution. This
+#      is the control that empirically protected people in the incident:
+#      projects whose committed lockfiles pinned arrayref 0.3.9 never
+#      resolved 0.3.10. It needs no network and no third-party tool, so
+#      it is also the fallback when cargo-cooldown is absent.
+#
+# WHY A WRAPPER AND NOT CONFIG
+#
+# cargo-cooldown only guards commands you explicitly route through it
+# (`cargo cooldown build`). Nobody types that. A config file cannot make
+# `cargo build` mean `cargo cooldown build` — only a PATH wrapper can.
+# Same reasoning as the bun wrapper: the config layer does not reach the
+# code path that matters.
+#
+# RE-ENTRANCY (the bug that would otherwise hang every build)
+#
+# cargo-cooldown invokes cargo internally. With this wrapper on PATH that
+# inner call would route straight back into cooldown, forever. The
+# SUPPLY_CHAIN_CARGO_WRAPPED guard below breaks the loop: it is exported
+# before handing off to cooldown, and any wrapper invocation that sees it
+# passes through to the real cargo untouched.
+#
+# TOOLCHAIN PREFIXES
+#
+# `cargo +nightly build` is a rustup toolchain override, not a subcommand.
+# It is stripped before dispatch and re-inserted on exec, or every rustup
+# user on the host would silently lose both controls.
+#
+# WHAT IT DOESN'T BREAK
+#
+# Commands that cannot change dependency resolution (new, init, clean,
+# fmt, search, login, owner, yank, uninstall, metadata, --version, --help)
+# pass through untouched. `cargo cooldown ...` and `cargo binstall ...`
+# pass through — the first would recurse, the second is binstall's own
+# prebuilt-fetch path.
+#
+# BYPASS (per-invocation, for someone who knows what they need)
+#
+#   {{ cargo_real_path }} build              # around the wrapper entirely
+#   cargo build --offline                    # already-explicit lock intent
+#   SUPPLY_CHAIN_CARGO_WRAPPED=1 cargo build # same effect, honest about it
+#
+# DISABLE GLOBALLY
+#
+#   role var cargo_path_wrapper=false (restores the real binary at this
+#   path on the next role apply), or cargo_cooldown_enforce=false to keep
+#   --locked but drop the age gate.
+#
+# SELF-UPDATE CAVEAT
+#
+# `rustup update` rewrites ~/.cargo/bin/cargo and will overwrite this
+# wrapper. Re-apply the role after a rustup update to restore it and
+# refresh the cargo-real backup. Same caveat as bun/composer/deno.
+
+set -u
+
+REAL_CARGO='{{ cargo_real_path }}'
+
+# Recursion guard — refuse to run if the embedded real-cargo path is empty,
+# non-executable, or points back at ourselves. Same pattern as the bun,
+# composer, deno, npm and pip wrappers.
+if [ -z "$REAL_CARGO" ] || [ ! -x "$REAL_CARGO" ] || [ "$REAL_CARGO" = "$0" ]; then
+  echo "[supply-chain-hardening] error: real cargo not found at '$REAL_CARGO'; refusing to recurse" >&2
+  exit 127
+fi
+
+# Re-entrancy guard. See RE-ENTRANCY above. Must come before any dispatch.
+if [ -n "${SUPPLY_CHAIN_CARGO_WRAPPED:-}" ]; then
+  exec "$REAL_CARGO" "$@"
+fi
+
+# Strip a leading rustup toolchain override so dispatch sees the real
+# subcommand, and remember it for re-insertion.
+TOOLCHAIN=""
+if [ "$#" -gt 0 ] && [ -n "${1:-}" ] && [ "${1#+}" != "$1" ]; then
+  TOOLCHAIN="$1"
+  shift
+fi
+
+# ARGV[0] MUST BE "cargo". This is not cosmetic.
+#
+# rustup is the dominant cargo installer, and its ~/.cargo/bin/cargo is a
+# SYMLINK to the rustup binary, which dispatches on the name it was invoked
+# as. Renaming that symlink to cargo-real and calling it directly yields:
+#
+#   error: unknown proxy name: 'cargo-real'; valid proxy names are 'rustc',
+#   'rustdoc', 'cargo', ...
+#
+# i.e. the wrapper would brick cargo on every rustup host. `exec -a cargo`
+# forces argv[0] back to "cargo" so the proxy resolves correctly. On a
+# non-rustup cargo (a real binary at /usr/bin/cargo) setting argv[0] to
+# "cargo" is exactly what it would have been anyway, so this is safe for
+# both install shapes and needs no detection.
+run_real() {
+  if [ -n "$TOOLCHAIN" ]; then
+    exec -a cargo "$REAL_CARGO" "$TOOLCHAIN" "$@"
+  fi
+  exec -a cargo "$REAL_CARGO" "$@"
+}
+
+CMD="${1:-}"
+
+# --- pass-through: cannot change dependency resolution, or would recurse ---
+case "$CMD" in
+  ""|cooldown|binstall|new|init|clean|fmt|search|login|logout|owner|yank|\
+uninstall|locate-project|metadata|pkgid|read-manifest|verify-project|config|\
+version|help|--version|-V|--help|-h|--list|--explain)
+    run_real "$@"
+    ;;
+esac
+
+# Does the caller already state an explicit resolution intent? Scan only the
+# args cargo itself parses — everything after `--` belongs to the user's
+# program, so `cargo run -- --locked` must not count as our flag.
+has_resolution_flag() {
+  local a
+  for a in "$@"; do
+    [ "$a" = "--" ] && return 1
+    case "$a" in
+      --locked|--frozen|--offline) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Walk up from CWD looking for a lockfile. Cargo is routinely invoked from a
+# subdirectory of a workspace, so checking only ./Cargo.lock would silently
+# skip --locked for most real invocations.
+has_lockfile() {
+  local d="$PWD"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -f "$d/Cargo.lock" ] && return 0
+    d="$(dirname "$d")"
+  done
+  [ -f "/Cargo.lock" ]
+}
+
+# Directory of the manifest cargo will act on.
+manifest_dir() {
+  local d="$PWD"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -f "$d/Cargo.toml" ] && { printf '%s' "$d"; return 0; }
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+# --- lockfile-writing commands that cargo-cooldown has no guard verb for ---
+#
+# THE BYPASS THIS CLOSES (found by adversarial review of the first version):
+#
+#   $ cargo add arrayref@0.3.9     # ungated -> writes Cargo.lock
+#   $ cargo build                  # SUCCEEDS: lockfile-baseline="floor"
+#                                  # grandfathers whatever the lockfile pins
+#
+# Two commands, no privileges, and the age gate never evaluates the crate. It
+# is worse than "not covered": the ungated command writes state that SUPPRESSES
+# the check on every subsequent gated command. `cargo add` is the normal way to
+# add a dependency, so this was the likeliest path in practice, not an exotic
+# one.
+#
+# cargo-cooldown only guards check/build/test/run/update, so we cannot simply
+# route these. Instead: run the command, then re-evaluate the resulting
+# dependency set with the PRE-EXISTING lockfile as the baseline — so newly
+# written entries are actually age-checked rather than grandfathered — and put
+# the project back exactly as we found it if the gate refuses.
+#
+# Restoring Cargo.toml matters as much as Cargo.lock: `cargo add too-new-crate`
+# must leave the project unchanged, not half-applied.
+run_lockfile_writer() {
+  local dir lock tmp had_lock rc
+  dir=$(manifest_dir) || run_real "$@"     # no manifest: nothing to gate
+  lock="$dir/Cargo.lock"
+  tmp=$(mktemp -d 2>/dev/null) || run_real "$@"
+
+  if [ -f "$lock" ]; then cp "$lock" "$tmp/lock"; had_lock=1; else had_lock=0; fi
+  cp "$dir/Cargo.toml" "$tmp/toml" 2>/dev/null
+
+  # Deliberately NOT exec: we have to inspect the result afterwards.
+  SUPPLY_CHAIN_CARGO_WRAPPED=1 "$REAL_CARGO" "$@"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then rm -rf "$tmp"; exit "$rc"; fi
+
+  # Unchanged lockfile => nothing new was resolved => nothing to check.
+  if [ "$had_lock" = "1" ] && cmp -s "$lock" "$tmp/lock"; then rm -rf "$tmp"; exit 0; fi
+  if [ "$had_lock" = "0" ] && [ ! -f "$lock" ]; then rm -rf "$tmp"; exit 0; fi
+
+  # Put the baseline back, then let the gate do the resolution properly.
+  if [ "$had_lock" = "1" ]; then cp "$tmp/lock" "$lock"; else rm -f "$lock"; fi
+  if ( cd "$dir" && SUPPLY_CHAIN_CARGO_WRAPPED=1 "$REAL_CARGO" cooldown check >&2 ); then
+    rm -rf "$tmp"; exit 0
+  fi
+
+  cp "$tmp/toml" "$dir/Cargo.toml" 2>/dev/null
+  if [ "$had_lock" = "1" ]; then cp "$tmp/lock" "$lock"; else rm -f "$lock"; fi
+  echo "[supply-chain-hardening] '$1' reverted: the resulting dependency set violates the publish-age gate (see above). Nothing was written." >&2
+  rm -rf "$tmp"
+  exit 1
+}
+{% if cargo_cooldown_enforce | bool %}
+
+# --- control 1: publish-age gate ---
+case "$CMD" in
+  build|b|check|c|test|t|run|r|update)
+    if command -v cargo-cooldown >/dev/null 2>&1; then
+      shift
+      # cargo-cooldown's guard commands are the long forms; normalise the
+      # aliases or `cargo b` would fail with an unknown-subcommand error.
+      case "$CMD" in
+        b) SUB=build ;;
+        c) SUB=check ;;
+        t) SUB=test ;;
+        r) SUB=run ;;
+        *) SUB="$CMD" ;;
+      esac
+      export SUPPLY_CHAIN_CARGO_WRAPPED=1
+      run_real cooldown "$SUB" "$@"
+    fi
+    # Degrade LOUDLY. A silent fallback here is how a host ends up believing
+    # it has an age gate it does not have — the exact failure mode this
+    # codebase has now shipped eight times.
+    echo "[supply-chain-hardening] warning: cargo-cooldown not installed — publish-age gate NOT enforced (falling back to --locked)" >&2
+    ;;
+esac
+
+# Lockfile writers, gated by post-hoc re-evaluation (see run_lockfile_writer).
+case "$CMD" in
+  add|remove|rm|generate-lockfile|fetch|vendor)
+    if command -v cargo-cooldown >/dev/null 2>&1; then
+      run_lockfile_writer "$@"
+    fi
+    # No backend: --locked cannot help here (these commands exist to CHANGE the
+    # lockfile), so say so rather than implying coverage we do not have.
+    echo "[supply-chain-hardening] warning: cargo-cooldown not installed — '$CMD' can write a lockfile entry for a freshly published crate with no age check" >&2
+    ;;
+esac
+{% endif %}
+
+# --- control 2: --locked on anything that can resolve dependencies ---
+#
+# Inserted immediately after the subcommand, never appended: `cargo run --
+# myprog` would otherwise hand --locked to myprog instead of to cargo.
+case "$CMD" in
+  build|b|check|c|test|t|run|r|bench|doc|d|rustc|rustdoc|tree|fetch|package|publish|clippy)
+    if ! has_resolution_flag "$@" && has_lockfile; then
+      shift
+      run_real "$CMD" --locked "$@"
+    fi
+    ;;
+  install)
+    # No workspace lockfile applies to `cargo install`; --locked makes it
+    # honour the Cargo.lock the crate was published with instead of
+    # re-resolving every transitive dependency to newest-compatible at
+    # install time. That re-resolution is precisely the arrayref vector.
+    if ! has_resolution_flag "$@"; then
+      shift
+      run_real install --locked "$@"
+    fi
+    ;;
+esac
+
+run_real "$@"

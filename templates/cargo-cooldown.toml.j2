@@ -1,0 +1,89 @@
+# Cargo publish-age gate — supply-chain-hardening.
+# Managed by ansible-supply-chain-security. Local edits are overwritten.
+#
+# WHY THIS FILE IS THE LOAD-BEARING CARGO PROTECTION
+#
+# Cargo runs build.rs and proc-macro code at COMPILE time with the building
+# user's full privileges, before any of your code is called. Cargo has no
+# --ignore-scripts equivalent (see cargo-config.toml.j2). So the only lever
+# that prevents execution is refusing to RESOLVE the malicious version in
+# the first place. That is what this file does.
+#
+# Calibrated against a real incident, 2026-08-20: arrayref 0.3.10 was
+# published from a compromised maintainer account at 07:15:00 UTC and
+# removed at 08:41:40 UTC — an 86-minute window. It added a first-ever
+# dependency on proc-macro1 (a typosquat of proc-macro2) whose build.rs
+# fetched and executed a remote binary during `cargo build`. blake3
+# required arrayref ^0.3.5, so any project resolving arrayref in that
+# window executed the dropper.
+#
+# internment 0.8.7 (90 min) and append-only-vec 0.1.9 (107 min) were
+# poisoned the same morning by the same actor. Every one of those windows
+# is under two hours. A publish-age gate of even ONE DAY makes all of them
+# unresolvable. That is the entire argument for this file.
+#
+# CONFIG PRECEDENCE (cargo-cooldown, strongest first)
+#   1. environment variables (COOLDOWN_*)
+#   2. active member cooldown.toml
+#   3. workspace / crate root cooldown.toml
+#   4. $CARGO_HOME/cooldown.toml   <-- this file
+#
+# We deploy at level 4 deliberately. It is the only level that applies to
+# EVERY project on the host without per-repo opt-in. Note the corollary:
+# a repo that ships its own cooldown.toml overrides this file. That is
+# cargo-cooldown's design, not something the role can close — treat a
+# committed cooldown.toml in an untrusted repo as a hardening bypass.
+
+[cooldown]
+# "deny" = fail the command and restore the original Cargo.lock when a
+# resolved version is younger than the window. The alternative,
+# "fallback", downgrades to the newest acceptable version and only warns
+# — which is a fail-open posture and is NOT what we want as a default.
+incompatible-publish-age = "{{ cargo_cooldown_violation_action }}"
+
+# "floor": versions already present in an existing Cargo.lock are accepted
+# as a baseline even if they are younger than the window. Without this,
+# every existing lockfile on the host would start failing builds the first
+# time the gate is applied, which is how a security control gets disabled
+# by an irritated developer within the hour.
+#
+# READ THIS BEFORE ASSUMING THE GATE COVERS EVERYTHING. The consequence is
+# that the age gate applies to NEW OR CHANGED RESOLUTIONS, not to versions
+# a lockfile already pins. Measured: with a 99999-day window, a build
+# reusing an existing Cargo.lock succeeds, while the same build with the
+# lockfile removed is refused:
+#
+#   Error: `incompatible-publish-age = "deny"` blocked fresh versions ...
+#     - arrayref 0.3.9 (published: 2024-09-14T12:24:40Z)
+#
+# That division of labour is deliberate and matches the threat. In the
+# 2026-08-20 incident the danger was RESOLVING arrayref 0.3.10, a version
+# no existing lockfile contained — the gate's job. Hosts that already
+# pinned 0.3.9 were never at risk, and keeping them building is the
+# wrapper's --locked half. Neither control has to cover both cases; what
+# matters is that together they leave no gap.
+lockfile-baseline = "floor"
+
+fallback-accept = "auto"
+
+[registry]
+# Derived from the role-wide `release_age_hours` knob (the same one that
+# drives the npm/pnpm/bun age gates), so one setting moves every ecosystem
+# together. Default 48h.
+#
+# Anything >= 24h defeats the incident class described above. Longer
+# windows trade freshness for safety; 14 days is cargo-cooldown's own
+# suggested default if you want to be conservative.
+global-min-publish-age = "{{ release_age_hours | int }} hours"
+{% if cargo_cooldown_allow_exact | length > 0 %}
+
+# Operator-supplied escape hatches: exact (crate, version) pairs admitted
+# regardless of age. Use for a known-good release you need before the
+# window elapses. Prefer this over lowering global-min-publish-age, which
+# weakens the gate for every crate at once.
+{% for a in cargo_cooldown_allow_exact %}
+[[allow.exact]]
+crate = "{{ a.crate }}"
+version = "{{ a.version }}"
+{% endfor %}
+{% endif %}

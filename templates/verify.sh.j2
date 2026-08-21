@@ -238,7 +238,7 @@ fi
 # defect as the npm false OK, pointing the other way: a real protection
 # reported as absent. Under-reporting is the safer direction, but it is still
 # wrong, and a verifier that cries wolf gets ignored.
-for w in npm pip pip3 bun bunx composer deno; do
+for w in npm pip pip3 bun bunx composer deno cargo; do
   have "$w" || continue
   p=$(command -v "$w" 2>/dev/null)   # what callers resolve to
   if [ -n "$p" ] && grep -q "supply-chain-hardening" "$p" 2>/dev/null; then
@@ -309,6 +309,64 @@ if have go; then
   fi
 else
   row "N/A" - "go" "go not installed"
+fi
+
+# ---------------------------------------------------------------- cargo ------
+# Cargo is the one ecosystem where the config layer cannot help at all: build.rs
+# and proc-macros execute at COMPILE time with the user's full privileges, and
+# cargo has no --ignore-scripts. The only control that PREVENTS execution is
+# refusing to resolve a too-new version, and that lives entirely in the wrapper.
+#
+# So this probe asks the wrapper what it actually DOES with `cargo build`,
+# rather than checking that a config file exists. Checking our own config file
+# and calling it enforcement is precisely the mistake that produced the npm
+# false OK (5522373) and, pointing the other way, the composer false GAP.
+cargo_wrapper_dispatch() {
+  # Prints the argv the deployed wrapper would hand to the real cargo for
+  # `cargo build` in a directory that has a lockfile. Runs the REAL wrapper
+  # with a stub standing in for cargo: no network, no compile, no side effects.
+  local w tmp
+  w=$(command -v cargo 2>/dev/null) || return 1
+  [ -n "$w" ] || return 1
+  grep -q 'supply-chain-hardening' "$w" 2>/dev/null || return 1
+  tmp=$(mktemp -d 2>/dev/null) || return 1
+  printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$tmp/real"
+  chmod +x "$tmp/real" 2>/dev/null
+  sed "s|^REAL_CARGO=.*|REAL_CARGO='$tmp/real'|" "$w" > "$tmp/cargo" 2>/dev/null
+  chmod +x "$tmp/cargo" 2>/dev/null
+  : > "$tmp/Cargo.lock"
+  ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && ./cargo build 2>/dev/null )
+  rm -rf "$tmp"
+}
+
+if have cargo; then
+  cdisp=$(cargo_wrapper_dispatch)
+  if [ -z "$cdisp" ]; then
+    row GAP PRESENT "cargo publish-age gate" "cargo is not wrapped — \`cargo build\` executes build.rs from whatever version the resolver picks, including one published minutes ago"
+  elif printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
+    cage=$(grep -m1 'global-min-publish-age' "${CARGO_HOME:-$HOME/.cargo}/cooldown.toml" 2>/dev/null | sed 's/.*= *//; s/"//g')
+    # BEING ON PATH IS NOT THE QUESTION — CAN IT RUN?
+    # cargo-binstall picks a prebuilt binary by target triple, which says
+    # nothing about glibc. On Debian 12 the published cargo-cooldown needs
+    # GLIBC_2.39 and dies in the loader. `command -v` still succeeds, so the
+    # wrapper routes every build into a binary that cannot execute and every
+    # build fails. Reporting OK for that state would be the worst false OK in
+    # the file: green light on a host whose toolchain we just broke.
+    if ! cargo-cooldown --version >/dev/null 2>&1; then
+      row GAP FUNCTIONAL "cargo publish-age gate" "cargo-cooldown is on PATH but CANNOT EXECUTE (usually a prebuilt binary needing newer glibc than this distro ships). The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated. Reinstall from source: cargo install cargo-cooldown"
+    else
+      # FUNCTIONAL covers the ROUTING plus the backend being runnable, which is
+      # what we observed. Whether cargo-cooldown then honours the window is its
+      # behaviour, not ours, and is deliberately not claimed here.
+      row OK FUNCTIONAL "cargo publish-age gate" "wrapper routes \`cargo build\` through \`cargo cooldown\` (backend runs; window ${cage:-<unset>} per cooldown.toml; the window's own enforcement is cargo-cooldown's and is not verified here)"
+    fi
+  elif printf '%s\n' "$cdisp" | grep -qx -- '--locked'; then
+    row WEAK FUNCTIONAL "cargo publish-age gate" "wrapper injects --locked but cargo-cooldown is absent — protects projects with a committed Cargo.lock, does nothing for \`cargo update\` or a fresh checkout with no lockfile"
+  else
+    row GAP FUNCTIONAL "cargo publish-age gate" "cargo is wrapped but the wrapper applied neither the cooldown route nor --locked"
+  fi
+else
+  row "N/A" - "cargo" "cargo not installed"
 fi
 
 # ---------------------------------------------------------------- pip --------

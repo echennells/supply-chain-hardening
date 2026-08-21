@@ -2,17 +2,77 @@
 # Cargo/Rust supply chain hardening
 # Config deployed unconditionally; auditing tools only install if cargo exists.
 
+- name: Resolve CARGO_HOME (NOT necessarily ~/.cargo)
+  # Cargo reads its config from $CARGO_HOME, which defaults to ~/.cargo but is
+  # explicitly set on a great many real hosts — the official rust Docker images
+  # use /usr/local/cargo, and shared CI runners commonly point it at a cache
+  # volume. Hardcoding ~/.cargo deploys a config file the tool will never read:
+  # present on disk, correct in content, completely inert.
+  #
+  # Caught by supply-chain-verify reporting `window <unset>` while cooldown.toml
+  # sat happily in /root/.cargo on an image where CARGO_HOME=/usr/local/cargo.
+  # That is the same defect class as the npm false OK (5522373) — believing a
+  # config we wrote is a config the tool honours.
+  ansible.builtin.shell:
+    cmd: 'echo "${CARGO_HOME:-$HOME/.cargo}"'
+    executable: /bin/bash
+  register: cargo_home_check
+  changed_when: false
+  check_mode: false
+
+- name: Set cargo_home fact
+  ansible.builtin.set_fact:
+    cargo_home: "{{ cargo_home_check.stdout | trim }}"
+
 - name: Create cargo config directory
   ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.cargo"
+    path: "{{ cargo_home }}"
     state: directory
     mode: "0755"
 
 - name: Deploy hardened cargo config.toml
   ansible.builtin.template:
     src: cargo-config.toml.j2
-    dest: "{{ ansible_env.HOME }}/.cargo/config.toml"
+    dest: "{{ cargo_home }}/config.toml"
     mode: "0644"
+
+- name: Deploy publish-age gate config at $CARGO_HOME/cooldown.toml
+  # THE load-bearing cargo protection. Cargo runs build.rs at compile time
+  # with full user privileges and has no --ignore-scripts, so refusing to
+  # RESOLVE a too-new version is the only control that prevents execution
+  # rather than detecting it afterwards.
+  #
+  # $CARGO_HOME/cooldown.toml is cargo-cooldown's weakest config precedence
+  # level, which is exactly why it goes here: it is the only level that
+  # applies to every project on the host without per-repo opt-in.
+  ansible.builtin.template:
+    src: cargo-cooldown.toml.j2
+    dest: "{{ cargo_home }}/cooldown.toml"
+    mode: "0644"
+  when: cargo_cooldown_enforce | bool
+
+- name: Create /root cargo config directory (sudo coverage)
+  # Mirrors the composer /root pattern. A build run under sudo reads root's
+  # CARGO_HOME, not the invoking user's, so without this the gate silently
+  # does not apply to `sudo cargo build`.
+  become: true
+  ansible.builtin.file:
+    path: /root/.cargo
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: cargo_cooldown_enforce | bool
+
+- name: Deploy publish-age gate config to /root (sudo coverage)
+  become: true
+  ansible.builtin.template:
+    src: cargo-cooldown.toml.j2
+    dest: /root/.cargo/cooldown.toml
+    owner: root
+    group: root
+    mode: "0644"
+  when: cargo_cooldown_enforce | bool
 
 - name: Create /etc/cargo directory for system-wide deny.toml reference
   ansible.builtin.file:
@@ -107,3 +167,225 @@
   when:
     - cargo_tools_install is defined
     - cargo_tools_install.rc | default(0) != 0
+
+# --- cargo PATH wrapper ---
+#
+# Deployed LAST, after the auditing tools are installed. Deploying it earlier
+# would route this role's own `cargo install` calls through a wrapper whose
+# cooldown backend does not exist yet.
+#
+# Ownership differs from the other wrappers on purpose. bun/composer/deno wrap
+# system paths and are root-owned. Cargo usually lives at ~/.cargo/bin/cargo,
+# installed and updated by rustup running AS THE USER — root-owning it there
+# would break `rustup update` with EACCES. So we only escalate when the
+# discovered binary is outside the user's home.
+
+- name: Decide whether wrapping this cargo path needs root
+  # NOTE: `startswith` is a Python str method reached through Jinja, NOT an
+  # Ansible filter. Writing it as `| startswith(...)` raises "Could not load
+  # 'startswith'" and aborts the play.
+  ansible.builtin.set_fact:
+    cargo_wrap_become: "{{ not (cargo_check.stdout | default('')).startswith(ansible_env.HOME) }}"
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_check.rc == 0
+    - cargo_check.stdout | default('') | length > 0
+
+- name: Determine whether current cargo binary is our wrapper or the real binary
+  ansible.builtin.shell:
+    cmd: |
+      if grep -q 'supply-chain-hardening' '{{ cargo_check.stdout }}' 2>/dev/null; then
+        echo is_wrapper
+      else
+        echo is_real
+      fi
+    executable: /bin/bash
+  register: cargo_binary_kind
+  changed_when: false
+  check_mode: false
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_check.rc == 0
+    - cargo_check.stdout | default('') | length > 0
+
+- name: Prepare cargo-real (an argv[0]-safe backup of the real cargo)
+  # WHY THIS IS NOT JUST `mv cargo cargo-real`
+  #
+  # rustup is the dominant cargo installer and its cargo is a SYMLINK to the
+  # rustup binary, which dispatches on the name it was invoked as. A file named
+  # cargo-real is not a valid proxy name, so calling it yields:
+  #
+  #   error: unknown proxy name: 'cargo-real'; valid proxy names are 'rustc',
+  #   'rustdoc', 'cargo', ...
+  #
+  # The wrapper's own `exec -a cargo` handles ITS call, but that is not enough:
+  # cargo tells subcommands where it lives via $CARGO, so cargo-cooldown then
+  # runs `cargo-real locate-project` and hits the same wall. Measured: a real
+  # `cargo build` through the wrapper failed with exactly that error, while the
+  # stubbed cargo-cooldown used in earlier tests never invoked cargo and so
+  # never revealed it.
+  #
+  # So cargo-real must work when invoked BY ANY NAME, by whoever. On rustup
+  # hosts it becomes a two-line shim that restores argv[0]=cargo before
+  # exec'ing rustup. On a non-rustup cargo (a genuine binary) a plain rename is
+  # correct and we keep it.
+  #
+  # No gate on "backup absent": if `rustup update` replaced our wrapper with a
+  # fresh cargo, the existing backup is stale and the binary now at this path
+  # is the one worth preserving. Same semantics as the composer/bun wrappers.
+  become: "{{ cargo_wrap_become | default(true) | bool }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      CARGO_PATH='{{ cargo_check.stdout }}'
+      REAL="${CARGO_PATH}-real"
+      TARGET=$(readlink -f "$CARGO_PATH")
+      if [ "$(basename "$TARGET")" = "rustup" ]; then
+        printf '#!/bin/bash\n# supply-chain-hardening: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$TARGET" > "$REAL"
+        chmod 0755 "$REAL"
+        echo shim
+      else
+        mv "$CARGO_PATH" "$REAL"
+        echo moved
+      fi
+    executable: /bin/bash
+  register: cargo_real_prep
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_check.rc == 0
+    - cargo_check.stdout | default('') | length > 0
+    - cargo_binary_kind.stdout | default('') == 'is_real'
+  changed_when: true
+
+- name: Deploy cargo wrapper at the discovered cargo path
+  become: "{{ cargo_wrap_become | default(true) | bool }}"
+  ansible.builtin.template:
+    src: cargo-wrapper.sh.j2
+    dest: "{{ cargo_check.stdout }}"
+    mode: "0755"
+  vars:
+    cargo_real_path: "{{ cargo_check.stdout }}-real"
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_check.rc == 0
+    - cargo_check.stdout | default('') | length > 0
+
+- name: Restore real cargo (when cargo_path_wrapper=false toggled after prior wrap)
+  # Mirror of the prepare step. If the backup is our rustup shim, the original
+  # state was a SYMLINK to rustup, so restore that and drop the shim — moving
+  # the shim into place would work but would silently leave role-managed code
+  # behind on a host that explicitly opted out.
+  become: "{{ cargo_wrap_become | default(true) | bool }}"
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      CARGO_PATH='{{ cargo_check.stdout }}'
+      REAL="${CARGO_PATH}-real"
+      if grep -q 'argv\[0\] shim for the rustup cargo proxy' "$REAL" 2>/dev/null; then
+        TARGET=$(grep -o 'exec -a cargo "[^"]*"' "$REAL" | sed 's/.*"\(.*\)"/\1/')
+        ln -sfn "$TARGET" "$CARGO_PATH"
+        rm -f "$REAL"
+      else
+        mv "$REAL" "$CARGO_PATH"
+      fi
+    executable: /bin/bash
+  when:
+    - not (cargo_path_wrapper | bool)
+    - cargo_check.rc == 0
+    - cargo_check.stdout | default('') | length > 0
+    - cargo_binary_kind.stdout | default('') == 'is_wrapper'
+  changed_when: true
+
+- name: Verify the cooldown backend can actually EXECUTE, and quarantine it if not
+  # "Installed" is not "works". cargo-binstall fetches a prebuilt binary chosen
+  # by target triple, which says nothing about glibc: on Debian 12 (glibc 2.36)
+  # the published cargo-cooldown needs GLIBC_2.39 and dies in the loader.
+  #
+  # That combination is worse than not installing it at all. `command -v
+  # cargo-cooldown` SUCCEEDS for a binary that cannot run, so the wrapper would
+  # route every `cargo build` on the host into it and every build would fail —
+  # a hardening role breaking the toolchain it was meant to protect.
+  #
+  # So: run it. If it cannot execute, move it aside so `command -v` fails, the
+  # wrapper degrades to --locked with its loud warning, and the gap is recorded
+  # below instead of being discovered by a developer whose builds stopped
+  # working. Same lesson as 82ccc19 (verify npq FUNCTIONS, don't just check it
+  # is installed) — the binary being on PATH was never the question.
+  ansible.builtin.shell:
+    cmd: |
+      BIN='{{ cargo_home }}/bin/cargo-cooldown'
+      [ -x "$BIN" ] || { echo absent; exit 0; }
+      if "$BIN" --version >/dev/null 2>&1; then
+        echo works
+      else
+        # VERIFY THE MOVE. An unconditional `echo quarantined` after
+        # `mv ... || true` reports a clean degrade while the broken binary is
+        # still on PATH — the wrapper then routes every build into it and all
+        # cargo builds fail on a host whose run claimed success. $CARGO_HOME is
+        # root-owned on the official rust images, so a non-root apply hits this.
+        if mv -f "$BIN" "$BIN.broken" 2>/dev/null && [ ! -e "$BIN" ]; then
+          echo quarantined
+        else
+          echo quarantine_failed
+        fi
+      fi
+    executable: /bin/bash
+  register: cargo_cooldown_health
+  changed_when: cargo_cooldown_health.stdout | trim == 'quarantined'
+  check_mode: false
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+
+- name: Record skipped protection — cooldown backend present but not runnable
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown was installed but could NOT execute on this host (commonly a prebuilt binary needing a newer glibc than the distro ships). It has been moved to cargo-cooldown.broken so it cannot break every cargo build, and the wrapper has degraded to --locked only. Reinstall from source with `cargo install cargo-cooldown` to restore the age gate.'] }}
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+    - cargo_cooldown_health is defined
+    - cargo_cooldown_health.stdout | default('') | trim == 'quarantined'
+
+- name: Record skipped protection — broken cooldown backend could NOT be quarantined
+  # Worse than a missing gate: the wrapper still finds cargo-cooldown on PATH,
+  # routes every build into a binary that cannot run, and nothing on the host
+  # works. Say so loudly rather than reporting a clean degrade.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown CANNOT EXECUTE and could not be moved aside (permission denied?). The wrapper will route every `cargo build` into a broken binary, so cargo is EFFECTIVELY DISABLED on this host. Remove or repair ' + cargo_home + '/bin/cargo-cooldown, or set cargo_cooldown_enforce=false, immediately.'] }}
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+    - cargo_cooldown_health is defined
+    - cargo_cooldown_health.stdout | default('') | trim == 'quarantine_failed'
+
+- name: Check whether the cooldown backend actually landed
+  ansible.builtin.stat:
+    path: "{{ cargo_home }}/bin/cargo-cooldown"
+  register: cargo_cooldown_bin
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+
+- name: Record skipped protection — cargo publish-age gate (cooldown backend absent)
+  # The wrapper degrades to --locked and warns on every invocation, but that
+  # warning is easy to miss in build output. Surfacing it in the end-of-run
+  # summary is the difference between a known gap and a host that believes it
+  # has an age gate it does not have.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown is not installed, so `cargo build` is NOT age-gated. The wrapper falls back to --locked, which only protects projects that already have a committed Cargo.lock and does nothing for `cargo update`.'] }}
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+    - cargo_cooldown_bin is defined
+    - not (cargo_cooldown_bin.stat.exists | default(false))
+
+- name: Record skipped protection — cargo hardening (cargo absent)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate and --locked enforcement — cargo is not installed, so the wrapper was not deployed.'] }}
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_check.rc != 0
