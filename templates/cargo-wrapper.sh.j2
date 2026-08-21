@@ -27,11 +27,32 @@
 #
 #   2. --locked — when a Cargo.lock exists, forbid cargo from silently
 #      changing resolution to satisfy a build, so a new transitive
-#      dependency is a hard error instead of silent code execution. This
-#      is the control that empirically protected people in the incident:
-#      projects whose committed lockfiles pinned arrayref 0.3.9 never
-#      resolved 0.3.10. It needs no network and no third-party tool, so
-#      it is also the fallback when cargo-cooldown is absent.
+#      dependency is a hard error instead of silent code execution. It
+#      needs no network and no third-party tool, so it is also the
+#      fallback when cargo-cooldown is absent.
+#
+#      BE PRECISE ABOUT WHAT THIS DOES AND DOES NOT DO. It is tempting to
+#      say --locked is what saved people in the incident. It is not:
+#      cargo respects an existing pin by DEFAULT. Measured — a project
+#      whose lockfile pinned arrayref 0.3.9 still had 0.3.9 after a plain
+#      `cargo build` with no flags. The lockfile did that, not the flag.
+#
+#      What --locked adds is a guarantee for the case where cargo WOULD
+#      change the graph. Measured, same project, after Cargo.toml gained a
+#      dependency the lockfile could not satisfy:
+#
+#        without --locked -> build succeeds, 3 packages silently added
+#        with --locked    -> error: cannot update the lock file ...
+#                            because --locked was passed to prevent this
+#
+#      In arrayref terms: blake3 required `arrayref ^0.3.5`, which means
+#      >=0.3.5 <0.4.0, so 0.3.10 satisfied it and cargo takes the NEWEST
+#      match. Anyone resolving fresh in those 86 minutes got it — no
+#      lockfile, `cargo update`, CI without a committed lock, or a
+#      lockfile that had to change. Note Rust LIBRARIES conventionally do
+#      not commit Cargo.lock at all, so that is a large population. When
+#      the graph does shift, proc-macro1 arrives as a NEW entry: silent
+#      without --locked, a hard error with it.
 #
 # WHY A WRAPPER AND NOT CONFIG
 #
