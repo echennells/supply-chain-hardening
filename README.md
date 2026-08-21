@@ -139,7 +139,7 @@ Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm`
 
 ### Install-time malware blocking (Socket Firewall)
 
-[Socket Firewall Free](https://github.com/SocketDev/sfw-free) wraps npm, pip, and cargo to block packages flagged by Socket's threat intelligence in real time. No API key required.
+[Socket Firewall Free](https://github.com/SocketDev/sfw-free) blocks packages flagged by Socket's threat intelligence in real time, with no API key required. Upstream it supports npm, pip and cargo; **this role wires it to npm (via `npm_path_wrapper`) and to cargo (via `cargo_socket_firewall`)**. It requires Node >= 20 in both cases, and it fails open — if it cannot reach Socket it warns, exits 0, and the install proceeds unfiltered. See the Cargo coverage map under Limitations for exactly which paths it does and does not reach.
 
 ### Deno age gate
 
@@ -289,6 +289,27 @@ AI agents install packages unpredictably. You can't control what package manager
   Calibrated against the 2026-08-20 crates.io incident: `arrayref 0.3.10`, published from a compromised maintainer account, added a first-ever dependency on the `proc-macro1` typosquat whose `build.rs` downloaded and ran a remote binary during `cargo build`. It was live for 86 minutes; `internment` and `append-only-vec` were poisoned the same morning, live 90 and 107 minutes. Every window was under two hours, so any age gate ≥ 24h makes all of them unresolvable — and the hosts that were actually spared were the ones whose committed lockfiles pinned `arrayref 0.3.9`. Those are precisely the two controls above.
 
   Neither control helps a project that has no lockfile *and* no cooldown backend installed; `supply-chain-verify` reports that state as `WEAK`, not `OK`.
+
+  **Cargo coverage map.** Every row verified by execution, not inspection. "Gated" means the publish-age gate evaluates the version before any `build.rs` can run.
+
+  | How a crate version reaches your build | Covered? | By what |
+  |---|---|---|
+  | Fresh resolution (`build`/`check`/`test`/`run`/`update`) | Yes | age gate via `cargo cooldown` |
+  | `add` / `remove` / `generate-lockfile` / `fetch` / `vendor` | Yes | re-evaluated after the command, reverted on violation |
+  | `cargo install <crate>` | Yes | publish date checked against crates.io, version pinned |
+  | A `Cargo.lock` **this host** wrote | Yes | gated when it was written |
+  | A `Cargo.lock` from a clone/PR, crate **known-malicious** | Yes | Socket Firewall blocks the download |
+  | A `Cargo.lock` from a clone/PR, crate **fresh and unflagged** | **No** | needs a lockfile-age check in CI (not built) |
+  | `cargo install --git` / `--path` | **No** | no registry publish date exists to gate on |
+  | git / path dependencies, `[patch]`, `[replace]` | **No** | same; needs a `cargo-deny` source allowlist |
+  | Vendored crates committed to the repo | **No** | nothing is downloaded or resolved |
+  | `build.rs` network egress once any build runs | **No** | structural; needs build-time network isolation |
+
+  The last four are not oversights, they are the shape of the problem. The age gate rests on crates.io recording a publish timestamp server-side; a git ref has no publish event, and a commit date is attacker-controlled via `GIT_COMMITTER_DATE`. `[patch]`/`[replace]` redirect a dependency to such a source, and can be set from a repo-local `.cargo/config.toml`. The countermeasure would be a source allowlist — `cargo-deny`'s `[sources]` with `unknown-git = "deny"`. Note two things before assuming you have it: the role's reference `/etc/cargo/deny.toml` is **not auto-applied** (cargo-deny only reads `./deny.toml` in the working directory), and it currently has **no `[sources]` section at all** — only `[advisories]`, `[bans]` and `[licenses]`. So even running it against a project would not close this gap today.
+
+  And the age gate is admission control, not a sandbox. Once any build script runs it is arbitrary code with your privileges: proc-macro1's `build.rs` connected directly to an IP with certificate validation disabled and executed what it downloaded, with no package manager involved. So the gate counters the attacker who publishes malware and is caught within hours — which is most registry attacks, because scanning is fast — and does nothing against one who publishes benign code and waits out the window. Build-time network isolation (`cargo fetch` online, then `cargo build --offline` with no egress) is the control for that, and cargo cannot provide it.
+
+  **Socket Firewall for cargo** (`cargo_socket_firewall`, default on) covers the axis the age gate cannot: it filters the *download* rather than the resolution, so it applies to a lockfile written anywhere, and it never participates in version selection — your lockfile is still authoritative. Two measured caveats: it needs **Node >= 20** like the npm path, and **it fails open** — with no network it warns, exits 0, and the build proceeds unfiltered. A *corrupt* sfw binary instead fails closed and would break every build, so the role runs it at apply time and moves it aside if it cannot execute, degrading to unfiltered rather than leaving cargo unusable. `supply-chain-verify` reports that state as `GAP`, never `OK`.
 
   **Known boundaries of the cargo gate** (found by adversarial review, all verified by execution):
 
