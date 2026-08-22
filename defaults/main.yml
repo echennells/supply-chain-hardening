@@ -316,9 +316,9 @@ cargo_path_wrapper: true
 
 # Enforce the publish-age gate (default on).
 #
-# This is the control that actually prevents the 2026-08-20 arrayref class of
-# attack: compromised account publishes, malicious version lives 86 minutes,
-# gets yanked. A gate of even one day makes it unresolvable.
+# This is the control that prevents the compromised-maintainer class of attack:
+# a malicious version is published, lives for hours, and is yanked. A gate of a
+# day or more makes that window unresolvable.
 #
 # Set false to keep the --locked half of the wrapper while dropping the
 # dependency on cargo-cooldown. Reasons you might: it is a young third-party

@@ -300,7 +300,7 @@
   # discipline as the cooldown backend: run it, and if it cannot run, say so
   # and let the wrapper skip it (the wrapper's own `command -v sfw` guard means
   # an absent sfw is simply not used — cargo keeps working).
-  # DETECTING IS NOT ENOUGH — DISARM IT. Measured: with sfw broken, `cargo
+  # Detecting is not enough; the binary must be disarmed. Measured: with sfw broken, `cargo
   # build` exits 9 on every invocation, and an earlier version of this task
   # merely reported that fact, so re-applying the role left the host's cargo
   # just as broken as before. Moving the binary aside makes the wrapper's

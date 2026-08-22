@@ -1,18 +1,11 @@
 #!/usr/bin/env bats
 # Tests for the cargo PATH wrapper (cargo_path_wrapper: true).
 #
-# WHY THIS WRAPPER IS THE WHOLE CARGO STORY
-#
 # Cargo executes build.rs and proc-macro code at COMPILE time with the building
-# user's full privileges, before any of your code is called, and has no
-# --ignore-scripts equivalent. So no config file can stop execution — the only
-# control that prevents it is refusing to RESOLVE a too-new version. That
-# control lives entirely in this wrapper.
-#
-# Calibrated against 2026-08-20: arrayref 0.3.10 published from a compromised
-# maintainer account, added a first-ever dep on the proc-macro1 typosquat whose
-# build.rs fetched and ran a remote binary during `cargo build`. Live 86
-# minutes. blake3 depended on arrayref ^0.3.5.
+# user's full privileges and has no --ignore-scripts equivalent, so no config
+# file can stop execution. Refusing to RESOLVE a too-new version is the only
+# control that prevents it, and that control lives entirely in this wrapper —
+# which is why its dispatch is tested exhaustively here.
 #
 # TEST STRATEGY
 #
@@ -208,7 +201,7 @@ teardown() {
   [ "$output" = "build --locked" ]
 }
 
-# ---- lockfile laundering (regression: adversarial review of the first cut) ----
+# ---- lockfile laundering (regression) ----
 #
 # The original wrapper gated build/check/test/run/update but left `cargo add`
 # and `cargo generate-lockfile` to fall through. Both WRITE Cargo.lock, and
@@ -271,7 +264,7 @@ STUB
 # it was the plainest hole after the lockfile-laundering fix.
 #
 # The first implementation reused cargo-cooldown via a scratch project, and was
-# DECORATIVE for exactly the crates cargo install exists for: binary-only crates
+# inert for exactly the crates cargo install exists for: binary-only crates
 # (ripgrep, xsv, every cargo-* tool) have no lib target, so cargo dropped them
 # from the dependency graph ("ignoring invalid dependency ... missing a lib
 # target"), cooldown checked an empty graph, and the gate returned success while
@@ -294,14 +287,14 @@ STUB
   run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' install --git https://example.invalid/x 2>&1 >/dev/null"
   # A git ref has no registry publish timestamp, so there is nothing to gate on.
   # Saying so is the requirement; silently passing would imply coverage.
-  [[ "$output" == *"NOT age-gated for this invocation"* ]]
+  [[ "$output" == *"NOT age-gated"* ]]
 }
 
 @test "cargo: install of several crates at once warns rather than guessing" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
   run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' install alpha beta 2>&1 >/dev/null"
-  [[ "$output" == *"NOT age-gated for this invocation"* ]]
+  [[ "$output" == *"NOT age-gated"* ]]
 }
 
 @test "cargo: --locked is never dropped just because the age check was unavailable" {

@@ -1,26 +1,15 @@
 # Cargo publish-age gate — supply-chain-hardening.
 # Managed by ansible-supply-chain-security. Local edits are overwritten.
 #
-# WHY THIS FILE IS THE LOAD-BEARING CARGO PROTECTION
-#
 # Cargo runs build.rs and proc-macro code at COMPILE time with the building
-# user's full privileges, before any of your code is called. Cargo has no
-# --ignore-scripts equivalent (see cargo-config.toml.j2). So the only lever
-# that prevents execution is refusing to RESOLVE the malicious version in
-# the first place. That is what this file does.
+# user's full privileges, before any of your code is called, and has no
+# --ignore-scripts equivalent (see cargo-config.toml.j2). Refusing to RESOLVE
+# a too-new version is therefore the only control that prevents execution.
 #
-# Calibrated against a real incident, 2026-08-20: arrayref 0.3.10 was
-# published from a compromised maintainer account at 07:15:00 UTC and
-# removed at 08:41:40 UTC — an 86-minute window. It added a first-ever
-# dependency on proc-macro1 (a typosquat of proc-macro2) whose build.rs
-# fetched and executed a remote binary during `cargo build`. blake3
-# required arrayref ^0.3.5, so any project resolving arrayref in that
-# window executed the dropper.
-#
-# internment 0.8.7 (90 min) and append-only-vec 0.1.9 (107 min) were
-# poisoned the same morning by the same actor. Every one of those windows
-# is under two hours. A publish-age gate of even ONE DAY makes all of them
-# unresolvable. That is the entire argument for this file.
+# Sizing the window: registry compromises of this class are caught and yanked
+# within hours — the 2026-08-20 crates.io incident poisoned three crates for
+# 86, 90 and 107 minutes respectively. A window of a day or more makes that
+# class unresolvable.
 #
 # CONFIG PRECEDENCE (cargo-cooldown, strongest first)
 #   1. environment variables (COOLDOWN_*)
@@ -47,21 +36,12 @@ incompatible-publish-age = "{{ cargo_cooldown_violation_action }}"
 # time the gate is applied, which is how a security control gets disabled
 # by an irritated developer within the hour.
 #
-# READ THIS BEFORE ASSUMING THE GATE COVERS EVERYTHING. The consequence is
-# that the age gate applies to NEW OR CHANGED RESOLUTIONS, not to versions
-# a lockfile already pins. Measured: with a 99999-day window, a build
-# reusing an existing Cargo.lock succeeds, while the same build with the
-# lockfile removed is refused:
-#
-#   Error: `incompatible-publish-age = "deny"` blocked fresh versions ...
-#     - arrayref 0.3.9 (published: 2024-09-14T12:24:40Z)
-#
-# That division of labour is deliberate and matches the threat. In the
-# 2026-08-20 incident the danger was RESOLVING arrayref 0.3.10, a version
-# no existing lockfile contained — the gate's job. Hosts that already
-# pinned 0.3.9 were never at risk, and keeping them building is the
-# wrapper's --locked half. Neither control has to cover both cases; what
-# matters is that together they leave no gap.
+# Scope: the gate therefore applies to NEW OR CHANGED resolutions, not to
+# versions a lockfile already pins. A build reusing an existing Cargo.lock
+# succeeds even under a window wide enough to reject every crate on the
+# registry; the same build with the lockfile removed is refused. That split
+# is deliberate — resolving a newly published version is the gate's job,
+# and holding an already-pinned one is the wrapper's --locked half.
 lockfile-baseline = "floor"
 
 fallback-accept = "auto"

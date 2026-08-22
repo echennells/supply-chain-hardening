@@ -161,6 +161,44 @@ Same as Axis 1 — the var sets the config but a higher-precedence layer
 the failure mode is "tool doesn't honor your setting" rather than
 "two locations disagree."
 
+### Installed but never invoked
+
+cargo-cooldown was installed by the role for months and never called.
+It only guards commands routed through it explicitly (`cargo cooldown
+build`), which nothing did, so the age gate advertised in the capability
+matrix did not apply to `cargo build`. Installing a tool is not enabling
+it, and `command -v` proves neither.
+
+**Principle**: for every tool the role installs, name the code path that
+invokes it. If there is none, it is a recommendation, not a protection —
+document it as such, or wire it in.
+
+### Present but not runnable
+
+cargo-binstall selects a prebuilt by target triple, which says nothing
+about glibc: on Debian 12 the published cargo-cooldown requires
+GLIBC_2.39 and dies in the loader. `command -v` succeeds for a binary
+that cannot execute. Worse, once a wrapper routes through such a binary,
+every invocation of the wrapped tool fails — a hardening role breaking
+the toolchain it protects.
+
+**Principle**: health-check installed tools by *running* them, not by
+testing for existence. If a tool a wrapper depends on cannot execute,
+move it aside so the wrapper degrades instead of propagating its exit
+code, and record the gap.
+
+### Gated the entry points, missed the state writers
+
+The cargo age gate covered build/check/test/run/update but not `cargo
+add` or `cargo generate-lockfile`. Both write Cargo.lock, and
+`lockfile-baseline = "floor"` makes later gated commands *trust* what
+they wrote. Two ordinary commands therefore defeated the gate — the
+ungated write suppressed the check on every subsequent gated build.
+
+**Principle**: enumerate every command that writes state a later check
+trusts, not just the commands that perform the risky action. An ungated
+writer into trusted state is worse than an ungated reader.
+
 ### Wrong syntax / parser-breaking values
 
 `uv_exclude_newer = "48 hours"` was relative-duration syntax — uv
@@ -246,6 +284,34 @@ to capture the real exit code. The `|| true` idiom belongs in
 production code paths where the rc doesn't matter — not in tests
 where the rc IS the assertion.
 
+### Exit code treated as proof of the mechanism
+
+A cargo gate test scored "non-zero exit" as "the gate refused." The
+build was in fact failing for an unrelated reason (a broken wrapper,
+then a binary that could not load), and the test reported enforcement on
+a run where the gate never executed. A later variant matched the word
+"cooldown" in a linker error and passed again. The inverse also bites:
+after the gate started correctly reverting `cargo add`, the crate was no
+longer a dependency, so `cargo build` exited 0 and the test read that as
+a bypass.
+
+**Principle**: assert the security property, not the exit code. Require
+the specific evidence (the tool's own refusal message, the artifact
+absent, the version not in the lockfile) and explicitly exclude
+infrastructure failures — loader errors, missing binaries, network
+faults — from counting as enforcement.
+
+### Absent signal read as a passing signal
+
+A test-suite summary was computed with `grep -c '^ok '` piped from a
+`docker run` that had failed to start: zero failures, and a pass count
+that was empty rather than a number. Read quickly, "0 failing" looks
+green.
+
+**Principle**: assert the expected total, not just the absence of
+failures. A TAP `1..N` plan line, or comparing the pass count against a
+known count, distinguishes "everything passed" from "nothing ran."
+
 ### Minimum-supported-version testing
 
 A 3-arg `strftime(fmt, time, utc=True)` works on Ansible 2.13+. Ubuntu
@@ -314,13 +380,41 @@ CDN paths.
 
 The npm path detector originally excluded /usr/local/bin entirely to
 avoid recursion; it missed /opt-installed Node where sysadmins symlink
-/usr/local/bin/node → /opt/node-vXX/bin/node. Cargo path detection has
-the same shape risk.
+/usr/local/bin/node → /opt/node-vXX/bin/node.
 
-**Principle**: always `readlink -f` to resolve symlinks. Never trust
-"everyone installs to /usr/local/bin." Marker-aware detection plus
-symlink resolution is the working pattern (see the npm path-wrapper
-plumbing).
+**Principle**: never trust "everyone installs to /usr/local/bin."
+Marker-aware detection plus symlink resolution is the working pattern
+(see the npm path-wrapper plumbing).
+
+**But `readlink -f` is not universally correct.** rustup's
+~/.cargo/bin/cargo is a symlink to the *rustup* binary, which is a shared
+proxy for rustc, clippy, rustfmt and cargo, dispatching on argv[0].
+Resolving canonically and wrapping the target would replace every Rust
+tool at once. Two consequences, both measured:
+
+- Wrap the invocation path, not the canonical target, when the target is
+  a multiplexer.
+- A renamed backup breaks argv[0] dispatch: `cargo-real` is rejected with
+  `unknown proxy name: 'cargo-real'`. The backup has to restore the name
+  (`exec -a cargo`), and it has to do so when invoked *by any caller* —
+  cargo passes subcommands its own path via `$CARGO`, so cargo-cooldown
+  ran `cargo-real locate-project` and hit the same wall.
+
+**Principle**: `readlink -f` for detection, but check whether the
+resolved target is a shared proxy before wrapping it. Preserve argv[0]
+for anything that dispatches on it.
+
+### Assumed canonical config homes
+
+Cargo reads config from `$CARGO_HOME`, not `~/.cargo`. The official rust
+images set it to /usr/local/cargo and CI runners point it at a cache
+volume. A cooldown.toml written to ~/.cargo on such a host is present,
+correct and never read.
+
+**Principle**: resolve the tool's config home from the tool's own
+environment (`${CARGO_HOME:-$HOME/.cargo}`), never from the default path.
+Applies equally to NPM_CONFIG_USERCONFIG, PIP_CONFIG_FILE, COMPOSER_HOME,
+GRADLE_USER_HOME, BUNDLE_USER_CONFIG.
 
 ---
 

@@ -20,8 +20,7 @@ Apply it to a bare host, inside a sandbox, or to a container image — anywhere 
 | **Lockfile enforcement** | | | | | | | x | x | | x | | | |
 
 `*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH
-wrapper. Before 2026-08 the crate was installed but never invoked, so the gate
-did not apply to `cargo build` — see "Cargo" below.
+wrapper. See "Cargo" under Limitations for its coverage map.
 
 ### Container image hardening (Podman)
 
@@ -286,15 +285,15 @@ AI agents install packages unpredictably. You can't control what package manager
 
   Because execution cannot be blocked, the role attacks the step before it: **refusing to resolve the malicious version at all.** The cargo PATH wrapper routes `build`/`check`/`test`/`run`/`update` through `cargo cooldown` (publish-age gate, default 48h from `release_age_hours`) and injects `--locked` whenever a `Cargo.lock` is present, so a build can never silently change dependency resolution.
 
-  Calibrated against the 2026-08-20 crates.io incident: `arrayref 0.3.10`, published from a compromised maintainer account, added a first-ever dependency on the `proc-macro1` typosquat whose `build.rs` downloaded and ran a remote binary during `cargo build`. It was live for 86 minutes; `internment` and `append-only-vec` were poisoned the same morning, live 90 and 107 minutes. Every window was under two hours, so any age gate ≥ 24h makes all of them unresolvable.
+  **Why an age gate works on this threat.** Registry compromises of this class are caught and yanked within hours — in the 2026-08-20 crates.io incident, `arrayref`, `internment` and `append-only-vec` were poisoned for 86, 90 and 107 minutes respectively. A window of 24h or more makes that class unresolvable.
 
-  `blake3` required `arrayref ^0.3.5` — that is `>=0.3.5, <0.4.0`, so `0.3.10` satisfied it, and cargo takes the **newest** match. Anyone resolving fresh in those 86 minutes picked it up transitively without ever naming arrayref themselves. "Resolving fresh" means no lockfile, `cargo update`, CI without a committed lock, or a lockfile that had to change — and note Rust **libraries conventionally do not commit `Cargo.lock`** at all, which is a large population.
+  **Why transitive dependencies matter more than direct ones.** A caret requirement resolves to the newest match: `blake3` required `arrayref ^0.3.5`, i.e. `>=0.3.5, <0.4.0`, which the malicious `0.3.10` satisfied. Projects picked it up without naming arrayref anywhere in their own manifest.
 
-  Be precise about what `--locked` contributes here, because it is easy to overstate. Cargo respects an existing pin **by default**: measured, a project whose lockfile pinned `arrayref 0.3.9` still had `0.3.9` after a plain `cargo build` with no flags. The lockfile did that, not the flag. What `--locked` adds is a guarantee for the case where cargo *would* change the graph — same project, after `Cargo.toml` gained a dependency the lockfile could not satisfy: without it the build succeeds and three packages are silently added; with it, `error: cannot update the lock file ... because --locked was passed to prevent this`. In arrayref terms, `proc-macro1` arrives as a **new** entry when the graph shifts: silent without `--locked`, a hard error with it.
+  **What `--locked` does and does not cover.** Cargo respects an existing pin by default, so `--locked` does not protect an unchanged lockfile — it constrains the case where cargo *would* change the graph, turning a silently added dependency into `error: cannot update the lock file`. Anything that re-resolves — no lockfile, `cargo update`, CI without a committed lock, a manifest change — takes the newest published version. Rust **libraries conventionally do not commit `Cargo.lock`**, so they re-resolve on every build.
 
   Neither control helps a project that has no lockfile *and* no cooldown backend installed; `supply-chain-verify` reports that state as `WEAK`, not `OK`.
 
-  **Cargo coverage map.** Every row verified by execution, not inspection. "Gated" means the publish-age gate evaluates the version before any `build.rs` can run.
+  **Cargo coverage map.** Each row verified by execution. "Gated" means the publish-age gate evaluates the version before any `build.rs` can run.
 
   | How a crate version reaches your build | Covered? | By what |
   |---|---|---|
@@ -315,7 +314,7 @@ AI agents install packages unpredictably. You can't control what package manager
 
   **Socket Firewall for cargo** (`cargo_socket_firewall`, default on) covers the axis the age gate cannot: it filters the *download* rather than the resolution, so it applies to a lockfile written anywhere, and it never participates in version selection — your lockfile is still authoritative. Two measured caveats: it needs **Node >= 20** like the npm path, and **it fails open** — with no network it warns, exits 0, and the build proceeds unfiltered. A *corrupt* sfw binary instead fails closed and would break every build, so the role runs it at apply time and moves it aside if it cannot execute, degrading to unfiltered rather than leaving cargo unusable. `supply-chain-verify` reports that state as `GAP`, never `OK`.
 
-  **Known boundaries of the cargo gate** (found by adversarial review, all verified by execution):
+  **Known boundaries of the cargo gate**, each verified by execution:
 
   - **A `Cargo.lock` you did not generate is trusted.** `lockfile-baseline = "floor"` accepts versions an existing lockfile already pins, so a branch or PR that ships its own lockfile pinning a fresh crate will build. This is not a regression — stock cargo trusts lockfiles unconditionally and applies no age check at all — but it means **reviewing lockfile diffs in PRs is load-bearing**, exactly as the crates.io advisory recommends. Locally-written lockfiles are covered: every command that writes one (`add`, `remove`, `generate-lockfile`, `fetch`, `vendor`) is re-evaluated through the gate and reverted on violation.
   - **`SUPPLY_CHAIN_CARGO_WRAPPED=1` disables the wrapper** for that invocation. It exists to break the cooldown→cargo→cooldown recursion and cannot simply be removed. It is also inherited by build scripts, so a nested `cargo` call from a `build.rs` is unguarded — though a build script already has arbitrary execution by then.

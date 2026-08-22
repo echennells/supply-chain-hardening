@@ -9,10 +9,9 @@
   # volume. Hardcoding ~/.cargo deploys a config file the tool will never read:
   # present on disk, correct in content, completely inert.
   #
-  # Caught by supply-chain-verify reporting `window <unset>` while cooldown.toml
-  # sat happily in /root/.cargo on an image where CARGO_HOME=/usr/local/cargo.
-  # That is the same defect class as the npm false OK (5522373) — believing a
-  # config we wrote is a config the tool honours.
+  # Measured consequence: on an image with CARGO_HOME=/usr/local/cargo, a
+  # cooldown.toml written to /root/.cargo is never read and the gate runs with
+  # no window configured.
   ansible.builtin.shell:
     cmd: 'echo "${CARGO_HOME:-$HOME/.cargo}"'
     executable: /bin/bash
