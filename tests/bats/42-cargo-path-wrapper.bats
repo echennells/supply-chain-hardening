@@ -61,6 +61,28 @@ teardown() {
   return 0
 }
 
+# ---- the wrapper must be valid shell ----
+#
+# A quoting error here does not degrade gracefully: the wrapper IS cargo, so an
+# unparseable script means every cargo invocation on the host dies with a bash
+# syntax error. This happened once — an embedded `python3 -c '...'` block gained
+# a single-quoted Python string, which closed the shell quote early. The
+# deployed artifact is checked, not the template, so a bad render is caught too.
+
+@test "cargo: the deployed wrapper is syntactically valid bash" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  run bash -n "$(cargo_path)"
+  [ "$status" -eq 0 ]
+}
+
+@test "cargo: no single quotes inside the embedded python block" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  # The block is delimited by python3 -c '...', so a single quote in the Python
+  # terminates it. Count quotes strictly between the delimiters.
+  run bash -c "awk \"/python3 -c '/{f=1;next} f&&/^' /{f=0} f\" '$(cargo_path)' | grep -c \"'\" || true"
+  [ "$output" = "0" ]
+}
+
 # ---- deployment ----
 
 @test "cargo: wrapper is deployed at the discovered cargo path" {

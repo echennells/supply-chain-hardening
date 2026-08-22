@@ -183,14 +183,22 @@
   # NOTE: `startswith` is a Python str method reached through Jinja, NOT an
   # Ansible filter. Writing it as `| startswith(...)` raises "Could not load
   # 'startswith'" and aborts the play.
+  #
+  # Not gated on cargo_path_wrapper: the restore path needs the same answer
+  # when the wrapper is being turned off, and would otherwise fall back to
+  # become: true and escalate unnecessarily against a user-owned ~/.cargo.
   ansible.builtin.set_fact:
     cargo_wrap_become: "{{ not (cargo_check.stdout | default('')).startswith(ansible_env.HOME) }}"
   when:
-    - cargo_path_wrapper | bool
     - cargo_check.rc == 0
     - cargo_check.stdout | default('') | length > 0
 
 - name: Determine whether current cargo binary is our wrapper or the real binary
+  # NOT gated on cargo_path_wrapper. The restore task below needs this fact
+  # precisely when the wrapper has been turned OFF, and gating it on the same
+  # var left cargo_binary_kind undefined in that case — so the restore
+  # condition could never match and `cargo_path_wrapper=false` silently did
+  # nothing. The documented off-switch was dead code.
   ansible.builtin.shell:
     cmd: |
       if grep -q 'supply-chain-hardening' '{{ cargo_check.stdout }}' 2>/dev/null; then
@@ -203,7 +211,6 @@
   changed_when: false
   check_mode: false
   when:
-    - cargo_path_wrapper | bool
     - cargo_check.rc == 0
     - cargo_check.stdout | default('') | length > 0
 

@@ -282,10 +282,25 @@ gate_cargo_install() {
       -H 'User-Agent: supply-chain-hardening (cargo install age gate)' \
       "https://crates.io/api/v1/crates/${crate}/versions" 2>/dev/null \
     | python3 -c '
-import sys, json, datetime
+import sys, json, datetime, re
 try:
     want = sys.argv[1] or None
+    # Read the window from cooldown.toml so `cargo install` and the gated
+    # build/test/run commands cannot disagree. The rendered release_age_hours
+    # is only the fallback: baking it in meant an edited or differently
+    # generated cooldown.toml applied to builds but not to installs.
     min_h = float(sys.argv[2])
+    try:
+        for line in open(sys.argv[3]):
+            if "global-min-publish-age" in line and "=" in line:
+                parts = line.split("=", 1)[1].strip().strip(chr(34)).split()
+                mult = {"hour": 1.0, "day": 24.0, "minute": 1/60.0,
+                        "week": 168.0}.get(parts[-1].rstrip("s").lower())
+                if mult and len(parts) >= 2:
+                    min_h = float(parts[0]) * mult
+                break
+    except Exception:
+        pass
     vs = [v for v in json.load(sys.stdin).get("versions", []) if not v.get("yanked")]
     if not vs:
         print("ERR"); raise SystemExit
@@ -302,7 +317,7 @@ except SystemExit:
     raise
 except Exception:
     print("ERR")
-' "$want" '{{ release_age_hours | int }}' 2>/dev/null)
+' "$want" '{{ release_age_hours | int }}' "${CARGO_HOME:-$HOME/.cargo}/cooldown.toml" 2>/dev/null)
 
   case "$verdict" in
     "OK "*)
@@ -311,7 +326,7 @@ except Exception:
     "TOO_NEW "*)
       ver=$(printf '%s' "$verdict" | cut -d" " -f2)
       age=$(printf '%s' "$verdict" | cut -d" " -f3)
-      echo "[supply-chain-hardening] REFUSING 'cargo install $spec': ${crate} ${ver} was published ${age} hours ago, inside the {{ release_age_hours | int }}-hour publish-age window." >&2
+      echo "[supply-chain-hardening] REFUSING 'cargo install $spec': ${crate} ${ver} was published ${age} hours ago, inside the publish-age window." >&2
       echo "[supply-chain-hardening] To override: cargo install ${crate}@<older-version>, or add an allow rule to \$CARGO_HOME/cooldown.toml." >&2
       exit 1
       ;;
