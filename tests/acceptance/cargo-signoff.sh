@@ -114,14 +114,23 @@ fi
 [ -f Cargo.lock ] && bad "a lockfile was written despite the refusal" \
                   || ok "nothing written on refusal (prior state preserved)"
 
-# cargo install is the newest and least-exercised path.
-out=$(timeout 900 cargo install --debug --force ripgrep@13.0.0 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'REFUSING'; then
-  ok "cargo install refused under the wide window"
-  eviden "$(printf '%s' "$out" | grep -i REFUSING | head -1 | cut -c1-150)"
+# A global flag before the subcommand must NOT bypass the gate. This was a
+# real, silent, total bypass: `cargo -q build` matched no case, fell through
+# with no controls and no warning, while the verifier reported OK.
+rm -f Cargo.lock; rm -rf target
+out=$(timeout 900 cargo -q build 2>&1); rc=$?
+if printf '%s' "$out" | grep -qiE 'GLIBC|loading shared|unknown proxy name|syntax error'; then
+  bad "'cargo -q build' failed for INFRASTRUCTURE reasons, not the gate"
+  eviden "$(printf '%s' "$out" | head -1 | cut -c1-150)"
+elif [ "$rc" -eq 0 ]; then
+  bad "'cargo -q build' SUCCEEDED under a 99999-day window — a leading flag bypasses the gate"
+  eviden "exit 0 while bare 'cargo build' was refused"
+elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
+  ok "'cargo -q build' is gated identically to 'cargo build'"
+  eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh|publish.?age' | head -1 | cut -c1-130)"
 else
-  bad "cargo install NOT refused (exit $rc)"
-  eviden "$(printf '%s' "$out" | grep -iE 'Installed package|error' | head -1 | cut -c1-150)"
+  bad "'cargo -q build' failed, but not with a gate message (exit \$rc)"
+  eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
 fi
 
 cp /tmp/cooldown.bak "$CH/cooldown.toml"

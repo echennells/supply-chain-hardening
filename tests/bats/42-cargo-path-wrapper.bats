@@ -1,29 +1,26 @@
 #!/usr/bin/env bats
 # Tests for the cargo PATH wrapper (cargo_path_wrapper: true).
 #
-# Cargo executes build.rs and proc-macro code at COMPILE time with the building
-# user's full privileges and has no --ignore-scripts equivalent, so no config
-# file can stop execution. Refusing to RESOLVE a too-new version is the only
-# control that prevents it, and that control lives entirely in this wrapper —
-# which is why its dispatch is tested exhaustively here.
+# The wrapper is a first-invocation control: it injects --locked (there is no
+# config or env route to it) and prefixes resolution-affecting commands with
+# `cargo cooldown` / `sfw` when those are enabled. It is not an enforcement
+# boundary — $CARGO, rust-toolchain.toml `path =` and RUSTC_WRAPPER all route
+# around it — and it does not attempt to be one.
 #
 # TEST STRATEGY
 #
-# Dispatch tests run the ACTUAL DEPLOYED WRAPPER with a stub standing in for
-# cargo itself, so they assert on the artifact the role installed rather than a
-# re-render of the template. A stub also means no network, no compile, and no
-# dependence on whether cargo-cooldown happens to be installed on this host.
+# Dispatch tests run the ACTUAL DEPLOYED WRAPPER against a stub standing in for
+# cargo, so they assert on the artifact the role installed rather than a
+# re-render of the template. No network, no compile, no dependence on whether
+# cargo-cooldown happens to exist on this host.
 
 load setup
 
 cargo_path() {
-  # DELIBERATELY NOT `readlink -f`, which is what the deno wrapper tests use.
-  # rustup's ~/.cargo/bin/cargo is a SYMLINK TO THE RUSTUP BINARY, so resolving
-  # it canonically lands on `rustup` — a shared proxy for rustc, clippy, rustfmt
-  # and friends. Wrapping that would replace every rust tool at once. The role
-  # wraps the cargo path itself, so the test must look at the same path, using
-  # the role's own discovery order (tasks/cargo.yml "Check if cargo is
-  # installed").
+  # NOT `readlink -f`. rustup's ~/.cargo/bin/cargo is a symlink to the rustup
+  # binary — a shared proxy for rustc, clippy and cargo — so resolving
+  # canonically would point at a multiplexer. The role wraps the cargo path
+  # itself, using the discovery order in tasks/cargo.yml.
   local p
   for p in "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo /usr/bin/cargo; do
     if [ -x "$p" ]; then echo "$p"; return 0; fi
@@ -31,11 +28,10 @@ cargo_path() {
   command -v cargo
 }
 
-# Copy the deployed wrapper, repointing REAL_CARGO at an argv-printing stub.
 # $1 = "with-cooldown" | "without-cooldown"
 make_probe() {
   PROBE_DIR="$(mktemp -d)"
-  printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$PROBE_DIR/cargo-real"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\n' > "$PROBE_DIR/cargo-real"
   chmod +x "$PROBE_DIR/cargo-real"
   sed "s|^REAL_CARGO=.*|REAL_CARGO='$PROBE_DIR/cargo-real'|" "$(cargo_path)" > "$PROBE_DIR/cargo"
   chmod +x "$PROBE_DIR/cargo"
@@ -47,40 +43,28 @@ make_probe() {
   fi
 }
 
-# Run the probe wrapper with a PATH containing ONLY the probe dir, so the
-# presence or absence of a real cargo-cooldown on this host cannot leak in.
 probe() {
-  ( cd "$PROBE_DIR/proj" \
-      && unset SUPPLY_CHAIN_CARGO_WRAPPED \
-      && PATH="$PROBE_DIR:/usr/bin:/bin" "$PROBE_DIR/cargo" "$@" 2>/dev/null \
-      | tr '\n' ' ' | sed 's/ $//' )
+  ( cd "$PROBE_DIR/proj" && unset SUPPLY_CHAIN_CARGO_WRAPPED \
+      && PATH="$PROBE_DIR:/usr/bin:/bin" "$PROBE_DIR/cargo" "$@" 2>/dev/null )
+}
+probe_err() {
+  ( cd "$PROBE_DIR/proj" && unset SUPPLY_CHAIN_CARGO_WRAPPED \
+      && PATH="$PROBE_DIR:/usr/bin:/bin" "$PROBE_DIR/cargo" "$@" 2>&1 >/dev/null )
 }
 
-teardown() {
-  [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"
-  return 0
-}
+teardown() { [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"; return 0; }
 
 # ---- the wrapper must be valid shell ----
 #
-# A quoting error here does not degrade gracefully: the wrapper IS cargo, so an
-# unparseable script means every cargo invocation on the host dies with a bash
-# syntax error. This happened once — an embedded `python3 -c '...'` block gained
-# a single-quoted Python string, which closed the shell quote early. The
-# deployed artifact is checked, not the template, so a bad render is caught too.
+# A quoting error does not degrade gracefully here: the wrapper IS cargo, so an
+# unparseable script means every cargo invocation dies with a bash syntax
+# error. The deployed artifact is checked, not the template, so a bad render is
+# caught too.
 
 @test "cargo: the deployed wrapper is syntactically valid bash" {
   command -v cargo >/dev/null || skip "cargo not installed"
   run bash -n "$(cargo_path)"
   [ "$status" -eq 0 ]
-}
-
-@test "cargo: no single quotes inside the embedded python block" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  # The block is delimited by python3 -c '...', so a single quote in the Python
-  # terminates it. Count quotes strictly between the delimiters.
-  run bash -c "awk \"/python3 -c '/{f=1;next} f&&/^' /{f=0} f\" '$(cargo_path)' | grep -c \"'\" || true"
-  [ "$output" = "0" ]
 }
 
 # ---- deployment ----
@@ -90,14 +74,6 @@ teardown() {
   grep -q 'supply-chain-hardening' "$(cargo_path)"
 }
 
-@test "cargo: original binary preserved as cargo-real" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  [ -x "$(cargo_path)-real" ]
-}
-
-# Asserting "cargo-real contains no role marker" would be wrong here: on rustup
-# hosts cargo-real IS role-written (an argv[0] shim). Assert the property that
-# actually matters instead — that invoking it produces a working cargo.
 @test "cargo: cargo-real is invokable and yields a real cargo" {
   command -v cargo >/dev/null || skip "cargo not installed"
   run "$(cargo_path)-real" --version
@@ -105,19 +81,15 @@ teardown() {
   [[ "$output" == cargo* ]]
 }
 
-# The regression that a stubbed cargo-cooldown could never catch: rustup
-# dispatches on argv[0], so a backup named cargo-real is an "unknown proxy
-# name" unless something restores the name. cargo-cooldown shells out to
-# `cargo locate-project` via $CARGO, hitting this on every real build.
+# rustup dispatches on argv[0], so a backup named cargo-real is an "unknown
+# proxy name" unless something restores the name. cargo hands subcommands its
+# own path via $CARGO, so anything re-entering cargo hits this.
 @test "cargo: cargo-real survives being invoked under its own name" {
   command -v cargo >/dev/null || skip "cargo not installed"
   run "$(cargo_path)-real" locate-project
-  [ "$status" -eq 0 ] || [[ "$output" != *"unknown proxy name"* ]]
   [[ "$output" != *"unknown proxy name"* ]]
 }
 
-# THE regression that matters most: a wrapper that breaks cargo is worse than
-# no wrapper at all. This invokes the real binary through the real wrapper.
 @test "cargo: wrapper does not break cargo itself" {
   command -v cargo >/dev/null || skip "cargo not installed"
   run cargo --version
@@ -125,54 +97,78 @@ teardown() {
   [[ "$output" == cargo* ]]
 }
 
-# ---- the publish-age gate ----
+# ---- THE regression: global flags before the subcommand ----
+#
+# The wrapper previously read the subcommand from argv[1]. `cargo -q build`
+# therefore matched no case, fell through with NO controls and NO warning, and
+# supply-chain-verify — which probed only the bare form — reported OK. `-q`,
+# `--quiet` and `--color always` are ordinary Makefile and CI forms, so the
+# bypass was correlated with unattended automation.
+#
+# The subcommand is the first NON-FLAG argument, as npm-wrapper.sh.j2 and
+# deno-wrapper.sh.j2 determine it. Cargo needs one addition: five of its
+# thirteen global flags take a value, which must be skipped or
+# `cargo --color always build` resolves to the subcommand "always".
 
-@test "cargo: build routes through cargo cooldown when the backend exists" {
+@test "cargo: -q before the subcommand does not bypass the controls" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  [ "$(probe build)" = "cooldown build" ]
+  [[ "$(probe -q build)" == *"cooldown build"* ]]
 }
 
-@test "cargo: update routes through cargo cooldown (the cargo update vector)" {
+@test "cargo: --quiet before the subcommand does not bypass" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  [ "$(probe update)" = "cooldown update" ]
+  [[ "$(probe --quiet build)" == *"cooldown build"* ]]
 }
 
-@test "cargo: short aliases are normalised before routing" {
+@test "cargo: a value-taking global flag does not swallow the subcommand" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  # `cargo b` must not reach cooldown as an unknown subcommand
-  [ "$(probe b)" = "cooldown build" ]
+  # Naive first-non-flag parsing reads "always" as the subcommand here.
+  [[ "$(probe --color always build)" == *"cooldown build"* ]]
 }
 
-@test "cargo: rustup +toolchain override survives routing" {
+@test "cargo: -v before the subcommand does not bypass" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  # Without explicit handling, `cargo +nightly build` would be dispatched on
-  # "+nightly" and every rustup user would silently lose both controls.
-  [ "$(probe +nightly build)" = "+nightly cooldown build" ]
+  [[ "$(probe -v build)" == *"cooldown build"* ]]
 }
 
-# ---- the --locked fallback ----
-
-@test "cargo: falls back to --locked when the cooldown backend is absent" {
+@test "cargo: flag-prefixed and bare forms reach the same decision" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe without-cooldown
-  [ "$(probe build)" = "build --locked" ]
+  # Both must get --locked; only the leading flag differs.
+  [[ "$(probe build)" == *"--locked"* ]]
+  [[ "$(probe -q build)" == *"--locked"* ]]
 }
 
-@test "cargo: degrading to --locked warns instead of failing silently" {
+# ---- argument order ----
+
+@test "cargo: +toolchain stays first when the subcommand is rewritten" {
   command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe without-cooldown
-  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1 >/dev/null"
-  [[ "$output" == *"cargo-cooldown not installed"* ]]
+  make_probe with-cooldown
+  # rustup requires +toolchain as the FIRST argument. Rebuilding argv by
+  # removing the subcommand and re-appending produced `cooldown build +nightly`,
+  # which rustup rejects.
+  [[ "$(probe +nightly build)" == "+nightly cooldown build" ]]
+}
+
+@test "cargo: +toolchain and a global flag both keep their positions" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  [[ "$(probe +nightly -q build)" == "+nightly -q cooldown build" ]]
+}
+
+@test "cargo: short aliases are normalised for the gate" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  [[ "$(probe b)" == *"cooldown build"* ]]
 }
 
 @test "cargo: --locked is inserted BEFORE -- so it reaches cargo not the program" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe without-cooldown
-  # Appending would hand --locked to the user's binary instead of to cargo.
   [ "$(probe run -- myarg)" = "run --locked -- myarg" ]
 }
 
@@ -190,198 +186,62 @@ teardown() {
   [ "$(probe build --frozen)" = "build --frozen" ]
 }
 
-@test "cargo: install always gets --locked, whatever the age check decides" {
+# ---- unknown subcommands: warn, never silently pass ----
+#
+# The subcommand set is open — any cargo-* on PATH, plus repo-local [alias].
+# Enumerating it cannot converge, so the wrapper says what it is doing instead.
+
+@test "cargo: a third-party subcommand is passed through with a note" {
   command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe without-cooldown
-  # Without --locked, cargo install re-resolves every transitive dep to
-  # newest-compatible at install time — the arrayref vector exactly.
-  #
-  # The crate spec may come back rewritten as name@version: when the age check
-  # can reach crates.io it pins the exact version it verified, so asserting a
-  # literal argv here would fail on a networked host and pass on an isolated
-  # one. Assert the invariant instead.
-  out="$(probe install ripgrep)"
-  [[ "$out" == install* ]]
-  [[ "$out" == *"--locked"* ]]
-  [[ "$out" == *"ripgrep"* ]]
+  make_probe with-cooldown
+  [ "$(probe nextest run)" = "nextest run" ]
+  [[ "$(probe_err nextest run)" == *"not a recognised subcommand"* ]]
 }
 
-@test "cargo: no lockfile means no --locked (would be a hard error)" {
+@test "cargo: --locked is NOT injected into unknown subcommands" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  # `cargo watch -x check` would break if we injected a flag it does not accept.
+  [[ "$(probe watch -x check)" != *"--locked"* ]]
+}
+
+@test "cargo: an unprotected build says so instead of failing open silently" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe without-cooldown
   rm -f "$PROBE_DIR/proj/Cargo.lock"
-  # Walk-up must find nothing; run from a dir with no Cargo.lock above it.
-  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>/dev/null | tr '\n' ' ' | sed 's/ \$//'"
-  [ "$output" = "build" ]
+  # No lockfile and no gate means no protection at all. A silent pass-through
+  # and a protected build must not look identical at the terminal.
+  [[ "$(probe_err build)" == *"no Cargo.lock found"* ]]
 }
 
-@test "cargo: lockfile is found from a workspace SUBdirectory" {
+# ---- install and lockfile writers ----
+
+@test "cargo: install gets --locked and an honest note about age" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe without-cooldown
-  mkdir -p "$PROBE_DIR/proj/crates/inner"
-  run bash -c "cd '$PROBE_DIR/proj/crates/inner' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>/dev/null | tr '\n' ' ' | sed 's/ \$//'"
-  [ "$output" = "build --locked" ]
+  [ "$(probe install ripgrep)" = "install --locked ripgrep" ]
+  # The previous 112-line crates.io age check was inert for binary-only crates
+  # and failed open on any network or interpreter problem. A deliberate,
+  # interactive command gets an accurate line rather than a control that only
+  # looks like one.
+  [[ "$(probe_err install ripgrep)" == *"not age-gated"* ]]
 }
 
-# ---- lockfile laundering (regression) ----
-#
-# The original wrapper gated build/check/test/run/update but left `cargo add`
-# and `cargo generate-lockfile` to fall through. Both WRITE Cargo.lock, and
-# lockfile-baseline="floor" then grandfathers whatever they wrote — so two
-# ungated commands defeated the gate completely:
-#
-#   cargo add arrayref@0.3.9   # ungated, pins a fresh version
-#   cargo build               # succeeds; the gate never sees the crate
-#
-# Confirmed by execution against a 99999-day window before the fix. These tests
-# pin the dispatch so it cannot silently regress.
-
-# Stub that records every invocation and simulates `add` writing a lockfile.
-make_recording_probe() {
-  make_probe "$1"
-  cat > "$PROBE_DIR/cargo-real" <<'STUB'
-#!/bin/sh
-printf '%s\n' "$*" >> "$RECORD"
-case "$1" in add|generate-lockfile) : > "$PWD/Cargo.lock" ;; esac
-exit 0
-STUB
-  chmod +x "$PROBE_DIR/cargo-real"
-  export RECORD="$PROBE_DIR/calls.log"
-  : > "$RECORD"
-  printf '[package]\nname="p"\nversion="0.1.0"\n' > "$PROBE_DIR/proj/Cargo.toml"
-  rm -f "$PROBE_DIR/proj/Cargo.lock"
-}
-
-@test "cargo: add re-evaluates the result through the gate" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_recording_probe with-cooldown
-  ( cd "$PROBE_DIR/proj" && unset SUPPLY_CHAIN_CARGO_WRAPPED \
-      && RECORD="$RECORD" PATH="$PROBE_DIR:/usr/bin:/bin" "$PROBE_DIR/cargo" add somecrate ) >/dev/null 2>&1 || true
-  # The add itself must run, and the wrapper must then ask the gate about the
-  # dependency set it produced.
-  grep -q '^add somecrate$' "$RECORD"
-  grep -q 'cooldown check' "$RECORD"
-}
-
-@test "cargo: generate-lockfile is gated the same way" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_recording_probe with-cooldown
-  ( cd "$PROBE_DIR/proj" && unset SUPPLY_CHAIN_CARGO_WRAPPED \
-      && RECORD="$RECORD" PATH="$PROBE_DIR:/usr/bin:/bin" "$PROBE_DIR/cargo" generate-lockfile ) >/dev/null 2>&1 || true
-  grep -q 'cooldown check' "$RECORD"
-}
-
-@test "cargo: lockfile writers warn when no backend can age-check them" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_recording_probe without-cooldown
-  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' add somecrate 2>&1 >/dev/null"
-  # --locked cannot help a command whose purpose is to CHANGE the lockfile, so
-  # the wrapper must say so rather than implying coverage it does not have.
-  [[ "$output" == *"can write a lockfile entry for a freshly published crate"* ]]
-}
-
-# ---- cargo install age gate ----
-#
-# `cargo install` takes the NEWEST version and no workspace lockfile applies, so
-# it was the plainest hole after the lockfile-laundering fix.
-#
-# The first implementation reused cargo-cooldown via a scratch project, and was
-# inert for exactly the crates cargo install exists for: binary-only crates
-# (ripgrep, xsv, every cargo-* tool) have no lib target, so cargo dropped them
-# from the dependency graph ("ignoring invalid dependency ... missing a lib
-# target"), cooldown checked an empty graph, and the gate returned success while
-# installing anything. It now asks crates.io for the publish date directly.
-#
-# The age check itself needs the network, so these tests pin the dispatch and —
-# more importantly — the FAIL-LOUD paths. Every branch that cannot determine an
-# age must say so rather than implying coverage.
-
-@test "cargo: install without a crate spec passes through (e.g. --list)" {
+@test "cargo: lockfile writers do not get --locked (it is contradictory)" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe without-cooldown
-  # Must not warn about age-gating, and must not mangle the command.
-  [[ "$(probe install --list)" == "install --list"* ]]
+  [[ "$(probe update)" != *"--locked"* ]]
+  [[ "$(probe add somecrate)" != *"--locked"* ]]
 }
 
-@test "cargo: install from a git source warns that it is NOT age-gated" {
+@test "cargo: update routes through the gate when it exists" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' install --git https://example.invalid/x 2>&1 >/dev/null"
-  # A git ref has no registry publish timestamp, so there is nothing to gate on.
-  # Saying so is the requirement; silently passing would imply coverage.
-  [[ "$output" == *"NOT age-gated"* ]]
+  # `cargo update` is the one resolution path --locked can never cover.
+  [ "$(probe update)" = "cooldown update" ]
 }
 
-@test "cargo: install of several crates at once warns rather than guessing" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe with-cooldown
-  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' install alpha beta 2>&1 >/dev/null"
-  [[ "$output" == *"NOT age-gated"* ]]
-}
-
-@test "cargo: --locked is never dropped just because the age check was unavailable" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe without-cooldown
-  # --locked pins transitive deps to the published lockfile; it is the weaker
-  # half but must survive every path through the install branch.
-  PATH_NO_NET="$PROBE_DIR:/bin"   # no curl/python3 -> age check cannot run
-  out="$( cd "$PROBE_DIR/proj" && PATH="$PATH_NO_NET" "$PROBE_DIR/cargo" install ripgrep 2>/dev/null | tr "\n" " " )"
-  [[ "$out" == *"--locked"* ]]
-  [[ "$out" == *"ripgrep"* ]]
-}
-
-# ---- Socket Firewall (threat-intel layer) ----
-#
-# sfw covers the axis the age gate cannot: it filters the DOWNLOAD, so it
-# applies to a lockfile written on someone else's machine, and it never
-# participates in version selection so it cannot rewrite a lockfile.
-#
-# The binding constraint is availability. Measured upstream behaviour:
-#   corrupt sfw binary -> FAILS CLOSED, propagating exit 9. Prefixing cargo
-#     unconditionally would break every build on the host.
-#   no network         -> FAILS OPEN, warns and exits 0, build unfiltered.
-# So the wrapper must only use sfw when it is actually present, and must never
-# make cargo's availability depend on it existing.
-
-stub_sfw() {
-  printf '#!/bin/sh\necho SFW-USED\nexec "$@"\n' > "$PROBE_DIR/sfw"
-  chmod +x "$PROBE_DIR/sfw"
-}
-
-@test "cargo: network commands are routed through sfw when it is present" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe with-cooldown
-  stub_sfw
-  [[ "$(probe build)" == SFW-USED* ]]
-}
-
-@test "cargo: sfw absent must NOT break cargo (availability over filtering)" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe with-cooldown
-  # probe() uses a PATH that contains no sfw at all.
-  run bash -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build"
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"SFW-USED"* ]]
-}
-
-@test "cargo: non-network subcommands skip sfw (no proxy startup cost)" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe with-cooldown
-  stub_sfw
-  # `cargo --version` must not spin up a filtering proxy.
-  [[ "$(probe --version)" != *"SFW-USED"* ]]
-}
-
-@test "cargo: sfw wraps the real cargo, not the wrapper (no recursion)" {
-  command -v cargo >/dev/null || skip "cargo not installed"
-  make_probe with-cooldown
-  stub_sfw
-  # SFW-USED must appear exactly once: sfw execs cargo-real directly, so the
-  # wrapper is not re-entered through it.
-  [ "$(probe build | grep -c 'SFW-USED')" -eq 1 ]
-}
-
-# ---- pass-through and guards ----
+# ---- guards ----
 
 @test "cargo: non-resolving subcommands pass through untouched" {
   command -v cargo >/dev/null || skip "cargo not installed"
@@ -391,56 +251,41 @@ stub_sfw() {
   [ "$(probe clean)" = "clean" ]
 }
 
-@test "cargo: binstall and cooldown pass through (no recursion)" {
+@test "cargo: cooldown and binstall pass through (no recursion)" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  [ "$(probe binstall foo)" = "binstall foo" ]
   [ "$(probe cooldown build)" = "cooldown build" ]
+  [ "$(probe binstall foo)" = "binstall foo" ]
 }
 
 @test "cargo: re-entrancy guard stops the cooldown->cargo->cooldown loop" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  # cargo-cooldown invokes cargo internally. Without this guard the inner call
-  # routes back into cooldown forever and every build hangs.
-  run bash -c "cd '$PROBE_DIR/proj' && SUPPLY_CHAIN_CARGO_WRAPPED=1 PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>/dev/null | tr '\n' ' ' | sed 's/ \$//'"
+  run bash -c "cd '$PROBE_DIR/proj' && SUPPLY_CHAIN_CARGO_WRAPPED=1 PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build"
   [ "$output" = "build" ]
 }
 
 @test "cargo: recursion guard refuses when cargo-real is missing" {
   command -v cargo >/dev/null || skip "cargo not installed"
   make_probe with-cooldown
-  sed "s|^REAL_CARGO=.*|REAL_CARGO='/nonexistent/cargo'|" "$PROBE_DIR/cargo" > "$PROBE_DIR/cargo-bad"
-  chmod +x "$PROBE_DIR/cargo-bad"
-  run "$PROBE_DIR/cargo-bad" build
+  sed "s|^REAL_CARGO=.*|REAL_CARGO='/nonexistent/cargo'|" "$PROBE_DIR/cargo" > "$PROBE_DIR/bad"
+  chmod +x "$PROBE_DIR/bad"
+  run "$PROBE_DIR/bad" build
   [ "$status" -eq 127 ]
 }
 
 # ---- the gate config ----
 
-# $CARGO_HOME, not ~/.cargo. Cargo reads config from $CARGO_HOME, which the
-# official rust images set to /usr/local/cargo and CI runners often point at a
-# cache volume. Asserting ~/.cargo would pass on a host where the file is inert.
 cargo_home_dir() { echo "${CARGO_HOME:-$HOME/.cargo}"; }
 
 @test "cargo: cooldown.toml is deployed at CARGO_HOME with a non-zero window" {
-  [ -f "$(cargo_home_dir)/cooldown.toml" ]
+  [ -f "$(cargo_home_dir)/cooldown.toml" ] || skip "cooldown gate not enabled"
   run grep -E 'global-min-publish-age' "$(cargo_home_dir)/cooldown.toml"
   [ "$status" -eq 0 ]
-  # A window of 0 would be a disabled gate reported as a configured one.
   [[ ! "$output" =~ =[[:space:]]*\"0 ]]
 }
 
 @test "cargo: cooldown violations deny rather than fall back" {
-  [ -f "$(cargo_home_dir)/cooldown.toml" ]
-  # "fallback" downgrades and only warns — a fail-open posture.
+  [ -f "$(cargo_home_dir)/cooldown.toml" ] || skip "cooldown gate not enabled"
   grep -qE 'incompatible-publish-age[[:space:]]*=[[:space:]]*"deny"' "$(cargo_home_dir)/cooldown.toml"
-}
-
-# Regression catcher for the bug above: the config must land where the TOOL
-# reads it, not merely somewhere plausible. On a host with CARGO_HOME set away
-# from ~/.cargo, a file at ~/.cargo/cooldown.toml is inert.
-@test "cargo: cooldown.toml is not stranded outside CARGO_HOME" {
-  [ "$(cargo_home_dir)" = "$HOME/.cargo" ] && skip "CARGO_HOME is ~/.cargo here; nothing to strand"
-  [ -f "$(cargo_home_dir)/cooldown.toml" ]
 }

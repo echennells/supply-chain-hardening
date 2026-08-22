@@ -1,6 +1,6 @@
 # Tests
 
-374 automated tests verify the supply chain hardening works. Run with `make test`.
+365 automated tests verify the supply chain hardening works. Run with `make test`.
 
 ## Test structure
 
@@ -41,7 +41,7 @@
 | 39-verify-behavioral.bats | 11 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers) and asserts each is caught |
 | 40-upgrade-convergence.bats | 4 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again |
 | 41-tty-interactive.bats | 5 | The npm wrapper's interactive branch under a real pty (script -qec): TTY routes through npq, non-TTY skips it, sfw-absent still reaches npq, read-only subcommands bypass both |
-| 42-cargo-path-wrapper.bats | 37 | The cargo PATH wrapper end to end: routing build/check/test/run/update through `cargo cooldown`, --locked placement (before `--`, never appended), rustup +toolchain and argv[0] handling, re-entrancy and recursion guards, lockfile-laundering regressions (`add`/`generate-lockfile` must not slip a fresh version past the gate), the `cargo install` age gate and every fail-loud branch, and Socket Firewall routing incl. "sfw absent must not break cargo" |
+| 42-cargo-path-wrapper.bats | 28 | The cargo PATH wrapper: subcommand parsing (global flags before the subcommand must not bypass the controls — the argv[1] regression), +toolchain ordering, --locked placement before `--`, unknown subcommands warned not gated, unprotected builds warned not silent, install/writer handling, re-entrancy and recursion guards, and `bash -n` on the deployed artifact |
 | 28-composer-tier-rendering.bats | 6 | Composer audit-tier authority (renders composer-config.json.j2 across 2.2 / 2.7 / 2.9 and asserts each tier's keys) |
 | 29-maven-behavioral.bats | 4 | Maven settings.xml — HTTPS-only mirror, checksum policy |
 | 30-gradle-behavioral.bats | 4 | Gradle init script — repository pinning, verification metadata |
@@ -107,7 +107,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 374 tests
+make test          # build container + run all 365 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

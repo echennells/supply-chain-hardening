@@ -298,8 +298,9 @@ AI agents install packages unpredictably. You can't control what package manager
   | How a crate version reaches your build | Covered? | By what |
   |---|---|---|
   | Fresh resolution (`build`/`check`/`test`/`run`/`update`) | Yes | age gate via `cargo cooldown` |
-  | `add` / `remove` / `generate-lockfile` / `fetch` / `vendor` | Yes | re-evaluated after the command, reverted on violation |
-  | `cargo install <crate>` | Yes | publish date checked against crates.io, version pinned |
+  | `cargo update` | Yes | routed through `cargo cooldown` — the one resolution path `--locked` cannot cover |
+  | `add` / `generate-lockfile` / `vendor` | **No** | warned, not gated — see below |
+  | `cargo install <crate>` | **No** | `--locked` only; warned, not age-gated |
   | A `Cargo.lock` **this host** wrote | Yes | gated when it was written |
   | A `Cargo.lock` from a clone/PR, crate **known-malicious** | Yes | Socket Firewall blocks the download |
   | A `Cargo.lock` from a clone/PR, crate **fresh and unflagged** | **No** | needs a lockfile-age check in CI (not built) |
@@ -316,9 +317,13 @@ AI agents install packages unpredictably. You can't control what package manager
 
   **Socket Firewall for cargo** (`cargo_socket_firewall`, default on) covers the axis the age gate cannot: it filters the *download* rather than the resolution, so it applies to a lockfile written anywhere, and it never participates in version selection — your lockfile is still authoritative. Two measured caveats: it needs **Node >= 20** like the npm path, and **it fails open** — with no network it warns, exits 0, and the build proceeds unfiltered. A *corrupt* sfw binary instead fails closed and would break every build, so the role runs it at apply time and moves it aside if it cannot execute, degrading to unfiltered rather than leaving cargo unusable. `supply-chain-verify` reports that state as `GAP`, never `OK`.
 
+  **The wrapper is a first-invocation control, not an enforcement boundary.** Three mechanisms route around it and none can be closed from a PATH shim: cargo overwrites `$CARGO` with its own resolved toolchain path, so build scripts and third-party subcommands that re-enter cargo do so unwrapped; a repo-local `rust-toolchain.toml` with `path =` supplies its own cargo; and `RUSTC_WRAPPER` or a repo-local `.cargo/config.toml` execute code with no registry involvement at all. It raises the floor for ordinary invocations. Containment of `build.rs` is a separate concern — see `sbe/`.
+
+  **Unknown subcommands are warned about, not gated.** The set of cargo subcommands is open (any `cargo-*` on `PATH`, plus repo-local `[alias]`), so enumerating it cannot converge. `cargo nextest run`, `cargo watch -x check` and the like pass through with a note on stderr and receive no injected flags — injecting `--locked` into a subcommand that does not accept it would break the build.
+
   **Known boundaries of the cargo gate**, each verified by execution:
 
-  - **A `Cargo.lock` you did not generate is trusted.** `lockfile-baseline = "floor"` accepts versions an existing lockfile already pins, so a branch or PR that ships its own lockfile pinning a fresh crate will build. This is not a regression — stock cargo trusts lockfiles unconditionally and applies no age check at all — but it means **reviewing lockfile diffs in PRs is load-bearing**, exactly as the crates.io advisory recommends. Locally-written lockfiles are covered: every command that writes one (`add`, `remove`, `generate-lockfile`, `fetch`, `vendor`) is re-evaluated through the gate and reverted on violation.
+  - **A `Cargo.lock` you did not generate is trusted.** `lockfile-baseline = "floor"` accepts versions an existing lockfile already pins, so a branch or PR that ships its own lockfile pinning a fresh crate will build. This is not a regression — stock cargo trusts lockfiles unconditionally and applies no age check at all — but it means **reviewing lockfile diffs in PRs is load-bearing**, exactly as the crates.io advisory recommends. `cargo update` is routed through the gate; the other lockfile-writing commands (`add`, `generate-lockfile`, `vendor`) are warned about rather than gated. An earlier version reverted them by copying `Cargo.toml`/`Cargo.lock` aside and restoring on refusal — that was removed as an unacceptable shape for a hardening role to impose on a user's source tree.
   - **`SUPPLY_CHAIN_CARGO_WRAPPED=1` disables the wrapper** for that invocation. It exists to break the cooldown→cargo→cooldown recursion and cannot simply be removed. It is also inherited by build scripts, so a nested `cargo` call from a `build.rs` is unguarded — though a build script already has arbitrary execution by then.
   - **Only the discovered cargo path is wrapped.** The rustup toolchain binary (`~/.rustup/toolchains/*/bin/cargo`) and `cargo-real` remain directly callable, as with every other wrapper in this role. `supply-chain-verify` reports `not deployed` when `command -v cargo` resolves somewhere unwrapped.
 
