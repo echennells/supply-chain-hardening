@@ -320,6 +320,11 @@ cargo_path_wrapper: true
 # a malicious version is published, lives for hours, and is yanked. A gate of a
 # day or more makes that window unresolvable.
 #
+# REQUIRES rustc >= 1.91.1 (cargo-cooldown 0.3.4). Distro cargo is older than
+# that on every current LTS — Ubuntu 24.04 ships 1.75.0 — so on those hosts the
+# backend cannot install, the wrapper degrades to --locked, and the run summary
+# records the gap. rustup hosts are unaffected.
+#
 # Set false to keep the --locked half of the wrapper while dropping the
 # dependency on cargo-cooldown. Reasons you might: it is a young third-party
 # crate (~2.7k downloads), and taking a build-time dependency on it inside a
