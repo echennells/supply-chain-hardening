@@ -72,7 +72,7 @@
   #      to a reported gap instead of taking out half the role. An optional
   #      vulnerability scanner must never cost the load-bearing config layer.
   ansible.builtin.command:
-    cmd: "{{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@latest"
+    cmd: "{{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@{{ govulncheck_version }}"
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/govulncheck' }}"
   environment:
     GOTOOLCHAIN: auto

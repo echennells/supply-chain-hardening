@@ -56,7 +56,7 @@
   # 11 downstream includes, including the entire env-var layer. The failure is
   # recorded below instead, so it is reported rather than fatal or silent.
   become: true
-  ansible.builtin.command: npm install -g sfw@2
+  ansible.builtin.command: npm install -g sfw@{{ sfw_version }}
   when:
     - sfw_check.rc != 0
     - npm_for_socket.rc == 0
@@ -64,6 +64,46 @@
   changed_when: true
   register: sfw_install
   failed_when: false
+
+- name: Warm the Socket Firewall binary cache at apply time
+  # sfw's npm package is a SHIM: the actual firewall binary is downloaded from
+  # GitHub on first invocation, not at npm-install time. Left cold, that
+  # download happens during someone's first real npm or cargo command — where
+  # it can hang, or fail and take the command with it.
+  #
+  # Doing it here makes the fetch deterministic (once, at apply, where a
+  # failure is visible and recorded) instead of a surprise in a build. It also
+  # replaces an accidental warm-up: a health-check task used to run `sfw --help`
+  # for other reasons and pulled the binary down as a side effect. Removing that
+  # check silently un-warmed every host, which surfaced as npm tests hanging on
+  # a cold cache — a dependency on a side effect nobody had written down.
+  #
+  # NON-FATAL and bounded: if the fetch fails, sfw stays installed and the gap
+  # is recorded below. Do NOT move the binary aside on failure — it is shared
+  # with the npm wrapper, and disarming it there to protect another ecosystem is
+  # a blast radius this task has no business having.
+  become: true
+  ansible.builtin.command:
+    cmd: "timeout 120 sfw /bin/true"
+  register: sfw_warm
+  # changed_when/check_mode go in as an ADJACENT PAIR — the invariant test in
+  # 25-integration-regressions.bats requires check_mode: on the line directly
+  # after changed_when: false, so a --check run gets a real answer rather than
+  # a skipped task and an undefined register. A comment between them breaks it.
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+
+- name: Record skipped protection — Socket Firewall binary could not be fetched
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ '). sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
+  when:
+    - sfw_warm is defined
+    - sfw_warm.rc | default(0) != 0
 
 - name: Record skipped protection — Socket Firewall (install failed)
   ansible.builtin.set_fact:
@@ -293,50 +333,10 @@
 # cargo hardening runs earlier in main.yml (:96 vs :153). Checking sfw health
 # from cargo.yml reported "absent" on every first apply — sfw genuinely was
 # absent at that point, and installed moments later.
-- name: Verify Socket Firewall can execute before letting cargo depend on it
-  # A corrupt sfw FAILS CLOSED: measured, `sfw cargo build` propagated exit 9
-  # while plain cargo built fine. Since the wrapper prefixes network commands
-  # with sfw, a broken binary would break every build on the host. Same
-  # discipline as the cooldown backend: run it, and if it cannot run, say so
-  # and let the wrapper skip it (the wrapper's own `command -v sfw` guard means
-  # an absent sfw is simply not used — cargo keeps working).
-  # Detecting is not enough; the binary must be disarmed. Measured: with sfw broken, `cargo
-  # build` exits 9 on every invocation, and an earlier version of this task
-  # merely reported that fact, so re-applying the role left the host's cargo
-  # just as broken as before. Moving the binary aside makes the wrapper's
-  # `command -v sfw` guard fail, which is precisely how the wrapper degrades
-  # safely. Same treatment as a non-runnable cargo-cooldown.
-  #
-  # This matters more for sfw than for cooldown: the sfw npm package fetches
-  # the LATEST firewall binary at runtime, so it can start failing on a host
-  # that has not changed. Re-applying the role is the recovery path, and it has
-  # to actually recover.
-  ansible.builtin.shell:
-    cmd: |
-      P=$(command -v sfw 2>/dev/null) || { echo absent; exit 0; }
-      [ -n "$P" ] || { echo absent; exit 0; }
-      if timeout 60 sfw --help >/dev/null 2>&1; then
-        echo works
-      elif mv -f "$P" "$P.broken" 2>/dev/null && ! command -v sfw >/dev/null 2>&1; then
-        echo quarantined
-      else
-        echo broken
-      fi
-    executable: /bin/bash
-  register: cargo_sfw_health
-  changed_when: false
-  check_mode: false
-  failed_when: false
-  when:
-    - cargo_path_wrapper | bool
-    - cargo_socket_firewall | bool
-
-- name: Record skipped protection — Socket Firewall unavailable for cargo
-  ansible.builtin.set_fact:
-    skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall for cargo — sfw is ' ~ (cargo_sfw_health.stdout | default('') | trim) ~ '. Crate downloads are NOT threat-intel filtered, so a lockfile written elsewhere that pins a known-malicious crate will still be fetched. sfw needs Node >= 20; install it and re-apply to close this.'] }}
-  when:
-    - cargo_path_wrapper | bool
-    - cargo_socket_firewall | bool
-    - cargo_sfw_health is defined
-    - cargo_sfw_health.stdout | default('') | trim in ['absent', 'broken', 'quarantined']
+# NOTE: a cargo-specific sfw health-check-and-quarantine block lived here and
+# was removed. It moved the SHARED /usr/bin/sfw aside when a probe failed,
+# which also disarmed the npm wrapper's sfw integration — a cargo-motivated
+# guard with a blast radius into another ecosystem. The probe was wrong too:
+# `sfw --help` triggers the shim's runtime binary download and exits 1 whenever
+# that fetch fails, which is common, so it quarantined healthy installs.
+# cargo's sfw prefix now defaults off instead (see cargo_socket_firewall).

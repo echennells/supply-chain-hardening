@@ -63,7 +63,14 @@
   # out the env-var layer deployed by shell_env.yml further down.
   become: true
   ansible.builtin.get_url:
-    url: "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-{{ cosign_arch }}"
+    # Pinned tag + digest. This previously fetched `releases/latest/` with no
+    # checksum at all: the signature-verification tool arrived from a mutable
+    # ref, unverified, and was made executable. get_url refuses to write the
+    # file when the digest does not match, so a substituted artifact now fails
+    # closed. Bump cosign_version and the digests together — the values come
+    # from the release's cosign_checksums.txt.
+    url: "https://github.com/sigstore/cosign/releases/download/{{ cosign_version }}/cosign-linux-{{ cosign_arch }}"
+    checksum: "{{ cosign_checksums[cosign_arch] }}"
     dest: /usr/local/bin/cosign
     mode: "0755"
   when:

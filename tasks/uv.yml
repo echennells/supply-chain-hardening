@@ -122,11 +122,16 @@
   # passes because the Dockerfile prepends /root/.local/bin to PATH — but
   # fresh hosts following the official installer instructions don't.
   ansible.builtin.command:
-    cmd: "{{ uv_binary_path.stdout }} tool install {{ item }}"
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/' + item }}"
+    # Pinned: an unpinned `uv tool install` takes the newest release at apply
+    # time, which is the same always-newest exposure the role's age gates exist
+    # to close for users. PyPI provides integrity; the pin is the other half.
+    # Looped over name/version pairs so `creates:` still names the binary
+    # rather than the versioned requirement string.
+    cmd: "{{ uv_binary_path.stdout }} tool install {{ item.name }}=={{ item.version }}"
+    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/' + item.name }}"
   loop:
-    - uv-secure
-    - pip-audit
+    - { name: uv-secure, version: "{{ uv_secure_version }}" }
+    - { name: pip-audit, version: "{{ pip_audit_version }}" }
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
   register: uv_tools_install
   failed_when: false

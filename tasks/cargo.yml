@@ -117,52 +117,110 @@
   check_mode: false
   failed_when: false
 
-- name: Bootstrap cargo-binstall (prebuilt — avoids multi-minute source compile of audit tools)
-  # cargo-binstall pulls prebuilt binaries from each crate's GitHub releases,
-  # auto-detecting the right target triple. cargo-audit alone takes ~15min to
-  # source-build on small VMs; binstall drops it in seconds. The bootstrap
-  # itself uses the project's official installer, which fetches the prebuilt
-  # binstall binary (no source compile). Failure here is non-fatal: the next
-  # task falls back to plain `cargo install`.
+- name: Check for a C linker (cargo install needs one; the old prebuilt did not)
+  # MEASURED: stock ubuntu:24.04 and debian:12 ship no cc, gcc, clang or ld, and
+  # a rustup-provisioned host looks the same — rustup installs a toolchain, not
+  # a linker. Every Rust build ends in `cc`, so without this probe the build
+  # below dies with "linker `cc` not found" and failed_when:false swallows it
+  # into a silently missing age gate.
+  #
+  # Probe, do not install: pulling build-essential onto every managed host is a
+  # larger change than this role is entitled to make. Report the gap instead.
   ansible.builtin.shell:
-    cmd: >-
-      curl -L --proto '=https' --tlsv1.2 -sSf
-      https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh
-      | bash
-    creates: "{{ ansible_env.HOME }}/.cargo/bin/cargo-binstall"
-  when: cargo_check.rc == 0
+    cmd: 'command -v cc || command -v gcc || command -v clang'
+    executable: /bin/bash
+  register: cargo_cc_check
+  changed_when: false
+  check_mode: false
   failed_when: false
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
 
-- name: Install cargo auditing tools (prebuilt via binstall when present, source-build fallback)
-  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
-  # abort the play: the config-file layer is the load-bearing protection and
-  # every include after this one would be skipped. Measured consequence of the
-  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
-  # 11 downstream includes, including the entire env-var layer. The failure is
-  # recorded below instead, so it is reported rather than fatal or silent.
-  ansible.builtin.shell:
-    cmd: |
-      set -e
-      export PATH="$HOME/.cargo/bin:$PATH"
-      if [ -x "$HOME/.cargo/bin/cargo-binstall" ]; then
-        cargo binstall --no-confirm {{ item }} || cargo install {{ item }}
-      else
-        cargo install {{ item }}
-      fi
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.cargo/bin/' + item }}"
-  loop:
-    - cargo-audit
-    - cargo-deny
-    - cargo-vet
-    - cargo-cooldown
-  when: cargo_check.rc == 0
-  register: cargo_tools_install
-  failed_when: false
-
-- name: Record skipped protection — cargo auditing tools (install failed)
+- name: Record skipped protection — no C linker for the gate backend
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['cargo auditing tools (cargo-audit / cargo-deny) — install failed. Rust dependency scanning is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — no C linker (cc/gcc/clang) on this host, so cargo-cooldown cannot be built from source. Install build-essential and re-apply, or set cargo_cooldown_enforce=false. The wrapper degrades to --locked only.'] }}
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
+    - cargo_cc_check is defined
+    - cargo_cc_check.rc | default(1) != 0
+
+- name: Detect the installed cargo-cooldown version (idempotence on the PIN, not the file)
+  # `creates:` alone checks only that the binary exists, so bumping
+  # cargo_cooldown_version would be inert — the pin could never be updated.
+  # Compare the installed version against the pin instead.
+  ansible.builtin.shell:
+    cmd: "{{ cargo_home }}/bin/cargo-cooldown --version 2>/dev/null | awk '{print $NF}'"
+    executable: /bin/bash
+  register: cargo_cooldown_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
+
+- name: Install the publish-age gate backend (pinned, from source)
+  # Replaces a `curl -L .../main/install-from-binstall-release.sh | bash`
+  # bootstrap that fetched an installer from a MUTABLE BRANCH with no checksum,
+  # which downloaded a release tarball and piped it to tar unverified, which
+  # then installed four unverified prebuilt binaries — one of which the wrapper
+  # execs on every cargo build.
+  #
+  # Pinning that chain would not have fixed it. MEASURED: 0 of the 4 crates
+  # declare [package.metadata.binstall].signing, and binstall has no code path
+  # that consumes the .sha256 / SHA256SUMS files three of them do publish. A
+  # fully-pinned bootstrap still yields unverified binaries.
+  #
+  # `cargo install --locked` builds from crates.io, whose .crate checksum cargo
+  # verifies, using the crate's own published Cargo.lock so the transitive tree
+  # is pinned too. Measured 1m53s. The old ~15min figure covered all four tools,
+  # and cargo-audit is the slow one.
+  #
+  # Bonus, measured: the published prebuilt needs GLIBC_2.39 and dies in the
+  # loader on Debian 12 (glibc 2.36). A source build links against local glibc,
+  # so on bookworm this moves the gate from quarantined-and-degraded to working.
+  #
+  # NON-FATAL: an optional backend failing to build must never abort the play.
+  ansible.builtin.command:
+    cmd: "{{ cargo_check.stdout | dirname }}/cargo install --locked cargo-cooldown@{{ cargo_cooldown_version }}"
+  environment:
+    PATH: "{{ cargo_home }}/bin:{{ ansible_env.PATH }}"
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
+    - cargo_cc_check is defined
+    - cargo_cc_check.rc | default(1) == 0
+    - refresh_tools | bool or (cargo_cooldown_installed.stdout | default('') | trim) != cargo_cooldown_version
+  register: cargo_tools_install
+  changed_when: cargo_tools_install.rc | default(1) == 0
+  failed_when: false
+
+- name: Install optional cargo auditing tools (opt-in — this role never invokes them)
+  # cargo-audit, cargo-deny and cargo-vet are detection tools. Nothing in this
+  # role runs them — grep for their names across tasks/ and templates/ returns
+  # no invocation — and /etc/cargo/deny.toml is a reference policy that is not
+  # auto-applied. Installing them by default put three binaries on every host
+  # that no code path uses, and was the sole reason the role needed a
+  # `curl | bash` bootstrap. Enable this and wire them into CI yourself.
+  ansible.builtin.command:
+    cmd: "{{ cargo_check.stdout | dirname }}/cargo install --locked {{ item.key }}@{{ item.value }}"
+    creates: "{{ omit if refresh_tools | bool else cargo_home + '/bin/' + item.key }}"
+  environment:
+    PATH: "{{ cargo_home }}/bin:{{ ansible_env.PATH }}"
+  loop: "{{ cargo_audit_versions | dict2items }}"
+  when:
+    - cargo_check.rc == 0
+    - cargo_audit_tools | bool
+    - cargo_cc_check is not defined or cargo_cc_check.rc | default(0) == 0
+  failed_when: false
+
+- name: Record skipped protection — publish-age gate backend (build failed)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown failed to build from source, so `cargo build` is NOT age-gated. The wrapper degrades to --locked, which only protects projects with a committed Cargo.lock and does nothing for `cargo update`.'] }}
   when:
     - cargo_tools_install is defined
     - cargo_tools_install.rc | default(0) != 0

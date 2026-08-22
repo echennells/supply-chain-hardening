@@ -77,7 +77,7 @@
   # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
   # 11 downstream includes, including the entire env-var layer. The failure is
   # recorded below instead, so it is reported rather than fatal or silent.
-  ansible.builtin.command: npm install -g lockfile-lint
+  ansible.builtin.command: npm install -g lockfile-lint@{{ lockfile_lint_version }}
   changed_when: true
   when:
     - npm_check.rc == 0

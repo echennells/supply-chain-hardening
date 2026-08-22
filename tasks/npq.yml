@@ -95,7 +95,7 @@
   # Gated on the RUNTIME threshold. Installing npq on an older Node would
   # succeed (npm only warns about engines), put a binary on PATH, and give
   # the host a silent passthrough that reads as protection.
-  ansible.builtin.command: npm install -g npq
+  ansible.builtin.command: npm install -g npq@{{ npq_version }}
   changed_when: true
   when:
     - npm_for_npq.rc == 0
