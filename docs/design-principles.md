@@ -18,6 +18,68 @@ forward.
 
 ---
 
+## Scope: what this role defends, and what it does not
+
+**The threat is INSTALL-TIME ADMISSION.** A malicious or compromised package
+reaches the machine through a package manager and executes — an npm
+`postinstall`, a Rust `build.rs`, a Python `setup.py`, a proc macro, a Gradle
+plugin. Every protection here exists to stop that, or to prove whether it is
+actually stopping it.
+
+**The role does NOT defend against an attacker who already has code
+execution.** Local privilege escalation, persistence, anti-tamper, lateral
+movement and exfiltration are all out of scope. Not because they do not matter,
+but because a package-manager configuration role is the wrong instrument: an
+attacker running as the user can rewrite every per-user config the role
+deploys, unset every env var, and call the real binary directly.
+
+### The boundary test
+
+Before adding a protection, ask:
+
+> **Does this change how a package manager treats a package that has not yet run?**
+
+- **Yes** → in scope.
+- **No, it limits what already-running code can do** → out of scope. Say so in
+  the docs and do not ship it as a protection.
+
+Two corollaries that have caught real defects in this repo:
+
+**Anti-tamper inside a user-writable directory is not a control.** MEASURED: a
+root-owned `0755` wrapper inside a user-owned `~/.bun/bin` was removed and
+replaced by that unprivileged user — directory write permission governs
+unlink/create, not file ownership. It bought no resistance and it broke
+`bun upgrade` with EACCES. Escalate only when the path is outside the user's
+home (see the `bun_wrap_become` / `cargo_wrap_become` facts).
+
+**A control whose only value is over an already-poisoned environment is
+restating a default.** `GOPRIVATE=""` is Go's default; emitting it changes
+nothing unless something already set it, which presupposes execution.
+
+### Things that are in scope but are not protections
+
+Two large categories are legitimate and should NOT be counted in the
+capability matrix or the coverage summary, because inflating the protection
+count is how the role starts believing its own marketing:
+
+- **Delivery mechanics** — binary detection, wrapper/real disambiguation,
+  recursion guards, non-fatal installs. Plumbing so a control reaches the tool.
+- **Coverage honesty** — version tiering, `skipped_protections` records,
+  refusing to emit a key the reader will ignore, the `verify.sh` rows. Machinery
+  whose only job is to stop the role claiming coverage it does not have. This is
+  the most valuable code in the repo and the least protection-like.
+
+### Deliberately excluded, with reasons
+
+| Threat | Why it is out |
+|---|---|
+| Shared cargo/npm cache substitution | Requires write access, therefore prior execution. The role also runs at provision time while the poisoning happens between builds — any check it installed would report a coverage window it does not have. |
+| `build.rs` / proc-macro containment | Needs process isolation (seccomp/Landlock, no-egress container, ephemeral builder). No config-level control exists, in any ecosystem. |
+| Repo-local `.cargo/config.toml`, `[alias]`, `rust-toolchain.toml path=` | Presupposes the attacker controls files in a tree you build — at which point they can simply put the payload in that repo's own build script. |
+| `.pyc` / bytecode artifacts, systemd linger, socket lifetime | Persistence and availability concerns, not admission. |
+
+---
+
 ## Axis 1 — Layer-conflict patterns
 
 When multiple locations "control" the same semantic, they can disagree,

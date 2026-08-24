@@ -67,6 +67,30 @@
   failed_when: false
   when: bun_path_wrapper | bool
 
+- name: Decide whether wrapping this bun path needs root
+  # Mirrors the same decision in tasks/cargo.yml. bun's installer puts the
+  # binary at ~/.bun/bin/bun, inside a directory the invoking user owns.
+  #
+  # MEASURED: forcing owner:root on a file inside a user-owned directory buys
+  # nothing. Directory write permission governs unlink/create, not file
+  # ownership — an unprivileged user removed a root-owned 0755 wrapper from
+  # their own ~/.bun/bin and replaced it with their own script. So the root
+  # ownership was tamper resistance that does not resist, against an attacker
+  # who by definition already has code execution as that user (which this role
+  # does not defend against — see docs/design-principles.md, "Scope").
+  #
+  # It also has a real cost: a root-owned binary in the user's home makes
+  # `bun upgrade` fail with EACCES for the user who owns everything around it.
+  #
+  # NOTE: `startswith` is a Python str method reached through Jinja, NOT an
+  # Ansible filter; `| startswith(...)` raises "Could not load 'startswith'".
+  ansible.builtin.set_fact:
+    bun_wrap_become: "{{ not (bun_binary_path.stdout | default('')).startswith(ansible_env.HOME) }}"
+  when:
+    - bun_binary_path is defined
+    - bun_binary_path.rc | default(1) == 0
+    - bun_binary_path.stdout | default('') | length > 0
+
 - name: Determine whether current bun binary is our wrapper or the real binary
   ansible.builtin.shell:
     cmd: |
@@ -100,7 +124,7 @@
   # our wrapper, the existing backup is stale and the freshly-installed
   # binary is what we want to preserve. Overwriting a stale backup with
   # the current binary is the correct semantics. Same logic as composer.
-  become: true
+  become: "{{ bun_wrap_become | default(true) | bool }}"
   ansible.builtin.command:
     cmd: "mv {{ bun_binary_path.stdout }} {{ bun_binary_path.stdout }}-real"
   when:
@@ -112,12 +136,12 @@
   changed_when: true
 
 - name: Deploy bun wrapper at the discovered bun path
-  become: true
+  become: "{{ bun_wrap_become | default(true) | bool }}"
   ansible.builtin.template:
     src: bun-wrapper.sh.j2
     dest: "{{ bun_binary_path.stdout }}"
-    owner: root
-    group: root
+    owner: "{{ omit if not (bun_wrap_become | default(true) | bool) else 'root' }}"
+    group: "{{ omit if not (bun_wrap_become | default(true) | bool) else 'root' }}"
     mode: "0755"
   vars:
     bun_real_path: "{{ bun_binary_path.stdout }}-real"
@@ -178,7 +202,7 @@
   # and lose argv[0] (which is how bun detects bunx mode). The wrapper
   # targets the real bun binary directly instead; this backup exists purely
   # so bun_path_wrapper=false can restore the original.
-  become: true
+  become: "{{ bun_wrap_become | default(true) | bool }}"
   ansible.builtin.command:
     cmd: "mv {{ bunx_binary_path.stdout }} {{ bunx_binary_path.stdout }}-real"
   when:
@@ -190,12 +214,12 @@
   changed_when: true
 
 - name: Deploy bunx wrapper at the discovered bunx path
-  become: true
+  become: "{{ bun_wrap_become | default(true) | bool }}"
   ansible.builtin.template:
     src: bunx-wrapper.sh.j2
     dest: "{{ bunx_binary_path.stdout }}"
-    owner: root
-    group: root
+    owner: "{{ omit if not (bun_wrap_become | default(true) | bool) else 'root' }}"
+    group: "{{ omit if not (bun_wrap_become | default(true) | bool) else 'root' }}"
     mode: "0755"
   vars:
     # Points at the REAL BUN binary, not bunx-real — see template header.
@@ -213,7 +237,7 @@
   # bun_path_wrapper from true to false on a host that was previously
   # wrapped, this restores the original binary so they're not stuck with
   # a wrapper they explicitly opted out of.
-  become: true
+  become: "{{ bun_wrap_become | default(true) | bool }}"
   ansible.builtin.command:
     cmd: "mv {{ bun_binary_path.stdout }}-real {{ bun_binary_path.stdout }}"
   when:
