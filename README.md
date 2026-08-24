@@ -321,6 +321,15 @@ AI agents install packages unpredictably. You can't control what package manager
 
   **Unknown subcommands are warned about, not gated.** The set of cargo subcommands is open (any `cargo-*` on `PATH`, plus repo-local `[alias]`), so enumerating it cannot converge. `cargo nextest run`, `cargo watch -x check` and the like pass through with a note on stderr and receive no injected flags — injecting `--locked` into a subcommand that does not accept it would break the build.
 
+  **A shared cargo cache is a code-injection path that every control here misses.** Cargo verifies a `.crate` checksum when it downloads, but **not** when it reads one already in `~/.cargo/registry/cache` — a repacked tarball whose SHA-256 matches nothing compiles silently under `--locked`, online and offline (reproduced twice). `--locked`, the lockfile checksum, the publish-age gate and Socket Firewall all miss it simultaneously, because none of them re-hash bytes on disk.
+
+  This is not an initial-access vector — writing to the cache requires code execution already. It is a **trust-boundary crossing**: an untrusted build poisons the cache, and a later privileged build compiles the result. Two concrete routes:
+
+  - **Self-hosted runners with a persistent `~/.cargo`** — a malicious PR's `build.rs` runs in a low-privilege job and the next job inherits the cache.
+  - **GitHub-hosted runners using `actions/cache`** — cache scoping normally isolates branches, but `pull_request_target` runs in the *default branch* context and can therefore write the default-branch cache scope. Job `permissions` blocks do not apply to cache writes at all. This is not theoretical: it is how Angular (2024) and TanStack (2026) were compromised.
+
+  **This role cannot close it.** It runs at provision time; the poisoning happens between builds. A verify-time check would report coverage it does not have. The fix is topological — do not share a cargo cache across trust boundaries, and do not restore an untrusted cache into a privileged job. If you must, purge `~/.cargo/registry/cache` rather than trusting it, or verify cached `.crate` files against a committed `Cargo.lock` or `index.crates.io` (both independent of the local sparse index, which an attacker with cache write access also controls).
+
   **Known boundaries of the cargo gate**, each verified by execution:
 
   - **A `Cargo.lock` you did not generate is trusted.** `lockfile-baseline = "floor"` accepts versions an existing lockfile already pins, so a branch or PR that ships its own lockfile pinning a fresh crate will build. This is not a regression — stock cargo trusts lockfiles unconditionally and applies no age check at all — but it means **reviewing lockfile diffs in PRs is load-bearing**, exactly as the crates.io advisory recommends. `cargo update` is routed through the gate; the other lockfile-writing commands (`add`, `generate-lockfile`, `vendor`) are warned about rather than gated. An earlier version reverted them by copying `Cargo.toml`/`Cargo.lock` aside and restoring on refusal — that was removed as an unacceptable shape for a hardening role to impose on a user's source tree.
