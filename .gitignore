@@ -21,3 +21,11 @@ sbe/
 /FIX_PLAN.md
 /VERIFICATION_REQUESTS.md
 /SBE_DEVC_NOTES.md
+
+# Personal dev sandbox for working ON this repo (a vendored copy of
+# trailofbits/claude-code-devcontainer). It is NOT part of the role — the role
+# is tasks/, templates/, defaults/, meta/, and a Galaxy consumer never receives
+# this. Tracking it at the repo root made it read as a role artifact (it is not)
+# and pinned a byte-identical third-party copy with no upstream update path.
+# Kept local, untracked. Re-clone the upstream devcontainer if you want it back.
+.devcontainer/
