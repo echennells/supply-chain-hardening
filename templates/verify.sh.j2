@@ -425,7 +425,7 @@ if have cargo; then
     # The operator's builds are failing RIGHT NOW and this row is the fastest
     # way to learn why: the wrapper prefixes cargo with sfw, so a non-runnable
     # sfw propagates its exit code out of every build. Measured exit 9.
-    row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is present but CANNOT EXECUTE — the wrapper prefixes cargo with it, so EVERY cargo build on this host is failing. Re-apply the role (it will move the broken binary aside), or remove sfw / set cargo_socket_firewall=false"
+    row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is present but CANNOT EXECUTE — the wrapper prefixes cargo with it, so EVERY cargo build on this host is failing. Set cargo_socket_firewall=false and re-apply, or remove sfw. Note sfw downloads its firewall binary from GitHub on first use; this state usually means that fetch has never succeeded"
   elif ! cargo_wrapper_uses_sfw; then
     row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is installed but the wrapper does not route cargo through it (cargo_socket_firewall=false?)"
   else

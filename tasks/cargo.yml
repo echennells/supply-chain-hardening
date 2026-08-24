@@ -181,7 +181,7 @@
   #
   # Bonus, measured: the published prebuilt needs GLIBC_2.39 and dies in the
   # loader on Debian 12 (glibc 2.36). A source build links against local glibc,
-  # so on bookworm this moves the gate from quarantined-and-degraded to working.
+  # so on bookworm the gate works there instead of failing in the loader.
   #
   # NON-FATAL: an optional backend failing to build must never abort the play.
   ansible.builtin.command:
@@ -360,91 +360,46 @@
     - cargo_binary_kind.stdout | default('') == 'is_wrapper'
   changed_when: true
 
-- name: Verify the cooldown backend can actually EXECUTE, and quarantine it if not
-  # "Installed" is not "works". cargo-binstall fetches a prebuilt binary chosen
-  # by target triple, which says nothing about glibc: on Debian 12 (glibc 2.36)
-  # the published cargo-cooldown needs GLIBC_2.39 and dies in the loader.
+- name: Check the publish-age gate backend is present and runnable
+  # One probe, reporting only. An earlier version of this also QUARANTINED a
+  # non-runnable binary — moved it aside so `command -v` would fail and the
+  # wrapper would degrade. That machinery existed for one specific failure
+  # mode: cargo-binstall fetched a PREBUILT binary chosen by target triple,
+  # and the published cargo-cooldown needs GLIBC_2.39, so on Debian 12
+  # (glibc 2.36) it installed fine and died in the loader.
   #
-  # That combination is worse than not installing it at all. `command -v
-  # cargo-cooldown` SUCCEEDS for a binary that cannot run, so the wrapper would
-  # route every `cargo build` on the host into it and every build would fail —
-  # a hardening role breaking the toolchain it was meant to protect.
+  # The binstall path is gone — the backend is now built from source with
+  # `cargo install --locked`, linking against local glibc — so that failure
+  # mode cannot occur. What remains ("present but will not execute") is either
+  # corruption or tampering by someone who already has code execution, which
+  # this role does not defend against (docs/design-principles.md, "Scope").
   #
-  # So: run it. If it cannot execute, move it aside so `command -v` fails, the
-  # wrapper degrades to --locked with its loud warning, and the gap is recorded
-  # below instead of being discovered by a developer whose builds stopped
-  # working. Same lesson as 82ccc19 (verify npq FUNCTIONS, don't just check it
-  # is installed) — the binary being on PATH was never the question.
+  # The wrapper needs no help here: its own `command -v cargo-cooldown` guard
+  # degrades to --locked and warns on every invocation when the binary is
+  # missing. So report the state and let the wrapper handle it.
   ansible.builtin.shell:
     cmd: |
       BIN='{{ cargo_home }}/bin/cargo-cooldown'
       [ -x "$BIN" ] || { echo absent; exit 0; }
-      if "$BIN" --version >/dev/null 2>&1; then
-        echo works
-      else
-        # VERIFY THE MOVE. An unconditional `echo quarantined` after
-        # `mv ... || true` reports a clean degrade while the broken binary is
-        # still on PATH — the wrapper then routes every build into it and all
-        # cargo builds fail on a host whose run claimed success. $CARGO_HOME is
-        # root-owned on the official rust images, so a non-root apply hits this.
-        if mv -f "$BIN" "$BIN.broken" 2>/dev/null && [ ! -e "$BIN" ]; then
-          echo quarantined
-        else
-          echo quarantine_failed
-        fi
-      fi
+      "$BIN" --version >/dev/null 2>&1 && echo works || echo broken
     executable: /bin/bash
   register: cargo_cooldown_health
-  changed_when: cargo_cooldown_health.stdout | trim == 'quarantined'
+  changed_when: false
   check_mode: false
+  failed_when: false
   when:
     - cargo_path_wrapper | bool
     - cargo_cooldown_enforce | bool
 
-- name: Record skipped protection — cooldown backend present but not runnable
+- name: Record skipped protection — publish-age gate not available
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown was installed but could NOT execute on this host (commonly a prebuilt binary needing a newer glibc than the distro ships). It has been moved to cargo-cooldown.broken so it cannot break every cargo build, and the wrapper has degraded to --locked only. Reinstall from source with `cargo install cargo-cooldown` to restore the age gate.'] }}
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown is ' ~ (cargo_cooldown_health.stdout | default('') | trim) ~ ', so `cargo build` is NOT age-gated. The wrapper degrades to --locked, which protects projects with a committed Cargo.lock and does nothing for `cargo update`. Needs rustc >= 1.91.1 and a C linker to build.'] }}
   when:
     - cargo_path_wrapper | bool
     - cargo_cooldown_enforce | bool
     - cargo_cooldown_health is defined
-    - cargo_cooldown_health.stdout | default('') | trim == 'quarantined'
-
-- name: Record skipped protection — broken cooldown backend could NOT be quarantined
-  # Worse than a missing gate: the wrapper still finds cargo-cooldown on PATH,
-  # routes every build into a binary that cannot run, and nothing on the host
-  # works. Say so loudly rather than reporting a clean degrade.
-  ansible.builtin.set_fact:
-    skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown CANNOT EXECUTE and could not be moved aside (permission denied?). The wrapper will route every `cargo build` into a broken binary, so cargo is EFFECTIVELY DISABLED on this host. Remove or repair ' + cargo_home + '/bin/cargo-cooldown, or set cargo_cooldown_enforce=false, immediately.'] }}
-  when:
-    - cargo_path_wrapper | bool
-    - cargo_cooldown_enforce | bool
-    - cargo_cooldown_health is defined
-    - cargo_cooldown_health.stdout | default('') | trim == 'quarantine_failed'
-
-- name: Check whether the cooldown backend actually landed
-  ansible.builtin.stat:
-    path: "{{ cargo_home }}/bin/cargo-cooldown"
-  register: cargo_cooldown_bin
-  when:
-    - cargo_path_wrapper | bool
-    - cargo_cooldown_enforce | bool
-
-- name: Record skipped protection — cargo publish-age gate (cooldown backend absent)
-  # The wrapper degrades to --locked and warns on every invocation, but that
-  # warning is easy to miss in build output. Surfacing it in the end-of-run
-  # summary is the difference between a known gap and a host that believes it
-  # has an age gate it does not have.
-  ansible.builtin.set_fact:
-    skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown is not installed, so `cargo build` is NOT age-gated. The wrapper falls back to --locked, which only protects projects that already have a committed Cargo.lock and does nothing for `cargo update`.'] }}
-  when:
-    - cargo_path_wrapper | bool
-    - cargo_cooldown_enforce | bool
-    - cargo_cooldown_bin is defined
-    - not (cargo_cooldown_bin.stat.exists | default(false))
+    - cargo_cooldown_health.stdout | default('') | trim in ['absent', 'broken']
 
 - name: Record skipped protection — cargo hardening (cargo absent)
   ansible.builtin.set_fact:
