@@ -75,7 +75,7 @@ count is how the role starts believing its own marketing:
 |---|---|
 | Shared cargo/npm cache substitution | Requires write access, therefore prior execution. The role also runs at provision time while the poisoning happens between builds — any check it installed would report a coverage window it does not have. |
 | `build.rs` / proc-macro containment | Needs process isolation (seccomp/Landlock, no-egress container, ephemeral builder). No config-level control exists, in any ecosystem. |
-| Repo-local `.cargo/config.toml`, `[alias]`, `rust-toolchain.toml path=` | Presupposes the attacker controls files in a tree you build — at which point they can simply put the payload in that repo's own build script. |
+| Repo-local `.cargo/config.toml`, `[alias]`, `rust-toolchain.toml path=` | **In scope as a threat, not closable by this role.** Do NOT reason that "you already chose to build untrusted code" — MEASURED: `cargo metadata` and `cargo tree` execute a repo-local `[build] rustc-wrapper`, and `cargo metadata` is what rust-analyzer and every IDE run on folder open. Cloning and opening is enough; no build required. It stays out because the delivery surface is open (`RUSTC_WRAPPER` as an env var is not in any file; `--config` takes a file path, so a key denylist does not cover it; `rust-toolchain.toml path=` supplies its own cargo and bypasses the wrapper before it can act). A detector over this surface enumerates an open set — the shape that produced the `argv[1]` bug. The honest mitigation is not to open untrusted Rust repos outside a container. |
 | `.pyc` / bytecode artifacts, systemd linger, socket lifetime | Persistence and availability concerns, not admission. |
 
 ---
