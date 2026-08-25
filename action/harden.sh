@@ -1246,24 +1246,68 @@ harden_deno() {
   fi
 
   local wrapper_path="${real_deno%-real}"
-  cat <<EOF | sudo tee "$wrapper_path" >/dev/null
+  # Placeholders + sed rather than an interpolating heredoc — same reason as
+  # the cargo wrapper: this text is dense with $ and the escaping is where
+  # generated wrappers go wrong without failing loudly.
+  local tmp_deno
+  tmp_deno=$(mktemp)
+  cat > "$tmp_deno" <<'DENOWRAP'
 #!/bin/bash
-# Managed by supply-chain-harden action
-REAL_DENO='$real_deno'
-if [ -z "\$REAL_DENO" ] || [ ! -x "\$REAL_DENO" ] || [ "\$REAL_DENO" = "$wrapper_path" ]; then
-  echo "[supply-chain-harden] error: real deno not found at '\$REAL_DENO'; refusing to recurse" >&2
+# deno — supply-chain-harden wrapper
+#
+# Deno has no global config file, so a PATH wrapper injecting
+# --minimum-dependency-age is the only host-wide age gate available.
+#
+# THE SUBCOMMAND IS THE FIRST NON-FLAG ARGUMENT.
+#
+# Reading $1 directly is wrong and was the bug here: `deno -A run app.ts` and
+# `deno --quiet run app.ts` are the ordinary forms — -A especially — and with
+# $1 as the subcommand they matched nothing, fell through to the pass-through
+# arm, and ran with NO age gate at all. Silently: an ungated run and a gated
+# one are identical at the terminal.
+REAL_DENO='__REAL_DENO__'
+if [ -z "$REAL_DENO" ] || [ ! -x "$REAL_DENO" ] || [ "$REAL_DENO" = "__WRAPPER_PATH__" ]; then
+  echo "[supply-chain-harden] error: real deno not found at '$REAL_DENO'; refusing to recurse" >&2
   exit 127
 fi
-# Inject --minimum-dependency-age for dep-fetching subcommands.
-case "\${1:-}" in
-  run|test|bench|task|install|add|cache|compile|bundle|check|info|doc|publish|vendor)
-    exec "\$REAL_DENO" "\$1" --minimum-dependency-age=$DENO_AGE_ISO "\${@:2}"
+
+subcmd=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) ;;
+    *) subcmd="$arg"; break ;;
+  esac
+done
+
+# Only subcommands that FETCH REMOTE MODULES, and only ones that accept the
+# flag. This list is deliberately narrow and matches the role's: deno ERRORS
+# when given --minimum-dependency-age on a subcommand that does not take it,
+# so a too-wide list does not weaken the gate, it breaks the command. `task`
+# was in this list and is exactly that hazard — it is how most deno projects
+# invoke everything.
+case "$subcmd" in
+  run|cache|install|test|compile|eval|info|doc|bench|publish)
+    # Insert directly after the subcommand, never appended: deno passes
+    # everything after the script path to the script itself.
+    new_args=()
+    inserted=0
+    for arg in "$@"; do
+      new_args+=("$arg")
+      if [ "$inserted" = "0" ] && [ "$arg" = "$subcmd" ]; then
+        new_args+=("--minimum-dependency-age=__MIN_AGE__")
+        inserted=1
+      fi
+    done
+    exec "$REAL_DENO" "${new_args[@]}"
     ;;
   *)
-    exec "\$REAL_DENO" "\$@"
+    exec "$REAL_DENO" "$@"
     ;;
 esac
-EOF
+DENOWRAP
+  sed -i "s|__REAL_DENO__|$real_deno|; s|__WRAPPER_PATH__|$wrapper_path|; s|__MIN_AGE__|$DENO_AGE_ISO|" "$tmp_deno"
+  sudo cp "$tmp_deno" "$wrapper_path"
+  rm -f "$tmp_deno"
   sudo chmod 755 "$wrapper_path"
   log "deno: wrapper deployed at $wrapper_path (injects --minimum-dependency-age=$DENO_AGE_ISO)"
   end_section

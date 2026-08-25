@@ -314,6 +314,86 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
   [[ "$output" != *"--no-plugins"* ]]
 }
 
+# --- deno ------------------------------------------------------------------
+
+@test "deno: the age gate is injected for a fetching subcommand" {
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" run app.ts
+  [[ "$output" == *"run --minimum-dependency-age=P2D app.ts"* ]]
+}
+
+@test "deno: a leading flag does not hide the subcommand" {
+  # `deno -A run app.ts` is THE common form. Reading $1 as the subcommand
+  # matched nothing here and ran with no age gate at all, silently.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" -A run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P2D"* ]] || {
+    echo "no age gate injected: $output"; return 1
+  }
+  [[ "$output" == *"-A run --minimum-dependency-age=P2D app.ts"* ]]
+}
+
+@test "deno: --quiet before the subcommand is handled too" {
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" --quiet run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P2D"* ]]
+}
+
+@test "deno: the flag lands after the subcommand, not after the script" {
+  # Everything after the script path belongs to the script.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" run app.ts --my-app-flag
+  [[ "$output" == *"run --minimum-dependency-age=P2D app.ts --my-app-flag"* ]]
+}
+
+@test "deno: non-fetching subcommands are left alone" {
+  # deno ERRORS when given --minimum-dependency-age on a subcommand that does
+  # not accept it, so a too-wide list breaks commands rather than weakening
+  # the gate. fmt and lint must pass through untouched.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" fmt
+  [[ "$output" != *"minimum-dependency-age"* ]]
+  run "$TEST_BIN/deno" lint
+  [[ "$output" != *"minimum-dependency-age"* ]]
+}
+
+@test "deno: task is NOT given the flag" {
+  # `deno task` was in the injection list and is how most deno projects invoke
+  # everything. If it rejects the flag, every task in the repo breaks.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" task build
+  [[ "$output" != *"minimum-dependency-age"* ]]
+}
+
+@test "deno: bare deno and --version pass through" {
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" --version
+  [[ "$output" != *"minimum-dependency-age"* ]]
+}
+
+@test "deno: the age window follows release_age_hours" {
+  stub_bin deno
+  harden ECOSYSTEMS=deno RELEASE_AGE_HOURS=168 -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P7D"* ]]
+}
+
+@test "deno: refuses to recurse when the real binary is gone" {
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  sudo rm -f "$(stub_real deno)"
+  run -127 "$TEST_BIN/deno" run app.ts
+  [ "$status" -eq 127 ]
+  [[ "$output" == *"refusing to recurse"* ]]
+}
+
 # --- socket firewall / npm -------------------------------------------------
 
 sfw_stubs() {
