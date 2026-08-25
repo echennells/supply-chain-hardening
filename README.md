@@ -64,21 +64,31 @@ Then reference it in your playbook:
 
 ```bash
 # Install Ansible if you don't have it
-pip install ansible
+sudo apt-get install -y ansible        # or: pip install ansible
 
-# Clone
-git clone git@github.com:echennells/supply-chain-hardening.git
+# Clone (HTTPS — no SSH key needed)
+git clone https://github.com/echennells/supply-chain-hardening.git
 cd supply-chain-hardening
 
-# Run against localhost
+# Apply to this host
 ansible-playbook site.yml --limit localhost
 
-# Run against a remote server
-ansible-playbook site.yml --limit servers
+# See what is actually enforcing (OK / WEAK / GAP per protection)
+/usr/local/bin/supply-chain-verify
 
-# Run only npm + Python hardening
+# Run against a remote server, or just one ecosystem
+ansible-playbook site.yml --limit servers
 ansible-playbook site.yml --tags npm,pip,uv
 ```
+
+**This role hardens the package managers a host already has; it does not install them** (podman is the opt-in exception). So on a bare host most rows in `supply-chain-verify` read `N/A — not installed`, which is correct, not a failure — there is simply nothing to harden yet. To see the role work, install the managers you intend to harden first, then apply:
+
+```bash
+# example: exercise the npm and cargo layers
+sudo apt-get install -y nodejs npm cargo rustc
+```
+
+Note the cargo publish-age gate additionally needs **rustc >= 1.91.1** to build its backend; distro cargo meets this on Ubuntu 26.04 (1.93) but not 24.04 (1.75), where the gate reports a gap and falls back to `--locked`. See Limitations → Cargo.
 
 ## How it works
 
