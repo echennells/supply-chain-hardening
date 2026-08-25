@@ -49,24 +49,3 @@ setup() {
 @test "cargo: config sets [net] retry = 3" {
   assert_file_contains "$HOME/.cargo/config.toml" "retry = 3"
 }
-
-@test "cargo: reference deny.toml deployed at /etc/cargo/deny.toml" {
-  # cargo-deny does NOT auto-merge a system config with project-local
-  # deny.toml. The role deploys this as a reference baseline only —
-  # users copy/symlink into their project or invoke with --config.
-  assert_file_exists /etc/cargo/deny.toml
-}
-
-@test "cargo: deny.toml denies unknown registries and unknown git sources" {
-  assert_file_contains /etc/cargo/deny.toml 'unknown-registry = "deny"'
-  assert_file_contains /etc/cargo/deny.toml 'unknown-git = "deny"'
-}
-
-@test "cargo: deny.toml denies yanked crate versions" {
-  assert_file_contains /etc/cargo/deny.toml 'yanked = "deny"'
-}
-
-@test "cargo: deny.toml is root-owned (non-root cannot tamper)" {
-  owner=$(stat -c '%U' /etc/cargo/deny.toml 2>/dev/null || stat -f '%Su' /etc/cargo/deny.toml)
-  [ "$owner" = "root" ]
-}

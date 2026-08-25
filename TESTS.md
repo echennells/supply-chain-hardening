@@ -1,6 +1,6 @@
 # Tests
 
-365 automated tests verify the supply chain hardening works. Run with `make test`.
+361 automated tests verify the supply chain hardening works. Run with `make test`.
 
 ## Test structure
 
@@ -23,7 +23,7 @@
 | 15-bun-adversarial.bats | 5 | Simulated bun lifecycle-script attacks + bun PATH wrapper end-to-end blocks runtime auto-install + FIXTURE CONTROL (bun-real does auto-install when not wrapped) |
 | 16-composer-behavioral.bats | 4 | Composer end-to-end blocking |
 | 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
-| 18-cargo-behavioral.bats | 9 | Cargo config (git-fetch-with-cli, retry), build.rs gap, /etc/cargo/deny.toml reference policy + regression catchers for removed Windows-only / mislabeled keys |
+| 18-cargo-behavioral.bats | 5 | Cargo config (git-fetch-with-cli, retry), build.rs gap + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
 | 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
 | 21-podman.bats | 14 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign |
@@ -107,7 +107,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 365 tests
+make test          # build container + run all 361 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

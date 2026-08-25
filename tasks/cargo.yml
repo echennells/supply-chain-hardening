@@ -73,29 +73,6 @@
     mode: "0644"
   when: cargo_cooldown_enforce | bool
 
-- name: Create /etc/cargo directory for system-wide deny.toml reference
-  ansible.builtin.file:
-    path: /etc/cargo
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  become: true
-  when: cargo_deny_deploy | bool
-
-- name: Deploy reference cargo-deny policy at /etc/cargo/deny.toml
-  # Not auto-applied: cargo-deny only reads ./deny.toml in CWD. The
-  # template documents the copy/--config recipes. Deployed root-owned so
-  # the reference can't be tampered with from non-root user access.
-  ansible.builtin.template:
-    src: cargo-deny.toml.j2
-    dest: /etc/cargo/deny.toml
-    owner: root
-    group: root
-    mode: "0644"
-  become: true
-  when: cargo_deny_deploy | bool
-
 - name: Check if cargo is installed
   # Check the canonical rustup install location first. rustup (the dominant
   # cargo installer) puts the binary at ~/.cargo/bin/cargo and adds PATH only
@@ -199,10 +176,9 @@
   failed_when: false
 
 - name: Install optional cargo auditing tools (opt-in — this role never invokes them)
-  # cargo-audit, cargo-deny and cargo-vet are detection tools. Nothing in this
-  # role runs them — grep for their names across tasks/ and templates/ returns
-  # no invocation — and /etc/cargo/deny.toml is a reference policy that is not
-  # auto-applied. Installing them by default put three binaries on every host
+  # cargo-audit and cargo-vet are detection tools. Nothing in this role runs
+  # them — grep for their names across tasks/ and templates/ returns no
+  # invocation. Installing them by default put binaries on every host
   # that no code path uses, and was the sole reason the role needed a
   # `curl | bash` bootstrap. Enable this and wire them into CI yourself.
   ansible.builtin.command:

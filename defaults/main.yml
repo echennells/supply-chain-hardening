@@ -285,17 +285,10 @@ composer_path_wrapper: true
 #      root). None of them stop build.rs.
 #   2. ~/.cargo/cooldown.toml + the cargo PATH wrapper — the publish-age gate.
 #      This is the load-bearing protection; see cargo_cooldown_enforce below.
-#   3. /etc/cargo/deny.toml — a reference cargo-deny policy. Not auto-applied
-#      to projects; copy or symlink into the project root, or pass via
-#      `cargo deny --config /etc/cargo/deny.toml check`.
-#   4. cargo-audit / cargo-deny / cargo-vet / cargo-cooldown — installed via
-#      cargo-binstall when cargo is present. cargo-cooldown is enforced by
-#      (2); the other three remain detection-oriented and still need wiring
-#      into CI.
-#
-# Set this to false on hosts where you ship your own deny.toml from another
-# config-management layer and don't want the role overwriting /etc/cargo/.
-cargo_deny_deploy: true
+#   3. cargo-audit / cargo-vet / cargo-cooldown — optional detection tools,
+#      installed only when cargo_audit_tools is enabled. cargo-cooldown is
+#      the one the role actually invokes (via the wrapper); the others remain
+#      detection-oriented and need wiring into CI by the operator.
 
 # cargo PATH wrapper (default on; the only way the age gate reaches callers).
 #
@@ -403,7 +396,7 @@ cargo_install_root: ""
 #
 # The role installs ten tools from upstream because nine of them are not
 # packaged by any supported distro (measured on Ubuntu 24.04: cargo-audit,
-# cargo-deny, cargo-vet, cosign, zizmor, npq, lockfile-lint and pinact all
+# cargo-vet, cosign, zizmor, npq, lockfile-lint and pinact all
 # return NOT PACKAGED; only podman is, and podman is installed via apt).
 # Leaving the distro was therefore forced. Replacing what the distro provided
 # was not, and originally did not happen.
@@ -456,16 +449,14 @@ pip_audit_version: "2.10.1"
 cargo_cooldown_version: "0.3.4"
 
 # The other three cargo tools are DETECTION tools that nothing in this role
-# runs — grep for cargo-audit/cargo-deny/cargo-vet across tasks/ and templates/
-# returns no invocation, and /etc/cargo/deny.toml is explicitly a reference
-# policy that is never applied. Installing them by default put three unverified
-# binaries on every host to no effect, and was the whole reason the role
-# needed a `curl | bash` bootstrap. Opt in if you intend to wire them into CI
+# runs — grep for cargo-audit/cargo-vet across tasks/ and templates/ returns
+# no invocation. Installing them by default put unverified binaries on every
+# host to no effect, and was part of why the role needed a `curl | bash`
+# bootstrap. Opt in if you intend to wire them into CI
 # yourself; they are documented in the README.
 cargo_audit_tools: false
 cargo_audit_versions:
   cargo-audit: "0.22.2"
-  cargo-deny: "0.20.2"
   cargo-vet: "0.10.2"
 
 # podman / container image hardening
