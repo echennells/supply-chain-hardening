@@ -33,7 +33,17 @@ make_probe() {
   PROBE_DIR="$(mktemp -d)"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*"\n' > "$PROBE_DIR/cargo-real"
   chmod +x "$PROBE_DIR/cargo-real"
-  sed "s|^REAL_CARGO=.*|REAL_CARGO='$PROBE_DIR/cargo-real'|" "$(cargo_path)" > "$PROBE_DIR/cargo"
+  # Neutralise the wrapper's COOLDOWN_BIN prepend so THIS fixture controls
+  # whether cargo-cooldown is reachable. The wrapper prepends its embedded
+  # COOLDOWN_BIN ($CARGO_HOME/bin) to PATH before dispatching — added so the
+  # gate resolves on apt-cargo hosts. On the rustup test image that dir holds a
+  # REAL cargo-cooldown, so without this the `without-cooldown` probes would
+  # still find it and route to `cooldown`, never exercising the --locked
+  # fallback. Point it at PROBE_DIR, where make_probe places a cargo-cooldown
+  # only for the with-cooldown case, so presence is fully under fixture control.
+  sed -e "s|^REAL_CARGO=.*|REAL_CARGO='$PROBE_DIR/cargo-real'|" \
+      -e "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$PROBE_DIR'|" \
+      "$(cargo_path)" > "$PROBE_DIR/cargo"
   chmod +x "$PROBE_DIR/cargo"
   mkdir -p "$PROBE_DIR/proj"
   : > "$PROBE_DIR/proj/Cargo.lock"
