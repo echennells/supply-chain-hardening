@@ -325,6 +325,10 @@ cargo_path_wrapper: true
 # still a real control — it is what protected lockfile-pinned projects in the
 # incident — but it only helps projects that already have a committed
 # Cargo.lock, and it does nothing for `cargo update`.
+# Effectively conditional on the toolchain: the backend has MSRV 1.91.1, so on
+# distro cargo (Ubuntu 24.04 = 1.75.0) the install is skipped with a recorded
+# reason and the wrapper degrades to --locked. rustup hosts >= 1.91.1 get the
+# full gate. Kept default-on so rustup users are covered without opting in.
 cargo_cooldown_enforce: true
 
 # What a cooldown violation does. "deny" fails the command and restores the

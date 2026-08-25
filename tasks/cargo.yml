@@ -124,6 +124,48 @@
     - cargo_cc_check is defined
     - cargo_cc_check.rc | default(1) != 0
 
+- name: Detect the rustc version (the gate backend needs >= 1.91.1 to build)
+  # cargo-cooldown 0.3.4 has MSRV 1.91.1. Distro cargo is older on every current
+  # LTS — Ubuntu 24.04 ships 1.75.0, Debian 12 older still — so on those hosts
+  # the source build cannot succeed. Detect it and skip cleanly, instead of
+  # spending a minute compiling dependencies only to die on the MSRV check and
+  # get swallowed by failed_when:false.
+  #
+  # This is what makes cargo_cooldown_enforce=true honest: it stays the default,
+  # but on a too-old toolchain it degrades to --locked with a recorded reason
+  # rather than a wasted build and a silent gap.
+  ansible.builtin.shell:
+    cmd: "{{ cargo_check.stdout | dirname }}/rustc --version 2>/dev/null | awk '{print $2}'"
+    executable: /bin/bash
+  register: cargo_rustc_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
+
+- name: Decide whether rustc is too old for the gate backend
+  # Only "too old" when we POSITIVELY read a version below the MSRV. An
+  # unreadable version falls through to attempting the build (which then fails
+  # gracefully via the health check) rather than skipping on a guess.
+  ansible.builtin.set_fact:
+    cargo_rustc_too_old: >-
+      {{ (cargo_rustc_version.stdout | default('') | trim) | length > 0
+         and (cargo_rustc_version.stdout | trim) is version('1.91.1', '<') }}
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
+
+- name: Record skipped protection — rustc too old for the gate backend
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — rustc ' ~ (cargo_rustc_version.stdout | trim) ~ ' is below cargo-cooldown 0.3.4 MSRV 1.91.1, so the backend cannot be built from source. Expected on distro cargo (Ubuntu 24.04 = 1.75.0). Use a rustup toolchain >= 1.91.1 and re-apply, or set cargo_cooldown_enforce=false. The wrapper degrades to --locked only.'] }}
+  when:
+    - cargo_check.rc == 0
+    - cargo_cooldown_enforce | bool
+    - cargo_rustc_too_old | default(false) | bool
+
 - name: Detect the installed cargo-cooldown version (idempotence on the PIN, not the file)
   # `creates:` alone checks only that the binary exists, so bumping
   # cargo_cooldown_version would be inert — the pin could never be updated.
@@ -170,6 +212,7 @@
     - cargo_cooldown_enforce | bool
     - cargo_cc_check is defined
     - cargo_cc_check.rc | default(1) == 0
+    - not (cargo_rustc_too_old | default(false) | bool)
     - refresh_tools | bool or (cargo_cooldown_installed.stdout | default('') | trim) != cargo_cooldown_version
   register: cargo_tools_install
   changed_when: cargo_tools_install.rc | default(1) == 0
@@ -368,6 +411,9 @@
     - cargo_cooldown_enforce | bool
 
 - name: Record skipped protection — publish-age gate not available
+  # Only fire when a more specific reason (rustc too old, no C linker) has NOT
+  # already been recorded — otherwise one gap gets reported twice and the
+  # end-of-run "N protections not applied" count is inflated.
   ansible.builtin.set_fact:
     skipped_protections: >-
       {{ (skipped_protections | default([])) + ['cargo publish-age gate — cargo-cooldown is ' ~ (cargo_cooldown_health.stdout | default('') | trim) ~ ', so `cargo build` is NOT age-gated. The wrapper degrades to --locked, which protects projects with a committed Cargo.lock and does nothing for `cargo update`. Needs rustc >= 1.91.1 and a C linker to build.'] }}
@@ -376,6 +422,8 @@
     - cargo_cooldown_enforce | bool
     - cargo_cooldown_health is defined
     - cargo_cooldown_health.stdout | default('') | trim in ['absent', 'broken']
+    - not (cargo_rustc_too_old | default(false) | bool)
+    - cargo_cc_check.rc | default(0) == 0
 
 - name: Record skipped protection — cargo hardening (cargo absent)
   ansible.builtin.set_fact:
