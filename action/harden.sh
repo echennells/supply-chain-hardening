@@ -102,7 +102,15 @@ esac
 # wrappers still work via the shared workspace volume).
 HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
 HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
-: > "$HARDENING_ENV_FILE"
+# The chosen temp dir is not guaranteed to exist — a caller can point TMPDIR
+# at a path it has not created yet, and the bare redirect below would then
+# fail with an opaque "no such file or directory" before any hardening ran.
+mkdir -p "$(dirname "$HARDENING_ENV_FILE")" "$(dirname "$HARDENING_OUTPUT_FILE")" 2>/dev/null || true
+if ! : > "$HARDENING_ENV_FILE" 2>/dev/null; then
+  echo "[supply-chain-harden] error: cannot write the env file at '$HARDENING_ENV_FILE'" >&2
+  echo "  set HARDENING_ENV_FILE to a writable path" >&2
+  exit 2
+fi
 : > "$HARDENING_OUTPUT_FILE"
 
 # ---- Log annotations (platform-specific markup, identical semantics) ----

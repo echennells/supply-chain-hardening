@@ -16,7 +16,7 @@ jobs:
     name: 'Action: default invocation works'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         id: harden
@@ -52,7 +52,7 @@ jobs:
     name: 'Action: blocks npm postinstall (the actual attack)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -74,7 +74,7 @@ jobs:
     name: 'Action: subset selection (npm,pip only)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         id: harden
@@ -104,7 +104,7 @@ jobs:
     name: 'Action: rejects release_age_hours=0'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         id: harden
@@ -124,7 +124,7 @@ jobs:
     name: 'Action: blocks pnpm project-level postinstall (pnpm 11 config.yaml is load-bearing)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
@@ -163,7 +163,7 @@ jobs:
     name: 'Action: uv pip install refuses sdist (setup.py blocked via no-build)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
@@ -225,7 +225,7 @@ jobs:
     name: 'Action: uv config remains valid on pinned older uv (regression catcher)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
@@ -262,7 +262,7 @@ jobs:
     name: 'DOCUMENTED LIMIT: pip only-binary does not block local-file sdist install'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
@@ -302,7 +302,7 @@ jobs:
     name: 'Action: blocks real npm package install script (bcrypt native bindings)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
@@ -338,7 +338,7 @@ jobs:
     name: 'Action: bun PATH wrapper blocks runtime auto-install on bun run'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install bun
         run: |
@@ -409,7 +409,7 @@ jobs:
     name: 'Action: composer wrapper blocks lifecycle script'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install composer
         run: |
@@ -451,7 +451,7 @@ jobs:
     name: 'Action: go env vars propagate to subsequent steps'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -472,7 +472,7 @@ jobs:
     name: 'Action: cargo config has hardening keys'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -492,7 +492,7 @@ jobs:
     name: 'Action: bundler/maven/gradle/nuget configs deployed'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -512,7 +512,7 @@ jobs:
     name: 'Action: bundler BUNDLE_FROZEN actually rejects out-of-sync Gemfile.lock'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -564,7 +564,7 @@ jobs:
     name: 'Action: maven mirror actually blocks HTTP-only repository'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
         with:
@@ -626,7 +626,7 @@ jobs:
     name: 'Action: gradle init script actually rejects dynamic versions'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
         with:
@@ -674,7 +674,7 @@ jobs:
     name: 'Action: nuget cert fingerprint accepts current nuget.org packages'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: actions/setup-dotnet@3e891b0cb619bf60e2c25674b222b8940e2c1c25 # v4.1.0
         with:
@@ -721,7 +721,7 @@ jobs:
     name: 'Action: pnpm_built_dependencies input correctly switches to allowlist mode'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -768,7 +768,7 @@ jobs:
     name: 'Action: bunfig.toml uses ignoreScripts (real key) not lifecycleScripts (made-up)'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         with:
@@ -791,7 +791,7 @@ jobs:
     name: 'Action: SUPPLY_CHAIN_HARDEN_SKIP env var bypasses hardening'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         id: harden
@@ -809,7 +809,7 @@ jobs:
     name: 'Action: tool-versions output is valid JSON with expected keys'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./action
         id: harden
@@ -856,3 +856,161 @@ jobs:
         run: |
           grep -q "ignore-scripts=true" "$HOME/.npmrc"
           grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
+
+  action-npm-age-gate-env-key:
+    name: 'Action: npm age-gate env key is the one npm reads (regression catcher)'
+    runs-on: ubuntu-24.04
+    # npm ignores NPM_CONFIG_MINIMUM_RELEASE_AGE. The action shipped that dead
+    # key while its .npmrc used the correct min-release-age, so the gate held
+    # via the file layer and the env layer was silently a no-op — invisible to
+    # any test that only checks behavior. This asserts the key by name.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      - name: The live key is set and the dead key is absent
+        run: |
+          test "$NPM_CONFIG_MIN_RELEASE_AGE" = "2" \
+            || { echo "::error::NPM_CONFIG_MIN_RELEASE_AGE=${NPM_CONFIG_MIN_RELEASE_AGE:-<unset>}, expected 2"; exit 1; }
+          if [ -n "${NPM_CONFIG_MINIMUM_RELEASE_AGE:-}" ]; then
+            echo "::error::NPM_CONFIG_MINIMUM_RELEASE_AGE is set — npm ignores that key; the env-layer age gate is a no-op again"
+            exit 1
+          fi
+          grep -q "^min-release-age=2$" "$HOME/.npmrc"
+
+  action-blocks-bunx:
+    name: 'Action: bunx cannot fetch-and-execute (finding V5)'
+    runs-on: ubuntu-24.04
+    # bunx is a SEPARATE entry point from bun: wrapping the bun binary leaves
+    # it untouched and ~/.bunfig.toml never applies to it. Before the bunx
+    # wrapper, `bunx <pkg>` downloaded and ran arbitrary code on a host whose
+    # bun was already hardened.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install bun BEFORE the action (so the wrapper lands on it)
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - uses: ./action
+        with:
+          ecosystems: bun
+
+      - name: bunx must refuse to auto-download an uninstalled package
+        run: |
+          set +e
+          out=$(bunx cowsay "hardening test" 2>&1); rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::bunx fetched and executed an uninstalled package — V5 has regressed"
+            exit 1
+          fi
+          echo "$out" | grep -qi "no-install\|Could not find an existing" \
+            || echo "::warning::bunx failed, but not with the --no-install message; check the wrapper is what refused it"
+
+      - name: bunx metadata flags still work (wrapper is not a brick)
+        run: bunx --version
+
+  action-cargo-locked:
+    name: 'Action: cargo wrapper injects --locked'
+    runs-on: ubuntu-24.04
+    # There is no config or env route to --locked, so the wrapper is the only
+    # mechanism. This proves it behaviorally: a lockfile deliberately out of
+    # sync with Cargo.toml builds fine WITHOUT --locked and must fail WITH it.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Build a project whose lockfile is out of sync
+        run: |
+          cargo init --name locktest /tmp/locktest
+          cd /tmp/locktest
+          cargo generate-lockfile
+          # Add a dependency the lockfile does not know about.
+          printf 'anyhow = "1"\n' >> Cargo.toml
+
+      - uses: ./action
+        with:
+          ecosystems: cargo
+
+      - name: cargo build must refuse the stale lockfile
+        run: |
+          cd /tmp/locktest
+          set +e
+          out=$(cargo build 2>&1); rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::cargo build succeeded against a stale lockfile — --locked was not injected"
+            exit 1
+          fi
+          echo "$out" | grep -qi "lock file\|--locked\|needs to be updated" \
+            || { echo "::error::cargo failed for some other reason than --locked"; exit 1; }
+
+      - name: The publish-age gate config was written
+        run: |
+          grep -q 'global-min-publish-age = "48 hours"' "$HOME/.cargo/cooldown.toml"
+          grep -q 'incompatible-publish-age = "deny"' "$HOME/.cargo/cooldown.toml"
+
+  action-go-persisted-without-env:
+    name: 'Action: go hardening survives with the env layer stripped'
+    runs-on: ubuntu-24.04
+    # go is the one ecosystem with no config file behind its settings, so it
+    # was the single thing that made the "generic across CI" claim untrue.
+    # `go env -w` is the fix; this proves the file layer holds on its own by
+    # unsetting every variable the action exported.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: go
+
+      - name: go settings hold with all exported vars removed
+        run: |
+          strip() { env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN \
+                        -u GOPRIVATE -u GONOPROXY -u GOINSECURE "$@"; }
+          test "$(strip go env GOFLAGS)"     = "-mod=readonly"     || { echo "::error::GOFLAGS did not persist"; exit 1; }
+          test "$(strip go env GOSUMDB)"     = "sum.golang.org"    || { echo "::error::GOSUMDB did not persist"; exit 1; }
+          test "$(strip go env GOTOOLCHAIN)" = "local"             || { echo "::error::GOTOOLCHAIN did not persist"; exit 1; }
+          test -z "$(strip go env GOPRIVATE)"                      || { echo "::error::GOPRIVATE is non-empty — a sumdb bypass survived"; exit 1; }
+          echo "go env file: $(go env GOENV)"
+
+  action-emit-plain:
+    name: 'Action: --emit=plain works with no CI variables at all'
+    runs-on: ubuntu-24.04
+    # The portability claim in the README, exercised. Running the script with
+    # every GitHub marker stripped must still harden and must produce a
+    # sourceable env file — this is the path Drone/Woodpecker and a Dockerfile
+    # would take.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Run bare, outside any CI context
+        run: |
+          mkdir -p /tmp/plainhome /tmp/plain
+          env -i PATH="$PATH" HOME=/tmp/plainhome TMPDIR=/tmp/plain \
+            ECOSYSTEMS=npm,go,pip WRITE_ETC=false \
+            bash ./action/harden.sh --emit=plain | tee /tmp/plain.log
+
+      - name: Config files landed and the env file round-trips
+        run: |
+          grep -q "^min-release-age=2$" /tmp/plainhome/.npmrc
+          grep -q "emit=plain" /tmp/plain.log
+          envfile=$(ls /tmp/plain/supply-chain-hardening.env 2>/dev/null || ls /tmp/supply-chain-hardening.env)
+          echo "env file: $envfile"; cat "$envfile"
+          # Source it in a pristine shell and confirm values survive quoting.
+          out=$(env -i bash -c "source '$envfile'; echo \"\$GOPROXY|\$NPM_CONFIG_MIN_RELEASE_AGE\"")
+          test "$out" = "https://proxy.golang.org,direct|2" \
+            || { echo "::error::env file did not round-trip: got '$out'"; exit 1; }
+
+      - name: No GitHub-specific annotations were emitted
+        run: |
+          if grep -q '::error::\|::warning::\|::group::' /tmp/plain.log; then
+            echo "::error::plain mode emitted GitHub workflow commands"
+            exit 1
+          fi
