@@ -64,6 +64,17 @@ set -u
 
 REAL_CARGO='{{ cargo_real_path }}'
 
+# cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup cargo
+# but NOT for a distro/apt cargo (whose ~/.cargo/bin is nowhere on PATH). Without
+# this, `command -v cargo-cooldown` below fails on apt-cargo hosts and cargo's
+# own `cargo cooldown` subcommand resolution (cargo-<name> on PATH) fails too —
+# so the age gate silently does nothing even though the backend built fine.
+# Prepend it, idempotently, so both lookups succeed on every host shape.
+COOLDOWN_BIN='{{ cargo_cooldown_bin | default("") }}'
+if [ -n "$COOLDOWN_BIN" ] && [ -d "$COOLDOWN_BIN" ]; then
+  case ":$PATH:" in *":$COOLDOWN_BIN:"*) ;; *) PATH="$COOLDOWN_BIN:$PATH"; export PATH ;; esac
+fi
+
 # Recursion guard — same pattern as the bun, composer, deno, npm and pip
 # wrappers.
 if [ -z "$REAL_CARGO" ] || [ ! -x "$REAL_CARGO" ] || [ "$REAL_CARGO" = "$0" ]; then

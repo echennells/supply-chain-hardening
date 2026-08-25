@@ -348,6 +348,7 @@
     mode: "0755"
   vars:
     cargo_real_path: "{{ cargo_check.stdout }}-real"
+    cargo_cooldown_bin: "{{ cargo_home }}/bin"
   when:
     - cargo_path_wrapper | bool
     - cargo_check.rc == 0

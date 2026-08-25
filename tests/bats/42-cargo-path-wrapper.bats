@@ -274,6 +274,25 @@ teardown() { [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"; return 0; }
   [ "$status" -eq 127 ]
 }
 
+# ---- BUG 1 regression: cargo-cooldown must be reachable on apt-cargo hosts ----
+#
+# On a rustup cargo, $CARGO_HOME/bin is on PATH, so `command -v cargo-cooldown`
+# and cargo's own `cargo cooldown` subcommand resolution both find the backend.
+# On a distro/apt cargo, ~/.cargo/bin is NOWHERE on PATH — so the backend builds
+# fine but the wrapper cannot find it, and the age gate silently resolves fresh
+# crates unchecked. Every test image used rustup, so this hid until a real
+# Ubuntu 26.04 apt-cargo box surfaced it. The wrapper prepends $CARGO_HOME/bin
+# to PATH; assert that it does.
+
+@test "cargo: wrapper prepends the cooldown bin dir to PATH (apt-cargo reachability)" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  # COOLDOWN_BIN must be set to a non-empty $CARGO_HOME/bin, and the wrapper
+  # must add it to PATH.
+  run grep -E "^COOLDOWN_BIN='.+/bin'" "$(cargo_path)"
+  [ "$status" -eq 0 ]
+  grep -q 'PATH="$COOLDOWN_BIN:$PATH"' "$(cargo_path)"
+}
+
 # ---- the gate config ----
 
 cargo_home_dir() { echo "${CARGO_HOME:-$HOME/.cargo}"; }
