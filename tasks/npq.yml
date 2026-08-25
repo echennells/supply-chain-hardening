@@ -95,6 +95,12 @@
   # Gated on the RUNTIME threshold. Installing npq on an older Node would
   # succeed (npm only warns about engines), put a binary on PATH, and give
   # the host a silent passthrough that reads as protection.
+  # become: root — `npm install -g` writes to the global prefix (/usr/local on
+  # apt npm), which a non-root apply cannot write to. sfw installs the same way
+  # (socket.yml). Without this the install fails on every non-root host, npq
+  # never functions, and (before the existence gate above) the alias shipped
+  # anyway.
+  become: true
   ansible.builtin.command: npm install -g npq@{{ npq_version }}
   changed_when: true
   when:
@@ -121,11 +127,24 @@
   # exit code is useless here and the message is the only honest signal.
   ansible.builtin.shell:
     cmd: |
-      out=$(npq-hero --version 2>&1)
-      if printf '%s' "$out" | grep -qi 'npq suppressed'; then
-        echo "SUPPRESSED"
+      # A MISSING or non-executing npq-hero is NOT functional. The old check only
+      # separated "npq suppressed" (old Node) from everything-else = FUNCTIONAL,
+      # so a FAILED install — npq-hero absent, `npq-hero --version` printing
+      # "command not found" — fell through to FUNCTIONAL. The alias task below
+      # then deployed `alias npm='npq-hero'` against a binary that does not
+      # exist, breaking every interactive npm/yarn/pnpm on the host. MEASURED on
+      # a non-root apt apply, where `npm install -g` cannot write /usr/local and
+      # the install fails. Existence is the first gate, so a failed install fails
+      # SAFE (no alias) instead of breaking the tool it was meant to protect.
+      if ! command -v npq-hero >/dev/null 2>&1; then
+        echo "MISSING"
       else
-        echo "FUNCTIONAL"
+        out=$(npq-hero --version 2>&1)
+        if printf '%s' "$out" | grep -qi 'npq suppressed'; then
+          echo "SUPPRESSED"
+        else
+          echo "FUNCTIONAL"
+        fi
       fi
     executable: /bin/bash
   register: npq_functional_probe

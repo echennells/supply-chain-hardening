@@ -77,6 +77,10 @@
   # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
   # 11 downstream includes, including the entire env-var layer. The failure is
   # recorded below instead, so it is reported rather than fatal or silent.
+  # become: root — `npm install -g` writes the global prefix (/usr/local on apt
+  # npm), unwritable by a non-root apply, so the install silently failed on
+  # every non-root host (recorded as a gap). sfw/npq install the same way.
+  become: true
   ansible.builtin.command: npm install -g lockfile-lint@{{ lockfile_lint_version }}
   changed_when: true
   when:

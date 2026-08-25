@@ -56,6 +56,17 @@ restore_npq() {
   fi
 }
 
+# Reproduce a FAILED install: npq-hero absent ENTIRELY, distinct from
+# shadow_npq_as_suppressed's old-Node case (binary present, passes through).
+# Same cp -a / rm dance so npm's symlink-into-node_modules is preserved for
+# restore and never written through. Restores via restore_npq (same backup).
+hide_npq() {
+  REAL_NPQ="$(npq_path)"
+  [ -n "$REAL_NPQ" ] || return 1
+  cp -a "$REAL_NPQ" "${REAL_NPQ}.upgradetest.bak" || return 1
+  rm -f "$REAL_NPQ"
+}
+
 @test "upgrade: a stale npq alias file is REMOVED when npq cannot function" {
   # The exact state QA found. An older role version deployed the aliases; the
   # host's npq is suppressed; re-applying must take the file away, because
@@ -84,6 +95,45 @@ EOF
   restore_npq
 
   # The whole point: converged away, not merely left un-rewritten.
+  [ "$present" -eq 0 ]
+}
+
+@test "upgrade: a stale npq alias file is REMOVED when npq-hero is MISSING, not only suppressed" {
+  # The exact state this role put a stock Ubuntu 26 box into. A non-root
+  # `npm install -g npq` could not write /usr/local, so the install FAILED and
+  # npq-hero was never present — yet the alias file `alias npm='npq-hero'` had
+  # already shipped. The functional probe used to split only "npq suppressed"
+  # from FUNCTIONAL, so a `command not found` fell through to FUNCTIONAL, the
+  # alias was kept, and every interactive npm/yarn/pnpm broke with
+  # "npq-hero: command not found". Removal must fire for MISSING too.
+  command -v npq-hero >/dev/null 2>&1 || skip "npq not installed in this image"
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+
+  hide_npq || skip "could not hide npq-hero"
+
+  # Seed the broken artifact the failed apply left behind.
+  cat > "$ALIASES" <<'EOF'
+#!/bin/sh
+# Managed by ansible-supply-chain-security
+export NPQ_DISABLE_AUTO_CONTINUE=true
+alias npm='npq-hero'
+EOF
+  [ -f "$ALIASES" ]
+
+  # Force the reinstall to fail too (bogus version), so npq-hero STAYS missing
+  # through the apply — otherwise the fixed `become` install would just heal it
+  # and we'd be testing the happy path instead of the removal path.
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npq -e podman_enabled=false -e verify_protections=false \
+    -e npq_version=99.99.99-nonexistent-testonly
+  echo "$output" | tail -20
+
+  local present=0
+  [ -f "$ALIASES" ] && present=1
+  restore_npq
+
+  # Missing backend must fail SAFE: no alias pointing at a binary that isn't there.
   [ "$present" -eq 0 ]
 }
 
