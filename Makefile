@@ -1,4 +1,4 @@
-.PHONY: build test test-dev test-matrix shell clean
+.PHONY: build test test-ci test-dev test-matrix shell clean
 
 IMAGE_NAME := supply-chain-test
 NODE_VERSION ?= 22
@@ -8,6 +8,14 @@ build:
 
 test: build
 	docker run --rm $(IMAGE_NAME)
+
+# Unit tests for the CI-runner script (action/harden.sh). No docker, no
+# Ansible, no network — runs against throwaway HOMEs in a few seconds.
+# Tests whose tool is absent skip rather than fail, so this is useful on a
+# bare checkout and gets stricter on a fuller machine.
+test-ci:
+	@command -v bats >/dev/null 2>&1 || { echo "bats not found: npm install -g bats"; exit 1; }
+	bats --print-output-on-failure tests/ci/
 
 test-matrix:
 	@for node in 20 22 24; do \

@@ -1,0 +1,58 @@
+name: harden.sh unit tests
+
+# Fast feedback for the CI-runner script. The role's bats suite needs a built
+# container and the action smoke tests need a full runner per case; this runs
+# harden.sh directly against throwaway HOMEs and finishes in seconds, so it
+# can gate every push.
+#
+# macOS is in the matrix for one specific reason: it is the only place the
+# BSD `date` fallback for uv's exclude-newer timestamp is exercised. On Linux
+# the GNU branch always wins and that code would never run.
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+    paths:
+      - 'action/**'
+      - 'tests/ci/**'
+      - '.github/workflows/ci-script.yml'
+  pull_request:
+    paths:
+      - 'action/**'
+      - 'tests/ci/**'
+      - '.github/workflows/ci-script.yml'
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: "harden.sh (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: Install bats
+        run: npm install -g bats@1.13.0
+
+      - name: Install uv (exercises the ecosystem's own behavioral tests)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Run the suite
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bats --print-output-on-failure tests/ci/
+
+      - name: Shell-check harden.sh
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # SC1090/SC1091: sourced paths are runtime values by design.
+          # SC2016: wrapper heredocs intentionally emit literal $VAR.
+          shellcheck --severity=warning --exclude=SC1090,SC1091,SC2016 action/harden.sh

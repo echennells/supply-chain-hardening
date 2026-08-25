@@ -307,8 +307,12 @@ detect_version() {
 # Treats missing patch as .0. Used for version-tiering checks.
 version_ge() {
   local a="$1" b="$2"
-  local IFS=.
-  local a_parts=($a) b_parts=($b)
+  # read -ra rather than unquoted expansion under IFS=. — the latter is also
+  # subject to globbing, so a version string containing * or ? would expand
+  # against the cwd instead of splitting.
+  local -a a_parts b_parts
+  IFS=. read -ra a_parts <<< "$a"
+  IFS=. read -ra b_parts <<< "$b"
   # Normalize to 3 components
   while [[ ${#a_parts[@]} -lt 3 ]]; do a_parts+=("0"); done
   while [[ ${#b_parts[@]} -lt 3 ]]; do b_parts+=("0"); done
@@ -771,7 +775,8 @@ EOF
   real_bunx=$(command -v bunx 2>/dev/null || true)
   if [[ -z "$real_bunx" ]]; then
     # bunx not on PATH; try the conventional sibling of the bun we wrapped.
-    local sibling="$(dirname "$wrapper_target")/bunx"
+    local sibling
+    sibling="$(dirname "$wrapper_target")/bunx"
     [[ -e "$sibling" ]] && real_bunx="$sibling"
   fi
 
@@ -1169,7 +1174,7 @@ harden_go() {
     if [[ -n "$failed" ]]; then
       warn "go env -w rejected: ${failed% } — those settings rely on the env layer only on this host"
     else
-      log "go: persisted to $(go env GOENV 2>/dev/null || echo '~/.config/go/env') — survives without env propagation"
+      log "go: persisted to $(go env GOENV 2>/dev/null || echo "$HOME/.config/go/env") — survives without env propagation"
     fi
   else
     log "go not installed — env layer written, go env -w skipped"

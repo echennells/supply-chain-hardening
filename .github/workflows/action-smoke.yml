@@ -838,7 +838,15 @@ jobs:
       # Deliberately NO `actions/checkout` of this repo — proves the action
       # resolves and runs purely via GitHub Actions runtime, which is what a
       # consumer in a separate repo experiences.
-      - uses: echennells/supply-chain-hardening/action@feat/github-action
+      #
+      # NOTE: `uses:` cannot interpolate ${{ }}, so this ref is hardcoded and
+      # is the one thing here that does NOT track the current branch. It
+      # pointed at feat/github-action, which is the PARKED branch carrying the
+      # pre-fix script (dead npm env key, no bunx wrapper, no cargo gate) — so
+      # this job was validating stale code while every other job tested the
+      # checkout. Retarget on release; until this branch is pushed, expect
+      # this single job to fail to resolve.
+      - uses: echennells/supply-chain-hardening/action@feat/ci-hardening
         id: harden
 
       - name: Outputs are populated (same as local-checkout test)
