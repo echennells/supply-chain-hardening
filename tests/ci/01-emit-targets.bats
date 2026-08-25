@@ -126,3 +126,28 @@ setup() { common_setup; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"unrecognised argument"* ]]
 }
+
+@test "the config layer survives a step boundary with no env at all" {
+  # The per-step-container shape (Drone, Woodpecker): nothing in a process
+  # environment crosses a step, so this is what the portability claim rests
+  # on. Config files land in a shared HOME and are read by the tool directly.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+
+  # A completely fresh environment — no sourcing, no inherited variables.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  [ "$status" -eq 0 ]
+  [ "$output" = "true" ]
+}
+
+@test "the env layer is genuinely absent until sourced, and present after" {
+  # The other half of the same claim: if the env layer appeared to work
+  # without the source line, the file would be pointless and the docs wrong.
+  harden ECOSYSTEMS=go -- --emit=plain >/dev/null
+
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c 'echo "${GOFLAGS:-ABSENT}"'
+  [ "$output" = "ABSENT" ]
+
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; echo \"\$GOFLAGS\""
+  [ "$output" = "-mod=readonly" ]
+}
