@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
-# Supply Chain Hardening action runtime.
+# Supply Chain Hardening — CI runtime.
 #
-# Applies package-manager-level hardening to a GitHub Actions runner
-# before subsequent steps execute. Mirrors a subset of the
-# echennells.supply_chain_hardening Ansible role — the parts that
-# apply in an ephemeral CI runner context. Skips role concerns that
-# don't apply (podman policy, preflight conflict detection, systemd
-# /etc/environment loading), keeps the parts that do (env vars,
-# config files, optional sfw wrapper).
+# Applies package-manager-level hardening to a CI runner before subsequent
+# steps execute. Mirrors a subset of the echennells.supply_chain_hardening
+# Ansible role — the parts that apply in an ephemeral CI runner context.
+# Skips role concerns that don't (podman policy, preflight conflict
+# detection, systemd /etc/environment loading), keeps the parts that do
+# (config files, PATH wrappers, env vars, optional sfw wrapper).
 #
-# All env-var writes go through $GITHUB_ENV (propagates to every
-# subsequent step in the job). All file writes use the same paths
-# the Ansible role uses, so the protections are layout-identical.
+# PORTABILITY
+#
+# This script is CI-generic. The hardening lands in three layers and only
+# one of them is platform-dependent:
+#
+#   1. Config files on disk (~/.npmrc, uv.toml, .bunfig.toml, ...) —
+#      persist for the life of the job on every platform. No coupling.
+#   2. PATH wrappers (bun, bunx, composer, deno, cargo) wrapped in place
+#      at their discovered path. No coupling.
+#   3. Env vars — the only layer that needs the platform's own mechanism
+#      for reaching later steps, and everywhere a redundant second layer
+#      behind (1). Routed through write_env() below.
+#
+# Everything platform-specific in this file goes through the adapter in
+# the "CI platform adapter" section. Adding a platform means adding one
+# case arm to each of those functions — not touching any harden_* code.
+#
+# GitHub Actions is the first-class adapter (see ../action/action.yml).
+# The others are implemented but not yet exercised by CI; see the
+# portability note in action/README.md before relying on them.
 
 set -euo pipefail
 
-# ---- Inputs (env-driven by action.yml) ----
+# ---- Inputs (env-driven by action.yml, or set directly when invoked bare) ----
 ECOSYSTEMS="${ECOSYSTEMS:-npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget}"
 RELEASE_AGE_HOURS="${RELEASE_AGE_HOURS:-48}"
 STRICT="${STRICT:-true}"
@@ -23,33 +39,193 @@ INSTALL_SFW="${INSTALL_SFW:-false}"
 WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
+INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
 
-# CI-specific: per-step opt-out. If a workflow step needs to bypass
-# hardening (e.g., bootstrap step that legitimately needs install scripts),
-# setting SUPPLY_CHAIN_HARDEN_SKIP=true on that step's env causes the
-# action to exit early without applying any hardening. Use sparingly —
-# the whole point of running this action is to harden subsequent steps.
-if [[ "${SUPPLY_CHAIN_HARDEN_SKIP:-false}" == "true" ]]; then
-  echo "::notice::SUPPLY_CHAIN_HARDEN_SKIP=true — hardening intentionally skipped for this step"
-  echo "ecosystems_hardened=" >> "${GITHUB_OUTPUT:-/dev/null}"
-  echo "release_age_hours=$RELEASE_AGE_HOURS" >> "${GITHUB_OUTPUT:-/dev/null}"
-  echo "sfw_installed=false" >> "${GITHUB_OUTPUT:-/dev/null}"
-  echo "tool_versions={}" >> "${GITHUB_OUTPUT:-/dev/null}"
-  exit 0
+# ---- CI platform adapter ----
+#
+# EMIT selects how env vars, step outputs and log annotations are
+# expressed. "auto" detects from the platform's own marker variables.
+# Set explicitly (--emit=gitlab, or EMIT=gitlab) to override.
+EMIT="${EMIT:-auto}"
+
+# Bare-invocation flag parsing. action.yml passes everything by env, so
+# this only fires when a human or a non-GitHub CI calls the script directly.
+for _arg in "$@"; do
+  case "$_arg" in
+    --emit=*) EMIT="${_arg#--emit=}" ;;
+    --help|-h)
+      echo "usage: harden.sh [--emit=auto|github|gitlab|circleci|azure|buildkite|plain]"
+      echo "       configuration is read from env: ECOSYSTEMS, RELEASE_AGE_HOURS,"
+      echo "       STRICT, INSTALL_SFW, WRITE_ETC, COMPOSER_ALLOW_PLUGINS,"
+      echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN"
+      exit 0
+      ;;
+    *) echo "[supply-chain-harden] warning: unrecognised argument '$_arg' — ignoring" >&2 ;;
+  esac
+done
+
+detect_platform() {
+  # Ordered by signal specificity. Each platform's own marker first; the
+  # bare-$BASH_ENV fallback last, because BASH_ENV is a plain bash feature
+  # that can be set outside any CI.
+  if   [[ -n "${GITHUB_ACTIONS:-}" || -n "${GITHUB_ENV:-}" ]]; then echo github
+  elif [[ -n "${GITLAB_CI:-}"      ]]; then echo gitlab
+  elif [[ -n "${CIRCLECI:-}"       ]]; then echo circleci
+  elif [[ -n "${TF_BUILD:-}"       ]]; then echo azure
+  elif [[ -n "${BUILDKITE:-}"      ]]; then echo buildkite
+  elif [[ -n "${BASH_ENV:-}"       ]]; then echo circleci
+  else echo plain
+  fi
+}
+
+PLATFORM="$EMIT"
+if [[ "$PLATFORM" == "auto" ]]; then
+  PLATFORM=$(detect_platform)
 fi
+case "$PLATFORM" in
+  github|gitlab|circleci|azure|buildkite|plain) ;;
+  *)
+    echo "[supply-chain-harden] error: unknown --emit target '$PLATFORM'" >&2
+    echo "  supported: auto, github, gitlab, circleci, azure, buildkite, plain" >&2
+    exit 2
+    ;;
+esac
+
+# The canonical, platform-neutral artifact. Written on EVERY platform, so
+# there is always one sourceable file containing the full env layer even
+# when the platform has no native step-to-step mechanism:
+#
+#   source /tmp/supply-chain-hardening.env
+#
+# On Drone/Woodpecker and other per-step-container runners this file is
+# the only way the env layer survives a step boundary (config files and
+# wrappers still work via the shared workspace volume).
+HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
+HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
+: > "$HARDENING_ENV_FILE"
+: > "$HARDENING_OUTPUT_FILE"
+
+# ---- Log annotations (platform-specific markup, identical semantics) ----
+log()  { echo "[supply-chain-harden] $*"; }
+
+notice() {
+  case "$PLATFORM" in
+    github) echo "::notice::$*" ;;
+    azure)  echo "##vso[task.logissue type=warning]$*" ;;
+    *)      echo "[supply-chain-harden] notice: $*" ;;
+  esac
+}
+
+warn() {
+  case "$PLATFORM" in
+    github) echo "::warning::$*" ;;
+    azure)  echo "##vso[task.logissue type=warning]$*" ;;
+    *)      echo "[supply-chain-harden] warning: $*" >&2 ;;
+  esac
+}
+
+err() {
+  case "$PLATFORM" in
+    github) echo "::error::$*" ;;
+    azure)  echo "##vso[task.logissue type=error]$*" ;;
+    *)      echo "[supply-chain-harden] error: $*" >&2 ;;
+  esac
+}
+
+# GitLab's collapsible sections require section_end to carry the SAME name
+# as its section_start, but every end_section call site is argument-less.
+# Track the open section instead of re-deriving it, or GitLab renders the
+# section as never-closed.
+CURRENT_SECTION=""
+
+section() {
+  CURRENT_SECTION=$(echo "$*" | tr -c '[:alnum:]_' '_')
+  case "$PLATFORM" in
+    github) echo "::group::[supply-chain-harden] $*" ;;
+    azure)  echo "##[group][supply-chain-harden] $*" ;;
+    gitlab) printf '\e[0Ksection_start:0:%s\r\e[0K[supply-chain-harden] %s\n' "$CURRENT_SECTION" "$*" ;;
+    *)      echo "[supply-chain-harden] --- $* ---" ;;
+  esac
+}
+
+end_section() {
+  case "$PLATFORM" in
+    github) echo "::endgroup::" ;;
+    azure)  echo "##[endgroup]" ;;
+    gitlab) printf '\e[0Ksection_end:0:%s\r\e[0K\n' "${CURRENT_SECTION:-section}" ;;
+    *)      : ;;
+  esac
+  CURRENT_SECTION=""
+}
 
 # ---- Validation ----
 if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
-  echo "::error::release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
+  err "release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
   exit 2
 fi
 if [[ "$RELEASE_AGE_HOURS" -lt 1 ]]; then
-  echo "::error::release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
+  err "release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
   exit 2
 fi
 if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
-  echo "::error::HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
+  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
   exit 2
+fi
+
+# ---- Env / output emission ----
+#
+# write_env always appends to the canonical env file, always exports into
+# this process (so the script's own probes see hardened values), and then
+# additionally uses the platform's native mechanism where one exists.
+write_env() {
+  local k="$1" v="$2"
+  printf 'export %s=%q\n' "$k" "$v" >> "$HARDENING_ENV_FILE"
+  export "${k}=${v}"
+  case "$PLATFORM" in
+    github)   echo "$k=$v" >> "$GITHUB_ENV" ;;
+    circleci) printf 'export %s=%q\n' "$k" "$v" >> "${BASH_ENV:-/dev/null}" ;;
+    azure)    echo "##vso[task.setvariable variable=$k]$v" ;;
+    # GitLab runs a job's whole script in ONE shell, so an export here is
+    # already visible to every later line; the env file covers the
+    # cross-job case via a dotenv artifact. Buildkite has no native
+    # mechanism (a pre-command hook sources the env file instead).
+    gitlab|buildkite|plain) : ;;
+  esac
+}
+
+emit_output() {
+  local k="$1" v="$2"
+  printf '%s=%s\n' "$k" "$v" >> "$HARDENING_OUTPUT_FILE"
+  case "$PLATFORM" in
+    github) echo "$k=$v" >> "${GITHUB_OUTPUT:-/dev/null}" ;;
+    azure)  echo "##vso[task.setvariable variable=$k;isOutput=true]$v" ;;
+    *)      : ;;
+  esac
+}
+
+# Job summary. GitHub renders markdown under the job; everywhere else the
+# same markdown goes to stdout so it is at least in the log.
+emit_summary() {
+  case "$PLATFORM" in
+    github) cat >> "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
+    *)      cat ;;
+  esac
+}
+
+# ---- Early opt-out ----
+#
+# CI-specific: per-step opt-out. If a workflow step needs to bypass
+# hardening (e.g., bootstrap step that legitimately needs install scripts),
+# setting SUPPLY_CHAIN_HARDEN_SKIP=true on that step's env causes the
+# script to exit early without applying any hardening. Use sparingly —
+# the whole point of running this is to harden subsequent steps.
+if [[ "${SUPPLY_CHAIN_HARDEN_SKIP:-false}" == "true" ]]; then
+  notice "SUPPLY_CHAIN_HARDEN_SKIP=true — hardening intentionally skipped for this step"
+  emit_output ecosystems_hardened ""
+  emit_output release_age_hours "$RELEASE_AGE_HOURS"
+  emit_output sfw_installed false
+  emit_output tool_versions "{}"
+  exit 0
 fi
 
 # ---- Derived values ----
@@ -65,21 +241,22 @@ YARN_AGE="${NPM_AGE_DAYS}d"
 # "failed to parse year in date '48 hours'", breaking every uv
 # invocation. Same bug the Ansible role had in defaults/main.yml
 # (fixed in b96bb7e); the action re-introduced it independently
-# at the bash layer. GitHub Actions runners are always Linux with
-# GNU date, so `date -u -d "N hours ago"` is portable here.
+# at the bash layer.
 # (uv 0.11.4+ added relative-duration support for pylock.toml
 # lockfiles, NOT for the config-file exclude-newer setting; config
 # requires absolute datetimes on all uv versions.)
-UV_EXCLUDE_NEWER=$(date -u -d "${RELEASE_AGE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
-
-# ---- Helpers ----
-log()       { echo "[supply-chain-harden] $*"; }
-section()   { echo "::group::[supply-chain-harden] $*"; }
-end_section() { echo "::endgroup::"; }
-
-write_env() {
-  echo "$1=$2" >> "$GITHUB_ENV"
-}
+#
+# BSD date (macOS runners) takes -v-Nh where GNU takes -d "N hours ago".
+# Try GNU first, fall back to BSD — CI runners are usually Linux but
+# macOS runners exist on every platform this script now targets.
+if UV_EXCLUDE_NEWER=$(date -u -d "${RELEASE_AGE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); then
+  :
+elif UV_EXCLUDE_NEWER=$(date -u -v-"${RELEASE_AGE_HOURS}"H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); then
+  :
+else
+  err "cannot compute the uv exclude-newer timestamp: neither GNU nor BSD date syntax worked"
+  exit 2
+fi
 
 write_etc() {
   local path="$1"
@@ -147,7 +324,7 @@ harden_npm() {
   write_env NPM_CONFIG_SAVE_EXACT      true
   write_env NPM_CONFIG_FUND            false
   write_env NPM_CONFIG_UPDATE_NOTIFIER false
-  write_env NPM_CONFIG_MINIMUM_RELEASE_AGE "$NPM_AGE_DAYS"
+  write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
 
   local content
   content="; Managed by supply-chain-harden action
@@ -188,7 +365,7 @@ harden_pnpm() {
     if [[ "$PNPM_BUILT_DEPENDENCIES" == *$'\n'* || \
           "$PNPM_BUILT_DEPENDENCIES" == *$'\r'* || \
           "$PNPM_BUILT_DEPENDENCIES" == *$'\t'* ]]; then
-      echo "::error::pnpm_built_dependencies must not contain control characters (newlines, tabs, CR). Use comma-separated format: 'esbuild,sharp'"
+      err "pnpm_built_dependencies must not contain control characters (newlines, tabs, CR). Use comma-separated format: 'esbuild,sharp'"
       exit 2
     fi
     IFS=',' read -ra _raw_pkgs <<< "$PNPM_BUILT_DEPENDENCIES"
@@ -200,7 +377,7 @@ harden_pnpm() {
       # chars, shell metacharacters) — defense against injection into the
       # deployed config file.
       if ! [[ "$pkg" =~ ^@?[a-zA-Z0-9_./-]+$ ]]; then
-        echo "::error::pnpm_built_dependencies entry '$pkg' contains invalid characters; refusing to deploy"
+        err "pnpm_built_dependencies entry '$pkg' contains invalid characters; refusing to deploy"
         exit 2
       fi
       pnpm_allowlist+=("$pkg")
@@ -432,7 +609,7 @@ harden_composer() {
     if [[ -x "${real_composer}-real" ]]; then
       real_composer="${real_composer}-real"
     else
-      echo "::warning::composer wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      warn "composer wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
       end_section
       return 0
     fi
@@ -503,8 +680,8 @@ EOF
 
   # PATH wrapper at the DISCOVERED bun location (wrap in-place — same
   # pattern as deno). Critical for CI runners where bun is commonly
-  # installed at ~/.bun/bin/bun (via official installer's $GITHUB_PATH
-  # prepend) which comes BEFORE /usr/local/bin in resolution order.
+  # installed at ~/.bun/bin/bun (the official installer prepends it to
+  # PATH) which comes BEFORE /usr/local/bin in resolution order.
   # A wrapper at /usr/local/bin/bun would be silently bypassed in that
   # configuration. Closes the runtime auto-install gap that
   # ~/.bunfig.toml cannot close (bun's docs: "Currently, bunfig.toml
@@ -525,7 +702,7 @@ EOF
     if [[ -x "${real_bun}-real" ]]; then
       real_bun="${real_bun}-real"
     else
-      echo "::warning::bun wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      warn "bun wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
       end_section
       return 0
     fi
@@ -558,6 +735,60 @@ esac
 EOF
   sudo chmod 755 "$wrapper_target"
   log "bun: wrapper deployed at $wrapper_target (injects --no-install for runtime paths)"
+
+  # ---- bunx ----
+  #
+  # `bunx <pkg>` downloads a package from npm and executes it in one step —
+  # the bun equivalent of npx, and a genuine hole: a typosquatted name is
+  # fetched and run immediately with no age gate and no script blocking.
+  #
+  # Wrapping `bun` above does NOT cover it. bunx is a SEPARATE entry point
+  # (the official installer creates ~/.bun/bin/bunx alongside bun), and the
+  # global ~/.bunfig.toml does not apply to it either — so none of
+  # minimumReleaseAge / ignoreScripts / frozenLockfile reach this path.
+  # Verified 2026-08 on a host where the bun wrapper was already deployed:
+  # `bunx cowsay` still auto-downloaded and executed. That is finding V5;
+  # the role fixed it in templates/bunx-wrapper.sh.j2 and this is the port.
+  #
+  # TWO SUBTLETIES, both load-bearing:
+  #  1. bun decides it is in "bunx mode" from argv[0], so the real binary
+  #     must be invoked with `exec -a bunx`. A plain exec runs it in
+  #     ordinary bun mode and silently changes every bunx invocation.
+  #  2. bunx is normally a SYMLINK to the bun binary. Pointing this wrapper
+  #     at a `bunx-real` backup would resolve through that symlink to the
+  #     bun *wrapper* deployed above — re-injecting flags and losing
+  #     argv[0]. So it points at the real bun binary directly.
+  local real_bunx
+  real_bunx=$(command -v bunx 2>/dev/null || true)
+  if [[ -z "$real_bunx" ]]; then
+    # bunx not on PATH; try the conventional sibling of the bun we wrapped.
+    local sibling="$(dirname "$wrapper_target")/bunx"
+    [[ -e "$sibling" ]] && real_bunx="$sibling"
+  fi
+
+  if [[ -z "$real_bunx" ]]; then
+    log "bunx not found — no bunx wrapper deployed"
+  else
+    cat <<EOF | sudo tee "$real_bunx" >/dev/null
+#!/bin/bash
+# Managed by supply-chain-harden
+REAL_BUN='$real_bun'
+if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "$real_bunx" ]; then
+  echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
+  exit 127
+fi
+# Metadata flags don't resolve or execute a package — pass them through.
+case "\${1:-}" in
+  --version|-v|--help|-h|--revision)
+    exec -a bunx "\$REAL_BUN" "\$@"
+    ;;
+esac
+exec -a bunx "\$REAL_BUN" --no-install "\$@"
+EOF
+    sudo chmod 755 "$real_bunx"
+    log "bunx: wrapper deployed at $real_bunx (injects --no-install; fails closed on uninstalled packages)"
+  fi
+
   end_section
 }
 
@@ -580,6 +811,17 @@ EOF
 
 harden_go() {
   section "go"
+
+  # Go is the ONE ecosystem with no config file behind its settings — every
+  # other harden_* here writes a dotfile that survives regardless of how the
+  # CI propagates environment. If go were left env-var-only, its hardening
+  # would silently evaporate on any platform without a step-to-step env
+  # mechanism (Drone/Woodpecker per-step containers, Buildkite without the
+  # hook, or a bare `harden.sh --emit=plain` whose env file nobody sources).
+  #
+  # `go env -w` is the file-backed equivalent: it writes os.UserConfigDir()/
+  # go/env, which go reads on every invocation. Env vars still win over that
+  # file, so both layers are written and they agree.
   write_env GOSUMDB     "sum.golang.org"
   write_env GOPROXY     "https://proxy.golang.org,direct"
   write_env GOFLAGS     "-mod=readonly"
@@ -588,8 +830,37 @@ harden_go() {
   write_env GOPRIVATE   ""
   write_env GONOPROXY   ""
   write_env GOINSECURE  ""
+
+  local go_version
+  go_version=$(detect_version go "go version")
+
+  if command -v go >/dev/null 2>&1; then
+    # `go env -w` validates keys and rejects unknown ones, so a failure here
+    # means the host's go is too old for one of these. Non-fatal: the env
+    # layer above still applies on platforms that propagate it.
+    local gokey failed=""
+    for gokey in \
+      "GOSUMDB=sum.golang.org" \
+      "GOPROXY=https://proxy.golang.org,direct" \
+      "GOFLAGS=-mod=readonly" \
+      "GOTOOLCHAIN=local" \
+      "GOPRIVATE=" \
+      "GONOPROXY=" \
+      "GOINSECURE="
+    do
+      go env -w "$gokey" 2>/dev/null || failed+="${gokey%%=*} "
+    done
+    if [[ -n "$failed" ]]; then
+      warn "go env -w rejected: ${failed% } — those settings rely on the env layer only on this host"
+    else
+      log "go: persisted to $(go env GOENV 2>/dev/null || echo '~/.config/go/env') — survives without env propagation"
+    fi
+  else
+    log "go not installed — env layer written, go env -w skipped"
+  fi
+
   HARDENED+=("go")
-  TOOL_VERSIONS["go"]=$(detect_version go "go version")
+  TOOL_VERSIONS["go"]="$go_version"
   log "go: GOSUMDB=sum.golang.org, GOPROXY=proxy.golang.org, GOFLAGS=-mod=readonly, GOTOOLCHAIN=local"
   end_section
 }
@@ -632,7 +903,7 @@ harden_deno() {
     if [[ -x "${real_deno}-real" ]]; then
       real_deno="${real_deno}-real"
     else
-      echo "::warning::deno wrapper present but ${real_deno}-real missing; skipping re-wrap"
+      warn "deno wrapper present but ${real_deno}-real missing; skipping re-wrap"
       end_section
       return 0
     fi
@@ -763,13 +1034,13 @@ install_sfw_and_wrap() {
   local node_major
   node_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
   if [[ "$node_major" -lt 20 ]]; then
-    echo "::warning::sfw requires Node >= 20 (host has $node_major); skipping"
+    warn "sfw requires Node >= 20 (host has $node_major); skipping"
     end_section
     return 0
   fi
 
   sudo npm install -g sfw@2 >/dev/null 2>&1 || {
-    echo "::warning::sfw global install failed; skipping wrapper deployment"
+    warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
   }
@@ -830,7 +1101,7 @@ for raw in "${REQUESTED[@]}"; do
     gradle)   harden_gradle ;;
     nuget|dotnet) harden_nuget ;;
     "")       ;;  # tolerate trailing commas / empty fields
-    *)        echo "::warning::Unknown ecosystem: '$eco' (supported: npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget) — skipping" ;;
+    *)        warn "Unknown ecosystem: '$eco' (supported: npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget) — skipping" ;;
   esac
 done
 
@@ -859,14 +1130,23 @@ for key in "${!TOOL_VERSIONS[@]}"; do
 done
 tool_versions_json+="}"
 
-{
-  echo "ecosystems_hardened=$ecosystems_str"
-  echo "release_age_hours=$RELEASE_AGE_HOURS"
-  echo "sfw_installed=$SFW_INSTALLED"
-  echo "tool_versions=$tool_versions_json"
-} >> "$GITHUB_OUTPUT"
+emit_output ecosystems_hardened "$ecosystems_str"
+emit_output release_age_hours     "$RELEASE_AGE_HOURS"
+emit_output sfw_installed         "$SFW_INSTALLED"
+emit_output tool_versions         "$tool_versions_json"
 
-# ---- Job summary (rendered in GitHub UI under each job) ----
+# ---- Job summary ----
+# How later steps actually inherit the env layer differs per platform, so
+# the summary states the mechanism in force rather than naming $GITHUB_ENV
+# unconditionally (it used to, on every platform).
+case "$PLATFORM" in
+  github)   inherit_note="via \`\$GITHUB_ENV\` and on-disk config files" ;;
+  circleci) inherit_note="via \`\$BASH_ENV\` and on-disk config files" ;;
+  azure)    inherit_note="via \`task.setvariable\` and on-disk config files" ;;
+  gitlab)   inherit_note="via the job shell's exported environment and on-disk config files" ;;
+  *)        inherit_note="via on-disk config files; \`source $HARDENING_ENV_FILE\` to pick up the env layer" ;;
+esac
+
 {
   echo "## Supply Chain Hardening Applied"
   echo ""
@@ -877,8 +1157,10 @@ tool_versions_json+="}"
   echo "| Strict mode | \`$STRICT\` |"
   echo "| Socket Firewall | \`$SFW_INSTALLED\` |"
   echo "| /etc/ writes | \`$WRITE_ETC\` |"
+  echo "| CI platform | \`$PLATFORM\`$([[ "$EMIT" == "auto" ]] && echo " (auto-detected)") |"
+  echo "| Env file | \`$HARDENING_ENV_FILE\` |"
   echo ""
-  echo "All subsequent steps in this job inherit the hardening via \`\$GITHUB_ENV\` and on-disk config files."
-} >> "$GITHUB_STEP_SUMMARY"
+  echo "All subsequent steps in this job inherit the hardening $inherit_note."
+} | emit_summary
 
-log "done. $ecosystems_str hardened."
+log "done. $ecosystems_str hardened (emit=$PLATFORM)."
