@@ -1372,29 +1372,53 @@ install_sfw_and_wrap() {
     return 0
   fi
 
-  sudo npm install -g sfw@2 >/dev/null 2>&1 || {
+  # Install with the npm we DISCOVERED, by absolute path. Bare `sudo npm`
+  # resolves against root's secure_path, which on a setup-node runner does not
+  # contain the toolcache npm at all — so this either failed outright or
+  # installed sfw into a different node prefix than the one the job uses.
+  local npm_bin
+  npm_bin=$(command -v npm)
+  sudo "$npm_bin" install -g sfw@2 >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
   }
 
-  # Deploy a wrapper at /usr/local/bin/npm that routes registry-touching
-  # subcommands through sfw. Simpler than the full ansible-role wrapper —
-  # no TTY detection or npq integration (irrelevant in CI).
-  local real_npm
+  # Wrap npm AT THE PATH IT ACTUALLY RESOLVES TO — same rule as the bun,
+  # composer, deno and cargo wrappers.
+  #
+  # This used to write unconditionally to /usr/local/bin/npm while taking
+  # `command -v npm` as the real binary. On any runner where npm is not there
+  # — which is every runner using actions/setup-node, where npm comes from
+  # /opt/hostedtoolcache and is PREPENDED to PATH, and every nvm/fnm host —
+  # the wrapper was written to a path that PATH never reaches. sfw was
+  # installed, the wrapper existed, sfw-installed reported true, and not one
+  # npm install was ever routed through it. Exactly the shadowing the bun
+  # wrapper documents; it just was not applied here.
+  local real_npm wrapper_target
   real_npm=$(command -v npm)
-  # If npm is already at /usr/local/bin/npm we'd recurse — move it aside.
-  if [[ "$real_npm" == "/usr/local/bin/npm" ]]; then
-    sudo mv /usr/local/bin/npm /usr/local/bin/npm-real
-    real_npm=/usr/local/bin/npm-real
+  wrapper_target="$real_npm"
+
+  if grep -q "supply-chain-harden" "$real_npm" 2>/dev/null; then
+    # Already wrapped in a previous run within this job — re-wrap the original.
+    if [[ -x "${real_npm}-real" ]]; then
+      real_npm="${real_npm}-real"
+    else
+      warn "npm wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      end_section
+      return 0
+    fi
+  else
+    sudo mv "$real_npm" "${real_npm}-real"
+    real_npm="${real_npm}-real"
   fi
 
-  cat <<EOF | sudo tee /usr/local/bin/npm >/dev/null
+  cat <<EOF | sudo tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_NPM='$real_npm'
-if [ -z "\$REAL_NPM" ] || [ ! -x "\$REAL_NPM" ] || [ "\$REAL_NPM" = "/usr/local/bin/npm" ]; then
-  echo "[supply-chain-harden] error: real npm not found; refusing to recurse" >&2
+if [ -z "\$REAL_NPM" ] || [ ! -x "\$REAL_NPM" ] || [ "\$REAL_NPM" = "$wrapper_target" ]; then
+  echo "[supply-chain-harden] error: real npm not found at '\$REAL_NPM'; refusing to recurse" >&2
   exit 127
 fi
 case "\${1:-}" in
@@ -1407,9 +1431,9 @@ esac
 exec "\$REAL_NPM" "\$@"
 EOF
 
-  sudo chmod 755 /usr/local/bin/npm
+  sudo chmod 755 "$wrapper_target"
   SFW_INSTALLED=true
-  log "sfw installed; npm wrapper deployed at /usr/local/bin/npm"
+  log "sfw installed; npm wrapper deployed at $wrapper_target"
   end_section
 }
 

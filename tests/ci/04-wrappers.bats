@@ -314,6 +314,82 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
   [[ "$output" != *"--no-plugins"* ]]
 }
 
+# --- socket firewall / npm -------------------------------------------------
+
+sfw_stubs() {
+  # An npm that reports a version and pretends the sfw install succeeds, plus
+  # a node new enough to clear the >= 20 gate.
+  stub_bin npm 'case "$*" in
+  "install -g sfw@2") exit 0 ;;
+  "--version") echo "10.9.8" ;;
+  *) echo "STUB:npm ARGS=[$*]" ;;
+esac'
+  stub_bin node 'echo 22'
+}
+
+@test "sfw: the wrapper lands on the npm PATH resolves, not a hardcoded path" {
+  # It used to write unconditionally to /usr/local/bin/npm while treating
+  # `command -v npm` as the real binary. On a setup-node runner (npm in the
+  # toolcache, prepended to PATH) or any nvm/fnm host, the wrapper sat on a
+  # path nothing reached — sfw-installed reported true and every install
+  # bypassed it.
+  sfw_stubs
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  assert_file_contains "$TEST_BIN/npm" "supply-chain-harden"
+  [ -x "$(stub_real npm)" ]
+}
+
+@test "sfw: the wrapper delegates to the preserved binary" {
+  sfw_stubs
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  run "$TEST_BIN/npm" install foo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+}
+
+@test "sfw: re-running does not wrap the wrapper" {
+  sfw_stubs
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  run grep -c "supply-chain-harden" "$(stub_real npm)"
+  [ "$output" = "0" ]
+  run "$TEST_BIN/npm" --version
+  [ "$output" = "10.9.8" ]
+}
+
+@test "sfw: refuses to recurse when the real npm is gone" {
+  sfw_stubs
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  sudo rm -f "$(stub_real npm)"
+  run -127 "$TEST_BIN/npm" install foo
+  [ "$status" -eq 127 ]
+  [[ "$output" == *"refusing to recurse"* ]]
+}
+
+@test "sfw: a node older than 20 is refused rather than half-applied" {
+  stub_bin npm 'case "$*" in "--version") echo "10.9.8" ;; *) echo "STUB" ;; esac'
+  stub_bin node 'echo 18'
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"requires Node >= 20"* ]]
+  assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
+  assert_file_contains "$OUT_FILE" "sfw_installed=false"
+}
+
+@test "sfw: a failed install does not leave a wrapper claiming success" {
+  stub_bin npm 'case "$*" in
+  "install -g sfw@2") exit 1 ;;
+  "--version") echo "10.9.8" ;;
+  *) echo "STUB" ;;
+esac'
+  stub_bin node 'echo 22'
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw global install failed"* ]]
+  assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
+  assert_file_contains "$OUT_FILE" "sfw_installed=false"
+}
+
 # --- absence ---------------------------------------------------------------
 
 @test "a missing tool is reported, not fatal, and the run continues" {

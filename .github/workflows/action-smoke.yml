@@ -1022,3 +1022,56 @@ jobs:
             echo "::error::plain mode emitted GitHub workflow commands"
             exit 1
           fi
+
+  action-sfw-wrapper-not-shadowed:
+    name: 'Action: the sfw npm wrapper lands on the npm PATH resolves'
+    runs-on: ubuntu-24.04
+    # setup-node puts npm in /opt/hostedtoolcache and PREPENDS it to PATH, so
+    # a wrapper written to a hardcoded /usr/local/bin/npm is never reached.
+    # That shipped: sfw installed, wrapper written, sfw-installed=true, and
+    # not one install routed through it. This job pins the invariant that
+    # matters — the wrapper must be on the binary PATH actually resolves.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: Confirm npm is NOT at /usr/local/bin (the shadowing precondition)
+        run: |
+          echo "npm resolves to: $(command -v npm)"
+          if [ "$(command -v npm)" = "/usr/local/bin/npm" ]; then
+            echo "::warning::npm is at /usr/local/bin here, so this job cannot detect shadowing"
+          fi
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm
+          install_sfw: true
+
+      - name: The npm PATH resolves to must be our wrapper
+        run: |
+          resolved=$(command -v npm)
+          echo "npm now resolves to: $resolved"
+          grep -q "supply-chain-harden" "$resolved" || {
+            echo "::error::the npm PATH resolves to ($resolved) is NOT the wrapper — sfw is being bypassed"
+            exit 1
+          }
+
+      - name: And the original binary was preserved next to it
+        run: |
+          resolved=$(command -v npm)
+          test -x "${resolved}-real" || {
+            echo "::error::${resolved}-real missing; the wrapper cannot delegate"
+            exit 1
+          }
+
+      - name: npm still works through the wrapper
+        run: |
+          npm --version
+          mkdir -p /tmp/sfwproj && cd /tmp/sfwproj && npm init -y >/dev/null && echo "npm init OK"
+
+      - name: Output agrees with reality
+        run: test "${{ steps.harden.outputs.sfw-installed }}" = "true"
