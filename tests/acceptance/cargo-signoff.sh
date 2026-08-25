@@ -16,7 +16,7 @@ set -u
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/cargo/bin:$PATH"
 
-EXPECTED_CHECKS=8
+EXPECTED_CHECKS=10
 PASS=0; FAIL=0; RAN=0
 
 ok()   { RAN=$((RAN+1)); PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
@@ -136,7 +136,44 @@ fi
 cp /tmp/cooldown.bak "$CH/cooldown.toml"
 
 # ---------------------------------------------------------------------------
-hdr "3. REVERSIBILITY — the off-switch must restore the original binary"
+hdr "3. RESILIENCE — the gate survives a rustup-style clobber"
+# ---------------------------------------------------------------------------
+# `rustup update` rewrites ~/.cargo/bin/cargo, silently overwriting the wrapper
+# and removing the age gate until the next role apply. This simulates that
+# (copy the real binary back over the wrapper), re-applies the role, and
+# confirms the wrapper is restored, cargo still works, and re-apply did NOT
+# double-wrap (cargo-real must remain a real cargo, not a wrapped one).
+# Clobber with a GENUINELY UNMARKED cargo (what rustup update writes), not
+# cargo-real — on rustup hosts cargo-real is the argv[0] shim and carries the
+# marker by design, so copying it would unwrap nothing.
+REAL_SRC=$(ls /usr/local/rustup/toolchains/*/bin/cargo "$HOME"/.rustup/toolchains/*/bin/cargo 2>/dev/null | head -1)
+cp -f "$REAL_SRC" "$CARGO_BIN" 2>/dev/null
+clobbered=$(grep -c 'supply-chain-hardening' "$CARGO_BIN" 2>/dev/null); clobbered=${clobbered:-0}
+cd /role
+ansible-playbook site.yml --connection=local --limit localhost -e podman_enabled=false >/tmp/reapply.log 2>&1
+re_rc=$?
+rewrapped=$(grep -c 'supply-chain-hardening' "$CARGO_BIN" 2>/dev/null); rewrapped=${rewrapped:-0}
+out=$(cargo --version 2>&1)
+if [ "$clobbered" = "0" ] && [ "$re_rc" -eq 0 ] && [ "$rewrapped" -gt 0 ] && case "$out" in cargo*) true;; *) false;; esac; then
+  ok "re-apply after a rustup-style clobber restored the wrapper and cargo works"
+  eviden "clobber unwrapped it, re-apply rc=$re_rc, wrapper back; $out"
+else
+  bad "re-apply did not restore the gate (clobbered=$clobbered reapply_rc=$re_rc rewrapped=$rewrapped)"
+  eviden "$out; $(tail -3 /tmp/reapply.log | tr '\n' ' ')"
+fi
+# Verify cargo-real by INVOKING it (the shim carries the marker by design, so a
+# grep would false-positive — same discipline as the bats suite).
+real_out=$("${CARGO_BIN}-real" --version 2>&1)
+if case "$real_out" in cargo*) true;; *) false;; esac; then
+  ok "re-apply did not corrupt cargo-real (it still yields a working cargo)"
+  eviden "${CARGO_BIN}-real --version -> $real_out"
+else
+  bad "re-apply corrupted cargo-real"
+  eviden "$real_out"
+fi
+
+# ---------------------------------------------------------------------------
+hdr "4. REVERSIBILITY — the off-switch must restore the original binary"
 # ---------------------------------------------------------------------------
 cd /role
 ansible-playbook site.yml --connection=local --limit localhost \
