@@ -242,10 +242,19 @@ for w in npm pip pip3 bun bunx composer deno cargo; do
   have "$w" || continue
   p=$(command -v "$w" 2>/dev/null)   # what callers resolve to
   if [ -n "$p" ] && grep -q "supply-chain-hardening" "$p" 2>/dev/null; then
-    if [ -x "${p}-real" ]; then
+    # Wrappers reach the real tool two different ways, and the check must know
+    # both or it cries wolf. bun/deno/composer/cargo RENAME the binary to
+    # <tool>-real and exec that. npm embeds REAL_NPM='<path>'; pip/pip3 embed
+    # UV='<path>'. So check the TARGET THE WRAPPER ACTUALLY EXECS — the value
+    # of its REAL_*/UV assignment — not a <tool>-real file that npm/pip never
+    # create. (Checking ${p}-real reported npm/pip wrappers as "refuses to run"
+    # on every host, a false GAP for a working wrapper — the mirror of the old
+    # composer false GAP.)
+    target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$p" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
+    if [ -n "$target" ] && [ -x "$target" ]; then
       row WEAK PRESENT "$w PATH wrapper" "active at $p; callers bypassing PATH are unaffected"
     else
-      row GAP PRESENT "$w PATH wrapper" "wrapper at $p but ${w}-real missing — the recursion guard makes it refuse to run"
+      row GAP PRESENT "$w PATH wrapper" "wrapper at $p but its real target '${target:-<none>}' is missing or not executable — the recursion guard makes it refuse to run"
     fi
   elif [ -f "/usr/local/bin/$w" ] && grep -q "supply-chain-hardening" "/usr/local/bin/$w" 2>/dev/null; then
     # Deployed, but something earlier on PATH shadows it — the wrapper exists
@@ -392,20 +401,33 @@ if have cargo; then
     row GAP PRESENT "cargo publish-age gate" "cargo is not wrapped — \`cargo build\` executes build.rs from whatever version the resolver picks, including one published minutes ago"
   elif printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
     cage=$(grep -m1 'global-min-publish-age' "${CARGO_HOME:-$HOME/.cargo}/cooldown.toml" 2>/dev/null | sed 's/.*= *//; s/"//g')
-    # BEING ON PATH IS NOT THE QUESTION — CAN IT RUN?
-    # cargo-binstall picks a prebuilt binary by target triple, which says
-    # nothing about glibc. On Debian 12 the published cargo-cooldown needs
-    # GLIBC_2.39 and dies in the loader. `command -v` still succeeds, so the
-    # wrapper routes every build into a binary that cannot execute and every
-    # build fails. Reporting OK for that state would be the worst false OK in
-    # the file: green light on a host whose toolchain we just broke.
-    if ! cargo-cooldown --version >/dev/null 2>&1; then
-      row GAP FUNCTIONAL "cargo publish-age gate" "cargo-cooldown is on PATH but CANNOT EXECUTE (usually a prebuilt binary needing newer glibc than this distro ships). The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated. Reinstall from source: cargo install cargo-cooldown"
+    # CAN THE BACKEND RUN — resolved the way the WRAPPER resolves it.
+    # The wrapper prepends its embedded COOLDOWN_BIN ($CARGO_HOME/bin) to PATH
+    # before dispatching, because on apt-cargo hosts cargo-cooldown is installed
+    # there and that dir is NOT on PATH. Probing `cargo-cooldown` by BARE NAME
+    # here reproduces the exact bug the prepend exists to fix: on apt cargo /
+    # Ubuntu 26 the bare probe returned 127 and this row reported a WORKING gate
+    # as "cannot execute" (measured — the behavioural signoff gated correctly on
+    # the same host). So resolve it via the wrapper's COOLDOWN_BIN, and keep two
+    # failure modes apart: not installed where the wrapper looks, vs installed
+    # there but unable to execute (a prebuilt binary needing newer glibc than
+    # the distro ships — cargo-binstall picks by target triple, which says
+    # nothing about glibc; on Debian 12 the published build dies in the loader).
+    cw=$(command -v cargo 2>/dev/null)
+    cbin=$(grep -oE "^COOLDOWN_BIN='[^']*'" "$cw" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'$//")
+    cool=""
+    for cand in "$cbin/cargo-cooldown" "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-cooldown" "$(command -v cargo-cooldown 2>/dev/null)"; do
+      [ -n "$cand" ] && [ -x "$cand" ] && { cool="$cand"; break; }
+    done
+    if [ -z "$cool" ]; then
+      row GAP FUNCTIONAL "cargo publish-age gate" "the wrapper routes builds through \`cargo cooldown\`, but cargo-cooldown is not installed where the wrapper looks (${cbin:-\$CARGO_HOME/bin}). The route dead-ends, so \`cargo build\` is BROKEN, not gated. Reinstall from source: cargo install cargo-cooldown"
+    elif ! "$cool" --version >/dev/null 2>&1; then
+      row GAP FUNCTIONAL "cargo publish-age gate" "cargo-cooldown is installed ($cool) but CANNOT EXECUTE (usually a prebuilt binary needing newer glibc than this distro ships). The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated. Reinstall from source: cargo install cargo-cooldown"
     else
       # FUNCTIONAL covers the ROUTING plus the backend being runnable, which is
       # what we observed. Whether cargo-cooldown then honours the window is its
       # behaviour, not ours, and is deliberately not claimed here.
-      row OK FUNCTIONAL "cargo publish-age gate" "wrapper routes \`cargo build\` through \`cargo cooldown\` (backend runs; window ${cage:-<unset>} per cooldown.toml; the window's own enforcement is cargo-cooldown's and is not verified here)"
+      row OK FUNCTIONAL "cargo publish-age gate" "wrapper routes \`cargo build\` through \`cargo cooldown\` (backend at $cool runs; window ${cage:-<unset>} per cooldown.toml; the window's own enforcement is cargo-cooldown's and is not verified here)"
     fi
   elif printf '%s\n' "$cdisp" | grep -qx -- '--locked'; then
     row WEAK FUNCTIONAL "cargo publish-age gate" "wrapper injects --locked but cargo-cooldown is absent — protects projects with a committed Cargo.lock, does nothing for \`cargo update\` or a fresh checkout with no lockfile"

@@ -163,10 +163,17 @@ EOF
   # bun and bunx are written to the DISCOVERED binary path (on stock Ubuntu
   # 24.04 that is /usr/bin/composer). The probe looked in one directory, so it
   # said "not deployed" for a wrapper that was installed and working.
-  cat > "$FAKEBIN/composer" <<'EOF'
+  # The stand-in must mirror the real composer wrapper: it embeds
+  # REAL_COMPOSER='<path>' and its recursion guard refuses unless that path is
+  # executable. The verifier checks THAT embedded target — the same thing every
+  # wrapper's guard checks — not a <tool>-real filename, because npm and pip
+  # embed a path and never create a <tool>-real file. A fixture without the
+  # embed is not a faithful wrapper (and its own guard would refuse).
+  cat > "$FAKEBIN/composer" <<EOF
 #!/bin/bash
 # supply-chain-hardening wrapper
-[ "$1" = "--version" ] && echo "Composer version 2.9.0 2025-11-01"
+REAL_COMPOSER='$FAKEBIN/composer-real'
+[ "\$1" = "--version" ] && echo "Composer version 2.9.0 2025-11-01"
 EOF
   cp "$FAKEBIN/composer" "$FAKEBIN/composer-real"
   chmod +x "$FAKEBIN/composer" "$FAKEBIN/composer-real"
