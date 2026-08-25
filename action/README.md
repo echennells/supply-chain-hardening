@@ -9,6 +9,8 @@ Before your workflow runs any package install (`npm install`, `pnpm install`, `p
 - **Lifecycle scripts are blocked** (`ignore-scripts=true` for npm/pnpm/bun, `enableScripts=false` for yarn, `--no-scripts` wrapper for composer, sdist refusal for pip via `only-binary=:all:`). Defeats the `preinstall`/`postinstall`/`setup.py`/`post-install-cmd` attack class — the same vector used in the May 2026 AntV / Shai-Hulud npm compromise, the March 2026 LiteLLM PyPI incident, and BufferZoneCorp.
 - **Fresh packages are refused** (`min-release-age` / `minimumReleaseAge` / `exclude-newer` / `npmMinimalAgeGate` / `--minimum-dependency-age`). Default: 48 hours. The 2026 AntV attack was live for ~1 hour before yank; a 48h gate would have blocked every malicious version.
 - **`bun run` runtime auto-install is blocked.** bun's `auto = "disable"` config doesn't work for `bun run` (bun's global bunfig isn't read by that code path). The action deploys a PATH wrapper at `/usr/local/bin/bun` that injects `--no-install` — closes the typosquat-via-runtime-auto-install vector.
+- **`bunx` fetch-and-execute is blocked.** `bunx <pkg>` downloads a package from npm and runs it in one step. It is a *separate entry point* from `bun`, so wrapping the bun binary does not cover it and the global `~/.bunfig.toml` never applies to it. A wrapper injects `--no-install`, which fails closed: `bunx` will only run a tool that is already installed.
+- **Cargo resolution is publish-age gated.** Cargo runs `build.rs` and proc-macro code at *compile* time with your privileges, before any of your code is called, and has no `--ignore-scripts` equivalent — so refusing to *resolve* a too-new version is the only control that prevents execution. A `cooldown.toml` sets the window and a `cargo` wrapper injects `--locked`. Enforcement of the age gate needs the `cargo-cooldown` backend (`install_cargo_cooldown: true`); without it you still get `--locked`.
 - **composer scripts and plugins are blocked at the wrapper layer**, not via the (made-up) `COMPOSER_NO_SCRIPTS` env var that doesn't exist. Real `/usr/local/bin/composer` wrapper injects `--no-scripts` on every invocation; `--no-plugins` is conditional on the `composer_allow_plugins` input.
 - **HTTPS-only repositories** enforced for Maven (`mirrorOf: external:http:*` blocks HTTP repos), Gradle (init script refuses HTTP repos + dynamic version selectors), NuGet (single trusted source: nuget.org with signature validation).
 - **Go module integrity** kept on by clearing all the bypass env vars (`GOPRIVATE`/`GONOPROXY`/`GOINSECURE` set empty so nothing skips sumdb).
@@ -23,10 +25,12 @@ This action ships the hardening that makes sense for **ephemeral CI runners**. F
 
 **Included in the action (relevant in CI):**
 - All 14 ecosystems' config-file + env-var hardening
-- bun PATH wrapper (closes the runtime auto-install gap)
+- bun PATH wrapper (closes the runtime auto-install gap) and bunx wrapper (closes fetch-and-execute)
 - composer PATH wrapper (script blocking)
 - deno PATH wrapper (minimum-dependency-age injection)
+- cargo PATH wrapper (`--locked` injection) + publish-age gate config
 - Optional Socket Firewall + npm wrapper
+- Optional cargo-cooldown backend to enforce the cargo age gate
 - `/etc/*` writes for `sudo` callers in the same job
 
 **Intentionally NOT in the action (long-lived-host concerns):**
@@ -36,8 +40,61 @@ This action ships the hardening that makes sense for **ephemeral CI runners**. F
 - `/etc/uv/uv.toml` sudo fallback for second user accounts (CI has one user)
 - Cross-distro detection (CI runs on known Ubuntu versions)
 - Preflight `/etc/*` clobber detection (fresh runner; nothing to clobber)
-- PAM/profile.d env-var layer (CI is non-interactive; PAM never loads — `$GITHUB_ENV` is the CI-shaped equivalent)
+- PAM/profile.d env-var layer (CI is non-interactive; PAM never loads — the CI platform's own env mechanism is the CI-shaped equivalent)
 - Multi-user / sudo-as-other-user concerns
+
+## Portability: GitHub is the first adapter, not the only target
+
+`harden.sh` is CI-generic. The hardening lands in three layers and only one of
+them cares which CI you are on:
+
+1. **Config files on disk** — `~/.npmrc`, `~/.config/pnpm/config.yaml`,
+   `~/.yarnrc.yml`, `pip.conf`, `uv.toml`, `.bunfig.toml`, `.bundle/config`,
+   `cooldown.toml`, maven `settings.xml`, gradle init script, `nuget.config`.
+   These persist for the life of the job everywhere. No coupling.
+2. **PATH wrappers** — bun, bunx, composer, deno, cargo, wrapped in place at
+   their discovered path. No coupling.
+3. **Env vars** — the only layer that needs the platform's own mechanism to
+   reach later steps, and everywhere a redundant second layer behind (1).
+
+Everything platform-specific goes through one adapter (`write_env`,
+`emit_output`, `emit_summary`, `section`, and the `notice`/`warn`/`err`
+annotations). Select a target with `--emit=` or `EMIT=`; the default,
+`auto`, detects from each platform's own marker variable:
+
+| Target | Env mechanism | Detected by |
+|---|---|---|
+| `github` | `$GITHUB_ENV` | `$GITHUB_ACTIONS` |
+| `gitlab` | job-shell `export` (one shell per job) | `$GITLAB_CI` |
+| `circleci` | `$BASH_ENV` | `$CIRCLECI` |
+| `azure` | `##vso[task.setvariable]` | `$TF_BUILD` |
+| `buildkite` | env file, sourced from a pre-command hook | `$BUILDKITE` |
+| `plain` | env file only | fallback |
+
+Every target also writes a canonical sourceable env file
+(`$HARDENING_ENV_FILE`, default `$RUNNER_TEMP/supply-chain-hardening.env`):
+
+```bash
+./action/harden.sh --emit=plain
+source /tmp/supply-chain-hardening.env
+```
+
+That file is what makes the env layer survive a step boundary on runners
+that give each step its own container (Drone, Woodpecker), where no native
+mechanism exists — layers 1 and 2 already survive via the shared workspace.
+It is also what makes `--emit=plain` useful outside CI entirely, e.g. inside
+a Dockerfile.
+
+> **Only the GitHub adapter is exercised by CI today.** The others are
+> implemented and their mechanisms are the documented ones, but no pipeline
+> on those platforms runs against this yet — treat them as working code with
+> untested integration, not as supported targets, until `action-smoke.yml`
+> has siblings. Layers 1 and 2 are platform-independent by construction, so
+> what is unverified is env propagation, not the hardening itself.
+
+For **long-lived hosts** rather than CI runners, run the parent Ansible role
+directly. For **any CI that runs containers**, a third option is to bake the
+hardening into an image and skip the adapter question altogether.
 
 ## Usage
 
@@ -67,6 +124,7 @@ That's it. The defaults are sensible for most workflows.
 | `strict` | `true` | When `true`, age-gate violations fail the install. When `false`, the package manager falls back to an older satisfying version if available. |
 | `install_sfw` | `false` | Install Socket Firewall and deploy an npm wrapper that routes `install`/`ci`/`update`/`audit` through threat-intel blocking. Adds ~10–20 seconds to job startup. Requires Node ≥ 20. |
 | `write_etc` | `true` | Write system-wide `/etc/*` config in addition to user-home config. Useful if any subsequent step uses `sudo npm install` etc. Requires passwordless sudo, which all stock GitHub runners have. |
+| `install_cargo_cooldown` | `false` | Install the `cargo-cooldown` backend that **enforces** the cargo publish-age gate. Compiles from source, costing minutes on a cold runner — hence off by default, same trade-off as `install_sfw`. With it off the gate config is still written and `--locked` still injected, but `cargo update` can resolve a freshly published crate unchecked. Already-cached installs are picked up automatically. |
 | `composer_allow_plugins` | `false` | When `false`, composer wrapper injects `--no-plugins` and JSON config sets `"allow-plugins": false`. Set to `true` for workflows that legitimately need composer Plugin classes (e.g., `composer/installers`, `phpstan/extension-installer`). `--no-scripts` injection still applies regardless. |
 
 ### Per-step opt-out
@@ -88,6 +146,7 @@ Use sparingly. The whole point of the action is to harden subsequent steps; opti
 | `ecosystems-hardened` | `npm,pnpm,pip,bun,composer` | Comma-separated; reflects what was actually hardened (skips unknowns + ecosystems whose tool wasn't installed). |
 | `release-age-hours` | `48` | Active minimum-release-age value. |
 | `sfw-installed` | `true` / `false` | Whether Socket Firewall was installed + npm wrapper deployed. |
+| `env-file` | `/home/runner/work/_temp/supply-chain-hardening.env` | Path to the canonical sourceable env file, written on every platform. On GitHub the env layer already propagates via `$GITHUB_ENV`; this matters for a step that shells into a container or re-execs a login shell. |
 | `tool-versions` | `{"npm":"10.5.0","bun":"1.2.0","composer":"2.9.8",...}` | JSON map of detected tool versions per ecosystem. Empty string means the tool wasn't installed in this runner. Useful for conditional downstream steps. |
 
 Example consumption:

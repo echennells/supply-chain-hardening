@@ -67,6 +67,17 @@ inputs:
       composer plugin; --no-scripts injection still applies regardless.
     required: false
     default: 'false'
+  install_cargo_cooldown:
+    description: >-
+      Install the cargo-cooldown backend that ENFORCES the cargo publish-age
+      gate. Off by default because it compiles from source and costs minutes
+      on a cold runner (same trade-off as install_sfw). When false, the gate's
+      config is still written and the cargo wrapper still injects --locked —
+      but a `cargo update` can resolve a freshly published crate unchecked.
+      Turn this on for security-critical pipelines that build Rust, or
+      pre-install cargo-cooldown in an earlier cached step and leave this off.
+    required: false
+    default: 'false'
 
 outputs:
   ecosystems-hardened:
@@ -78,6 +89,13 @@ outputs:
   sfw-installed:
     description: 'true if Socket Firewall was installed and the npm wrapper deployed.'
     value: ${{ steps.harden.outputs.sfw_installed }}
+  env-file:
+    description: >-
+      Path to the canonical, sourceable env file written on every platform
+      (`source $ENV_FILE` re-applies the env layer). On GitHub Actions the
+      env layer already propagates via $GITHUB_ENV, so this is mainly useful
+      for a step that shells into a container or re-execs a login shell.
+    value: ${{ steps.harden.outputs.env_file }}
   tool-versions:
     description: >-
       JSON map of detected tool versions per ecosystem ({"npm":"10.5.0","bun":"","composer":"2.9.8"}).
@@ -99,6 +117,10 @@ runs:
         WRITE_ETC: ${{ inputs.write_etc }}
         COMPOSER_ALLOW_PLUGINS: ${{ inputs.composer_allow_plugins }}
         PNPM_BUILT_DEPENDENCIES: ${{ inputs.pnpm_built_dependencies }}
+        INSTALL_CARGO_COOLDOWN: ${{ inputs.install_cargo_cooldown }}
+        # The script auto-detects GitHub from $GITHUB_ACTIONS; pinning it
+        # here means a future runner change can't silently reroute emission.
+        EMIT: github
       run: ${{ github.action_path }}/harden.sh
 
 branding:

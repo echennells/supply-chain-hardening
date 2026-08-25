@@ -225,6 +225,7 @@ if [[ "${SUPPLY_CHAIN_HARDEN_SKIP:-false}" == "true" ]]; then
   emit_output release_age_hours "$RELEASE_AGE_HOURS"
   emit_output sfw_installed false
   emit_output tool_versions "{}"
+  emit_output env_file "$HARDENING_ENV_FILE"
   exit 0
 fi
 
@@ -1441,6 +1442,7 @@ emit_output ecosystems_hardened "$ecosystems_str"
 emit_output release_age_hours     "$RELEASE_AGE_HOURS"
 emit_output sfw_installed         "$SFW_INSTALLED"
 emit_output tool_versions         "$tool_versions_json"
+emit_output env_file              "$HARDENING_ENV_FILE"
 
 # ---- Job summary ----
 # How later steps actually inherit the env layer differs per platform, so
