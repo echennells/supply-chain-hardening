@@ -138,7 +138,7 @@ Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm`
 
 ### Install-time malware blocking (Socket Firewall)
 
-[Socket Firewall Free](https://github.com/SocketDev/sfw-free) blocks packages flagged by Socket's threat intelligence in real time, with no API key required. Upstream it supports npm, pip and cargo; **this role wires it to npm (via `npm_path_wrapper`) and to cargo (via `cargo_socket_firewall`)**. It requires Node >= 20 in both cases, and it fails open — if it cannot reach Socket it warns, exits 0, and the install proceeds unfiltered. See the Cargo coverage map under Limitations for exactly which paths it does and does not reach.
+[Socket Firewall Free](https://github.com/SocketDev/sfw-free) blocks packages flagged by Socket's threat intelligence in real time, with no API key required. Upstream it supports npm, pip and cargo; **this role wires it to npm (via `npm_path_wrapper`) and to cargo (via `cargo_socket_firewall`)**. It requires Node >= 20 in both cases. sfw is a shim that downloads its firewall binary on first use; the role warms it at apply time, and if it cannot run it is moved aside so both wrappers fall through to an unfiltered pass-through with a warning (recorded in the run summary) rather than breaking the tool. When sfw is runnable, its runtime posture is fail-open: if it cannot reach Socket it warns, exits 0, and the install proceeds unfiltered. See the Cargo coverage map under Limitations for exactly which paths it does and does not reach.
 
 ### Deno age gate
 

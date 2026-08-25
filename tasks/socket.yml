@@ -78,13 +78,28 @@
   # check silently un-warmed every host, which surfaced as npm tests hanging on
   # a cold cache — a dependency on a side effect nobody had written down.
   #
-  # NON-FATAL and bounded: if the fetch fails, sfw stays installed and the gap
-  # is recorded below. Do NOT move the binary aside on failure — it is shared
-  # with the npm wrapper, and disarming it there to protect another ecosystem is
-  # a blast radius this task has no business having.
+  # NON-FATAL. If sfw cannot be prepared, MOVE IT ASIDE (sfw -> sfw.broken) so
+  # `command -v sfw` fails and BOTH the npm and cargo wrappers fall through to
+  # their pass-through-with-warning path. This is not a blast radius — it is the
+  # correct, consistent behaviour: a genuinely non-runnable sfw would break
+  # EITHER tool that routed through it, so neither should. (An earlier version
+  # refused to move it aside, and separately a cargo-only quarantine used
+  # `sfw --help` as its probe, which triggers the binary download and
+  # false-positived on healthy hosts. `sfw /bin/true` is the right probe: it is
+  # exactly what the wrappers do, so it cannot disagree with real usage.)
+  #
+  # Self-healing: a quarantined sfw makes the next apply's `command -v sfw` fail,
+  # which re-triggers the install-and-warm above.
   become: true
-  ansible.builtin.command:
-    cmd: "timeout 120 sfw /bin/true"
+  ansible.builtin.shell:
+    cmd: |
+      if timeout 120 sfw /bin/true >/dev/null 2>&1; then
+        echo ok
+      else
+        P=$(command -v sfw 2>/dev/null) && mv -f "$P" "$P.broken" 2>/dev/null || true
+        echo broken
+      fi
+    executable: /bin/bash
   register: sfw_warm
   # changed_when/check_mode go in as an ADJACENT PAIR — the invariant test in
   # 25-integration-regressions.bats requires check_mode: on the line directly
@@ -103,7 +118,7 @@
       {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ '). sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
   when:
     - sfw_warm is defined
-    - sfw_warm.rc | default(0) != 0
+    - sfw_warm.stdout | default('') | trim == 'broken'
 
 - name: Record skipped protection — Socket Firewall (install failed)
   ansible.builtin.set_fact:

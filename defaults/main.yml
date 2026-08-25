@@ -336,44 +336,18 @@ cargo_cooldown_enforce: true
 # and only warns — a fail-open posture, so it is not the default.
 cargo_cooldown_violation_action: deny
 
-# Route cargo's network-touching commands through Socket Firewall (default OFF).
+# Route cargo's network-touching commands through Socket Firewall (default on,
+# matching the npm wrapper). sfw is a threat-intel download filter; it covers
+# the axis the age gate cannot — a crate arriving via a lockfile written
+# elsewhere. Requires Node >= 20.
 #
-# sfw is upstream-supported for cargo (`sfw cargo fetch`) even though the role
-# previously wired it only to npm. It covers the case the age gate structurally
-# cannot: a lockfile written on someone else's machine. Because it filters the
-# DOWNLOAD rather than the resolution, it never rewrites or downgrades a
-# lockfile — the lockfile still wins, the fetch is what gets refused.
-#
-# Requires Node >= 20, same as the npm path. Measured failure modes:
-#   - a corrupt sfw binary FAILS CLOSED (propagates its exit code and breaks
-#     the build), so the role health-checks it at apply time and the wrapper
-#     checks presence before prefixing;
-#   - with no network sfw FAILS OPEN (warns, exits 0, build proceeds
-#     unfiltered), so on air-gapped hosts it provides no protection. That is
-#     the safer direction for availability and the worse one for security;
-#     supply-chain-verify reports it rather than implying coverage.
-#
-# Residual risk worth knowing: the sfw npm package is a shim that downloads the
-# LATEST firewall binary at runtime, so a future upstream release can change
-# behaviour on a host that has not been re-applied. Set this false if you need
-# the cargo toolchain's availability to depend on nothing but local state.
-#
-# WHY THIS DEFAULTS OFF (measured, and it reverses an earlier read).
-# sfw's npm package is a shim that downloads the firewall binary from GitHub on
-# first use. When that download has succeeded, sfw fails OPEN on a later network
-# error — it warns, exits 0, and the build proceeds unfiltered. But when the
-# download has NEVER succeeded, every sfw invocation exits 1:
-#
-#   $ sfw /bin/true
-#   [sfw] Failed to prepare firewall binary: Unable to fetch latest release
-#   exit=1
-#
-# Measured with network available, not just offline. Since the wrapper prefixes
-# resolution-affecting commands with sfw, that state breaks EVERY cargo command
-# on the host until the fetch succeeds. Making a toolchain's availability depend
-# on an unpinned runtime download from GitHub is not an acceptable default.
-# Turn it on where you have verified sfw works and want the threat-intel layer.
-cargo_socket_firewall: false
+# Failure handling is shared with npm and handled at apply time: the socket.yml
+# warm-up runs `sfw /bin/true`, and if sfw cannot run it is moved aside so both
+# wrappers' `command -v sfw` guard falls through to pass-through-with-warning.
+# So a broken sfw never breaks a build; it just means no threat-intel filtering,
+# recorded in the run summary. When sfw IS runnable, its own runtime posture is
+# fail-open on a network error (warns, exits 0, build proceeds unfiltered).
+cargo_socket_firewall: true
 
 # Exact (crate, version) pairs admitted regardless of age, e.g.
 #   cargo_cooldown_allow_exact:
