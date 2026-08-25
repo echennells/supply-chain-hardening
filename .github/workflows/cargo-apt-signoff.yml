@@ -1,0 +1,38 @@
+name: Cargo apt-host signoff
+
+# The bats suite and cargo-signoff.sh both run on a RUSTUP image, where the gate
+# backend (cargo-cooldown, `cargo install`ed into ~/.cargo/bin) lands on a dir
+# that is already on PATH. That layout hid a real bug: on a host where cargo
+# comes from apt (/usr/bin/cargo), ~/.cargo/bin is NOT on PATH, the wrapper
+# could not find its backend, and the age gate was silently dead while still
+# reporting healthy. See tests/acceptance/cargo-signoff-apt.sh.
+#
+# This job exercises the apt-cargo layout that structurally cannot appear in the
+# rustup-based suite, and unlike the advisory coverage matrix it FAILS the build
+# on a regression. 24.04 (apt cargo below MSRV) proves availability + a clean
+# gate-skip; 26.04 (apt cargo above MSRV) proves the gate actually enforces
+# through the wrapper's PATH prepend — the direct regression for that bug.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apt-signoff:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - "ubuntu:24.04"   # apt cargo 1.75 < MSRV -> gate skipped by policy
+          - "ubuntu:26.04"   # apt cargo 1.93 > MSRV -> gate active; BUG-1 regression
+    name: "apt cargo on ${{ matrix.image }}"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Apply the role on stock ${{ matrix.image }} and sign off cargo
+        run: |
+          docker run --rm -v "$PWD:/role" "${{ matrix.image }}" \
+            bash /role/tests/acceptance/cargo-signoff-apt.sh

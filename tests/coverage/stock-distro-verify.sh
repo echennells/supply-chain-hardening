@@ -43,7 +43,7 @@ apt-get update -qq >/dev/null 2>&1
 # and re-create the blind spot this script exists to remove.
 apt-get install -y -qq --no-install-recommends \
   ansible python3 python3-pip nodejs npm golang-go composer curl ca-certificates \
-  yarnpkg \
+  yarnpkg cargo rustc \
   >/dev/null 2>&1 || true
 
 echo
@@ -56,7 +56,7 @@ if command -v yarnpkg >/dev/null 2>&1 && ! command -v yarn >/dev/null 2>&1; then
 fi
 
 echo "--- tool versions this host actually has ---"
-for t in ansible node npm yarn pnpm bun composer python3 pip3 go; do
+for t in ansible node npm yarn pnpm bun composer python3 pip3 go cargo; do
   if command -v "$t" >/dev/null 2>&1; then
     # `go` takes `go version`, not `--version` — the old form printed
     # "flag provided but not defined: -version" in every distro column.
