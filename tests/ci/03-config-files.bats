@@ -60,6 +60,23 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableHardenedMode: true"
 }
 
+@test "pnpm: store integrity and lockfile determinism are set" {
+  # Both default true in the role and were missing here entirely — the action
+  # predated them and nothing compared the two.
+  run harden ECOSYSTEMS=pnpm -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "verifyStoreIntegrity: true"
+  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "preferFrozenLockfile: true"
+}
+
+@test "yarn: HTTPS-only, via an empty unsafe-HTTP allowlist" {
+  # yarn reads an ABSENT key as "no restriction", so emitting [] is what
+  # actually closes plain-HTTP fetches.
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.yarnrc.yml" "unsafeHttpWhitelist: \[\]"
+}
+
 @test "yarn: approvedGitRepositories is never emitted" {
   # yarn 4.10.3 rejects that key with a hard Usage Error that breaks EVERY
   # yarn command. It shipped once on the parked branch; this stops it coming back.

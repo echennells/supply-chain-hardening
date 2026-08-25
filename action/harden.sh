@@ -421,6 +421,13 @@ harden_pnpm() {
     echo "minimumReleaseAgeStrict: $STRICT"
     echo "minimumReleaseAgeExclude: []"
     echo "blockExoticSubdeps: true"
+    # Store integrity + lockfile determinism. Standard pnpm settings that ARE
+    # readable from the global config — unlike onlyBuiltDependencies, which
+    # pnpm 11 rejects here. verifyStoreIntegrity hash-checks the store against
+    # the lockfile; preferFrozenLockfile installs from an up-to-date lockfile
+    # without re-resolving. Neither hard-fails on drift.
+    echo "verifyStoreIntegrity: true"
+    echo "preferFrozenLockfile: true"
   } > "$HOME/.config/pnpm/config.yaml"
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
@@ -470,6 +477,9 @@ harden_yarn() {
     echo "enableImmutableInstalls: true"
     echo "enableImmutableCache: true"
     echo "checksumBehavior: throw"
+    # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
+    # absent key as "no restriction", so emitting [] is what closes it.
+    echo "unsafeHttpWhitelist: []"
     if [[ "$has_hardened" == "true" ]]; then
       echo "enableHardenedMode: true"
     fi
@@ -484,6 +494,9 @@ harden_yarn() {
     echo "enableImmutableInstalls: true"
     echo "enableImmutableCache: true"
     echo "checksumBehavior: throw"
+    # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
+    # absent key as "no restriction", so emitting [] is what closes it.
+    echo "unsafeHttpWhitelist: []"
     if [[ "$has_hardened" == "true" ]]; then
       echo "enableHardenedMode: true"
     fi
