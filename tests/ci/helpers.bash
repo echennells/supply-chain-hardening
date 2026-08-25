@@ -70,6 +70,18 @@ esac'
   chmod +x "${TEST_BIN}/${name}"
 }
 
+# stub_symlink <name> <target>
+#
+# The layout a real bun install actually has: bunx is a SYMLINK to bun, not a
+# separate binary. Wrapping code that writes with `tee` follows that link and
+# clobbers whatever it points at, so any wrapper test that stubs both as plain
+# files is testing a shape that does not occur in the wild.
+stub_symlink() {
+  local name="$1" target="$2"
+  [[ -e "${TEST_BIN}/${name}" || -L "${TEST_BIN}/${name}" ]] && sudo rm -f "${TEST_BIN}/${name}"
+  ln -s "$target" "${TEST_BIN}/${name}"
+}
+
 # The real binary harden.sh moved aside when it wrapped our stub.
 stub_real() { echo "${TEST_BIN}/${1}-real"; }
 

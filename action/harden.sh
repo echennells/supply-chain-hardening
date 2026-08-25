@@ -783,6 +783,18 @@ EOF
   if [[ -z "$real_bunx" ]]; then
     log "bunx not found — no bunx wrapper deployed"
   else
+    # REMOVE FIRST, THEN WRITE. bunx is normally a SYMLINK to the bun binary,
+    # and by this point that symlink resolves to the bun WRAPPER deployed
+    # above. `tee` follows symlinks, so writing straight to $real_bunx wrote
+    # the bunx wrapper's contents *through* the link and clobbered the bun
+    # wrapper — leaving a single file that injected --no-install into every
+    # invocation, including `bun install`. That breaks bun installs outright
+    # while still looking successfully hardened in the log.
+    #
+    # No -real backup is kept: unlike bun, bunx carries no unique binary. It
+    # is a symlink, and the thing it pointed at is already preserved as
+    # bun-real by the wrap above.
+    sudo rm -f "$real_bunx"
     cat <<EOF | sudo tee "$real_bunx" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden

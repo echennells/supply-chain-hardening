@@ -158,6 +158,45 @@ setup() {
   [[ "$output" == *"refusing to recurse"* ]]
 }
 
+@test "bunx-as-symlink: wrapping it does not clobber the bun wrapper" {
+  # THE REAL LAYOUT. bunx ships as a symlink to bun, and after bun is wrapped
+  # that link resolves to the bun WRAPPER. Writing the bunx wrapper with tee
+  # followed the link and overwrote the bun wrapper, leaving one file that
+  # injected --no-install into everything — `bun install` included. The log
+  # still said both wrappers deployed successfully.
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo "STUB:bun ARGS=[$*]";; esac'
+  stub_symlink bunx bun
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+
+  # bun install must NOT be given --no-install, or installs are broken.
+  run "$TEST_BIN/bun" install
+  [[ "$output" == *"ARGS=[install]"* ]] || {
+    echo "bun install was mangled: $output"; return 1
+  }
+}
+
+@test "bunx-as-symlink: bun runtime and bunx are both still hardened" {
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo "STUB:bun ARGS=[$*]";; esac'
+  stub_symlink bunx bun
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+
+  run "$TEST_BIN/bun" run script.ts
+  [[ "$output" == *"--no-install run script.ts"* ]]
+  run "$TEST_BIN/bunx" cowsay
+  [[ "$output" == *"--no-install cowsay"* ]]
+}
+
+@test "bunx-as-symlink: the link is replaced by a regular file" {
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo "STUB:bun ARGS=[$*]";; esac'
+  stub_symlink bunx bun
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  [ ! -L "$TEST_BIN/bunx" ]
+  [ -f "$TEST_BIN/bunx" ]
+  # And the two wrappers must be genuinely different files.
+  run bash -c "cmp -s '$TEST_BIN/bun' '$TEST_BIN/bunx' && echo same || echo different"
+  [ "$output" = "different" ]
+}
+
 # --- cargo -----------------------------------------------------------------
 
 lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj/Cargo.lock"; echo "$BATS_TEST_TMPDIR/proj/sub"; }
