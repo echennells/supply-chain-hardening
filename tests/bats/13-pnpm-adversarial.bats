@@ -31,37 +31,51 @@ setup() {
   rm -rf /tmp/pnpm-attack-test
 }
 
-@test "BEHAVIORAL: pnpm block-exotic-subdeps refuses tarball/http deps before network (pnpm >=11 only)" {
-  # File-content tests in 01-config-files.bats assert block-exotic-subdeps=true
-  # is written to ~/.config/pnpm/rc. This test verifies pnpm actually honors
-  # the key — same shape as the npm allow-git=none behavioral test in
-  # 03-npm.bats. Distinguishes "pnpm refused before network" (enforcement
-  # working) from "pnpm attempted DNS" (key silently ignored).
+@test "pnpm: block-exotic-subdeps governs SUBdeps only; direct deps stay allowed (pnpm >=11)" {
+  # WHAT THIS CONTROL ACTUALLY IS. pnpm's blockExoticSubdeps, per its docs:
+  # "only DIRECT dependencies ... may use exotic sources (like git)". It blocks
+  # a TRANSITIVE dependency that points at a git/tarball/http source; it does
+  # NOT block an exotic source you list yourself. It also defaults to true in
+  # pnpm 11.
   #
-  # blockExoticSubdeps / block-exotic-subdeps is a pnpm 11+ control. pnpm 10
-  # accepts the key in config and silently ignores it — verified empirically
-  # against pnpm 10.34.5, which fetched the tarball URL and surfaced ENOTFOUND.
-  # The test container pins pnpm@10 on Node <22 (pnpm 11 requires Node >=22),
-  # so this skips there rather than asserting a control the runtime lacks.
-  # The pnpm 10 exposure is documented in README.md → Limitations.
+  # An earlier version of this test did `pnpm add <tarball-url>` — a DIRECT dep —
+  # and asserted pnpm should refuse it, treating the control like npm's
+  # allow-git=none. That premise is wrong: a direct exotic dep is allowed by
+  # design, so pnpm attempting the fetch is CORRECT, and the test failed on
+  # pnpm 11 (where the control is active) for doing the right thing.
+  #
+  # The real subdep-blocking behavior cannot be exercised offline — it needs a
+  # registry package whose transitive dependency is exotic, which this harness
+  # cannot fabricate without a fixture registry. So this asserts the two things
+  # that ARE verifiable: the setting is deployed, and pnpm does not over-block a
+  # legitimate direct exotic dep (a real regression guard — over-blocking would
+  # break normal installs).
   pnpm_major=$(pnpm --version 2>/dev/null | sed -nE 's/^([0-9]+)\..*/\1/p' | head -1)
   [[ "$pnpm_major" =~ ^[0-9]+$ ]] || skip "couldn't parse pnpm major version"
-  [[ "$pnpm_major" -ge 11 ]] || skip "block-exotic-subdeps enforcement requires pnpm >=11 (got: $(pnpm --version 2>/dev/null))"
+  [[ "$pnpm_major" -ge 11 ]] || skip "blockExoticSubdeps is a pnpm >=11 control (got: $(pnpm --version 2>/dev/null))"
 
+  # deployed
+  assert_file_contains "$HOME/.config/pnpm/config.yaml" 'blockExoticSubdeps: true'
+
+  # direct exotic dep must remain ALLOWED (pnpm reaches the network / does not
+  # refuse it outright). Non-resolvable host -> a network error is the expected
+  # "it tried" signal; a "not allowed / blocked / refused" message would mean
+  # pnpm is wrongly blocking direct deps.
   cd /tmp && rm -rf pnpm-exotic-test && mkdir pnpm-exotic-test && cd pnpm-exotic-test
   pnpm init >/dev/null 2>&1
-  # Tarball URL pointing at a non-resolvable host. If block-exotic-subdeps
-  # is honored, pnpm refuses without DNS. If silently ignored, pnpm tries
-  # the fetch and surfaces ENOTFOUND / getaddrinfo errors.
   result=$(pnpm add "https://does-not-resolve.invalid/pkg.tgz" 2>&1 || true)
   rm -rf /tmp/pnpm-exotic-test
-
-  if echo "$result" | grep -qiE "ENOTFOUND|ENETUNREACH|getaddrinfo|could not resolve|getaddrinfo ENOTFOUND"; then
-    echo "FAIL: pnpm attempted DNS for the exotic dep — block-exotic-subdeps NOT enforced" >&2
-    echo "--- pnpm output ---" >&2
-    echo "$result" >&2
-    return 1
+  # Correct behaviour is that pnpm ATTEMPTS the fetch (direct exotic deps are
+  # allowed), which against a non-resolvable host surfaces a network error.
+  # Assert the attempt positively; its ABSENCE would mean pnpm wrongly refused a
+  # direct dep. (The original test asserted the opposite and failed here for
+  # pnpm doing the right thing.)
+  if echo "$result" | grep -qiE "ENOTFOUND|ENETUNREACH|getaddrinfo|fetch failed|could not resolve"; then
+    return 0
   fi
+  echo "FAIL: pnpm did not attempt the direct exotic dep — unexpected refusal of a DIRECT dep" >&2
+  echo "$result" >&2
+  return 1
 }
 
 @test "ATTACK: pnpm project-level postinstall is blocked (pnpm 11 config.yaml regression catcher)" {
