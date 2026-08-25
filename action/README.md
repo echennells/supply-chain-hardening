@@ -123,6 +123,56 @@ jobs:
 
 That's it. The defaults are sensible for most workflows.
 
+## Verifying it actually applied
+
+Writing a config file proves nothing about enforcement. Every protection here
+has failed at least once in the same shape: the file was exactly what we meant
+to write, the tool ignored it, and nothing said so.
+
+```yaml
+- uses: echennells/supply-chain-hardening/action@v2
+- uses: actions/setup-node@v4          # your normal setup
+  with: { node-version: '22' }
+- uses: echennells/supply-chain-hardening/action/verify@v2
+```
+
+**Run it after your setup steps, not immediately after hardening.** Verifying
+straight away only proves hardening worked. Its value is catching what the
+rest of your workflow undoes — a toolchain install putting an unhardened
+binary ahead of a wrapper, a PATH prepend, an env layer that never propagated.
+
+It reports a table with an evidence strength per row, and fails the step on
+any GAP:
+
+| Evidence | Means |
+|---|---|
+| `FUNCTIONAL` | we ran the protection and observed its behavior |
+| `PARSED` | the tool itself reported the setting back — it read the file, recognised the key, accepted the value |
+| `PRESENT` | a file exists and nothing more. **Unverified**, and the evidence level that produced every bug above |
+
+`OK` / `GAP` / `WEAK` / `N/A`; exit 0 unless there's a `GAP`. Pass
+`strict: true` to fail on `WEAK` too — for pipelines where unverified should
+count as unprotected.
+
+Two checks only a runner can do:
+
+- **Did the env layer propagate to this step?** `harden.sh` records what it
+  set; the verifier compares that against the live environment. A wrong
+  `--emit` target, or nothing sourcing the env file on `gitlab`/`buildkite`/
+  `plain`, is invisible any other way — the hardening ran, the file exists, and
+  no variable arrived.
+- **Is each wrapper the binary PATH actually resolves to?** A wrapper that
+  exists but sits behind something else reads as coverage and is not. It
+  scans every PATH entry, so it reports *shadowed* rather than *not deployed* —
+  a different diagnosis pointing at a different fix.
+
+Outside GitHub, run the script directly; it takes the same `--emit` targets:
+
+```bash
+./action/verify.sh --emit=gitlab      # exit 1 on any gap
+./action/verify.sh --strict --quiet   # table suppressed, exit code kept
+```
+
 ## Inputs
 
 | Input | Default | What it controls |
@@ -223,7 +273,7 @@ Example consumption:
 - **Per-job, not per-workflow.** Each job in a workflow gets a fresh runner; the action only protects the job it runs in. Add `- uses:` to every job that does installs.
 - **pnpm 11 vs 10 nuance.** pnpm 11 only reads `~/.config/pnpm/config.yaml`; pnpm 10 reads `~/.config/pnpm/rc`. The action writes both, so you're covered either way.
 - **pnpm 10 silently ignores `block-exotic-subdeps`.** Runtime enforcement landed in pnpm 11. Action writes the key on both versions for forward-compat; pnpm 10 reads it but doesn't act.
-- **Doesn't validate node/python versions.** If you're targeting older toolchains, some settings (e.g. npm's `min-release-age` needs npm 10.5+) may be silently ignored by the package manager. Age-gate keys in particular tend to be *accepted and ignored* by older versions rather than rejected, so an old toolchain looks hardened and is not.
+- **Doesn't validate node/python versions.** If you're targeting older toolchains, some settings are silently ignored. The sharpest case: **npm's `min-release-age` landed in npm 11.10.0**, so on npm 10.x the action writes the key, `npm config get` echoes it back, and *nothing enforces it*. Age-gate keys in general tend to be accepted-and-ignored by older versions rather than rejected, so an old toolchain looks hardened and is not. `action/verify.sh` detects exactly this and reports it as a GAP — run it if your runners pin a Node version.
 - **Cargo `build.rs` and proc-macro execution CANNOT be blocked** by cargo config — structural gap in cargo itself. Cargo runs them at *compile* time with your privileges, before any of your code, and has no `--ignore-scripts` equivalent. Refusing to *resolve* a too-new version is the only control that prevents execution, which is what the publish-age gate does. For vetting the code itself, run `cargo deny check` / `cargo audit` as a separate step.
 - **The cargo age gate needs a backend to enforce it.** `cooldown.toml` is always written, but nothing reads it unless `cargo-cooldown` is installed — set `install_cargo_cooldown: true`, or install it in an earlier cached step. Without it you still get `--locked` injection, which covers reuse of an existing lockfile but not `cargo update`.
 - **A repo-local `cooldown.toml` overrides the deployed one.** The gate is deployed at `$CARGO_HOME`, the weakest level of cargo-cooldown's precedence chain and the only one that applies to every project without per-repo opt-in. That is cargo-cooldown's design, not something this can close — treat a committed `cooldown.toml` in an untrusted repo as a hardening bypass.

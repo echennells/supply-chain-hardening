@@ -1,0 +1,55 @@
+name: 'Supply Chain Hardening — Verify'
+description: >-
+  Report which supply-chain protections are ACTUALLY enforcing in this job,
+  and fail the step when any are not. Run it AFTER your setup steps, not
+  immediately after hardening — its value is catching what your workflow
+  undoes (a toolchain install shadowing a wrapper, an env layer that never
+  propagated), which nothing else reports.
+author: 'echennells'
+
+inputs:
+  strict:
+    description: >-
+      Also fail when a protection could only be verified as PRESENT — i.e. a
+      file exists and nothing was observed enforcing. Off by default because
+      several protections have no cheap functional probe; turn it on for
+      pipelines that want unverified to count as unprotected.
+    required: false
+    default: 'false'
+  quiet:
+    description: >-
+      Suppress the table on stdout. The job summary and the exit code are
+      still produced.
+    required: false
+    default: 'false'
+
+outputs:
+  gaps:
+    description: 'Number of protections found NOT in effect (0 when the step passes).'
+    value: ${{ steps.verify.outputs.gaps }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        EMIT: github
+        VERIFY_STRICT: ${{ inputs.strict }}
+        VERIFY_QUIET: ${{ inputs.quiet }}
+      run: |
+        args=()
+        [[ "$VERIFY_STRICT" == "true" ]] && args+=(--strict)
+        [[ "$VERIFY_QUIET"  == "true" ]] && args+=(--quiet)
+        set +e
+        "${{ github.action_path }}/../verify.sh" "${args[@]}"
+        rc=$?
+        set -e
+        # The script's own count is authoritative; re-derive it for the output
+        # so a consumer can branch on it even when the step is allowed to fail.
+        echo "gaps=$rc" >> "$GITHUB_OUTPUT"
+        exit $rc
+
+branding:
+  icon: 'check-circle'
+  color: 'blue'

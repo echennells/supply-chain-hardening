@@ -1075,3 +1075,50 @@ jobs:
 
       - name: Output agrees with reality
         run: test "${{ steps.harden.outputs.sfw-installed }}" = "true"
+
+  action-verify-catches-post-hardening-shadowing:
+    name: 'Verify: catches a toolchain installed AFTER hardening'
+    runs-on: ubuntu-24.04
+    # The verifier's whole reason to exist. Hardening runs, then a later step
+    # installs a fresh Node — which puts an unhardened npm ahead of the
+    # wrapper on PATH and rewrites the config npm reads. Nothing in the job
+    # fails; the workflow goes green while unprotected. This asserts the
+    # verifier says otherwise.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+          install_sfw: true
+
+      - name: Verify immediately — should be clean
+        uses: ./action/verify
+
+      - name: Now install a different Node AFTER hardening
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+
+      - name: The verifier must now report a gap
+        id: reverify
+        continue-on-error: true
+        uses: ./action/verify
+
+      - name: Assert it failed rather than passing silently
+        run: |
+          if [ "${{ steps.reverify.outcome }}" = "success" ]; then
+            echo "::error::a toolchain installed after hardening did not register as a gap — the verifier is not doing its job"
+            exit 1
+          fi
+          echo "verifier correctly reported the post-hardening change"
+
+  action-verify-clean-run:
+    name: 'Verify: a correctly hardened job reports no gaps'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./action
+        with:
+          ecosystems: npm,pip,uv
+      - uses: ./action/verify

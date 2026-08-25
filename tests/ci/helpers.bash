@@ -12,6 +12,7 @@
 # no ambient CI variable leaks in to skew platform auto-detection.
 
 HARDEN_SH="${BATS_TEST_DIRNAME}/../../action/harden.sh"
+VERIFY_SH="${BATS_TEST_DIRNAME}/../../action/verify.sh"
 
 # Named rather than being bats' own setup(): a .bats file that needs extra
 # setup (a skip guard, say) defines its own setup(), which SHADOWS a setup()
@@ -46,6 +47,44 @@ harden() {
     WRITE_ETC=false \
     "${envs[@]}" \
     bash "$HARDEN_SH" "${args[@]}"
+}
+
+# verify [VAR=value ...] [-- script args ...]
+#
+# Runs verify.sh the way a LATER CI step would: same HOME and PATH, but a
+# fresh environment, so whether the env layer propagated is a real question
+# rather than an artifact of the test inheriting it.
+verify() {
+  local -a envs=() args=()
+  local sep=0 a
+  for a in "$@"; do
+    if [[ "$a" == "--" ]]; then sep=1; continue; fi
+    if [[ $sep -eq 1 ]]; then
+      args+=("$a")
+    else
+      # Catch the mistake this helper otherwise hides: `env` accepts ANY token
+      # containing = as a variable assignment, so a flag passed before `--`
+      # becomes a bogus variable and never reaches the script — the test then
+      # passes while testing the default path.
+      [[ "$a" == -* ]] && { echo "helper misuse: pass script flags after --, got '$a'" >&2; return 64; }
+      envs+=("$a")
+    fi
+  done
+  env -i \
+    PATH="${TEST_BIN}:${PATH}" \
+    HOME="$TEST_HOME" \
+    TMPDIR="$TEST_TMP" \
+    HARDENING_ENV_FILE="$ENV_FILE" \
+    "${envs[@]}" \
+    bash "$VERIFY_SH" "${args[@]}"
+}
+
+# verify_sourced — as above, but with the env layer picked up first, which is
+# what a correctly-configured job looks like.
+verify_sourced() {
+  env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    bash -c "set -a; source '$ENV_FILE'; set +a
+             HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' $*"
 }
 
 # stub_bin <name> [body]
