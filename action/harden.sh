@@ -193,10 +193,16 @@ write_env() {
     github)   echo "$k=$v" >> "$GITHUB_ENV" ;;
     circleci) printf 'export %s=%q\n' "$k" "$v" >> "${BASH_ENV:-/dev/null}" ;;
     azure)    echo "##vso[task.setvariable variable=$k]$v" ;;
-    # GitLab runs a job's whole script in ONE shell, so an export here is
-    # already visible to every later line; the env file covers the
-    # cross-job case via a dotenv artifact. Buildkite has no native
-    # mechanism (a pre-command hook sources the env file instead).
+    # No native step-to-step mechanism. Note the export above reaches only
+    # THIS process and its children — harden.sh runs as a subprocess, so the
+    # calling job shell does not inherit it. On these targets the env file is
+    # the mechanism and the caller must source it:
+    #
+    #   ./harden.sh --emit=gitlab
+    #   source "${RUNNER_TEMP:-/tmp}/supply-chain-hardening.env"
+    #
+    # The config-file and wrapper layers need no such step; they are already
+    # on disk. Buildkite conventionally does the source in a pre-command hook.
     gitlab|buildkite|plain) : ;;
   esac
 }

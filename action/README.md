@@ -65,19 +65,27 @@ annotations). Select a target with `--emit=` or `EMIT=`; the default,
 | Target | Env mechanism | Detected by |
 |---|---|---|
 | `github` | `$GITHUB_ENV` | `$GITHUB_ACTIONS` |
-| `gitlab` | job-shell `export` (one shell per job) | `$GITLAB_CI` |
+| `gitlab` | env file, sourced by the job script | `$GITLAB_CI` |
 | `circleci` | `$BASH_ENV` | `$CIRCLECI` |
 | `azure` | `##vso[task.setvariable]` | `$TF_BUILD` |
 | `buildkite` | env file, sourced from a pre-command hook | `$BUILDKITE` |
 | `plain` | env file only | fallback |
 
-Every target also writes a canonical sourceable env file
+On `github`, `circleci` and `azure` the env layer propagates by itself. On
+`gitlab`, `buildkite` and `plain` there is no native mechanism, so the caller
+sources the env file — `harden.sh` runs as a subprocess and its own exports
+do not reach the calling shell. The config-file and wrapper layers need no
+such step on any target; they are already on disk.
+
+Every target writes that canonical sourceable env file
 (`$HARDENING_ENV_FILE`, default `$RUNNER_TEMP/supply-chain-hardening.env`):
 
 ```bash
 ./action/harden.sh --emit=plain
-source /tmp/supply-chain-hardening.env
+source "${TMPDIR:-/tmp}/supply-chain-hardening.env"
 ```
+
+Worked examples for each platform live in [`examples/`](examples/).
 
 That file is what makes the env layer survive a step boundary on runners
 that give each step its own container (Drone, Woodpecker), where no native

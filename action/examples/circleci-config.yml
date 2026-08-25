@@ -1,0 +1,30 @@
+# CircleCI
+#
+# CircleCI sources $BASH_ENV before every step, which makes it the closest
+# analogue to GitHub's $GITHUB_ENV. harden.sh writes there directly when
+# --emit=circleci, so no `source` line is needed in later steps.
+
+version: 2.1
+
+commands:
+  harden:
+    description: "Apply supply-chain hardening to this job's container"
+    steps:
+      - run:
+          name: Supply-chain hardening
+          command: ./action/harden.sh --emit=circleci
+
+jobs:
+  build:
+    docker:
+      - image: cimg/node:22.11
+    steps:
+      - checkout
+      - harden
+      # Later steps inherit the env layer via $BASH_ENV automatically.
+      - run: npm ci
+      - run: npm run build
+
+workflows:
+  main:
+    jobs: [build]
