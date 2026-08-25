@@ -1,0 +1,32 @@
+name: pnpm age-gate signoff
+
+# supply-chain-verify can only ever report the pnpm age gate as WEAK — its
+# runtime probe proves pnpm READ the config, not that it enforces it (pnpm
+# echoes unimplemented keys, and there is no cheap discriminator for it the way
+# there is for npm). This job supplies the behavioural proof the verifier
+# structurally won't: it applies the role's pnpm config and watches pnpm refuse
+# a too-fresh version by its own error code, and install an old one.
+#
+# See tests/acceptance/pnpm-signoff.sh. Runs on ubuntu:26.04, where Node 22 can
+# run a current pnpm (installed via `npm install -g`, because Ubuntu's corepack
+# cannot run modern pnpm). Unlike the advisory coverage matrix, this FAILS the
+# build on a regression — e.g. a pnpm release renaming the key, or a template
+# edit that writes it to the wrong file for the detected pnpm major.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pnpm-signoff:
+    runs-on: ubuntu-24.04
+    name: "pnpm age gate on ubuntu:26.04"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Apply the role's pnpm config on stock 26.04 and prove the gate enforces
+        run: |
+          docker run --rm -v "$PWD:/role" ubuntu:26.04 \
+            bash /role/tests/acceptance/pnpm-signoff.sh
