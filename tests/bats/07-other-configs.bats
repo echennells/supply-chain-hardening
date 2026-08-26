@@ -40,9 +40,31 @@ npq_is_functional() {
   fi
 }
 
-@test "npq: npm alias routes through npq-hero" {
+@test "npq: npm reaches npq exactly once — wrapper OR alias, never both (no double-prompt)" {
+  # npm is routed through npq by the PATH wrapper AND could be by the alias.
+  # BOTH firing double-prompts every install (alias -> npq -> npm(wrapper) ->
+  # npq — the user answers "yes" twice). The alias file guards its npm alias
+  # behind a runtime wrapper check so exactly one path is live. yarn/pnpm have
+  # no wrapper and are always aliased. Behavioural, not a string grep: the
+  # literal `alias npm='npq-hero'` is still IN the file (inside the guard), so
+  # grepping it would pass while npm double-prompts.
   npq_is_functional || skip "npq non-functional on this Node ($(node --version 2>/dev/null)); aliases intentionally not deployed"
-  assert_file_contains /etc/profile.d/npq-aliases.sh "alias npm='npq-hero'"
+  local F=/etc/profile.d/npq-aliases.sh
+  if grep -q supply-chain-hardening /usr/local/bin/npm 2>/dev/null; then
+    # wrapper present: it handles npq, so sourcing must NOT leave npm aliased,
+    # and npm must resolve to the wrapper rather than npq-hero.
+    run sh -c ". $F 2>/dev/null; alias npm"
+    [ "$status" -ne 0 ] || ! echo "$output" | grep -q "npq-hero"
+    run sh -c ". $F 2>/dev/null; command -v npm"
+    echo "$output" | grep -q "/usr/local/bin/npm"
+  else
+    # no wrapper: the alias is the npq path for npm
+    run sh -c ". $F 2>/dev/null; alias npm"
+    echo "$output" | grep -q "npq-hero"
+  fi
+  # yarn/pnpm have no wrapper — always aliased through npq
+  run sh -c ". $F 2>/dev/null; alias yarn"
+  echo "$output" | grep -q "npq-hero"
 }
 
 @test "npq: NPQ_DISABLE_AUTO_CONTINUE=true" {
