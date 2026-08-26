@@ -10,6 +10,19 @@
 # Isolation: every test gets a throwaway $HOME and $TMPDIR and runs the
 # script under `env -i`, so nothing touches the developer's real config and
 # no ambient CI variable leaks in to skew platform auto-detection.
+#
+# WHAT THIS SUITE CANNOT REACH — read before trusting a green run:
+#   - action.yml. Nothing here exercises the composite action's inputs,
+#     outputs or ${{ github.action_path }}. The packaging every consumer
+#     actually touches has ZERO coverage; only the smoke workflows test it.
+#   - the /etc layer. WRITE_ETC is forced false throughout so the suite never
+#     needs to write outside a temp dir, which means the sudo/system path is
+#     never exercised here either.
+#   - real tools for 10 of the 14 ecosystems. Only npm, node, uv and python3
+#     are genuinely present; bun, deno, composer, cargo, go, pnpm, yarn,
+#     maven, gradle and dotnet are STUBS. So these tests prove what the
+#     wrappers EMIT, never that the real tool accepts it.
+# A green run means the script behaves; it does not mean the action works.
 
 HARDEN_SH="${BATS_TEST_DIRNAME}/../../action/harden.sh"
 VERIFY_SH="${BATS_TEST_DIRNAME}/../../action/verify.sh"
@@ -30,9 +43,9 @@ common_setup() {
 
 # harden [VAR=value ...] [-- script args ...]
 #
-# Runs harden.sh in a pristine environment. WRITE_ETC defaults to false so the
-# suite never needs sudo; tests that want the /etc layer pass WRITE_ETC=true
-# explicitly and are skipped when sudo is unavailable.
+# Runs harden.sh in a pristine environment. WRITE_ETC is false so the suite
+# never writes outside a temp dir. No test currently overrides it, so the
+# /etc layer is untested here — the smoke workflows are the only coverage.
 harden() {
   local -a envs=() args=()
   local sep=0 a
