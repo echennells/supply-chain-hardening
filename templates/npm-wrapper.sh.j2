@@ -21,6 +21,18 @@ if [ -z "$REAL_NPM" ] || [ ! -x "$REAL_NPM" ] || [ "$REAL_NPM" = "$0" ]; then
   exit 127
 fi
 
+# npq re-entry guard — the interactive block below hands the install to
+# npq-hero, and npq performs the APPROVED install by invoking the package
+# manager, which resolves back to this wrapper. Without this guard that is an
+# infinite loop: `npm install <x>`, answer "yes", and npq→npm→wrapper→npq re-
+# prompts forever, never completing (MEASURED on a real box). On re-entry (our
+# marker is exported below) run the real npm directly — npq has already done
+# its reputation prompt, and the outer sfw still wraps the whole process tree,
+# so threat-intel filtering is preserved.
+if [ -n "${SUPPLY_CHAIN_NPM_WRAPPED:-}" ]; then
+  exec "$REAL_NPM" "$@"
+fi
+
 # Find the first non-flag argument — that's the npm subcommand. Bare `npm`,
 # `npm --version`, `npm -v` etc. leave subcmd empty.
 subcmd=""
@@ -51,6 +63,10 @@ esac
 # for threat-intel blocking. Otherwise (script/agent/CI), use sfw alone
 # (npq would hang waiting for input).
 if [ -t 0 ] && [ -t 1 ] && command -v npq-hero >/dev/null 2>&1; then
+  # Mark the hand-off so npq's own npm call (to perform the install it just
+  # approved) hits the re-entry guard above and reaches the real npm instead
+  # of looping back into npq.
+  SUPPLY_CHAIN_NPM_WRAPPED=1; export SUPPLY_CHAIN_NPM_WRAPPED
   if command -v sfw >/dev/null 2>&1; then
     exec sfw npq-hero "$@"
   fi

@@ -110,3 +110,42 @@ wrapper_is_ours() {
   ! echo "$output" | grep -q "SFW_WRAPPED:"
   ! echo "$output" | grep -q "NPQ_DIRECT:"
 }
+
+@test "tty: interactive install COMPLETES through npq without looping (re-entry guard)" {
+  # The tests above use SINK stubs (print a marker, exit) — they prove the
+  # wrapper ROUTES to sfw+npq but not that an install COMPLETES through them.
+  # The real npq-hero, after approval, runs the package manager to perform the
+  # install — npq -> npm -> wrapper -> npq. Without a re-entry guard that loops
+  # forever (MEASURED on a real box: interactive `npm install`, answer yes, the
+  # reputation panel re-prompts endlessly). A sink stub cannot surface it; this
+  # uses a FAITHFUL, delegating npq stub, bounded so a regression fails fast.
+  wrapper_is_ours || skip "npm PATH wrapper not deployed on this host"
+  command -v script >/dev/null 2>&1 || skip "util-linux script(1) not available"
+
+  rm -f /tmp/npq-reentry-count
+  # npq stub that behaves like the real one: approve, then run the package
+  # manager (which re-enters the wrapper). Bounded at 3 so the loop fails the
+  # test instead of hanging the suite.
+  cat > "$STUBS/npq-hero" <<'EOF'
+#!/bin/sh
+n=$(( $(cat /tmp/npq-reentry-count 2>/dev/null || echo 0) + 1 )); echo "$n" > /tmp/npq-reentry-count
+[ "$n" -gt 3 ] && { echo "NPQ_LOOP"; exit 97; }
+echo "NPQ_RAN:$n"
+exec npm "$@"
+EOF
+  # sfw that actually delegates (pass-through), so both layers really run.
+  printf '#!/bin/sh\nexec "$@"\n' > "$STUBS/sfw"
+  # a stub "real npm" so the chain is hermetic (no registry/network)
+  printf '#!/bin/sh\necho "REAL_NPM_DID_INSTALL:$*"\n' > "$STUBS/real-npm"
+  # a copy of the DEPLOYED wrapper whose REAL_NPM points at our stub, so this
+  # exercises the wrapper's actual routing + guard, not a hand-written mock.
+  sed "s|^REAL_NPM=.*|REAL_NPM='$STUBS/real-npm'|" "$WRAPPER" > "$STUBS/npm"
+  chmod +x "$STUBS/npq-hero" "$STUBS/sfw" "$STUBS/real-npm" "$STUBS/npm"
+
+  run script -qec "PATH='$STUBS:$PATH' '$STUBS/npm' install some-package" /dev/null
+  echo "$output"
+  # the install must reach the real npm (completed), never the loop
+  echo "$output" | grep -q "REAL_NPM_DID_INSTALL:install some-package"
+  ! echo "$output" | grep -q "NPQ_LOOP"
+  [ "$(cat /tmp/npq-reentry-count 2>/dev/null || echo 99)" -le 2 ]
+}
