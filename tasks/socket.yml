@@ -194,16 +194,27 @@
   check_mode: false
   failed_when: false
 
-- name: Ensure sfw cache directory is writable
+- name: Give the invoking user ownership of the sfw cache
+  # sfw runs as WHOEVER invokes npm/cargo, but the global install and the
+  # apply-time warm both run as root (become), so the cache is root-owned. The
+  # old task set mode 0755 on that root-owned dir — writable only by root — so a
+  # non-root `npm install` failed with `EACCES ... .sfw-cache/next-check`, and
+  # because sfw's binary-prep fails BEFORE it hands off, it took the install
+  # down with it (fail-closed; MEASURED on a non-root Ubuntu box). chmod 0777
+  # would fix the permission but let any local user swap the cached firewall
+  # binary — a real downgrade. Instead chown the shared, already-warmed cache
+  # tree to the unescalated invoking user (the account that actually runs it).
   become: true
   ansible.builtin.file:
     path: /usr/local/lib/node_modules/sfw/.sfw-cache
     state: directory
-    mode: "0755"
+    owner: "{{ preflight_invoking_user.stdout }}"
+    recurse: true
   failed_when: false
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+    - preflight_invoking_user.stdout | default('') | length > 0
 
 # --- npm PATH wrapper (opt-in via npm_path_wrapper) ---
 # Without this, sfw is installed but never invoked except by callers who
