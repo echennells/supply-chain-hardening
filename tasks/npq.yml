@@ -184,7 +184,15 @@
       # Managed by ansible-supply-chain-security
       # Route npm/yarn/pnpm through npq pre-install checks
       export NPQ_DISABLE_AUTO_CONTINUE=true
-      alias npm='npq-hero'
+      # npm is ALSO routed through npq by the PATH wrapper at /usr/local/bin/npm
+      # (its interactive branch). Aliasing npm to npq-hero on top of that double-
+      # prompts every install: alias -> npq -> npm(wrapper) -> npq. So only alias
+      # npm when the wrapper is NOT present to handle it; the check is at runtime
+      # so it self-corrects if the wrapper is later added or removed. yarn and
+      # pnpm have no PATH wrapper, so they always need the alias.
+      if ! grep -q supply-chain-hardening /usr/local/bin/npm 2>/dev/null; then
+        alias npm='npq-hero'
+      fi
       alias yarn='NPQ_PKG_MGR=yarn npq-hero'
       alias pnpm='NPQ_PKG_MGR=pnpm npq-hero'
   when: npq_functional
