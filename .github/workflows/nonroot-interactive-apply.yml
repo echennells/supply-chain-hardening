@@ -1,0 +1,38 @@
+name: Non-root + interactive apply
+
+# WHY THIS JOB EXISTS
+#
+# The role's own suite (test.yml) applies as ROOT and runs bats as ROOT; the
+# action smoke tests run non-root but NON-interactively. Every protection bug
+# this project shipped in Aug 2026 lived in the one cell neither exercises: the
+# role applied by a NON-ROOT invoking user (so global `npm install -g` needs
+# become, and caches land owned by the wrong user), through the npm wrapper's
+# INTERACTIVE npq branch (where npm->npq->npm looped without a re-entry guard).
+# This job reproduces that cell and fails if any protection is not actually in
+# effect there. Full rationale in tests/Dockerfile.nonroot.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  nonroot-interactive:
+    name: Applied by a non-root sudo user; interactive wrapper exercised
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # The build IS the regression guard: the RUN that applies the role runs as
+      # the unprivileged `dev` user, so a task that forgot `become`, or a cache
+      # left root-owned, turns a verify row to GAP and fails right here.
+      - name: Build image (performs the non-root apply)
+        run: docker build -t sch-nonroot -f tests/Dockerfile.nonroot .
+
+      # Behavioral proof as the non-root user: verify reports no gaps, a real
+      # install succeeds (sfw cache writable), a postinstall is blocked, and the
+      # interactive wrapper terminates instead of looping.
+      - name: Behavioral smokes as the non-root user
+        run: docker run --rm sch-nonroot
