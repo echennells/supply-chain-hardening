@@ -1,0 +1,77 @@
+# Non-root + interactive apply of the role.
+#
+# WHY THIS FILE EXISTS
+#
+# tests/Dockerfile applies the role as ROOT and runs bats as ROOT, and the
+# GitHub Action smoke tests run non-root but NON-interactively. Every bug this
+# project shipped in Aug 2026 lived in the one cell neither exercises: the role
+# applied by a NON-ROOT invoking user, and the npm wrapper's INTERACTIVE (npq)
+# branch. Concretely, on a stock Ubuntu box hardened as an ordinary sudo user:
+#   - `npm install -g npq/sfw/lockfile-lint` needs the global prefix (/usr/local)
+#     which a non-root apply cannot write, so the installs silently failed and
+#     the npq alias pointed at a binary that was never there;
+#   - the sfw cache was created root-owned, so the FIRST real `npm install` as
+#     the user died with EACCES;
+#   - the interactive wrapper handed npm -> npq -> npm and, without a re-entry
+#     guard, looped forever the moment you answered "yes".
+# CI is root + non-interactive, so none of it ran. This image reproduces the
+# cell exactly: a non-root user with sudo applies the role, then we drive real
+# and INTERACTIVE installs as that user.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# util-linux gives us `script`, the same pty allocator the interactive bats use.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv python3-setuptools \
+    ansible \
+    curl git ca-certificates sudo jq \
+    util-linux procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 24 so npm is >= 11.10 (min-release-age), then float npm to latest so the
+# age gate is genuinely IMPLEMENTED, not just echoed back. This mirrors the
+# NodeSource path we hardened Eric's real Ubuntu 26 box with.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g npm@latest \
+    && hash -r \
+    && echo "npm now: $(npm --version)"
+
+# The NON-ROOT invoking user, with passwordless sudo — exactly a normal
+# operator/agent account on a real host. uid 1000 so it is unmistakably not root.
+# Ubuntu 24.04's base image ships a stock uid-1000 `ubuntu` user; remove it so
+# `dev` is unmistakably the first real user (uid 1000), matching a real box.
+RUN userdel -r ubuntu 2>/dev/null || true; \
+    useradd -m -s /bin/bash -u 1000 dev \
+    && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
+    && chmod 0440 /etc/sudoers.d/dev
+
+# Role sources + fixtures, owned by dev (standalone-role layout: files at root).
+COPY --chown=dev:dev site.yml ansible.cfg /home/dev/role/
+COPY --chown=dev:dev inventories /home/dev/role/inventories/
+COPY --chown=dev:dev meta /home/dev/role/meta/
+COPY --chown=dev:dev defaults /home/dev/role/defaults/
+COPY --chown=dev:dev tasks /home/dev/role/tasks/
+COPY --chown=dev:dev templates /home/dev/role/templates/
+COPY --chown=dev:dev tests/fixtures /home/dev/fixtures/
+
+USER dev
+WORKDIR /home/dev/role
+
+# THE NON-ROOT APPLY. Tasks self-declare become:true and escalate via sudo
+# NOPASSWD, exactly like `ansible-playbook -K` against a real sudo user. If a
+# global install needs root and the task forgot become, it silently no-ops and
+# the verify table below turns a row to GAP — which is the whole point.
+# verify runs during the play (as dev, no become) so its table is in the build
+# log; fail_on_gap stays off here so the RUN stage owns the pass/fail assertion.
+RUN bash -o pipefail -c "ansible-playbook site.yml --connection=local --limit localhost \
+    -e podman_enabled=false -e verify_protections=true \
+    2>&1 | tee /home/dev/apply.log"
+
+COPY --chown=dev:dev tests/nonroot-smoke.sh /home/dev/nonroot-smoke.sh
+
+# RUN stage: behavioral proof as the non-root user.
+CMD ["bash", "/home/dev/nonroot-smoke.sh"]
