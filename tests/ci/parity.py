@@ -20,6 +20,19 @@ import os
 import re
 import sys
 
+# Keys the role emits only under a VERSION CONDITION, which the action gates
+# the same way. Their presence in a rendered file depends on which tool version
+# the host happens to have, so comparing by presence is meaningless: on a
+# runner with yarn 1.22 the role would withhold the key too.
+#
+# These are NOT exclusions — the action implements them. They are simply not
+# checkable by this method. The per-tier assertions in 03-config-files.bats
+# cover them instead.
+VERSION_CONDITIONAL = {
+    "enableHardenedMode": "yarn 4.0+ only; both role and action gate on the detected version",
+    "saveTextLockfile": "bun 1.2+ only; both gate on the detected version",
+}
+
 # key -> why the CI action does not carry it
 EXCLUDED = {
     "scanner": (
@@ -83,13 +96,14 @@ def main():
         act = keys(open(apath).read(), pats) if os.path.exists(apath) else set()
 
         for k in sorted(role - act):
-            if k in EXCLUDED:
+            if k in EXCLUDED or k in VERSION_CONDITIONAL:
                 continue
             gaps.append((label, k, "in the role, absent from the action"))
 
     if not gaps:
         print("PARITY OK — the action carries every role config key not "
-              f"explicitly excluded ({len(EXCLUDED)} exclusions, each documented)")
+              f"explicitly excluded ({len(EXCLUDED)} exclusions, "
+              f"{len(VERSION_CONDITIONAL)} version-conditional), each documented")
         return 0
 
     print("PARITY GAPS:")

@@ -52,12 +52,31 @@ setup() { common_setup; }
   [[ "$output" == *"control characters"* ]]
 }
 
-@test "yarn: scripts off, age gate on, hardened mode on" {
+@test "yarn: scripts off and age gate on, at every version" {
   run harden ECOSYSTEMS=yarn -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableScripts: false"
   assert_file_contains "$TEST_HOME/.yarnrc.yml" 'npmMinimalAgeGate: "2d"'
+}
+
+@test "yarn: hardened mode is emitted on yarn 4+" {
+  # enableHardenedMode is Yarn 4.0+. This used to be asserted unconditionally
+  # and passed only because the dev machine had no yarn at all — on a runner
+  # with yarn 1.22 (which ubuntu-24.04 ships) it is correctly withheld, and
+  # the test failed for being wrong rather than the code being wrong.
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs sudo for stubs"
+  stub_bin yarn 'echo 4.5.0'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableHardenedMode: true"
+}
+
+@test "yarn: hardened mode is withheld on yarn 1.x" {
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs sudo for stubs"
+  stub_bin yarn 'echo 1.22.22'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$TEST_HOME/.yarnrc.yml" "enableHardenedMode"
 }
 
 @test "pnpm: store integrity and lockfile determinism are set" {

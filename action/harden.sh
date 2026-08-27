@@ -332,7 +332,23 @@ version_ge() {
 
 HARDENED=()
 SFW_INSTALLED=false
-declare -A TOOL_VERSIONS=()
+
+# TOOL VERSIONS — parallel indexed arrays, NOT an associative array.
+#
+# `declare -A` needs bash 4.0. macOS ships bash 3.2 (2007; Apple froze it at
+# the last GPLv2 release), and `#!/usr/bin/env bash` finds that one. So on a
+# macOS runner the associative array aborted the script at startup with
+# "declare: -A: invalid option" — every ecosystem unhardened, before a single
+# config file was written. Indexed arrays work in 3.2.
+TV_KEYS=()
+TV_VALS=()
+set_tool_version() {
+  local k="$1" v="$2" i
+  for i in "${!TV_KEYS[@]}"; do
+    if [ "${TV_KEYS[$i]}" = "$k" ]; then TV_VALS[$i]="$v"; return 0; fi
+  done
+  TV_KEYS+=("$k"); TV_VALS+=("$v")
+}
 
 # ---- Per-ecosystem handlers ----
 
@@ -359,7 +375,7 @@ allow-git=none"
   echo "$content" | write_etc /etc/npmrc
 
   HARDENED+=("npm")
-  TOOL_VERSIONS["npm"]=$(detect_version npm "npm --version")
+  set_tool_version "npm" "$(detect_version npm "npm --version")"
   log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d"
   end_section
 }
@@ -448,7 +464,7 @@ harden_pnpm() {
   } > "$HOME/.config/pnpm/rc"
 
   HARDENED+=("pnpm")
-  TOOL_VERSIONS["pnpm"]=$(detect_version pnpm "pnpm --version")
+  set_tool_version "pnpm" "$(detect_version pnpm "pnpm --version")"
   if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
     log "pnpm: onlyBuiltDependencies=[${pnpm_allowlist[*]}], minimumReleaseAge=${PNPM_AGE_MINUTES}m"
   else
@@ -503,7 +519,7 @@ harden_yarn() {
   } | write_etc /etc/yarnrc.yml
 
   HARDENED+=("yarn")
-  TOOL_VERSIONS["yarn"]="$yarn_version"
+  set_tool_version "yarn" "$yarn_version"
   log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
   end_section
 }
@@ -535,7 +551,7 @@ only-binary = :all:
 EOF
 
   HARDENED+=("pip")
-  TOOL_VERSIONS["pip"]=$(detect_version pip "pip --version")
+  set_tool_version "pip" "$(detect_version pip "pip --version")"
   log "pip: only-binary=:all: (refuses sdist setup.py execution)"
   end_section
 }
@@ -568,7 +584,7 @@ verify-hashes = true
 EOF
 
   HARDENED+=("uv")
-  TOOL_VERSIONS["uv"]=$(detect_version uv "uv --version")
+  set_tool_version "uv" "$(detect_version uv "uv --version")"
   log "uv: exclude-newer='$UV_EXCLUDE_NEWER', no-build=true, index-strategy=first-index"
   end_section
 }
@@ -615,7 +631,7 @@ harden_composer() {
   } > "$HOME/.config/composer/config.json"
 
   HARDENED+=("composer")
-  TOOL_VERSIONS["composer"]="$composer_version"
+  set_tool_version "composer" "$composer_version"
 
   # COMPOSER_SKIP_SCRIPTS env var: belt-and-suspenders for `php composer.phar`
   # callers that bypass the wrapper but inherit the action's env. Composer
@@ -708,7 +724,7 @@ EOF
   fi
 
   HARDENED+=("bun")
-  TOOL_VERSIONS["bun"]="$bun_version"
+  set_tool_version "bun" "$bun_version"
 
   # PATH wrapper at the DISCOVERED bun location (wrap in-place — same
   # pattern as deno). Critical for CI runners where bun is commonly
@@ -886,7 +902,7 @@ global-min-publish-age = "$RELEASE_AGE_HOURS hours"
 EOF
 
   HARDENED+=("cargo")
-  TOOL_VERSIONS["cargo"]=$(detect_version cargo "cargo --version")
+  set_tool_version "cargo" "$(detect_version cargo "cargo --version")"
 
   # ---- optional cargo-cooldown backend ----
   #
@@ -1212,7 +1228,7 @@ harden_go() {
   fi
 
   HARDENED+=("go")
-  TOOL_VERSIONS["go"]="$go_version"
+  set_tool_version "go" "$go_version"
   log "go: GOSUMDB=sum.golang.org, GOPROXY=proxy.golang.org, GOFLAGS=-mod=readonly, GOTOOLCHAIN=local"
   end_section
 }
@@ -1228,7 +1244,7 @@ BUNDLE_DEPLOYMENT: "true"
 BUNDLE_DISABLE_EXEC_LOAD: "true"
 EOF
   HARDENED+=("bundler")
-  TOOL_VERSIONS["bundler"]=$(detect_version bundler "bundler --version")
+  set_tool_version "bundler" "$(detect_version bundler "bundler --version")"
   log "bundler: BUNDLE_FROZEN=true, BUNDLE_DEPLOYMENT=true"
   end_section
 }
@@ -1239,7 +1255,7 @@ harden_deno() {
   # The role deploys a PATH wrapper that injects --minimum-dependency-age
   # — we mirror that here as the actual enforcement layer.
   HARDENED+=("deno")
-  TOOL_VERSIONS["deno"]=$(detect_version deno "deno --version")
+  set_tool_version "deno" "$(detect_version deno "deno --version")"
 
   local real_deno
   real_deno=$(command -v deno 2>/dev/null || true)
@@ -1354,7 +1370,7 @@ harden_maven() {
 </settings>
 EOF
   HARDENED+=("maven")
-  TOOL_VERSIONS["maven"]=$(detect_version maven "mvn --version")
+  set_tool_version "maven" "$(detect_version maven "mvn --version")"
   log "maven: HTTPS-only mirror enforced; HTTP repos blocked"
   end_section
 }
@@ -1384,7 +1400,7 @@ allprojects {
 }
 EOF
   HARDENED+=("gradle")
-  TOOL_VERSIONS["gradle"]=$(detect_version gradle "gradle --version")
+  set_tool_version "gradle" "$(detect_version gradle "gradle --version")"
   log "gradle: HTTPS-only repos enforced, dynamic versions blocked"
   end_section
 }
@@ -1411,7 +1427,7 @@ harden_nuget() {
 </configuration>
 EOF
   HARDENED+=("nuget")
-  TOOL_VERSIONS["nuget"]=$(detect_version nuget "dotnet nuget --version")
+  set_tool_version "nuget" "$(detect_version nuget "dotnet nuget --version")"
   log "nuget: nuget.org only, signature validation required"
   end_section
 }
@@ -1538,14 +1554,15 @@ ecosystems_str=$(IFS=,; echo "${HARDENED[*]:-}")
 # (`if [[ $(echo $TV | jq -r .composer) != "" ]]; then ...`).
 tool_versions_json="{"
 first=true
-for key in "${!TOOL_VERSIONS[@]}"; do
+for _i in "${!TV_KEYS[@]}"; do
+  key="${TV_KEYS[$_i]}"
   if [[ "$first" == "true" ]]; then first=false; else tool_versions_json+=","; fi
   # JSON-escape the value. detect_version's grep filters to [0-9.] in
   # the normal path so these escapes are belt-and-suspenders, but if a
   # future contributor populates TOOL_VERSIONS bypassing detect_version,
   # this prevents JSON corruption. Escape backslash FIRST (otherwise the
   # backslash from \" gets double-escaped).
-  v=$(printf '%s' "${TOOL_VERSIONS[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  v=$(printf '%s' "${TV_VALS[$_i]}" | sed 's/\\/\\\\/g; s/"/\\"/g')
   tool_versions_json+="\"$key\":\"$v\""
 done
 tool_versions_json+="}"

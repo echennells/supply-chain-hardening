@@ -1116,9 +1116,59 @@ jobs:
   action-verify-clean-run:
     name: 'Verify: a correctly hardened job reports no gaps'
     runs-on: ubuntu-24.04
+    # Requires an npm that IMPLEMENTS min-release-age. ubuntu-24.04 ships npm
+    # 10.9.8, where the key is accepted, echoed back by `npm config get`, and
+    # enforced by nothing — so a stock runner cannot reach zero gaps for npm,
+    # and the verifier is right to say so. See the inverse job below.
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '24'
+
+      - name: Ensure npm implements the age gate (>= 11.10.0)
+        run: |
+          npm install -g npm@latest
+          echo "npm now $(npm --version)"
+
       - uses: ./action
         with:
-          ecosystems: npm,pip,uv
+          ecosystems: npm,pip
       - uses: ./action/verify
+
+  action-verify-reports-inert-npm-gate:
+    name: 'Verify: reports the age gate as a GAP on an npm that lacks it'
+    runs-on: ubuntu-24.04
+    # The more valuable half. A detector that only ever passes is not a
+    # detector. ubuntu-24.04's stock npm 10.9.8 does NOT implement
+    # min-release-age, so the verifier MUST report it — proving it discriminates
+    # by implementation rather than by echoing our own config back at us.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Record the stock npm version
+        run: npm --version
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      - name: Verify must fail, naming the npm version and the real key
+        id: v
+        continue-on-error: true
+        uses: ./action/verify
+
+      - name: Assert it detected the inert gate rather than passing
+        run: |
+          major=$(npm --version | cut -d. -f1)
+          minor=$(npm --version | cut -d. -f2)
+          if [ "$major" -gt 11 ] || { [ "$major" -eq 11 ] && [ "$minor" -ge 10 ]; }; then
+            echo "runner npm now implements min-release-age; nothing to detect"
+            exit 0
+          fi
+          if [ "${{ steps.v.outcome }}" = "success" ]; then
+            echo "::error::npm $(npm --version) does not implement min-release-age, but the verifier reported no gap — it is echoing our config back instead of probing"
+            exit 1
+          fi
+          echo "verifier correctly reported the inert npm age gate"

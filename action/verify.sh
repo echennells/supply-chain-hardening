@@ -105,6 +105,34 @@ GAPS=0
 WEAKS=0
 ROWS=""
 
+# WHICH ECOSYSTEMS WERE ACTUALLY REQUESTED.
+#
+# A runner has tools the job never asked to harden — ubuntu-24.04 ships yarn
+# 1.22 whether or not your workflow uses it. Reporting those as GAPs makes
+# `ecosystems: npm,pip,uv` fail verification for yarn config that was never
+# supposed to exist, which is a false alarm and trains people to ignore the
+# tool.
+#
+# harden.sh records the list it hardened in its outputs file. When that is
+# readable, anything absent from it is N/A — not requested, nothing to
+# verify. When it is not, every installed tool is fair game, because we
+# cannot tell the difference between "not requested" and "silently skipped".
+OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
+HARDENED_LIST=""
+HARDENED_KNOWN=0
+if [ -f "$OUTPUT_FILE" ]; then
+  HARDENED_LIST=$(grep '^ecosystems_hardened=' "$OUTPUT_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+  HARDENED_KNOWN=1
+fi
+
+# requested <eco> — true when the ecosystem was hardened, or when we have no
+# record and therefore must not assume it was skipped on purpose.
+requested() {
+  [ "$HARDENED_KNOWN" -eq 0 ] && return 0
+  case ",${HARDENED_LIST}," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
 row() { # status, evidence, protection, detail
   ROWS="${ROWS}$1\t$2\t$3\t$4\n"
   [ "$1" = "GAP" ]  && GAPS=$((GAPS + 1))
@@ -193,6 +221,9 @@ find_wrapper_on_path() {
 
 for w in npm bun bunx composer deno cargo; do
   have "$w" || { row "N/A" - "$w PATH wrapper" "$w not installed"; continue; }
+  # bunx rides along with the bun ecosystem; it is not selectable on its own.
+  eco="$w"; [ "$w" = "bunx" ] && eco="bun"
+  requested "$eco" || { row "N/A" - "$w PATH wrapper" "$w installed but not in the requested ecosystems"; continue; }
   p=$(command -v "$w" 2>/dev/null)
 
   if [ -n "$p" ] && grep -q "supply-chain-harden" "$p" 2>/dev/null; then
@@ -249,7 +280,9 @@ npm_implements() {
 }
 
 if have npm; then
-  nv=$(npm --version 2>/dev/null)
+  requested npm || { row "N/A" - "npm" "npm installed but not in the requested ecosystems"; }
+  if requested npm; then
+    nv=$(npm --version 2>/dev/null)
   if ! npm_implements ignore-scripts; then
     row GAP FUNCTIONAL "npm lifecycle scripts blocked" "npm $nv does not implement ignore-scripts"
   else
@@ -273,13 +306,16 @@ if have npm; then
       *)                 row OK  PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)" ;;
     esac
   fi
+  fi
 else
   row "N/A" - "npm" "npm not installed"
 fi
 
 # ============================================================ uv =============
 if have uv; then
-  # uv REJECTS a malformed uv.toml outright, so a working uv proves the config
+  requested uv || { row "N/A" - "uv" "uv installed but not in the requested ecosystems"; }
+  if requested uv; then
+    # uv REJECTS a malformed uv.toml outright, so a working uv proves the config
   # parsed. That makes `uv pip list` a real functional probe, not a formality:
   # a relative-duration exclude-newer breaks every uv invocation.
   if uv pip list >/dev/null 2>&1; then
@@ -293,12 +329,16 @@ if have uv; then
     row GAP FUNCTIONAL "uv config valid" \
       "uv fails to run — it is rejecting its own config file. Every uv command in this job will fail."
   fi
+  fi
 else
   row "N/A" - "uv" "uv not installed"
 fi
 
 # ============================================================ pip ============
 if have pip3 || have pip; then
+  if ! requested pip; then
+    row "N/A" - "pip" "pip installed but not in the requested ecosystems"
+  else
   pipbin=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
   v=$("$pipbin" config get install.only-binary 2>/dev/null | tr -d '\r')
   if [ "$v" = ":all:" ]; then
@@ -306,13 +346,16 @@ if have pip3 || have pip; then
   else
     row GAP PARSED "pip sdist execution blocked" "pip reports only-binary='${v:-<unset>}'"
   fi
+  fi
 else
   row "N/A" - "pip" "pip not installed"
 fi
 
 # ============================================================ cargo ==========
 if have cargo; then
-  ch="${CARGO_HOME:-$HOME/.cargo}"
+  requested cargo || { row "N/A" - "cargo" "cargo installed but not in the requested ecosystems"; }
+  if requested cargo; then
+    ch="${CARGO_HOME:-$HOME/.cargo}"
   if [ -f "$ch/cooldown.toml" ]; then
     if command -v cargo-cooldown >/dev/null 2>&1; then
       row OK PRESENT "cargo publish-age gate" "cooldown.toml deployed and the cargo-cooldown backend is installed"
@@ -323,13 +366,16 @@ if have cargo; then
   else
     row WEAK PRESENT "cargo publish-age gate" "no cooldown.toml at $ch"
   fi
+  fi
 else
   row "N/A" - "cargo" "cargo not installed"
 fi
 
 # ============================================================ go =============
 if have go; then
-  # go is the one ecosystem with no config FILE behind its settings unless
+  requested go || { row "N/A" - "go" "go installed but not in the requested ecosystems"; }
+  if requested go; then
+    # go is the one ecosystem with no config FILE behind its settings unless
   # `go env -w` ran. Probing with the environment stripped is what separates
   # "hardened" from "hardened only while these variables happen to be set".
   gf=$(env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN -u GOPRIVATE \
@@ -345,6 +391,7 @@ if have go; then
       row GAP PARSED "go settings persisted" "go reports GOFLAGS='${live:-<unset>}'"
     fi
   fi
+  fi
 else
   row "N/A" - "go" "go not installed"
 fi
@@ -358,6 +405,7 @@ for pair in "pnpm:$HOME/.config/pnpm/config.yaml:ignoreScripts" \
             "bundler:$HOME/.bundle/config:BUNDLE_FROZEN"; do
   tool="${pair%%:*}"; rest="${pair#*:}"; file="${rest%%:*}"; key="${rest##*:}"
   have "$tool" || { row "N/A" - "$tool config" "$tool not installed"; continue; }
+  requested "$tool" || { row "N/A" - "$tool config" "$tool installed but not in the requested ecosystems"; continue; }
   if [ -f "$file" ] && grep -q "$key" "$file" 2>/dev/null; then
     row WEAK PRESENT "$tool config" "$key present in $file — file contents only, not proof of enforcement"
   else
