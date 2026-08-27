@@ -1080,10 +1080,16 @@ jobs:
     name: 'Verify: catches a toolchain installed AFTER hardening'
     runs-on: ubuntu-24.04
     # The verifier's whole reason to exist. Hardening runs, then a later step
-    # installs a fresh Node — which puts an unhardened npm ahead of the
-    # wrapper on PATH and rewrites the config npm reads. Nothing in the job
-    # fails; the workflow goes green while unprotected. This asserts the
-    # verifier says otherwise.
+    # installs a fresh Node — which puts an unhardened npm ahead of the wrapper
+    # on PATH. Nothing in the job fails; the workflow goes green while
+    # unprotected.
+    #
+    # Asserts on the WRAPPER ROW specifically, not on the overall exit code.
+    # An earlier version demanded "no gaps" before the toolchain install, which
+    # a stock runner cannot deliver — its npm 10.9.8 does not implement
+    # min-release-age, so there is always one legitimate gap unrelated to what
+    # this job tests. Asserting the exit code made an unrelated true finding
+    # look like a broken test.
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -1092,25 +1098,33 @@ jobs:
           ecosystems: npm
           install_sfw: true
 
-      - name: Verify immediately — should be clean
-        uses: ./action/verify
+      - name: Before — the npm wrapper is the binary PATH resolves to
+        run: |
+          echo "npm resolves to: $(command -v npm)"
+          ./action/verify.sh --emit=plain > before.txt 2>&1 || true
+          grep -E '^OK .*npm PATH wrapper' before.txt || {
+            echo "::error::the wrapper was not active even before the toolchain install"
+            cat before.txt; exit 1
+          }
 
-      - name: Now install a different Node AFTER hardening
+      - name: Install a different Node AFTER hardening
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: '20'
 
-      - name: The verifier must now report a gap
-        id: reverify
-        continue-on-error: true
-        uses: ./action/verify
-
-      - name: Assert it failed rather than passing silently
+      - name: After — the verifier must report the wrapper as shadowed
         run: |
-          if [ "${{ steps.reverify.outcome }}" = "success" ]; then
-            echo "::error::a toolchain installed after hardening did not register as a gap — the verifier is not doing its job"
+          echo "npm now resolves to: $(command -v npm)"
+          ./action/verify.sh --emit=plain > after.txt 2>&1 || true
+          cat after.txt
+          if grep -qE '^OK .*npm PATH wrapper' after.txt; then
+            echo "::error::the wrapper still reads as active after a new toolchain was installed — the verifier is not detecting shadowing"
             exit 1
           fi
+          grep -E 'npm PATH wrapper' after.txt | grep -qiE 'shadow|not deployed' || {
+            echo "::error::expected a shadowed/not-deployed verdict for the npm wrapper"
+            exit 1
+          }
           echo "verifier correctly reported the post-hardening change"
 
   action-verify-clean-run:

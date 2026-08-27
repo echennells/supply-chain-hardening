@@ -289,6 +289,19 @@ write_etc() {
   sudo chmod 644 "$path"
 }
 
+# subst_inplace <file> <sed-script>
+#
+# `sed -i` is NOT portable and there is no form that works on both: GNU takes
+# a bare -i, BSD (macOS) requires -i '' and reads the next argument as the
+# backup suffix otherwise. On a macOS runner `sed -i "s|a|b|" file` consumed
+# the script as the suffix and then choked on the path with
+# "invalid command code f", killing every wrapper that renders through a
+# placeholder. Write to a sibling and move instead.
+subst_inplace() {
+  local file="$1" script="$2"
+  sed "$script" "$file" > "${file}.new" && mv "${file}.new" "$file"
+}
+
 # detect_version <key> <command>: returns the version string the command
 # prints (typically major.minor.patch), or empty if the binary isn't
 # installed OR if the version command fails for any reason. Used for
@@ -1164,7 +1177,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  sed -i "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|" "$tmp_wrapper"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|"
   sudo cp "$tmp_wrapper" "$wrapper_target"
   sudo chmod 755 "$wrapper_target"
   rm -f "$tmp_wrapper"
@@ -1340,7 +1353,7 @@ case "$subcmd" in
     ;;
 esac
 DENOWRAP
-  sed -i "s|__REAL_DENO__|$real_deno|; s|__WRAPPER_PATH__|$wrapper_path|; s|__MIN_AGE__|$DENO_AGE_ISO|" "$tmp_deno"
+  subst_inplace "$tmp_deno" "s|__REAL_DENO__|$real_deno|; s|__WRAPPER_PATH__|$wrapper_path|; s|__MIN_AGE__|$DENO_AGE_ISO|"
   sudo cp "$tmp_deno" "$wrapper_path"
   rm -f "$tmp_deno"
   sudo chmod 755 "$wrapper_path"
