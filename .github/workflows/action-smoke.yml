@@ -514,6 +514,16 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      - name: Install ruby + bundler (ubuntu runners ship neither)
+        # The test asserted BUNDLE_FROZEN behavior against a `bundle` that was
+        # never installed, so it failed 127 rather than proving anything.
+        # apt rather than a third-party setup action: no extra SHA to pin.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ruby-full
+          sudo gem install bundler --no-document
+          bundle --version
+
       - uses: ./action
         with:
           ecosystems: bundler
@@ -596,12 +606,23 @@ jobs:
                 <url>http://repo.example.com/maven2</url>
               </repository>
             </repositories>
+            <!-- A dependency that exists on NO public repo, so Maven is
+                 forced to consult http-repo and hit the blocked mirror.
+                 Without this the pom declared an HTTP repo that nothing
+                 ever needed: dependency:resolve had nothing to resolve,
+                 fetched its own plugin from central over HTTPS, and exited
+                 0 — the mirror was never exercised at all. -->
+            <dependencies>
+              <dependency>
+                <groupId>com.example.blocked</groupId>
+                <artifactId>only-on-http</artifactId>
+                <version>1.0</version>
+              </dependency>
+            </dependencies>
           </project>
           EOF
-          # Force resolution attempt against the HTTP repo by asking Maven
-          # to fetch a non-stock artifact. We expect a blocked-mirror error.
           set +e
-          output=$(mvn -B dependency:resolve -DincludeArtifactIds=does-not-exist 2>&1)
+          output=$(mvn -B dependency:resolve 2>&1)
           rc=$?
           set -e
           echo "$output" | tail -30
@@ -654,10 +675,16 @@ jobs:
             // Dynamic version — must be refused by init script.
             implementation("com.google.guava:guava:33.+")
           }
+          // `gradle dependencies` only REPORTS the graph; it marks an
+          // unresolved entry "(n)" and still exits 0, so it proved nothing
+          // here. Force an actual resolve so failOnDynamicVersions fires and
+          // the build genuinely fails.
+          tasks.register("resolveAll") {
+            doLast { configurations.getByName("compileClasspath").resolve() }
+          }
           EOF
           set +e
-          # `gradle dependencies` triggers resolution which fires failOnDynamicVersions
-          output=$(gradle --no-daemon --init-script "$HOME/.gradle/init.gradle.kts" dependencies 2>&1)
+          output=$(gradle --no-daemon --init-script "$HOME/.gradle/init.gradle.kts" resolveAll 2>&1)
           rc=$?
           set -e
           echo "$output" | tail -30
@@ -750,13 +777,17 @@ jobs:
             ECOSYSTEMS=pnpm INSTALL_SFW=false WRITE_ETC=false STRICT=true \
             RELEASE_AGE_HOURS=48 COMPOSER_ALLOW_PLUGINS=false \
             bash ./action/harden.sh 2>&1 | head -5
-          newline_rc=$?
+          # PIPESTATUS, not $?. `cmd | head -5` makes $? head's exit status,
+          # which is 0 whenever head reads anything at all — so this recorded
+          # rc=0 while quoting the guard's own refusal message back in the
+          # failure output.
+          newline_rc=${PIPESTATUS[0]}
           # special-char injection
           PNPM_BUILT_DEPENDENCIES='esbuild,foo;rm -rf /' \
             ECOSYSTEMS=pnpm INSTALL_SFW=false WRITE_ETC=false STRICT=true \
             RELEASE_AGE_HOURS=48 COMPOSER_ALLOW_PLUGINS=false \
             bash ./action/harden.sh 2>&1 | head -5
-          special_rc=$?
+          special_rc=${PIPESTATUS[0]}
           set -e
           if [ "$newline_rc" = "0" ] || [ "$special_rc" = "0" ]; then
             echo "::error::injection guard didn't fire (newline_rc=$newline_rc, special_rc=$special_rc)"
