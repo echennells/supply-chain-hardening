@@ -1,6 +1,23 @@
 #!/bin/bash
 # /usr/local/bin/supply-chain-verify — Managed by ansible-supply-chain-security
 #
+# THIS FILE IS FRAGMENT 00 OF AN ASSEMBLED SCRIPT. Do not edit the deployed
+# copy — tasks/verify.yml rebuilds it from three pieces, in this order:
+#
+#   00-context.sh   templates/verify.sh.j2         (this file)
+#                   the CONTEXT PREAMBLE, the row/expectation API, and the
+#                   probes that are still host-only (npm, yarn, pnpm, npq,
+#                   sfw, PATH wrappers, go, pip)
+#   50-probes.sh    files/verify-probes.sh         (SHARED, byte-identical
+#                   with the CI surface: bun, deno, uv, composer, cargo,
+#                   bundler, maven, gradle, nuget)
+#   90-report.sh    templates/verify-report.sh.j2  (renderer + exit code)
+#
+# The shared body is plain bash with no Jinja in it, which is what lets it be
+# `copy`d rather than `template`d and therefore be the SAME BYTES the CI
+# surface runs. It needs exactly three things from this file: row(), have()
+# and requested(). Everything else it defines itself.
+#
 # WHAT THIS IS FOR
 #
 # Every protection in this role has failed at least once in the same way: the
@@ -18,56 +35,252 @@
 # act. That is what this script does, on the real host, against the real
 # installed versions.
 #
-# EVIDENCE STRENGTH — reported per row, because it is the whole point
-#
-#   FUNCTIONAL  We ran the protection and observed its behavior. Strongest.
-#   PARSED      The tool itself reported the setting back to us. Proves the
-#               tool read the file, recognized the key, and accepted the
-#               value — which is what all six failures above violated.
-#   PRESENT     We only know a file or binary exists. Weakest; this is the
-#               evidence level that produced every bug listed above, so rows
-#               reporting it are flagged rather than counted as coverage.
-#
-# STATUS
-#   OK        protection verified at the stated evidence strength
-#   GAP       tool is installed but the protection is NOT in effect
-#   WEAK      tool is installed, protection looks present, but we could only
-#             establish PRESENT — treat as unverified, not as covered
-#   N/A       tool not installed on this host; nothing to protect
-#
-# Exit code: 0 when there are no GAP rows, 1 otherwise. WEAK does not fail the
-# run by itself — use --strict to make it.
+# Run `supply-chain-verify --help` for the evidence taxonomy and the flags.
 #
 # Safe to run any time: every probe is read-only. Nothing here installs,
-# fetches, or writes.
+# fetches, or writes outside a temporary directory it removes again.
 
 set -u
 
+# =========================================================================
+# CONTEXT PREAMBLE — the only Jinja in the verifier
+# =========================================================================
+#
+# WHY THIS BLOCK EXISTS.
+#
+# A probe answers "is this protection in effect?". It cannot answer "was it
+# supposed to be?", and until this block existed the verifier had no way to
+# know. That produced the defect this preamble closes: a host with every PATH
+# wrapper deployed and a host with none both printed "RESULT: no gaps",
+# because "wrapper not deployed" was reported as WEAK and WEAK does not move
+# the exit code. The verifier could see the absence and had nothing to
+# compare it against.
+#
+# So the role renders its own INTENT here, at apply time, from the variables
+# that decided what to deploy. A negative result is then either a broken
+# promise (GAP) or something this host never asked for (N/A BYDESIGN), and
+# those two are no longer the same row.
+#
+# THE ONE RULE FOR EDITING THIS BLOCK: freeze INTENT, never DISCOVERY.
+# "bun_path_wrapper was true" is intent and belongs here. "bun lives at
+# /root/.bun/bin/bun", "npm is 10.9.8", "GOFLAGS is set" are discovery: they
+# are re-derived by the probes on every run, because this file outlives the
+# apply and the host drifts underneath it. The single exception is
+# SCV_WRAPPER_PATHS, which records where a wrapper was MEANT to land so the
+# probe can name both halves when PATH resolves somewhere else.
+#
+# This is executed bash, not rendered text: $(hostname) below runs when the
+# verifier runs. Only the literal string is frozen at apply time.
+
+SCV_SCOPE_LABEL="on $(hostname)"
+
+# When this host's intent was recorded. A stale preamble is the one failure
+# mode this design introduces, so the report says how old it is out loud.
+SCV_APPLIED_AT='{{ ansible_date_time.iso8601 | default("unknown") }}'
+
+# The age window the role promised, in hours (defaults/main.yml:release_age_hours).
+SCV_MIN_AGE_HOURS='{{ release_age_hours | default("") }}'
+
+# 1 = SCV_EXPECT is authoritative. Always 1 on this surface: the preamble is
+# rendered from the role's own variables, so a record always exists. The
+# accessor below still defaults it to 0 so that the shared body keeps working
+# unchanged if it is ever run without a preamble.
+SCV_EXPECT_KNOWN=1
+
+# WHAT THIS HOST PROMISED. Whitespace-separated tokens; a `!` prefix negates.
+#
+#   <ecosystem>      npm yarn pnpm bun pip uv go deno cargo composer
+#                    bundler maven gradle nuget
+#   wrapper.<tool>   a PATH wrapper the role was configured to deploy
+#   tool.<name>      a protection COMPONENT (npq, sfw), not an ecosystem
+#
+# Ecosystem tokens are emitted unconditionally, INCLUDING on a tag-scoped
+# run. That is deliberate and it is the same reasoning as tasks/main.yml's
+# "Confirm full coverage" guard: `--tags npm` narrows what this run applied,
+# it does not narrow what the host is expected to have. Narrowing the
+# verifier from a scoped apply would let `--tags npm` quietly delete every
+# other ecosystem's rows from every future run of the deployed binary.
+#
+# Wrapper and tool tokens come from role BOOLEANS, which are fully defined on
+# every run including a scoped one, so they are exact in every run shape.
+# They are deliberately NOT implied by their ecosystem token: `bun` says bun
+# is expected to be hardened, `wrapper.bun` says a wrapper was requested, and
+# bun_path_wrapper=false is a supported configuration.
+{% set scv_expect = ['npm', 'yarn', 'pnpm', 'bun', 'pip', 'uv', 'go', 'deno',
+                     'cargo', 'composer', 'bundler', 'maven', 'gradle', 'nuget'] %}
+{#- npm's wrapper is deployed by socket.yml and only routes through sfw, so it
+    requires BOTH switches; npm_path_wrapper alone deploys nothing. -#}
+{% if (npm_path_wrapper | default(true) | bool) and (socket_firewall_install | default(true) | bool) %}
+{%- set _ = scv_expect.append('wrapper.npm') %}
+{% endif %}
+{#- uv.yml deploys the pip -> uv redirect unconditionally wherever uv is
+    found; there is no per-wrapper switch for it. -#}
+{% set _ = scv_expect.append('wrapper.pip') %}
+{% set _ = scv_expect.append('wrapper.pip3') %}
+{% if bun_path_wrapper | default(true) | bool %}
+{%- set _ = scv_expect.append('wrapper.bun') %}
+{%- set _ = scv_expect.append('wrapper.bunx') %}
+{% endif %}
+{% if composer_path_wrapper | default(true) | bool %}
+{%- set _ = scv_expect.append('wrapper.composer') %}
+{% endif %}
+{% if deno_path_wrapper | default(true) | bool %}
+{%- set _ = scv_expect.append('wrapper.deno') %}
+{% endif %}
+{% if cargo_path_wrapper | default(true) | bool %}
+{%- set _ = scv_expect.append('wrapper.cargo') %}
+{% endif %}
+{% if socket_firewall_install | default(true) | bool %}
+{%- set _ = scv_expect.append('tool.sfw') %}
+{% endif %}
+{#- npq.yml is unconditional. -#}
+{% set _ = scv_expect.append('tool.npq') %}
+SCV_EXPECT='{{ scv_expect | join(" ") }}'
+
+# Appended to every "N/A BYDESIGN" detail so a suppressed row can always be
+# traced back to the decision that suppressed it.
+{% set scv_scope_notes = [] %}
+{% if ansible_run_tags | default(['all']) != ['all'] %}
+{%- set _ = scv_scope_notes.append('this run was limited to tags ' ~ (ansible_run_tags | join(','))) %}
+{% endif %}
+{% if ansible_skip_tags | default([]) | length > 0 %}
+{%- set _ = scv_scope_notes.append('this run skipped tags ' ~ (ansible_skip_tags | join(','))) %}
+{% endif %}
+SCV_EXPECT_WHY='not enabled in the role configuration for this host{% if scv_scope_notes %} ({{ scv_scope_notes | join("; ") }}, so ecosystem coverage was NOT narrowed){% endif %}'
+
+# Which tools get a PATH-wrapper row. Surface-specific: the pip/pip3 -> uv
+# redirect is a host-role deliverable and does not exist in CI.
+SCV_WRAPPERS='npm pip pip3 bun bunx composer deno cargo'
+
+# Where each wrapper was INTENDED to land, one `tool=path` per line.
+# Best-effort and newline-separated so a path containing a space survives.
+# This is the one piece of apply-time discovery that earns its place here:
+# without it the probe cannot tell "we deployed to /usr/bin/composer and
+# something shadows it" from "we never deployed a composer wrapper".
+#
+# composer_binary_path is a REGISTERED FACT, so it is undefined on any run
+# where composer.yml did not execute (`--tags npm`, `--tags verify`, or
+# composer_path_wrapper=false). It previously appeared bare at what Jinja
+# treats as file scope — a `#` is a shell comment, not a Jinja one — and
+# failed the DEPLOY on exactly those runs. Guarded here; never dereference a
+# registered fact in this template without `| default("", true)`.
+SCV_WRAPPER_PATHS='{% if npm_path_wrapper | default(true) | bool and socket_firewall_install | default(true) | bool %}npm=/usr/local/bin/npm
+{% endif %}pip=/usr/local/bin/pip
+pip3=/usr/local/bin/pip3
+{% if composer_path_wrapper | default(true) | bool and composer_binary_path is defined %}composer={{ composer_binary_path.stdout | default("", true) | trim }}
+{% endif %}'
+
+# =========================================================================
+# END OF PREAMBLE — nothing below this line is rendered from role variables
+# =========================================================================
+
 STRICT=0
 QUIET=0
+
+usage() {
+  cat <<'EOF'
+supply-chain-verify — what is ACTUALLY enforcing on this host
+
+USAGE
+  supply-chain-verify [--strict] [--quiet] [--help]
+
+  --strict  also exit non-zero when a row could only be established as
+            PRESENT (a protection that looks deployed but was not proven)
+  --quiet   suppress the table; exit code only
+
+EVIDENCE STRENGTH — reported per row, because it is the whole point
+
+  FUNCTIONAL  We ran the protection and observed its behavior. Strongest.
+  PARSED      The tool itself reported the setting back to us. Proves the
+              tool read the file, recognized the key, and accepted the
+              value — which is what every failure this script exists to
+              catch violated.
+  PRESENT     We only know a file or binary exists. Weakest; this is the
+              evidence level that produced those bugs, so rows reporting
+              it are flagged rather than counted as coverage.
+
+STATUS
+  OK        protection verified at the stated evidence strength
+  GAP       the protection this host asked for is NOT in effect
+  WEAK      protection looks present, but we could only establish PRESENT —
+            treat as unverified, not as covered
+  N/A       nothing to report. The EVIDENCE column says which kind:
+              -         the tool is not installed on this host
+              BYDESIGN  this host's role configuration never asked for it
+
+  A GAP is measured against what THIS host declared, recorded at apply time
+  in the context preamble at the top of this file. "Not deployed" is a GAP
+  when the role was configured to deploy it and an N/A when it was not —
+  before that distinction existed, a host with every wrapper and a host with
+  none printed the same verdict.
+
+EXIT CODE
+  0 when there are no GAP rows, 1 otherwise. WEAK does not fail the run by
+  itself — use --strict to make it.
+EOF
+}
+
 for arg in "$@"; do
   case "$arg" in
     --strict) STRICT=1 ;;
     --quiet)  QUIET=1 ;;
-    -h|--help)
-      sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
-      exit 0
-      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[supply-chain-verify] warning: unrecognised argument '$arg'" >&2 ;;
   esac
 done
 
 GAPS=0
 WEAKS=0
+NA_DESIGN=0
 ROWS=""
 
 row() { # status, strength, protection, detail
   ROWS="${ROWS}$1\t$2\t$3\t$4\n"
   [ "$1" = "GAP" ]  && GAPS=$((GAPS + 1))
   [ "$1" = "WEAK" ] && WEAKS=$((WEAKS + 1))
+  [ "$2" = "BYDESIGN" ] && NA_DESIGN=$((NA_DESIGN + 1))
   return 0
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Normalise once so the substring tests below can rely on single-space
+# separators and leading/trailing padding.
+: "${SCV_EXPECT_KNOWN:=0}"
+: "${SCV_EXPECT:=}"
+: "${SCV_EXPECT_WHY:=not in the declared expectations for this surface}"
+SCV_EXPECT=" $(printf '%s' "$SCV_EXPECT" | tr '\n\t' '  ' | tr -s ' ') "
+
+# expected <token> — was this promised on this surface?
+#
+# Fails OPEN when there is no record (SCV_EXPECT_KNOWN=0): "we cannot tell
+# what was intended" must mean "check everything", never "assume nothing was
+# wanted". That is the direction in which a mistake is visible.
+expected() {
+  [ "$SCV_EXPECT_KNOWN" -eq 1 ] || return 0
+  case "$SCV_EXPECT" in *" !$1 "*) return 1 ;; esac
+  case "$SCV_EXPECT" in *" $1 "*)  return 0 ;; esac
+  # An ecosystem token covers its dotted children: `cargo` implies
+  # `cargo.age-gate`. It does NOT imply `wrapper.cargo`, whose prefix is
+  # `wrapper` — wrapper intent is a separate switch and stays separate.
+  case "$SCV_EXPECT" in *" ${1%%.*} "*) return 0 ;; esac
+  return 1
+}
+
+# requested <ecosystem> — the name the SHARED probe body calls. Same
+# question, and the body asks it only about ecosystems.
+#
+# Note this is new on the host surface. Before it existed, the shared body's
+# `requested composer` call resolved to "command not found" (rc 127), which
+# reads as "not requested" and silently deleted the whole composer block from
+# every host report.
+requested() { expected "$1"; }
+
+# The BYDESIGN half of the truth table. Never used for a tool that is merely
+# absent — that is `row "N/A" - ...` and means something different.
+na_design() { # protection, detail
+  row "N/A" BYDESIGN "$1" "$2 — not required here: $SCV_EXPECT_WHY"
+}
 
 # Does npm actually IMPLEMENT a config key, or is it merely echoing our file
 # back at us?
@@ -202,6 +415,9 @@ fi
 # plausible name an agent might guess. An age gate does nothing against a squat
 # registered months ago; this is what catches it. It also fails OPEN: below
 # Node 20.13.0 it warns, runs the real package manager, and exits 0.
+#
+# npq is a protection COMPONENT, not an ecosystem, so "not installed" is a
+# broken promise rather than "nothing to protect" — provided it was promised.
 if have npq-hero; then
   out=$(npq-hero --version 2>&1)
   if printf '%s' "$out" | grep -qi 'npq suppressed'; then
@@ -209,8 +425,10 @@ if have npq-hero; then
   else
     row OK FUNCTIONAL "npq reputation checks" "npq responds normally (not suppressed)"
   fi
-else
+elif expected tool.npq; then
   row GAP PRESENT "npq reputation checks" "npq-hero not installed — no pre-install reputation checking"
+else
+  na_design "npq reputation checks" "npq-hero not installed"
 fi
 
 # ------------------------------------------------- sfw (reputation layer) ----
@@ -220,8 +438,10 @@ if have sfw; then
   else
     row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully"
   fi
-else
+elif expected tool.sfw; then
   row GAP PRESENT "Socket Firewall" "sfw not installed — npm installs are not threat-intel filtered"
+else
+  na_design "Socket Firewall" "sfw not installed (socket_firewall_install=false)"
 fi
 
 # ------------------------------------------------------- PATH wrappers -------
@@ -231,17 +451,58 @@ fi
 # CHECK THE PATH CALLERS ACTUALLY HIT, NOT A FIXED DIRECTORY.
 # An earlier version of this loop only looked in /usr/local/bin. But only npm
 # and pip/pip3 deploy there — composer, deno, bun and bunx are written to the
-# DISCOVERED binary path (composer.yml "Deploy composer wrapper at the
-# discovered composer path", dest: {{ composer_binary_path.stdout }}). On a
-# stock Ubuntu 24.04 that is /usr/bin/composer, so the probe reported "not
-# deployed" for a wrapper that was installed and working. That is the same
-# defect as the npm false OK, pointing the other way: a real protection
-# reported as absent. Under-reporting is the safer direction, but it is still
-# wrong, and a verifier that cries wolf gets ignored.
-for w in npm pip pip3 bun bunx composer deno cargo; do
-  have "$w" || continue
+# DISCOVERED binary path. On a stock Ubuntu 24.04 that is /usr/bin/composer, so
+# the probe reported "not deployed" for a wrapper that was installed and
+# working. That is the same defect as the npm false OK, pointing the other way:
+# a real protection reported as absent. Under-reporting is the safer direction,
+# but it is still wrong, and a verifier that cries wolf gets ignored.
+#
+# AND THE OTHER HALF, WHICH IS THE ONE THE PREAMBLE FIXED. "Not deployed" used
+# to be WEAK, which does not move the exit code, so a host with every wrapper
+# and a host with none both printed "RESULT: no gaps". It is now measured
+# against SCV_EXPECT: a GAP when the role was configured to deploy it, an
+# N/A BYDESIGN when it was not.
+
+# Where a wrapper for this tool was MEANT to go, per the preamble. Empty when
+# the role deploys it to a path only discovered at apply time.
+scv_intended_path() { # tool
+  printf '%s\n' "$SCV_WRAPPER_PATHS" | sed -n "s|^$1=||p" | head -1
+}
+
+# Find a deployed wrapper for this tool ANYWHERE a caller could have it, not
+# just where the tool currently resolves from. A shadowed wrapper is by
+# definition not on the resolved path, so looking only there reports it as
+# "never deployed" — the wrong diagnosis, pointing at the wrong fix.
+#
+# The marker is "supply-chain-harden", a substring of both this role's
+# "supply-chain-hardening" and the CI action's "supply-chain-harden action",
+# so one probe recognises a wrapper from either surface.
+locate_wrapper() { # tool
+  local w="$1" d ip
+  local -a dirs
+  IFS=: read -ra dirs <<< "$PATH"
+  for d in "${dirs[@]}"; do
+    [ -n "$d" ] || continue
+    if [ -f "$d/$w" ] && grep -q "supply-chain-harden" "$d/$w" 2>/dev/null; then
+      printf '%s\n' "$d/$w"; return 0
+    fi
+  done
+  ip=$(scv_intended_path "$w")
+  if [ -n "$ip" ] && [ -f "$ip" ] && grep -q "supply-chain-harden" "$ip" 2>/dev/null; then
+    printf '%s\n' "$ip"; return 0
+  fi
+  return 1
+}
+
+for w in $SCV_WRAPPERS; do
+  if ! have "$w"; then
+    # The SUBJECT tool is absent, so there is nothing for a wrapper to wrap.
+    # This is the one wrapper outcome that is N/A regardless of intent.
+    row "N/A" - "$w PATH wrapper" "$w not installed"
+    continue
+  fi
   p=$(command -v "$w" 2>/dev/null)   # what callers resolve to
-  if [ -n "$p" ] && grep -q "supply-chain-hardening" "$p" 2>/dev/null; then
+  if [ -n "$p" ] && grep -q "supply-chain-harden" "$p" 2>/dev/null; then
     # Wrappers reach the real tool two different ways, and the check must know
     # both or it cries wolf. bun/deno/composer/cargo RENAME the binary to
     # <tool>-real and exec that. npm embeds REAL_NPM='<path>'; pip/pip3 embed
@@ -252,43 +513,25 @@ for w in npm pip pip3 bun bunx composer deno cargo; do
     # composer false GAP.)
     target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$p" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
     if [ -n "$target" ] && [ -x "$target" ]; then
+      # WEAK, not OK, and deliberately so: nothing here EXECUTED the wrapper.
+      # We know PATH resolves to it and that its exec target exists. That is
+      # PRESENT evidence, and this file's own rule is that PRESENT evidence is
+      # flagged rather than counted as coverage.
       row WEAK PRESENT "$w PATH wrapper" "active at $p; callers bypassing PATH are unaffected"
     else
       row GAP PRESENT "$w PATH wrapper" "wrapper at $p but its real target '${target:-<none>}' is missing or not executable — the recursion guard makes it refuse to run"
     fi
-  elif [ -f "/usr/local/bin/$w" ] && grep -q "supply-chain-hardening" "/usr/local/bin/$w" 2>/dev/null; then
+  elif shadow=$(locate_wrapper "$w"); then
     # Deployed, but something earlier on PATH shadows it — the wrapper exists
-    # and is bypassed on every call, which reads as coverage and is not.
-    row GAP PRESENT "$w PATH wrapper" "wrapper is at /usr/local/bin/$w but $w resolves to $p — the wrapper is shadowed and never runs"
+    # and is bypassed on every call, which reads as coverage and is not. A GAP
+    # regardless of intent: we found our own artifact being ignored.
+    row GAP PRESENT "$w PATH wrapper" "wrapper is at $shadow but $w resolves to $p — the wrapper is shadowed and never runs"
+  elif expected "wrapper.$w"; then
+    row GAP PRESENT "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary at $p"
   else
-    row WEAK PRESENT "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary at $p"
+    na_design "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary at $p"
   fi
 done
-
-# ------------------------------------------------------------ composer ------
-if have composer; then
-  # Composer 2.2.x prints "Composer 2.2.6 <date>"; 2.7+ prints "Composer version
-  # 2.7.1 <date>". Requiring the word "version" silently failed to parse exactly
-  # the OLDEST composer — the one with the largest gap — and reported
-  # "could not parse" where the answer should have been "no audit blocking at
-  # all". Measured on stock Ubuntu 22.04.
-  cv=$(composer --version --no-plugins 2>/dev/null | sed -nE 's/.*[Cc]omposer( version)? ([0-9]+\.[0-9]+\.[0-9]+).*/\2/p' | head -1)
-  cmaj=${cv%%.*}; crest=${cv#*.}; cmin=${crest%%.*}
-  # Version-tiered, matching what the role renders. audit.block-* needs 2.9;
-  # audit.abandoned=fail needs 2.7. Distro composer is routinely below both:
-  # jammy 2.2.6, bookworm 2.5.5, noble 2.7.1.
-  if [ -n "${cmaj:-}" ] && [ -n "${cmin:-}" ]; then
-    if [ "$cmaj" -gt 2 ] 2>/dev/null || { [ "$cmaj" -eq 2 ] && [ "$cmin" -ge 9 ]; } 2>/dev/null; then
-      row OK FUNCTIONAL "composer audit blocking" "composer $cv supports audit.block-insecure / block-abandoned"
-    elif [ "$cmaj" -eq 2 ] && [ "$cmin" -ge 7 ] 2>/dev/null; then
-      row GAP FUNCTIONAL "composer audit blocking" "composer $cv supports audit.abandoned=fail but NOT block-insecure/block-abandoned (needs >= 2.9); advisories do not refuse installs"
-    else
-      row GAP FUNCTIONAL "composer audit blocking" "composer $cv is below 2.7 — no audit blocking of any kind is available"
-    fi
-  else
-    row WEAK PRESENT "composer audit blocking" "could not parse composer version"
-  fi
-fi
 
 # ---------------------------------------------------------------- go ---------
 if have go; then
@@ -309,7 +552,6 @@ if have go; then
         row GAP PARSED "go module integrity" "GOFLAGS='${v:-<empty>}' and -mod=readonly is not in /etc/environment or /etc/profile.d either"
       fi ;;
   esac
-  v=$(go env GONOSUMDB 2>/dev/null; go env GONOSUMCHECK 2>/dev/null)
   v2=$(go env GOPRIVATE 2>/dev/null)
   if [ -z "$v2" ]; then
     row OK PARSED "go checksum verification" "GOPRIVATE empty — sumdb checks apply to all modules"
@@ -318,146 +560,6 @@ if have go; then
   fi
 else
   row "N/A" - "go" "go not installed"
-fi
-
-# ---------------------------------------------------------------- cargo ------
-# Cargo is the one ecosystem where the config layer cannot help at all: build.rs
-# and proc-macros execute at COMPILE time with the user's full privileges, and
-# cargo has no --ignore-scripts. The only control that PREVENTS execution is
-# refusing to resolve a too-new version, and that lives entirely in the wrapper.
-#
-# So this probe asks the wrapper what it actually DOES with `cargo build`,
-# rather than checking that a config file exists. Checking our own config file
-# and calling it enforcement is precisely the mistake that produced the npm
-# false OK (5522373) and, pointing the other way, the composer false GAP.
-cargo_wrapper_dispatch() {
-  # Prints the argv the deployed wrapper would hand to the real cargo for
-  # `cargo build` in a directory that has a lockfile. Runs the REAL wrapper
-  # with a stub standing in for cargo: no network, no compile, no side effects.
-  local w tmp
-  w=$(command -v cargo 2>/dev/null) || return 1
-  [ -n "$w" ] || return 1
-  grep -q 'supply-chain-hardening' "$w" 2>/dev/null || return 1
-  tmp=$(mktemp -d 2>/dev/null) || return 1
-  printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$tmp/real"
-  # Neutralise sfw for THIS probe with a pass-through stub placed first on
-  # PATH. The wrapper prefixes network commands with sfw, so a broken sfw would
-  # otherwise swallow the probe's output and make the verifier report "cargo is
-  # not wrapped" — a false GAP on the age gate caused by an unrelated component.
-  # sfw's own health is reported by its own row.
-  printf '#!/bin/sh\nexec "$@"\n' > "$tmp/sfw"
-  chmod +x "$tmp/real" "$tmp/sfw" 2>/dev/null
-  sed "s|^REAL_CARGO=.*|REAL_CARGO='$tmp/real'|" "$w" > "$tmp/cargo" 2>/dev/null
-  chmod +x "$tmp/cargo" 2>/dev/null
-  : > "$tmp/Cargo.lock"
-  ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo ${SCH_PROBE_FLAGS:-} build 2>/dev/null )
-  rm -rf "$tmp"
-}
-
-# Probe a FLAG-PREFIXED invocation as well as the bare one.
-#
-# An earlier wrapper read the subcommand from argv[1], so `cargo -q build`
-# matched no case and fell through with no controls and no warning — while this
-# verifier, which probed only the bare form, reported OK. A verifier that tests
-# only the happy path certifies the one invocation that works. `-q`, `--quiet`
-# and `--color always` are ordinary Makefile and CI forms.
-cargo_dispatch_differs() {
-  local bare flagged
-  bare=$(cargo_wrapper_dispatch)
-  flagged=$(SCH_PROBE_FLAGS=-q cargo_wrapper_dispatch)
-  [ -z "$bare" ] && return 1
-  # Strip the leading global flag before comparing: `-q cooldown build` and
-  # `cooldown build` are the same decision.
-  flagged=$(printf '%s\n' "$flagged" | grep -vx -- '-q')
-  [ "$bare" != "$flagged" ]
-}
-
-# Separate probe for the sfw hop: it cannot be read out of cargo_wrapper_dispatch
-# above, because when sfw is in play IT execs the stub, so the stub's own output
-# never mentions sfw. Here a stub `sfw` is put first on PATH and we observe
-# whether the wrapper actually calls it.
-cargo_wrapper_uses_sfw() {
-  local w tmp out
-  w=$(command -v cargo 2>/dev/null) || return 1
-  [ -n "$w" ] || return 1
-  grep -q 'supply-chain-hardening' "$w" 2>/dev/null || return 1
-  tmp=$(mktemp -d 2>/dev/null) || return 1
-  printf '#!/bin/sh\necho SFW-INVOKED\nexit 0\n' > "$tmp/sfw"
-  printf '#!/bin/sh\nexit 0\n' > "$tmp/real"
-  chmod +x "$tmp/sfw" "$tmp/real" 2>/dev/null
-  sed "s|^REAL_CARGO=.*|REAL_CARGO='$tmp/real'|" "$w" > "$tmp/cargo" 2>/dev/null
-  chmod +x "$tmp/cargo" 2>/dev/null
-  : > "$tmp/Cargo.lock"
-  out=$( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo build 2>/dev/null )
-  rm -rf "$tmp"
-  printf '%s\n' "$out" | grep -q 'SFW-INVOKED'
-}
-
-if have cargo; then
-  cdisp=$(cargo_wrapper_dispatch)
-  if [ -n "$cdisp" ] && cargo_dispatch_differs; then
-    row GAP FUNCTIONAL "cargo publish-age gate" "the wrapper treats \`cargo build\` and \`cargo -q build\` DIFFERENTLY — a global flag before the subcommand bypasses the controls. Ordinary Makefile and CI invocations are ungated"
-  elif [ -z "$cdisp" ]; then
-    row GAP PRESENT "cargo publish-age gate" "cargo is not wrapped — \`cargo build\` executes build.rs from whatever version the resolver picks, including one published minutes ago"
-  elif printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
-    cage=$(grep -m1 'global-min-publish-age' "${CARGO_HOME:-$HOME/.cargo}/cooldown.toml" 2>/dev/null | sed 's/.*= *//; s/"//g')
-    # CAN THE BACKEND RUN — resolved the way the WRAPPER resolves it.
-    # The wrapper prepends its embedded COOLDOWN_BIN ($CARGO_HOME/bin) to PATH
-    # before dispatching, because on apt-cargo hosts cargo-cooldown is installed
-    # there and that dir is NOT on PATH. Probing `cargo-cooldown` by BARE NAME
-    # here reproduces the exact bug the prepend exists to fix: on apt cargo /
-    # Ubuntu 26 the bare probe returned 127 and this row reported a WORKING gate
-    # as "cannot execute" (measured — the behavioural signoff gated correctly on
-    # the same host). So resolve it via the wrapper's COOLDOWN_BIN, and keep two
-    # failure modes apart: not installed where the wrapper looks, vs installed
-    # there but unable to execute (a prebuilt binary needing newer glibc than
-    # the distro ships — cargo-binstall picks by target triple, which says
-    # nothing about glibc; on Debian 12 the published build dies in the loader).
-    cw=$(command -v cargo 2>/dev/null)
-    cbin=$(grep -oE "^COOLDOWN_BIN='[^']*'" "$cw" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'$//")
-    cool=""
-    for cand in "$cbin/cargo-cooldown" "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-cooldown" "$(command -v cargo-cooldown 2>/dev/null)"; do
-      [ -n "$cand" ] && [ -x "$cand" ] && { cool="$cand"; break; }
-    done
-    if [ -z "$cool" ]; then
-      row GAP FUNCTIONAL "cargo publish-age gate" "the wrapper routes builds through \`cargo cooldown\`, but cargo-cooldown is not installed where the wrapper looks (${cbin:-\$CARGO_HOME/bin}). The route dead-ends, so \`cargo build\` is BROKEN, not gated. Reinstall from source: cargo install cargo-cooldown"
-    elif ! "$cool" --version >/dev/null 2>&1; then
-      row GAP FUNCTIONAL "cargo publish-age gate" "cargo-cooldown is installed ($cool) but CANNOT EXECUTE (usually a prebuilt binary needing newer glibc than this distro ships). The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated. Reinstall from source: cargo install cargo-cooldown"
-    else
-      # FUNCTIONAL covers the ROUTING plus the backend being runnable, which is
-      # what we observed. Whether cargo-cooldown then honours the window is its
-      # behaviour, not ours, and is deliberately not claimed here.
-      row OK FUNCTIONAL "cargo publish-age gate" "wrapper routes \`cargo build\` through \`cargo cooldown\` (backend at $cool runs; window ${cage:-<unset>} per cooldown.toml; the window's own enforcement is cargo-cooldown's and is not verified here)"
-    fi
-  elif printf '%s\n' "$cdisp" | grep -qx -- '--locked'; then
-    row WEAK FUNCTIONAL "cargo publish-age gate" "wrapper injects --locked but cargo-cooldown is absent — protects projects with a committed Cargo.lock, does nothing for \`cargo update\` or a fresh checkout with no lockfile"
-  else
-    row GAP FUNCTIONAL "cargo publish-age gate" "cargo is wrapped but the wrapper applied neither the cooldown route nor --locked"
-  fi
-  # Threat-intel layer, reported separately because it covers a DIFFERENT axis:
-  # cooldown blocks by publish time and only at resolution; sfw blocks by intel
-  # at download time and therefore also covers a lockfile written elsewhere.
-  # Neither subsumes the other, so a single merged row would hide which half is
-  # missing.
-  if [ -z "$cdisp" ]; then
-    :   # unwrapped; the GAP row above already says cargo is unprotected
-  elif ! have sfw; then
-    row GAP PRESENT "cargo threat-intel filtering" "sfw not installed — crate downloads are not filtered, so a lockfile written elsewhere pinning a known-malicious crate is fetched normally (needs Node >= 20)"
-  elif ! timeout 60 sfw --help >/dev/null 2>&1; then
-    # The operator's builds are failing RIGHT NOW and this row is the fastest
-    # way to learn why: the wrapper prefixes cargo with sfw, so a non-runnable
-    # sfw propagates its exit code out of every build. Measured exit 9.
-    row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is present but CANNOT EXECUTE — the wrapper prefixes cargo with it, so EVERY cargo build on this host is failing. Set cargo_socket_firewall=false and re-apply, or remove sfw. Note sfw downloads its firewall binary from GitHub on first use; this state usually means that fetch has never succeeded"
-  elif ! cargo_wrapper_uses_sfw; then
-    row GAP FUNCTIONAL "cargo threat-intel filtering" "sfw is installed but the wrapper does not route cargo through it (cargo_socket_firewall=false?)"
-  else
-    # Deliberately WEAK, not OK. Measured: with no network sfw prints "fetch
-    # failed", exits 0, and the build proceeds UNFILTERED. Presence of the
-    # route is not evidence that filtering happened on any given run.
-    row WEAK FUNCTIONAL "cargo threat-intel filtering" "wrapper routes cargo through sfw; note sfw FAILS OPEN — if it cannot reach Socket it warns, exits 0 and the build proceeds unfiltered"
-  fi
-else
-  row "N/A" - "cargo" "cargo not installed"
 fi
 
 # ---------------------------------------------------------------- pip --------
@@ -473,31 +575,7 @@ else
   row "N/A" - "pip" "pip not installed"
 fi
 
-# ---------------------------------------------------------------- report -----
-if [ "$QUIET" -eq 0 ]; then
-  echo
-  echo "supply-chain-hardening — what is ACTUALLY enforcing on $(hostname)"
-  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  echo
-  printf "%-6s %-11s %-32s %s\n" "STATUS" "EVIDENCE" "PROTECTION" "DETAIL"
-  printf "%-6s %-11s %-32s %s\n" "------" "-----------" "--------------------------------" "------"
-  printf "$ROWS" | while IFS=$'\t' read -r s e p d; do
-    [ -n "$s" ] || continue
-    printf "%-6s %-11s %-32s %s\n" "$s" "$e" "$p" "$d"
-  done
-  echo
-  echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
-  echo "setting back · PRESENT = a file exists and nothing more (unverified)."
-  echo
-  if [ "$GAPS" -gt 0 ]; then
-    echo "RESULT: $GAPS gap(s) — protections NOT in effect on this host."
-  else
-    echo "RESULT: no gaps."
-  fi
-  [ "$WEAKS" -gt 0 ] && echo "        $WEAKS row(s) verified only as PRESENT — not evidence of enforcement."
-  echo
-fi
-
-[ "$GAPS" -gt 0 ] && exit 1
-[ "$STRICT" -eq 1 ] && [ "$WEAKS" -gt 0 ] && exit 1
-exit 0
+# =========================================================================
+# Fragment 50 (files/verify-probes.sh) follows: bun, deno, uv, composer,
+# cargo, bundler, maven, gradle, nuget. Fragment 90 renders the table.
+# =========================================================================

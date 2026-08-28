@@ -17,30 +17,114 @@
 #
 # So this asks the tools instead of asking ourselves, on the real host, against
 # the real installed versions, after everything has been applied.
+#
+# HOW THE COMMAND IS BUILT
+#
+# /usr/local/bin/supply-chain-verify is assembled from three fragments rather
+# than rendered from one template:
+#
+#   00-context.sh   templates/verify.sh.j2         host context + host-only probes
+#   50-probes.sh    files/verify-probes.sh         SHARED with the CI surface
+#   90-report.sh    templates/verify-report.sh.j2  renderer + exit code
+#
+# `copy` (not `template`) for the middle fragment is the whole point: it
+# guarantees the bytes running on this host are the same bytes action/verify.sh
+# runs in CI. A probe is a question about a tool and has no business differing
+# between a VM and a runner; only the CONTEXT — what this surface promised —
+# is allowed to differ, and that is what fragment 00 carries.
+#
+# `assemble` rather than a shell `cat`: no shell module, idempotent,
+# check-mode-aware, and `validate` refuses to install a verifier that does not
+# parse. The single `template` task this replaced had no such guard.
 
-- name: Deploy the verification command
+- name: Create the verifier fragment directory
+  become: true
+  ansible.builtin.file:
+    path: /usr/local/lib/supply-chain-verify
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render this host's verification context
+  # Fragment 00. The ONLY Jinja in the verifier, and the only place the role's
+  # intent (which wrappers were requested, which tools, the age window) crosses
+  # into the deployed artifact. See the preamble's own header for the rule that
+  # governs what may be frozen here.
+  become: true
+  ansible.builtin.template:
+    src: verify.sh.j2
+    dest: /usr/local/lib/supply-chain-verify/00-context.sh
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the shared probe body
+  # Fragment 50. Jinja-free on purpose so it can be copied verbatim; if a
+  # `{{` ever appears in it, this task starts shipping it literally, which is
+  # the failure mode to watch for.
+  become: true
+  ansible.builtin.copy:
+    src: verify-probes.sh
+    dest: /usr/local/lib/supply-chain-verify/50-probes.sh
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Render the verification report and exit logic
+  # Fragment 90. Last because it consumes what every probe produced.
+  become: true
+  ansible.builtin.template:
+    src: verify-report.sh.j2
+    dest: /usr/local/lib/supply-chain-verify/90-report.sh
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Assemble the verification command
   # Shipped as a standalone binary, not just an end-of-play step, so operators
   # and agents can answer "what is actually protecting this box right now?"
   # at any time — including long after the apply, when versions have drifted
   # underneath us. That drift is how several of these bugs arrived.
+  #
+  # Fragments are concatenated in lexical order, which is what the 00/50/90
+  # prefixes buy: ordering is a property of the filenames rather than of this
+  # task, and a future local override can slot in at 10- without editing here.
+  #
+  # `not ansible_check_mode`: assemble reads the fragments off the REMOTE host,
+  # and under --check on a host that has never been applied they do not exist
+  # yet, so the task would fail on a run that is supposed to change nothing.
   become: true
-  ansible.builtin.template:
-    src: verify.sh.j2
+  ansible.builtin.assemble:
+    src: /usr/local/lib/supply-chain-verify
     dest: /usr/local/bin/supply-chain-verify
-    mode: "0755"
+    remote_src: true
     owner: root
     group: root
+    mode: "0755"
+    validate: /bin/bash -n %s
+  when: not ansible_check_mode
 
 - name: Verify which protections are actually in effect
-  # Read-only: nothing here installs, fetches, or writes. rc 1 means gaps were
-  # found, which is information rather than a task failure, so it is captured
-  # instead of raised.
+  # Read-only: nothing here installs, fetches, or writes outside a temporary
+  # directory it removes again. rc 1 means gaps were found, which is
+  # information rather than a task failure, so it is captured instead of
+  # raised.
+  #
+  # `not ansible_check_mode` replaces the previous `check_mode: false`. Forcing
+  # the command to run while the deploy tasks above are skipped is the same
+  # class of error this whole file exists to catch, in the consumer: under
+  # --check on a fresh host the binary does not exist, rc is 2, and
+  # verify_fail_on_gap=true would fail the play with "a protection this role
+  # reports as applied is not actually doing anything" — about a protection
+  # that was never deployed because the operator asked for a dry run.
   ansible.builtin.command: /usr/local/bin/supply-chain-verify
   register: verification
   changed_when: false
-  check_mode: false
   failed_when: false
-  when: verify_protections | bool
+  when:
+    - verify_protections | bool
+    - not ansible_check_mode
 
 - name: Report what is actually enforcing
   ansible.builtin.debug:
@@ -50,17 +134,18 @@
     - verification.stdout_lines is defined
 
 - name: Fail when protections are not in effect
-  # Off by default: on an existing host a gap is usually a fact about the
-  # environment (Node too old for the reputation layer), not a defect in the
-  # run, and failing every such play would train operators to ignore it.
-  # Turn on where the host is expected to be fully covered — CI images, golden
-  # images, anything an agent will run untrusted package installs on.
+  # Off by default. See defaults/main.yml:verify_fail_on_gap for what a gap
+  # now means: with the context preamble in place it is measured against what
+  # THIS host declared, not against an ideal host.
   ansible.builtin.fail:
     msg: |
       Verification found protections that are NOT in effect on this host.
 
       This is not a warning about missing prerequisites — it means a
-      protection this role reports as applied is not actually doing anything.
+      protection this host's own configuration asked for is not actually
+      doing anything. Protections this host never asked for are reported as
+      "N/A BYDESIGN" and do not reach this message.
+
       See the table above; each row states how it was established:
 
         FUNCTIONAL  we ran it and watched what happened
@@ -72,4 +157,8 @@
   when:
     - verify_protections | bool
     - verify_fail_on_gap | bool
-    - verification.rc | default(0) != 0
+    # `rc is defined` rather than `rc | default(0)`: when the run task was
+    # skipped (--check, or verify_protections=false) there is no rc, and
+    # defaulting it to 0 hid that behind a value that reads as success.
+    - verification.rc is defined
+    - verification.rc != 0

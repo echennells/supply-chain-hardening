@@ -1,0 +1,58 @@
+# FRAGMENT 90 OF /usr/local/bin/supply-chain-verify — the report and the exit
+# code. Assembled by tasks/verify.yml after templates/verify.sh.j2 (the
+# context preamble and the host-only probes) and files/verify-probes.sh (the
+# probe body shared byte-for-byte with the CI surface).
+#
+# This half is last because it consumes what every probe produced. It is a
+# template rather than a static file only so that it lives beside the other
+# half of this surface's user-facing contract; it contains no Jinja.
+#
+# Defaults so this fragment still renders if it is ever run without a
+# preamble in front of it.
+: "${SCV_SCOPE_LABEL:=on $(hostname)}"
+: "${SCV_APPLIED_AT:=unknown}"
+: "${SCV_MIN_AGE_HOURS:=}"
+: "${NA_DESIGN:=0}"
+
+if [ "$QUIET" -eq 0 ]; then
+  echo
+  echo "supply-chain-hardening — what is ACTUALLY enforcing $SCV_SCOPE_LABEL"
+  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  # What this host DECLARED, and when. A GAP below means "below what this
+  # line promised", so the reader needs to see the promise — and needs to
+  # know how old it is, because the preamble is frozen at apply time while
+  # the host keeps drifting. A verifier judging against a year-old intent
+  # should say so rather than be quietly believed.
+  echo "declared intent recorded $SCV_APPLIED_AT${SCV_MIN_AGE_HOURS:+ · age window ${SCV_MIN_AGE_HOURS}h} — re-apply the role to refresh it"
+  echo
+  printf "%-6s %-11s %-32s %s\n" "STATUS" "EVIDENCE" "PROTECTION" "DETAIL"
+  printf "%-6s %-11s %-32s %s\n" "------" "-----------" "--------------------------------" "------"
+  # '%b', NOT "$ROWS" as a format string. A bare % in an interpolated path
+  # would otherwise rewrite the row that names the file. %b expands the \n
+  # row separators without treating % as a directive, so it is safe by
+  # construction rather than by escaping. action/verify.sh does the same, and
+  # files/verify-probes.sh's cq() is a pass-through to match — all three move
+  # together or none do.
+  printf '%b' "$ROWS" | while IFS=$'\t' read -r s e p d; do
+    [ -n "$s" ] || continue
+    printf "%-6s %-11s %-32s %s\n" "$s" "$e" "$p" "$d"
+  done
+  echo
+  echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
+  echo "setting back · PRESENT = a file exists and nothing more (unverified)."
+  echo "N/A rows say '-' (the tool is not installed here) or BYDESIGN (this"
+  echo "host's role configuration never asked for it)."
+  echo
+  if [ "$GAPS" -gt 0 ]; then
+    echo "RESULT: $GAPS gap(s) — protections NOT in effect $SCV_SCOPE_LABEL."
+  else
+    echo "RESULT: no gaps."
+  fi
+  [ "$WEAKS" -gt 0 ] && echo "        $WEAKS row(s) verified only as PRESENT — not evidence of enforcement."
+  [ "$NA_DESIGN" -gt 0 ] && echo "        $NA_DESIGN row(s) N/A — not requested by this host's configuration."
+  echo
+fi
+
+[ "$GAPS" -gt 0 ] && exit 1
+[ "$STRICT" -eq 1 ] && [ "$WEAKS" -gt 0 ] && exit 1
+exit 0

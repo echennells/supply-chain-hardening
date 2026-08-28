@@ -156,6 +156,35 @@ any GAP:
 `strict: true` to fail on `WEAK` too — for pipelines where unverified should
 count as unprotected.
 
+`WEAK` means one thing only: *the promise is met and we could not prove it*.
+It used to also mean "absent", which is why a job with every wrapper deployed
+and a job with none both printed `WEAK PRESENT / not deployed` and
+`RESULT: no gaps`. The harden step now records what it actually did — which
+ecosystems, which wrappers, and a marker saying it reached the end — and the
+verifier reads that record:
+
+| The protection is | this job asked for it | it did not |
+|---|---|---|
+| observed working | `OK` | `OK` |
+| absent or inert | `GAP` | `N/A BYDESIGN` |
+| impossible on this tool version | `GAP` | `N/A BYDESIGN` |
+| its tool is not installed | `N/A ABSENT` | `N/A ABSENT` |
+
+The `N/A` rows say which kind in the EVIDENCE column: `ABSENT` (nothing here
+to protect) or `BYDESIGN` (never requested). **When the record is missing,
+incomplete, or was written by a different job, the verifier ignores it and
+checks every installed tool** — "not requested" and "silently skipped" are
+indistinguishable from there, and only one of them is safe to assume.
+
+`fail-on` decides which gaps fail the step, and never which gaps are
+*reported*:
+
+| `fail-on` | Fails on |
+|---|---|
+| `any` (default) | every gap — the historical contract |
+| `config` | only gaps a re-run of the hardening closes. A runner whose npm predates `min-release-age` still prints that GAP and no longer fails your job for a capability the toolchain does not have. |
+| `never` | nothing; report only |
+
 Two checks only a runner can do:
 
 - **Did the env layer propagate to this step?** `harden.sh` records what it
@@ -171,9 +200,24 @@ Two checks only a runner can do:
 Outside GitHub, run the script directly; it takes the same `--emit` targets:
 
 ```bash
-./action/verify.sh --emit=gitlab      # exit 1 on any gap
-./action/verify.sh --strict --quiet   # table suppressed, exit code kept
+./action/verify.sh --emit=gitlab            # exit 1 on any gap
+./action/verify.sh --strict --quiet         # table suppressed, exit code kept
+./action/verify.sh --fail-on=config         # report every gap, fail only on the fixable ones
 ```
+
+If you set `env-file` or `output-file` on the harden step, **set the matching
+input on the verify step too**. The verifier cannot find a custom path on its
+own: without `env-file` it looks in the default place, finds nothing, and
+degrades the env-propagation row to `WEAK`; without `output-file` it has no
+record of what the job hardened and falls back to checking every installed
+tool.
+
+The probes themselves live in `files/verify-probes.sh` — the same bytes the
+Ansible role installs as `/usr/local/bin/supply-chain-verify`, so the two
+surfaces cannot drift. `action/verify.sh` is the CI half: what this job
+promised, the runner-only probes, and the report. It **exits 2** if the probe
+body is missing rather than quietly skipping nine ecosystems and printing a
+short green table.
 
 ## Inputs
 
@@ -208,6 +252,15 @@ Use sparingly. The whole point of the action is to harden subsequent steps; opti
 | `sfw-installed` | `true` / `false` | Whether Socket Firewall was installed + npm wrapper deployed. |
 | `env-file` | `/home/runner/work/_temp/supply-chain-hardening.env` | Path to the canonical sourceable env file, written on every platform. On GitHub the env layer already propagates via `$GITHUB_ENV`; this matters for a step that shells into a container or re-execs a login shell. |
 | `tool-versions` | `{"npm":"10.5.0","bun":"1.2.0","composer":"2.9.8",...}` | JSON map of detected tool versions per ecosystem. Empty string means the tool wasn't installed in this runner. Useful for conditional downstream steps. |
+
+Alongside these, the harden step writes a private record next to the env file
+(`…/supply-chain-hardening.outputs`) that only the verify step reads:
+`wrappers_deployed` (which PATH wrappers actually landed), `job_id` (so a
+leftover record on a self-hosted runner is ignored rather than silently
+scoping the next job), and `hardening_complete`, written last. That marker is
+load-bearing: without it a harden step that died partway used to leave a
+truncated record that the verifier read as "nothing was requested", printing
+an all-`N/A` table and `RESULT: no gaps` for a run that failed.
 
 Example consumption:
 
