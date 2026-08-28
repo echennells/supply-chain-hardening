@@ -91,8 +91,28 @@ inputs:
 
 outputs:
   ecosystems-hardened:
-    description: 'Comma-separated list of ecosystems actually hardened (skips unsupported entries from input).'
+    description: >-
+      Comma-separated list of ecosystems REQUESTED and recognised. Kept for
+      compatibility — despite the name it does not mean anything is in force.
+      Branch on ecosystems-effective instead.
     value: ${{ steps.harden.outputs.ecosystems_hardened }}
+  ecosystems-effective:
+    description: >-
+      Ecosystems where every layer the protection depends on is in place.
+      This is the one to gate on.
+    value: ${{ steps.harden.outputs.ecosystems_effective }}
+  ecosystems-degraded:
+    description: >-
+      Ecosystems that got something but not everything — a config file written
+      while the PATH wrapper it needs could not be deployed, or a setting the
+      installed tool version does not implement. Partially protected.
+    value: ${{ steps.harden.outputs.ecosystems_degraded }}
+  ecosystems-ineffective:
+    description: >-
+      Ecosystems where NOTHING effective was applied. deno lands here whenever
+      deno is absent at hardening time, because a PATH wrapper is its entire
+      mechanism and it has no config file to fall back on.
+    value: ${{ steps.harden.outputs.ecosystems_ineffective }}
   release-age-hours:
     description: 'Active minimum release age in hours.'
     value: ${{ steps.harden.outputs.release_age_hours }}

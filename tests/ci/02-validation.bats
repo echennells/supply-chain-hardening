@@ -110,3 +110,54 @@ setup() { common_setup; }
   run node -e "JSON.parse(process.argv[1])" "$tv"
   [ "$status" -eq 0 ]
 }
+
+@test "reporting: an ecosystem whose only mechanism could not be applied reads NOT applied" {
+  # deno has NO config file — a PATH wrapper is its entire mechanism. With deno
+  # absent, nothing whatsoever is applied, and this used to report
+  # "deno hardened" in the summary, the final line and the output.
+  run harden ECOSYSTEMS=deno -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NOT applied: deno"* ]]
+  assert_file_contains "$OUT_FILE" "ecosystems_ineffective=deno"
+  assert_file_contains "$OUT_FILE" "^ecosystems_effective=$"
+}
+
+@test "reporting: the summary explains WHY an ecosystem is not in force" {
+  run harden ECOSYSTEMS=deno -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Not fully in force"* ]]
+  [[ "$output" == *"PATH wrapper is the entire mechanism"* ]]
+}
+
+@test "reporting: a config-backed ecosystem with no wrapper reads degraded, not applied" {
+  # cargo writes config AND needs a wrapper for --locked, which has no config
+  # or env route at all. Absent cargo means partial, not full.
+  run harden ECOSYSTEMS=cargo -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$OUT_FILE" "ecosystems_degraded=cargo"
+}
+
+@test "reporting: npm that cannot enforce the age gate is flagged at hardening time" {
+  # min-release-age landed in npm 11.10.0. The version is already detected, so
+  # the run can say so itself instead of leaving it to an opt-in verifier.
+  have npm || skip "npm not installed"
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  local v; v=$(npm --version)
+  case "$v" in
+    1[1-9].*|[2-9][0-9].*)
+      # A new enough npm should NOT be flagged.
+      [[ "$output" != *"does NOT implement min-release-age"* ]] ;;
+    *)
+      [[ "$output" == *"does NOT implement min-release-age"* ]]
+      [[ "$output" == *"Script blocking is unaffected"* ]]
+      assert_file_contains "$OUT_FILE" "ecosystems_degraded=npm" ;;
+  esac
+}
+
+@test "reporting: a fully applied ecosystem says so without noise" {
+  run harden ECOSYSTEMS=pip -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$OUT_FILE" "ecosystems_effective=pip"
+  [[ "$output" != *"Not fully in force"* ]]
+}

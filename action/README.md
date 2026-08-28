@@ -125,6 +125,30 @@ jobs:
 
 That's it. The defaults are sensible for most workflows.
 
+## What it reports, and what that means
+
+The run distinguishes what was **requested** from what is **in force**, because
+those differ more often than you'd expect:
+
+```
+done (emit=github). applied: pip | degraded: npm,cargo | NOT applied: deno
+```
+
+- **applied** — every layer is in place
+- **degraded** — partial. A config file landed but the PATH wrapper it needs
+  could not be deployed, or the installed tool version doesn't implement the
+  setting
+- **NOT applied** — nothing effective. `deno` lands here whenever deno is
+  absent, because a wrapper is its whole mechanism
+
+Anything not fully applied gets a row in the job summary naming the reason. The
+run also **warns at hardening time** about configurations it can already tell
+are inert — most importantly an npm older than 11.10.0, where the age gate is
+written and enforced by nothing.
+
+This used to report a flat `Ecosystems hardened: npm,cargo,deno` regardless,
+which claimed effect where it only had intent.
+
 ## Verifying it actually applied
 
 Writing a config file proves nothing about enforcement. Every protection here
@@ -247,7 +271,10 @@ Use sparingly. The whole point of the action is to harden subsequent steps; opti
 
 | Output | Example | What it carries |
 |---|---|---|
-| `ecosystems-hardened` | `npm,pnpm,pip,bun,composer` | Comma-separated; reflects what was actually hardened (skips unknowns + ecosystems whose tool wasn't installed). |
+| `ecosystems-hardened` | `npm,pnpm,pip,bun,composer` | Requested and recognised. **Kept for compatibility — the name overpromises.** Gate on `ecosystems-effective` instead. |
+| `ecosystems-effective` | `npm,pip` | Every layer the protection depends on is in place. **This is the one to branch on.** |
+| `ecosystems-degraded` | `cargo` | Got something, not everything — a config written while its PATH wrapper could not be deployed, or a setting the installed tool version does not implement. |
+| `ecosystems-ineffective` | `deno` | **Nothing effective was applied.** deno lands here whenever deno is absent at hardening time: a PATH wrapper is its entire mechanism and it has no config file to fall back on. |
 | `release-age-hours` | `48` | Active minimum-release-age value. |
 | `sfw-installed` | `true` / `false` | Whether Socket Firewall was installed + npm wrapper deployed. |
 | `env-file` | `/home/runner/work/_temp/supply-chain-hardening.env` | Path to the canonical sourceable env file, written on every platform. On GitHub the env layer already propagates via `$GITHUB_ENV`; this matters for a step that shells into a container or re-execs a login shell. |
