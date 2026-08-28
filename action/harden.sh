@@ -747,11 +747,19 @@ harden_composer() {
   # what we emit below 2.2.15 and whenever the version is undetected.
   # (allow-plugins only exists from 2.2.0 at all; below that the key is inert
   # either way and --no-plugins in the wrapper is the layer doing the work.)
+  # ALWAYS {} when denying, with NO version predicate. `false` is a hard fatal
+  # (array_merge(): Argument #1 must be of type array, bool given -> exit 255)
+  # and the fix was NOT backported linearly:
+  #   2.2.6 FATAL   2.2.14 FATAL   2.2.15 safe   2.2.16 safe
+  #   2.3.0 FATAL   2.3.5 FATAL    2.3.7 FATAL   2.3.8 safe   2.4.0+ safe
+  # So a `>= 2.2.15` predicate emits the bricking value across 2.3.0-2.3.7,
+  # because 2.3.0 sorts ABOVE 2.2.15 while predating the fix. MEASURED: {}
+  # returns rc 0 on every version 2.2.6 -> 2.10.3 and still refuses plugins,
+  # so the tier bought nothing and could only ever be wrong. Deleting the
+  # predicate deletes the whole bug class.
   local allow_plugins_json="{}"
   if [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]]; then
     allow_plugins_json="true"
-  elif [[ -n "$composer_version" ]] && version_ge "$composer_version" "2.2.15"; then
-    allow_plugins_json="false"
   fi
 
   {

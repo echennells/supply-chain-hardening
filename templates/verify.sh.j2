@@ -76,7 +76,11 @@ SCV_SCOPE_LABEL="on $(hostname)"
 
 # When this host's intent was recorded. A stale preamble is the one failure
 # mode this design introduces, so the report says how old it is out loud.
-SCV_APPLIED_AT='{{ ansible_date_time.iso8601 | default("unknown") }}'
+# Truncated to the DAY on purpose. A per-second timestamp changes on every
+# apply, so the rendered fragment differs every run, assemble reports
+# changed forever and the role is never idempotent. Same reasoning and same
+# resolution as uv_exclude_newer in defaults/main.yml.
+SCV_APPLIED_AT='{{ (ansible_date_time.iso8601 | default("unknown"))[:10] }}'
 
 # The age window the role promised, in hours (defaults/main.yml:release_age_hours).
 SCV_MIN_AGE_HOURS='{{ release_age_hours | default("") }}'

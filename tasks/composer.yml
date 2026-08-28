@@ -36,7 +36,11 @@
 
 - name: Detect installed Composer version (empty if not installed)
   # Pull the X.Y.Z out of `composer --version` output:
-  #   "Composer version 2.7.1 2024-02-09 15:26:28"
+  #   "Composer version 2.7.1 2024-02-09 15:26:28"   (upstream phar)
+  #   "Composer 2.2.6 2022-02-04 17:00:38"           (Debian/Ubuntu apt)
+  # The apt build omits the word "version". Anchoring on it made
+  # detection fail on EVERY apt composer, which silently downgraded the
+  # wrapper and suppressed the skipped_protections records.
   # sed -n + /p only prints when the pattern matches, so any pre-version
   # warning lines (e.g. "Do not run Composer as root!") are skipped.
   # `command -v composer` short-circuits when Composer isn't on PATH —
@@ -47,7 +51,7 @@
       set -o pipefail
       command -v composer >/dev/null 2>&1 || exit 0
       composer --version --no-ansi 2>/dev/null \
-        | sed -nE 's/^Composer version ([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+        | sed -nE 's/^Composer (version )?([0-9]+\.[0-9]+\.[0-9]+).*$/\2/p' \
         | head -1
     executable: /bin/bash
   register: composer_version_check

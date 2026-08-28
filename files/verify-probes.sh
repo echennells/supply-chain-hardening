@@ -1775,7 +1775,14 @@ else
   # What THIS job's harden step asked for, from its own outputs record. A
   # mismatch means the cooldown.toml at $ch was written by a different run.
   cwant=""
-  [ -f "$OUTPUT_FILE" ] && cwant=$(grep '^release_age_hours=' "$OUTPUT_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+  # ${OUTPUT_FILE:-} NOT $OUTPUT_FILE. This file is shared by both surfaces and
+  # runs under `set -u`. OUTPUT_FILE is defined only by the CI preamble
+  # (action/verify.sh); the role preamble has no such concept, so a bare
+  # reference aborted /usr/local/bin/supply-chain-verify at line 1 of its
+  # first use and the role verifier did not run AT ALL. `bash -n` cannot
+  # see an unbound variable, so validate: passed it through.
+  # Any variable read here must come from the body or be :--guarded.
+  [ -f "${OUTPUT_FILE:-}" ] && cwant=$(grep '^release_age_hours=' "${OUTPUT_FILE:-}" 2>/dev/null | head -1 | cut -d= -f2-)
 
   creal=""; [ -n "$cw" ] && creal=$(cargo_embedded REAL_CARGO "$cw")
 
@@ -3503,7 +3510,7 @@ else
 
   if [ -z "$napplied" ]; then
     row "WEAK" "PRESENT" "nuget config read by dotnet" \
-      "SDK $nsdk has no 'dotnet nuget config' subcommand (needs 8.0+); the tool cannot be asked which files it merges, so a config written to an unread path is undetectable here"
+      "SDK $nsdk has no 'dotnet nuget config' subcommand (needs SDK 9.0+; measured absent on 8.0.424); the tool cannot be asked which files it merges, so a config written to an unread path is undetectable here"
   elif [ -n "$norphan" ] && [ -z "$ninset" ]; then
     row "GAP" "PARSED" "nuget config read by dotnet" \
       "hardening config at $(nuget_clip "$norphan") is NOT among the files dotnet merges ($(nuget_clip "$napplied")) — never read"
@@ -3706,7 +3713,7 @@ NGEOF
       "signature validation is not proven to be enforcing on this host; trusted signers cannot change that outcome"
   elif ! nuget_dotnet nuget config get all >/dev/null 2>&1; then
     row "WEAK" "PRESENT" "nuget trusted signers" \
-      "SDK $nsdk cannot report merged trustedSigners ('dotnet nuget config' needs 8.0+)"
+      "SDK $nsdk cannot report merged trustedSigners ('dotnet nuget config' needs SDK 9.0+)"
   else
     # MEASURED: `config get all` prints sections in FILE order, not a fixed
     # order.  An unbounded '/^trustedSigners:/,$p' range swallowed whatever

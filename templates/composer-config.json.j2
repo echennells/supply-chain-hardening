@@ -6,30 +6,37 @@
      Composer not detected at apply time: rendered as < 2.7 (safe baseline);
        re-run the role after installing Composer to upgrade to the matching tier.
 
-   allow-plugins is tiered SEPARATELY from the audit block, on 2.2.15:
+   allow-plugins is NOT tiered. When denying we always emit `{}`.
      MEASURED (composer 2.0.14 → 2.10.3, 16 phars): `"allow-plugins": false`
-     is a HARD FATAL below 2.2.15 —
+     is a HARD FATAL —
        PHP Fatal error: Uncaught TypeError: array_merge():
        Argument #1 must be of type array, false given
      exit 255 on install / config / dump-autoload, i.e. every command except
      --version. Ubuntu 22.04 ships composer 2.2.6, this role's oldest
      supported LTS, so the literal `false` bricked composer on every jammy
-     host. `{}` — the empty allowlist — is accepted by 2.2.6 AND still blocks
-     every plugin, so it is what we emit below 2.2.15 and whenever the version
-     is unknown. (allow-plugins itself only exists from 2.2.0; on 2.0/2.1 the
+     host.
+     A `>= 2.2.15` predicate looked like the fix and was NOT, because the
+     upstream fix was not backported linearly:
+       2.2.6 FATAL   2.2.14 FATAL   2.2.15 safe   2.2.16 safe
+       2.3.0 FATAL   2.3.5 FATAL    2.3.7 FATAL   2.3.8 safe   2.4.0+ safe
+     2.3.0 sorts ABOVE 2.2.15 while predating the fix, so the predicate
+     emitted the bricking value across the whole 2.3.0-2.3.7 range.
+     `{}` — the empty allowlist — returns rc 0 on EVERY version tested and
+     still blocks every plugin, so the tier bought nothing and could only ever
+     be wrong. No predicate is safer than a predicate over a non-monotonic
+     property. (allow-plugins itself only exists from 2.2.0; on 2.0/2.1 the
      key is inert either way and --no-plugins in the wrapper is the layer that
      blocks plugins.)
    See README "Limitations" → "Composer audit blocking is version-tiered". #}
 {%- set v = composer_detected_version | default('', true) -%}
 {%- set has_audit = v != '' and v is version('2.7.0', '>=') -%}
 {%- set has_block = v != '' and v is version('2.9.0', '>=') -%}
-{%- set plugins_false_safe = v != '' and v is version('2.2.15', '>=') -%}
 {
   "config": {
     "secure-http": true,
     "lock": true,
     "preferred-install": "dist",
-    "allow-plugins": {% if composer_allow_plugins | bool %}true{% elif plugins_false_safe %}false{% else %}{}{% endif %}{% if has_audit %},
+    "allow-plugins": {% if composer_allow_plugins | bool %}true{% else %}{}{% endif %}{% if has_audit %},
     "audit": {
       "abandoned": "{{ composer_audit_abandoned }}"{% if has_block %},
       "block-insecure": {{ composer_audit_block_insecure | bool | lower }},
