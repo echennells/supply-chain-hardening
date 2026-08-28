@@ -730,27 +730,62 @@ jobs:
       # cleanly under our config. If it fails, our cert pin is wrong.
       - name: dotnet restore must succeed under require-mode + pinned cert
         run: |
-          mkdir -p /tmp/nuget-victim && cd /tmp/nuget-victim
-          dotnet new console -o app --no-restore >/dev/null
-          cd app
-          dotnet add package Newtonsoft.Json --version 13.0.3 >/dev/null
-          set +e
-          output=$(dotnet restore 2>&1)
-          rc=$?
-          set -e
-          echo "$output" | tail -20
-          echo "rc=$rc"
-          if [ "$rc" != "0" ]; then
-            # NU3008 = signature validation failure
-            if echo "$output" | grep -qiE "NU3008|signature.*invalid|certificate.*not.*trusted"; then
-              echo "::error::nuget cert fingerprint is STALE or WRONG — Newtonsoft.Json failed signature validation"
-              echo "Action's harden_nuget needs an updated cert fingerprint"
-              exit 1
-            fi
-            echo "::error::dotnet restore failed for an unexpected reason"
+          # NOTHING here is allowed to hide its output. A previous version ran
+          # `dotnet new` and `dotnet add package` with >/dev/null under
+          # `bash -e`, so when a malformed NuGet.Config made dotnet unable to
+          # build a dependency graph, the step aborted at setup with a generic
+          # message and the run read as a signature failure. The test could
+          # not tell "our config is broken" from "our cert pin is stale".
+          set -uo pipefail
+
+          CFG="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+          echo "::group::NuGet.Config under test ($CFG)"
+          cat "$CFG" || { echo "::error::no NuGet.Config at $CFG"; exit 1; }
+          echo "::endgroup::"
+
+          # GATE 1 - can dotnet PARSE it at all? This is the check that was
+          # missing. An unparseable config (a stray `--` inside an XML comment
+          # will do it) disables every nuget protection AND breaks dotnet, and
+          # it must not be reported as a certificate problem.
+          if ! out=$(dotnet nuget list source 2>&1); then
+            echo "$out"
+            echo "::error::dotnet cannot read our NuGet.Config — the file is malformed, not the cert"
             exit 1
           fi
-          echo "✓ nuget cert fingerprint is current — signed packages from nuget.org install cleanly"
+          echo "$out"
+          echo "$out" | grep -q 'api.nuget.org' \
+            || { echo "::error::nuget.org missing from the source list dotnet actually reads"; exit 1; }
+
+          # GATE 2 - project setup. Run it visibly; a failure here is still
+          # our config's fault more often than not.
+          mkdir -p /tmp/nuget-victim && cd /tmp/nuget-victim
+          if ! out=$(dotnet new console -o app --no-restore 2>&1); then
+            echo "$out"; echo "::error::dotnet new failed — infrastructure, not hardening"; exit 1
+          fi
+          cd app
+          if ! out=$(dotnet add package Newtonsoft.Json --version 13.0.3 2>&1); then
+            echo "$out"
+            echo "::error::dotnet add package failed. This does an implicit restore, so our config is in play — read the output above before blaming the cert"
+            exit 1
+          fi
+
+          # GATE 3 - the actual security property.
+          out=$(dotnet restore 2>&1); rc=$?
+          echo "$out" | tail -20
+          echo "rc=$rc"
+          if [ "$rc" != "0" ]; then
+            # NU3034 = package signed by a repository we do not trust, i.e. the
+            # pinned fingerprint set is stale. NU3008 = signature invalid.
+            # nuget.org has rotated this cert twice (2021-03, 2024-04), so a
+            # single pinned fingerprint goes stale on a schedule — see ECH-168.
+            if echo "$out" | grep -qiE "NU3034|NU3008|signature.*invalid|not.*trusted"; then
+              echo "::error::cert fingerprint set is STALE or WRONG — Newtonsoft.Json failed signature validation. harden_nuget and tasks/nuget.yml both need the current nuget.org fingerprints"
+              exit 1
+            fi
+            echo "::error::dotnet restore failed for an unexpected reason — see output above"
+            exit 1
+          fi
+          echo "✓ config parses, sources resolve, and signed nuget.org packages install under require-mode"
 
   action-pnpm-allowlist-input:
     name: 'Action: pnpm_built_dependencies input correctly switches to allowlist mode'
