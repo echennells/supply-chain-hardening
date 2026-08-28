@@ -4,30 +4,47 @@
 #
 # Composer has no host-wide config-file or env-var mechanism for disabling
 # script and plugin execution. The only real primitives are the --no-scripts
-# / --no-plugins CLI flags (universal) and COMPOSER_SKIP_SCRIPTS=<event,list>
-# (composer 2.9+ only). This wrapper injects --no-scripts on every
-# invocation. --no-plugins is also injected by default, but the role var
+# / --no-plugins CLI flags and COMPOSER_SKIP_SCRIPTS=<event,list>
+# (MEASURED: honoured from composer 2.8.0 — silently ignored on 2.2.6 and
+# 2.7.1, honoured on 2.8.12+; the older "2.9+" in this comment was wrong).
+# This wrapper injects --no-scripts (see the version note below).
+# --no-plugins is also injected by default, but the role var
 # composer_allow_plugins controls it: set composer_allow_plugins=true
 # to drop --no-plugins here AND write "allow-plugins": true to config.json
 # so users with legitimate plugin needs (e.g. composer/installers in CI)
 # get a real opt-in without disabling the whole wrapper.
 #
-# --no-scripts is always injected. Script execution is much higher-risk
-# than plugin execution (arbitrary shell on every composer op vs. composer
-# Plugin classes loaded by composer.json), so there's no matching opt-in
-# for scripts. Users who need scripts run composer-real with cleared env.
+# --no-scripts is injected wherever composer accepts it. Script execution is
+# much higher-risk than plugin execution (arbitrary shell on every composer
+# op vs. composer Plugin classes loaded by composer.json), so there's no
+# matching opt-in for scripts. Users who need scripts run composer-real with
+# cleared env.
 #
-# Composer accepts global flags anywhere on the command line (Symfony
-# Console behavior) and ignores them for subcommands where they don't
-# apply (--version, help, etc.), so injection is safe across all
-# subcommands.
+# --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
+# MEASURED (composer 2.0.14 → 2.10.3): on 2.0/2.1 only install, update,
+# require, remove and dump-autoload declare --no-scripts; injecting it
+# unconditionally makes `composer show`, `composer config`, `composer
+# diagnose` and friends die with
+#     The "--no-scripts" option does not exist.
+# It became a global (application-level) option in composer 2.2.0. So the
+# injection below is tiered on the version detected at apply time:
+#   composer >= 2.2  → inject on every invocation (this host: see the
+#                      NO_SCRIPTS_IS_GLOBAL value rendered below)
+#   composer <= 2.1, or version not detected at apply time (safe baseline)
+#                    → inject only for the subcommands that declare it.
+#                      Other subcommands run WITHOUT --no-scripts there;
+#                      that gap is recorded in skipped_protections.
+# --no-plugins IS application-level on 2.0/2.1, so it is always injected.
+# Re-run the role after upgrading composer to move to the >= 2.2 tier.
 #
 # Bypass (per-invocation, for users who know what they need):
 #   COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install
-# Both halves are required. Just `composer-real install` alone is still
-# blocked by COMPOSER_SKIP_SCRIPTS in /etc/environment + /etc/profile.d
-# (belt-and-suspenders layer for PAM-loaded shells, intentional). Clearing
-# the env var AND going around the wrapper is the documented bypass.
+# On composer >= 2.8 both halves are required: just `composer-real install`
+# alone is still blocked by COMPOSER_SKIP_SCRIPTS in /etc/environment +
+# /etc/profile.d (belt-and-suspenders layer for PAM-loaded shells,
+# intentional). On composer 2.2-2.7 that env var is inert (MEASURED), so
+# going around the wrapper is by itself enough to run scripts there.
+# Clearing the env var AND going around the wrapper is the documented bypass.
 #
 # Disable globally:
 #   role var composer_path_wrapper=false (restores the real binary at this
@@ -55,10 +72,41 @@ fi
 # runs as the caller's UID regardless.
 export COMPOSER_ALLOW_SUPERUSER=1
 
+# Rendered from the composer version detected at apply time
+# ({{ composer_detected_version | default('', true) | default('undetected', true) }}).
+# Quoted on purpose: an unquoted Jinja expression here contains bare
+# parentheses, which makes this template unparseable by `bash -n` and
+# silently removes the shell lint that covers the wrapper body.
+NO_SCRIPTS_IS_GLOBAL="{{ 'true' if (composer_detected_version | default('', true)) != '' and (composer_detected_version | default('0', true)) is version('2.2.0', '>=') else 'false' }}"
+
+FLAGS=()
+if [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
+  FLAGS+=(--no-scripts)
+else
+  # Safe baseline: find the subcommand (first non-option token, skipping the
+  # value of composer's own value-taking global -d/--working-dir) and inject
+  # --no-scripts only where composer <= 2.1 declares it. Aliases included:
+  # they are the same command object with the same option definition, and an
+  # alias a given composer doesn't know fails on the command name, not on us.
+  skip_next=0
+  for arg in "$@"; do
+    if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+    case "$arg" in
+      -d|--working-dir) skip_next=1; continue ;;
+      -*) continue ;;
+    esac
+    case "$arg" in
+      install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+        FLAGS+=(--no-scripts) ;;
+    esac
+    break
+  done
+fi
 {% if composer_allow_plugins | bool %}
 # composer_allow_plugins=true → omit --no-plugins. The JSON config also
 # carries "allow-plugins": true so the two layers agree.
-exec "$REAL_COMPOSER" --no-scripts "$@"
 {% else %}
-exec "$REAL_COMPOSER" --no-scripts --no-plugins "$@"
+FLAGS+=(--no-plugins)
 {% endif %}
+
+exec "$REAL_COMPOSER" ${FLAGS[@]+"${FLAGS[@]}"} "$@"

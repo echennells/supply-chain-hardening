@@ -1,13 +1,19 @@
 ---
 # Bun supply chain hardening
-# Config deployed unconditionally; saveTextLockfile is tiered (bun 1.2+ only).
+# The bunfig path is RESOLVED from bun's environment (XDG_CONFIG_HOME), never
+# assumed to be ~/.bunfig.toml. minimumReleaseAge (bun 1.3.0+), ignoreScripts
+# (bun 1.2.0+) and saveTextLockfile (bun 1.2.0+) are version-tiered inside
+# templates/bunfig.toml.j2; every tier gap is recorded in skipped_protections
+# below so the end-of-run summary reports it.
 
 - name: Detect installed bun version (empty if not installed)
   # `bun --version` outputs just the version number ("1.2.0") — no prefix.
-  # If bun isn't installed, empty stdout; template treats that as
-  # "assume modern" since modern bun is the common case when bun is
-  # installed at all. Old bun (pre-1.2) would just silently ignore
-  # the saveTextLockfile key; emitting it isn't harmful, just inert.
+  # If bun isn't installed, empty stdout; the template treats that as
+  # "assume modern" and emits every key. That direction is the safe one for
+  # bun specifically: bun accepts unknown [install] keys SILENTLY (MEASURED
+  # 1.1.38 → 1.4.0), so an over-emitted key is inert on old bun, whereas an
+  # under-emitted one would leave a modern bun unhardened. Re-run the role
+  # after installing bun to land on the exact tier.
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -23,15 +29,91 @@
   ansible.builtin.set_fact:
     bun_detected_version: "{{ bun_version_check.stdout | default('') | trim }}"
 
+- name: Determine bun global bunfig path
+  # MEASURED (bun 1.1.38 → 1.4.0). bun's GLOBAL bunfig is:
+  #   $XDG_CONFIG_HOME/.bunfig.toml  — DOT-PREFIXED — when XDG_CONFIG_HOME is
+  #                                    set, and
+  #   $HOME/.bunfig.toml             — only when XDG_CONFIG_HOME is unset.
+  # There is NO fallback between the two: with XDG_CONFIG_HOME pointing at a
+  # directory that holds no .bunfig.toml, $HOME/.bunfig.toml is never read
+  # (measured — the fixture's preinstall ran). And
+  # $XDG_CONFIG_HOME/bunfig.toml WITHOUT the leading dot is not read either,
+  # which is the easy thing to get wrong here.
+  #
+  # This task previously hardcoded ansible_env.HOME, which left every key in
+  # the file dead on any host that sets XDG_CONFIG_HOME — devcontainers,
+  # most language base images and most dotfile setups do. The bun/bunx PATH
+  # wrappers below were the only surviving layer there.
+  # docs/design-principles.md Axis 5, "Assumed canonical config homes".
+  ansible.builtin.set_fact:
+    bun_bunfig_path: >-
+      {{
+        ansible_env.XDG_CONFIG_HOME ~ '/.bunfig.toml'
+        if ansible_env.XDG_CONFIG_HOME is defined and ansible_env.XDG_CONFIG_HOME | length > 0
+        else ansible_env.HOME ~ '/.bunfig.toml'
+      }}
+
+- name: Validate bun_minimum_release_age_seconds is a bare non-negative integer
+  # FAIL-WHOLE HAZARD, not fail-silent. bun rejects the ENTIRE bunfig on ONE
+  # bad value — "Invalid Bunfig: failed to load bunfig", exit 1 — MEASURED
+  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d"). It does not
+  # skip the offending key: every other key in the file is disarmed with it
+  # AND bun itself stops working, so a malformed value here is strictly worse
+  # than deploying nothing. Same shape as the yarn npmMinimalAgeGate NaN bug.
+  # Caught at apply time instead of on the host's next `bun install`; the
+  # template also renders the value through `| int` so nothing quoted or
+  # fractional can reach the file.
+  ansible.builtin.assert:
+    that:
+      - bun_minimum_release_age_seconds | string is match('^[0-9]+$')
+    fail_msg: >-
+      bun_minimum_release_age_seconds must be a bare integer number of seconds
+      (got '{{ bun_minimum_release_age_seconds }}'). bun's minimumReleaseAge
+      takes a NUMBER of seconds; a quoted or non-numeric value makes bun
+      reject the whole bunfig and fail every install with
+      "Invalid Bunfig: failed to load bunfig".
+
+- name: Ensure the bunfig parent directory exists
+  # XDG_CONFIG_HOME can point at a directory that does not exist yet; without
+  # this the template task fails instead of hardening.
+  ansible.builtin.file:
+    path: "{{ bun_bunfig_path | dirname }}"
+    state: directory
+    mode: "0755"
+
 - name: Deploy hardened global bunfig.toml
   ansible.builtin.template:
     src: bunfig.toml.j2
-    dest: "{{ ansible_env.HOME }}/.bunfig.toml"
+    dest: "{{ bun_bunfig_path }}"
     mode: "0644"
+
+- name: Record skipped protection — bun ignoreScripts (bun older than 1.2.0)
+  # MEASURED: below bun 1.2.0 the [install] ignoreScripts key is inert in the
+  # global bunfig AND in a local one; only the CLI --ignore-scripts blocks
+  # lifecycle scripts. Honoured 1.2.0 → 1.4.0. The key is omitted rather than
+  # written-and-ignored so the file cannot claim a protection bun is not
+  # applying — and the gap is surfaced in the end-of-run summary instead.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['bun ignoreScripts — bun ' ~ bun_detected_version ~ ' ignores [install] ignoreScripts in both the global and a local bunfig (MEASURED inert below 1.2.0, honoured 1.2.0+), so the key was not written. bun install lifecycle scripts (preinstall/install/postinstall/prepare) are NOT blocked by the bunfig on this host; on this version only the CLI --ignore-scripts blocks them. Upgrade bun to >= 1.2.0 and re-run the role.'] }}
+  when:
+    - bun_detected_version | length > 0
+    - bun_detected_version is version('1.2.0', '<')
+
+- name: Record skipped protection — bun minimumReleaseAge (bun older than 1.3.0)
+  # MEASURED: the key does not exist below bun 1.3.0 (absent through 1.2.23),
+  # and bun accepts unknown [install] keys silently — so writing it there
+  # produced a file that looked age-gated and was not.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['bun minimumReleaseAge — bun ' ~ bun_detected_version ~ ' has no [install] minimumReleaseAge key (MEASURED: added in 1.3.0, absent through 1.2.23), so it was not written. bun install on this host will accept a package published seconds ago; the ' ~ (bun_minimum_release_age_seconds | int) ~ '-second cooldown is not enforced. Upgrade bun to >= 1.3.0 and re-run the role.'] }}
+  when:
+    - bun_detected_version | length > 0
+    - bun_detected_version is version('1.3.0', '<')
 
 # --- bun PATH wrapper (closes the runtime auto-install gap) ---
 #
-# ~/.bunfig.toml's [install].auto = "disable" is the documented config
+# The global bunfig's [install].auto = "disable" is the documented config
 # knob for blocking bun's silent runtime auto-install — but it does not
 # fire for `bun run` because bun only consults the GLOBAL bunfig for
 # `bun install`, not for `bun run`. The wrapper closes this gap by

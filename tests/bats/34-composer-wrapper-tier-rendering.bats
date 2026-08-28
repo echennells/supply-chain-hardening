@@ -50,19 +50,26 @@ teardown_file() {
 @test "wrapper-render: composer_allow_plugins=false → wrapper injects --no-plugins" {
   local f="$WRAPPER_DIR/deny-plugins.sh"
   [ -f "$f" ]
-  grep -qE 'exec ".*REAL_COMPOSER.*" --no-scripts --no-plugins "\$@"' "$f"
+  # The flags are assembled into FLAGS[] rather than written literally on the
+  # exec line: --no-scripts is version-gated (it is not an application-level
+  # option on composer <= 2.1), --no-plugins is not (it is global that far
+  # back), so --no-plugins is an unconditional append.
+  grep -qE '^FLAGS\+=\(--no-plugins\)$' "$f"
+  grep -qE '^exec ".*REAL_COMPOSER.*" .*FLAGS.* "\$@"$' "$f"
 }
 
 @test "wrapper-render: composer_allow_plugins=true → wrapper omits --no-plugins" {
   local f="$WRAPPER_DIR/allow-plugins.sh"
   [ -f "$f" ]
   # --no-scripts MUST still be present (script execution has no opt-in).
-  grep -qE 'exec ".*REAL_COMPOSER.*" --no-scripts "\$@"' "$f"
-  # --no-plugins MUST be absent.
-  # Anchor to the exec line. The wrapper's header comments legitimately
-  # discuss --no-plugins when explaining the flag, and a bare grep matches
-  # those comments (false positive) even though the injection is correctly
-  # omitted from the exec.
+  grep -qE '^ *FLAGS\+=\(--no-scripts\)$' "$f"
+  grep -qE '^exec ".*REAL_COMPOSER.*" .*FLAGS.* "\$@"$' "$f"
+  # --no-plugins MUST be absent from the injected flags.
+  # Anchor to the append, not a bare grep: the wrapper's header comments
+  # legitimately discuss --no-plugins when explaining the flag, and a bare
+  # grep matches those comments (false positive) even though the injection
+  # is correctly omitted.
+  ! grep -qE '^FLAGS\+=\(--no-plugins\)$' "$f"
   ! grep -qE '^exec .*--no-plugins' "$f"
 }
 

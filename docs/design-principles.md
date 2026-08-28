@@ -476,7 +476,48 @@ correct and never read.
 **Principle**: resolve the tool's config home from the tool's own
 environment (`${CARGO_HOME:-$HOME/.cargo}`), never from the default path.
 Applies equally to NPM_CONFIG_USERCONFIG, PIP_CONFIG_FILE, COMPOSER_HOME,
-GRADLE_USER_HOME, BUNDLE_USER_CONFIG.
+GRADLE_USER_HOME, BUNDLE_USER_CONFIG, and UV_CONFIG_FILE / XDG_CONFIG_HOME.
+
+**uv is the quiet case.** Its user config is
+`${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml`, and `UV_CONFIG_FILE` overrides
+whatever is discovered. MEASURED: with `uv.toml` written to `$HOME/.config/uv`
+while `XDG_CONFIG_HOME` pointed elsewhere, `uv pip list` still exits 0, a grep
+for `no-build` still matches the file we wrote, and uv reports
+`no_build: None` — it read nothing of ours. Both writers hardcoded
+`$HOME/.config/uv` and so did the verifier, so writer and checker agreed with
+each other and disagreed with uv. Grepping the file you wrote proves only that
+you wrote it; ask the tool what it resolved (`uv --show-settings`).
+
+**bun is the sharp-edged case: XDG changes the FILENAME, and there is no
+fallback.** MEASURED across bun 1.1.38 → 1.4.0: bun reads
+`$XDG_CONFIG_HOME/.bunfig.toml` — *dot-prefixed* — when `XDG_CONFIG_HOME` is
+set, and `$HOME/.bunfig.toml` only when it is unset. With `XDG_CONFIG_HOME`
+pointing at a directory that holds no `.bunfig.toml`, `$HOME/.bunfig.toml` is
+never consulted, and `$XDG_CONFIG_HOME/bunfig.toml` without the dot is not
+read either. So the usual "write the default path, the tool will find it"
+intuition fails twice: wrong directory *and* wrong name. Both writers
+hardcoded `$HOME` and were dead on every image that sets `XDG_CONFIG_HOME`.
+Check what the tool calls the file in each home, not just where the home is.
+
+**gradle is the case where resolving the env var is NOT enough.** Gradle reads
+`$GRADLE_USER_HOME`, and when that is unset it falls back to
+`<user.home>/.gradle` — where `user.home` is a JVM system property that on
+Linux comes from the **passwd entry**, not from `$HOME`. MEASURED (gradle
+8.14.3 on openjdk-21, linux-arm64): with `HOME=/tmp/.../fakehome`,
+`System.getProperty("user.home")` was still `/home/vscode` and gradle loaded no
+init script from `fakehome/.gradle`. So `${GRADLE_USER_HOME:-$HOME/.gradle}` —
+the shape that fixes cargo, uv and bun — is still wrong for gradle, because the
+DEFAULT half of it is passwd-derived. Both writers hardcoded `$HOME` and were
+dead on `docker run -u <uid>`, OpenShift arbitrary uids and `sudo -E`.
+
+**Principle**: when the tool's default config home is not derived from `$HOME`,
+resolving its env var only covers the case where the env var is set. Resolve
+the default the way the TOOL derives it (`getent passwd "$(id -u)"`,
+`ansible_user_dir` — ansible reads the same passwd entry the JVM does), and
+where the surface owns a private, single-user env layer, pin the env var to the
+directory you wrote so the ambiguity cannot return. A system-wide env layer is
+not such a place: one absolute path in `/etc/profile.d` would point every
+account on the host at one user's home.
 
 ---
 

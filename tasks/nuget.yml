@@ -1,6 +1,10 @@
 ---
 # NuGet (.NET) supply chain hardening
 
+- name: Resolve NuGet's user config home the way the dotnet CLI does
+  ansible.builtin.set_fact:
+    nuget_config_home: "{{ ansible_env.DOTNET_CLI_HOME | default(ansible_env.HOME, true) }}/.nuget/NuGet"
+
 - name: Check if dotnet is installed
   ansible.builtin.command: which dotnet
   register: dotnet_check
@@ -8,16 +12,23 @@
   check_mode: false
   failed_when: false
 
+# NuGet's user config home is <cli-home>/.nuget/NuGet, and the cli home is
+# DOTNET_CLI_HOME when set, NOT $HOME. MEASURED on SDK 9.0.317 (linux-arm64):
+# `HOME=a DOTNET_CLI_HOME=b dotnet nuget config paths` reports
+# b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5) so the file
+# is not stranded outside the merged set on hosts that set DOTNET_CLI_HOME.
+# The path itself was always right here; the CI surface wrote to
+# ~/.config/NuGet, which dotnet never reads, until ECH-157.
 - name: Create NuGet config directory
   ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.nuget/NuGet"
+    path: "{{ nuget_config_home }}"
     state: directory
     mode: "0755"
   when: dotnet_check.rc == 0
 
 - name: Deploy NuGet.Config with supply chain hardening
   ansible.builtin.copy:
-    dest: "{{ ansible_env.HOME }}/.nuget/NuGet/NuGet.Config"
+    dest: "{{ nuget_config_home }}/NuGet.Config"
     mode: "0644"
     content: |
       <?xml version="1.0" encoding="utf-8"?>
@@ -31,5 +42,30 @@
           <!-- Require signed packages -->
           <add key="signatureValidationMode" value="require" />
         </config>
+        <!-- signatureValidationMode=require with NO trustedSigners refuses
+             EVERY package, so the operator's only recovery is to delete the
+             key. The action side has always carried this block; the role did
+             not, which was a parity gap rather than a deliberate choice. It
+             matters more now: the role exports
+             DOTNET_NUGET_SIGNATURE_VERIFICATION=true (see
+             templates/supply-chain-env.sh.j2), which turns enforcement on for
+             the 6.x tier where the config key alone was inert (MEASURED:
+             6.0.428). Fingerprint is nuget.org's repository signing
+             certificate, identical to the one in action/harden.sh. -->
+        <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
+             packages signed under a rotation we do not trust fail with NU3034 and the
+             install is refused -- signatureValidationMode=require makes that fatal.
+             Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
+             Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
+        <trustedSigners>
+          <repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">
+            <!-- current; deployed 2024-04-08 -->
+            <certificate fingerprint="1F4B311D9ACC115C8DC8018B5A49E00FCE6DA8E2855F9F014CA6F34570BC482D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
+            <!-- previous; renewed 2021-03-15, expired 2024-05-15 -->
+            <certificate fingerprint="5A2901D6ADA3D18260B9C6DFE2133C95D74B9EEF6AE0E5DC334C8454D1477DF4" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
+            <!-- intermediate/original; still required for older packages -->
+            <certificate fingerprint="0E5F38F57DC1BCC806D8494F4F90FBCEDD988B46760709CBEEC6F4219AA6157D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
+          </repository>
+        </trustedSigners>
       </configuration>
   when: dotnet_check.rc == 0

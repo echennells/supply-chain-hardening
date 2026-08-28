@@ -40,8 +40,13 @@ export GOTOOLCHAIN=local
 # === PHP (Composer) ===
 # Belt-and-suspenders for `php composer.phar` callers that bypass our
 # /usr/local/bin/composer wrapper but inherit the system env. Composer
-# 2.9+ honors COMPOSER_SKIP_SCRIPTS=<event,list> by skipping dispatch
-# of any user-defined script registered for the named events. Below is
+# 2.8.0+ honors COMPOSER_SKIP_SCRIPTS=<event,list> by skipping dispatch
+# of any user-defined script registered for the named events. MEASURED:
+# silently ignored on 2.2.6 (Ubuntu 22.04) and 2.7.1 (Ubuntu 24.04),
+# honoured on 2.8.12+ — an earlier comment here said 2.9 and was wrong.
+# On 2.2-2.7 this export is inert and the composer PATH wrapper is the
+# only script-blocking layer; tasks/composer.yml records that in
+# skipped_protections so the end-of-run summary says so. Below is
 # the full enumeration from composer's ScriptEvents + PackageEvents +
 # PluginEvents at the time of writing. Composer silently ignores unknown
 # names, so extra events here are harmless if composer drops one in the
@@ -57,3 +62,17 @@ export COMPOSER_SKIP_SCRIPTS='pre-install-cmd,post-install-cmd,pre-update-cmd,po
 # the wrapper but inherit the PAM-loaded environment. Removing either
 # leaves a coverage gap.
 export COMPOSER_ALLOW_SUPERUSER=1
+
+# === .NET (NuGet) ===
+# This env var OVERRIDES signatureValidationMode in NuGet.Config in BOTH
+# directions, on every SDK. MEASURED on 6.0.428, 8.0.424, 9.0.317 and 10.0.400
+# (linux-arm64): DOTNET_NUGET_SIGNATURE_VERIFICATION=false disables signature
+# enforcement even when tasks/nuget.yml has deployed
+# signatureValidationMode=require — so leaving it unset lets any inherited
+# `false` silently disarm the file. Pinning it true fixes the safe side of that
+# conflict and does more than the file can on the 6.x tier, where the config
+# key is accepted-and-inert: MEASURED, 6.0.428 parses require and restores an
+# unsigned package anyway, but refuses with NU3004 once this is true. 8.0.424+
+# enforce the config key unaided, so true is a no-op there beyond denying a
+# later `false` the last word.
+export DOTNET_NUGET_SIGNATURE_VERIFICATION=true

@@ -21,6 +21,8 @@ sbe/
 /FIX_PLAN.md
 /VERIFICATION_REQUESTS.md
 /SBE_DEVC_NOTES.md
+/VERIFIER_STATUS*.md
+/FINDINGS_measured*.md
 
 # Personal dev sandbox for working ON this repo (a vendored copy of
 # trailofbits/claude-code-devcontainer). It is NOT part of the role — the role

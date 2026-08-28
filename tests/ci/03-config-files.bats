@@ -186,10 +186,17 @@ setup() { common_setup; }
 }
 
 @test "nuget: single trusted source with signature validation" {
+  # The path is the assertion. This test used to grep the same
+  # $HOME/.config/NuGet path harden.sh wrote to, so it passed for months while
+  # the dotnet CLI read none of it (ECH-157) — dotnet merges only
+  # <cli-home>/.nuget/NuGet/NuGet.Config, MEASURED on SDK 6.0.428/8.0.424/
+  # 9.0.317/10.0.400. Assert the tool's path, and assert the old one is NOT
+  # written, so a regression cannot pass by writing both.
   run harden ECOSYSTEMS=nuget -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/NuGet/NuGet.Config" "nuget.org"
-  assert_file_contains "$TEST_HOME/.config/NuGet/NuGet.Config" "signatureValidationMode"
+  assert_file_contains "$TEST_HOME/.nuget/NuGet/NuGet.Config" "nuget.org"
+  assert_file_contains "$TEST_HOME/.nuget/NuGet/NuGet.Config" "signatureValidationMode"
+  [ ! -e "$TEST_HOME/.config/NuGet/NuGet.Config" ]
 }
 
 @test "the age gate window propagates to every ecosystem's own unit" {

@@ -1,6 +1,48 @@
 {%- set v = bun_detected_version | default('', true) -%}
 {%- set has_text_lockfile = v == '' or v is version('1.2.0', '>=') -%}
+{%- set has_ignore_scripts = v == '' or v is version('1.2.0', '>=') -%}
+{%- set has_min_release_age = v == '' or v is version('1.3.0', '>=') -%}
 # Managed by ansible-supply-chain-security
+#
+# WHERE THIS FILE LIVES IS NOT ~/.bunfig.toml UNCONDITIONALLY.
+# bun's global bunfig is $XDG_CONFIG_HOME/.bunfig.toml — dot-prefixed — when
+# XDG_CONFIG_HOME is set, and $HOME/.bunfig.toml only when it is unset. There
+# is NO fallback between them. tasks/bun.yml resolves the path; do not
+# hardcode $HOME here or anywhere else.
+#
+# VERSION TIERING — MEASURED across bun 1.1.38 / 1.2.0 / 1.2.10 / 1.2.20 /
+# 1.2.22 / 1.2.23 / 1.3.0 / 1.4.0:
+#
+#   ignoreScripts      INERT below bun 1.2.0. The GLOBAL bunfig and a LOCAL
+#                      bunfig are both ignored there; only the CLI
+#                      --ignore-scripts blocks lifecycle scripts on 1.1.x.
+#                      Honoured 1.2.0 -> 1.4.0.
+#   minimumReleaseAge  DOES NOT EXIST below bun 1.3.0 (absent through 1.2.23).
+#                      Present 1.3.0 -> 1.4.0.
+#   saveTextLockfile   bun 1.2.0+; older bun defaults to binary bun.lockb.
+#   exact / frozenLockfile / auto = "disable"
+#                      universal across 1.1.38 -> 1.4.0. auto = "disable" is
+#                      still a valid enum value on 1.4.0 — do not "fix" it.
+#
+# Below its threshold a key is OMITTED rather than emitted-and-ignored, and
+# tasks/bun.yml records the gap in skipped_protections so the end-of-run
+# summary says the protection is missing instead of reporting it as applied.
+#
+# Version UNDETECTED at apply time (bun not installed yet, or `bun --version`
+# failed): emit everything. bun accepts unknown [install] keys SILENTLY
+# (MEASURED on all eight versions above), so an over-emitted key is inert on
+# old bun, while an under-emitted one would silently leave a modern bun
+# unhardened. This is the opposite direction from composer's tiering, where
+# the emit direction is the one that can brick the tool.
+#
+# FAIL-WHOLE HAZARD — read before adding a key or widening a value.
+# bun rejects the ENTIRE bunfig on ONE bad value ("Invalid Bunfig: failed to
+# load bunfig", exit 1) — MEASURED with a QUOTED minimumReleaseAge
+# (minimumReleaseAge = "2d"). It does not skip the bad key: every other key in
+# this file goes with it AND bun itself stops working. So minimumReleaseAge is
+# rendered through `| int` (bare integer seconds, never quoted, never a
+# duration string) and tasks/bun.yml asserts the variable is a non-negative
+# integer before this file is written.
 #
 # frozenLockfile refuses install if package.json diverges from the
 # lockfile — catches sneaky dep additions during build. Universal
@@ -11,13 +53,9 @@
 # `bun run`'s runtime auto-install because bun's docs are explicit:
 # "Currently, bunfig.toml is only automatically loaded for `bun run`
 # in a local project (it doesn't check for a global .bunfig.toml)."
-# The `bun run` gap is closed by /usr/local/bin/bun (the PATH wrapper
-# this role deploys when bun_path_wrapper=true), which injects
-# --no-install on every runtime invocation.
-#
-# saveTextLockfile uses text-format bun.lock (diff-able for audit)
-# instead of the binary bun.lockb. Added in bun 1.2; older bun ignores
-# the key but defaults to binary format.
+# The `bun run` gap is closed by the bun PATH wrapper this role deploys
+# when bun_path_wrapper=true, which injects --no-install on every
+# runtime invocation.
 #
 # ignoreScripts is bun's real key for blocking lifecycle scripts
 # (preinstall/install/postinstall/prepare). Earlier versions of this
@@ -25,9 +63,13 @@
 # silently ignored, so install-time scripts ran despite the claim.
 # Caught 2026-05-28 during a fresh taxonomy audit (Axis 3: made-up keys).
 [install]
-minimumReleaseAge = {{ bun_minimum_release_age_seconds }}
+{% if has_min_release_age %}
+minimumReleaseAge = {{ bun_minimum_release_age_seconds | int }}
+{% endif %}
 exact = {{ bun_exact | bool | lower }}
+{% if has_ignore_scripts %}
 ignoreScripts = {{ bun_ignore_scripts | bool | lower }}
+{% endif %}
 frozenLockfile = {{ bun_frozen_lockfile | bool | lower }}
 auto = "{{ bun_auto }}"
 {% if has_text_lockfile and bun_save_text_lockfile %}

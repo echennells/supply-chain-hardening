@@ -53,9 +53,18 @@ harden() {
     if [[ "$a" == "--" ]]; then sep=1; continue; fi
     if [[ $sep -eq 1 ]]; then args+=("$a"); else envs+=("$a"); fi
   done
+  # GRADLE_USER_HOME is part of the isolation, not part of the fixture.
+  # Relocating HOME does NOT relocate gradle: gradle's default user home is
+  # <user.home>/.gradle, and on Linux the JVM reads user.home from the PASSWD
+  # ENTRY, so harden_gradle resolves the passwd home and would write the init
+  # script into the developer's REAL ~/.gradle from inside a sandboxed test.
+  # GRADLE_USER_HOME is the only lever that moves it, which is exactly why
+  # harden_gradle exports it. Any sandbox that relocates HOME has to set this
+  # too.
   env -i \
     PATH="${TEST_BIN}:${PATH}" \
     HOME="$TEST_HOME" \
+    GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
     TMPDIR="$TEST_TMP" \
     WRITE_ETC=false \
     "${envs[@]}" \

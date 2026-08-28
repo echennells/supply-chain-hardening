@@ -70,7 +70,30 @@ assert_has_baseline() {
   local f="$1"
   grep -q '"secure-http": true' "$f" || { echo "missing secure-http in $f" >&2; return 1; }
   grep -q '"preferred-install": "dist"' "$f" || { echo "missing preferred-install in $f" >&2; return 1; }
-  grep -q '"allow-plugins": false' "$f" || { echo "missing allow-plugins in $f" >&2; return 1; }
+  # allow-plugins denial, in whichever form this tier can survive.
+  # MEASURED (composer 2.0.14 → 2.10.3): "allow-plugins": false is a HARD
+  # FATAL below 2.2.15 — array_merge(): Argument #1 must be of type array,
+  # false given — exit 255 on install/config/dump-autoload. Ubuntu 22.04
+  # ships 2.2.6, so the literal false bricked composer there. Below 2.2.15
+  # the template emits the empty allowlist {}, which 2.2.6 accepts and which
+  # blocks every plugin just the same. The exact form per tier is asserted
+  # in its own test below; here it is "denied, one way or the other".
+  grep -qE '"allow-plugins": (false|\{\})' "$f" \
+    || { echo "missing allow-plugins denial in $f" >&2; return 1; }
+}
+
+@test "tier-render: allow-plugins is {} below 2.2.15, false at/above it (false is fatal on older composer)" {
+  # The regression this pins: emitting false on composer < 2.2.15 makes every
+  # composer command except --version exit 255 with a PHP TypeError.
+  grep -q '"allow-plugins": {}' "$TIER_DIR/undetected.json" \
+    || { echo "FAIL: undetected must use the {} baseline" >&2; cat "$TIER_DIR/undetected.json" >&2; return 1; }
+  grep -q '"allow-plugins": {}' "$TIER_DIR/tier3-jammy.json" \
+    || { echo "FAIL: composer 2.2.6 (jammy) must use {} — false is fatal there" >&2; cat "$TIER_DIR/tier3-jammy.json" >&2; return 1; }
+  local f
+  for f in tier3-bookworm tier2-noble tier1-current tier1-future; do
+    grep -q '"allow-plugins": false' "$TIER_DIR/$f.json" \
+      || { echo "FAIL: $f (composer >= 2.2.15) should emit the explicit false" >&2; cat "$TIER_DIR/$f.json" >&2; return 1; }
+  done
 }
 
 @test "tier-render: undetected (composer not installed) → Tier-3 baseline, no audit block" {

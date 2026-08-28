@@ -31,6 +31,16 @@ import sys
 VERSION_CONDITIONAL = {
     "enableHardenedMode": "yarn 4.0+ only; both role and action gate on the detected version",
     "saveTextLockfile": "bun 1.2+ only; both gate on the detected version",
+    # Qualified "<label>:<key>" so a shared key name (minimumReleaseAge also
+    # exists in pnpm's config) is excused for ONE ecosystem, not all of them.
+    "bun:ignoreScripts": (
+        "bun 1.2.0+ only. MEASURED inert below 1.2.0 in the global AND a local "
+        "bunfig; both role and action gate on the detected version."
+    ),
+    "bun:minimumReleaseAge": (
+        "bun 1.3.0+ only. MEASURED: the key does not exist through bun 1.2.23; "
+        "both role and action gate on the detected version."
+    ),
 }
 
 # key -> why the CI action does not carry it
@@ -97,6 +107,8 @@ def main():
 
         for k in sorted(role - act):
             if k in EXCLUDED or k in VERSION_CONDITIONAL:
+                continue
+            if f"{label}:{k}" in EXCLUDED or f"{label}:{k}" in VERSION_CONDITIONAL:
                 continue
             gaps.append((label, k, "in the role, absent from the action"))
 

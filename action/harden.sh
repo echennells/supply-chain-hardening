@@ -207,6 +207,24 @@ write_env() {
   esac
 }
 
+# WHICH JOB WROTE THIS RECORD.
+#
+# On a self-hosted runner the temp dir outlives the job, so yesterday's
+# outputs file is still sitting there when today's verify step reads it — and
+# it would silently scope today's verification to yesterday's ecosystem list.
+# verify.sh compares this against its own job identity and ignores a record
+# that belongs to somebody else. Empty on a platform with no job identity,
+# which verify.sh treats as "cannot tell" and accepts.
+job_identity() {
+  if   [[ -n "${GITHUB_RUN_ID:-}" ]]; then
+    printf '%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT:-1}" "${GITHUB_JOB:-}"
+  elif [[ -n "${CI_JOB_ID:-}" ]];              then printf '%s' "$CI_JOB_ID"
+  elif [[ -n "${BUILDKITE_JOB_ID:-}" ]];       then printf '%s' "$BUILDKITE_JOB_ID"
+  elif [[ -n "${CIRCLE_WORKFLOW_JOB_ID:-}" ]]; then printf '%s' "$CIRCLE_WORKFLOW_JOB_ID"
+  elif [[ -n "${BUILD_BUILDID:-}" ]];          then printf '%s' "$BUILD_BUILDID"
+  fi
+}
+
 emit_output() {
   local k="$1" v="$2"
   printf '%s=%s\n' "$k" "$v" >> "$HARDENING_OUTPUT_FILE"
@@ -240,6 +258,12 @@ if [[ "${SUPPLY_CHAIN_HARDEN_SKIP:-false}" == "true" ]]; then
   emit_output sfw_installed false
   emit_output tool_versions "{}"
   emit_output env_file "$HARDENING_ENV_FILE"
+  emit_output wrappers_deployed ""
+  emit_output job_id "$(job_identity)"
+  # NO hardening_complete marker. Nothing was hardened, so the verifier must
+  # NOT scope itself to this record — it widens back to checking every
+  # installed tool and says out loud that the scope is unknown. An
+  # intentional skip is still an unhardened job.
   exit 0
 fi
 
@@ -345,6 +369,21 @@ version_ge() {
 
 HARDENED=()
 SFW_INSTALLED=false
+
+# WRAPPERS ACTUALLY DEPLOYED, recorded for the verifier.
+#
+# This is the other half of the ecosystem list. A PATH wrapper is a separate
+# decision from hardening the ecosystem — composer's config is written even
+# when composer is absent and no wrapper lands — so `ecosystems_hardened`
+# cannot answer "was a bun wrapper supposed to be here?". Without that answer
+# verify.sh had to report a missing wrapper as WEAK, and WEAK does not move
+# the exit code: a job with every wrapper and a job with none printed the same
+# verdict. Recorded here, a promised-and-missing wrapper is a GAP.
+#
+# Indexed array, appended at each deploy site AFTER the chmod succeeds, so the
+# record says deployed only where one is. bash 3.2 safe (see TV_KEYS below).
+WRAPPED=()
+record_wrapper() { WRAPPED+=("$1"); }
 
 # TOOL VERSIONS — parallel indexed arrays, NOT an associative array.
 #
@@ -573,8 +612,23 @@ harden_uv() {
   section "uv"
   write_env UV_LINK_MODE copy
 
-  mkdir -p "$HOME/.config/uv"
-  cat > "$HOME/.config/uv/uv.toml" <<EOF
+  # WHERE THE USER-LEVEL uv.toml LIVES — resolved from uv's environment, never
+  # hardcoded. uv's user config is $XDG_CONFIG_HOME/uv/uv.toml and falls back
+  # to $HOME/.config/uv/uv.toml only when XDG_CONFIG_HOME is unset. MEASURED:
+  # with uv.toml written to $HOME/.config/uv while XDG_CONFIG_HOME pointed
+  # elsewhere, `uv --show-settings` reports no_build: None — uv read nothing of
+  # ours, and the old verifier row still said OK because the checker shared the
+  # writer's wrong assumption. docs/design-principles.md Axis 5, "Assumed
+  # canonical config homes".
+  # NOT MEASURED, per uv's documentation only: UV_CONFIG_FILE / --config-file
+  # names an explicit uv.toml that overrides the discovered user config. We do
+  # not write to it (it is a caller-owned path); a runner that sets it is not
+  # covered by the file we write here.
+  local uv_config_dir
+  uv_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/uv"
+
+  mkdir -p "$uv_config_dir"
+  cat > "$uv_config_dir/uv.toml" <<EOF
 # Managed by supply-chain-harden action
 exclude-newer = "$UV_EXCLUDE_NEWER"
 no-build = true
@@ -598,7 +652,7 @@ EOF
 
   HARDENED+=("uv")
   set_tool_version "uv" "$(detect_version uv "uv --version")"
-  log "uv: exclude-newer='$UV_EXCLUDE_NEWER', no-build=true, index-strategy=first-index"
+  log "uv: exclude-newer='$UV_EXCLUDE_NEWER', no-build=true, index-strategy=first-index (user config at $uv_config_dir/uv.toml)"
   end_section
 }
 
@@ -619,6 +673,26 @@ harden_composer() {
     version_ge "$composer_version" "2.9.0" && has_block=true
   fi
 
+  # allow-plugins is tiered SEPARATELY, on 2.2.15.
+  #
+  # MEASURED (composer 2.0.14 -> 2.10.3, 16 phars): "allow-plugins": false is
+  # a HARD FATAL below 2.2.15 —
+  #     PHP Fatal error: Uncaught TypeError: array_merge():
+  #     Argument #1 must be of type array, false given
+  # exit 255 on install / config / dump-autoload, i.e. everything except
+  # --version. Ubuntu 22.04 ships composer 2.2.6, so writing the literal
+  # false bricked composer on every jammy runner. `{}` — the empty allowlist
+  # — is accepted by 2.2.6 AND blocks every plugin just the same, so it is
+  # what we emit below 2.2.15 and whenever the version is undetected.
+  # (allow-plugins only exists from 2.2.0 at all; below that the key is inert
+  # either way and --no-plugins in the wrapper is the layer doing the work.)
+  local allow_plugins_json="{}"
+  if [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]]; then
+    allow_plugins_json="true"
+  elif [[ -n "$composer_version" ]] && version_ge "$composer_version" "2.2.15"; then
+    allow_plugins_json="false"
+  fi
+
   {
     echo "{"
     echo "  \"config\": {"
@@ -626,7 +700,7 @@ harden_composer() {
     echo "    \"lock\": true,"
     echo "    \"preferred-install\": \"dist\","
     if [[ "$has_audit" == "true" ]]; then
-      echo "    \"allow-plugins\": $COMPOSER_ALLOW_PLUGINS,"
+      echo "    \"allow-plugins\": $allow_plugins_json,"
       echo "    \"audit\": {"
       if [[ "$has_block" == "true" ]]; then
         echo "      \"abandoned\": \"fail\","
@@ -637,7 +711,7 @@ harden_composer() {
       fi
       echo "    }"
     else
-      echo "    \"allow-plugins\": $COMPOSER_ALLOW_PLUGINS"
+      echo "    \"allow-plugins\": $allow_plugins_json"
     fi
     echo "  }"
     echo "}"
@@ -647,11 +721,20 @@ harden_composer() {
   set_tool_version "composer" "$composer_version"
 
   # COMPOSER_SKIP_SCRIPTS env var: belt-and-suspenders for `php composer.phar`
-  # callers that bypass the wrapper but inherit the action's env. Composer
-  # 2.9+ honors this; older composer silently ignores.
+  # callers that bypass the wrapper but inherit the action's env.
+  #
+  # MEASURED: honoured from composer 2.8.0 — silently ignored on 2.2.6 and
+  # 2.7.1, honoured on 2.8.12+. (This comment said "2.9+" before; the number
+  # was wrong and it was the number everyone cited.) On 2.2-2.7 the var is
+  # inert, so the notice below says so instead of leaving an env var in the
+  # log that reads as coverage.
   write_env COMPOSER_SKIP_SCRIPTS \
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
   write_env COMPOSER_ALLOW_SUPERUSER 1
+
+  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.0"; then
+    notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.0). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
+  fi
 
   # PATH wrapper at the DISCOVERED composer location (wrap in-place —
   # same fix as bun). Wrapping at /usr/local/bin/composer breaks when
@@ -679,61 +762,194 @@ harden_composer() {
     real_composer="${real_composer}-real"
   fi
 
-  local maybe_no_plugins="--no-plugins"
+  local plugins_flag_line="FLAGS+=(--no-plugins)"
   if [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]]; then
-    maybe_no_plugins=""
+    plugins_flag_line="# composer_allow_plugins=true — --no-plugins deliberately not injected"
+  fi
+
+  # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
+  # MEASURED (2.0.14 -> 2.10.3): on 2.0/2.1 only install, update, require,
+  # remove and dump-autoload declare it, so a wrapper that injects it
+  # unconditionally makes `composer show`, `composer config` and
+  # `composer diagnose` die with
+  #     The "--no-scripts" option does not exist.
+  # It became global in composer 2.2.0. Inject unconditionally at or above
+  # that; below it (and when the version is undetected — safe baseline) the
+  # wrapper injects only for the subcommands that declare it.
+  # --no-plugins IS application-level on 2.0/2.1 and is always injected.
+  local no_scripts_is_global=false
+  if [[ -n "$composer_version" ]] && version_ge "$composer_version" "2.2.0"; then
+    no_scripts_is_global=true
   fi
 
   cat <<EOF | sudo tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
+#
+# --no-scripts is an application-level option only from composer 2.2.0
+# (MEASURED 2.0.14 -> 2.10.3). NO_SCRIPTS_IS_GLOBAL below was rendered from
+# the composer version detected when this wrapper was written
+# (${composer_version:-undetected}); when it is false the wrapper injects
+# --no-scripts only for the subcommands that declare it on 2.0/2.1, because
+# injecting it elsewhere there fails with
+#     The "--no-scripts" option does not exist.
 REAL_COMPOSER='$real_composer'
 if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "$wrapper_target" ]; then
   echo "[supply-chain-harden] error: real composer not found at '\$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
 fi
 export COMPOSER_ALLOW_SUPERUSER=1
-exec "\$REAL_COMPOSER" --no-scripts $maybe_no_plugins "\$@"
+
+NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+
+FLAGS=()
+if [ "\$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
+  FLAGS+=(--no-scripts)
+else
+  # First non-option token is the subcommand. -d/--working-dir takes a value,
+  # so its argument must not be mistaken for the subcommand.
+  skip_next=0
+  for arg in "\$@"; do
+    if [ "\$skip_next" = 1 ]; then skip_next=0; continue; fi
+    case "\$arg" in
+      -d|--working-dir) skip_next=1; continue ;;
+      -*) continue ;;
+    esac
+    case "\$arg" in
+      install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+        FLAGS+=(--no-scripts) ;;
+    esac
+    break
+  done
+fi
+$plugins_flag_line
+
+exec "\$REAL_COMPOSER" \${FLAGS[@]+"\${FLAGS[@]}"} "\$@"
 EOF
   sudo chmod 755 "$wrapper_target"
-  log "composer: wrapper deployed at $wrapper_target (--no-scripts$([[ -n "$maybe_no_plugins" ]] && echo " --no-plugins"))"
+  local wrap_desc="--no-scripts on every invocation"
+  if [[ "$no_scripts_is_global" != "true" ]]; then
+    wrap_desc="--no-scripts on install/update/require/remove/dump-autoload only"
+    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project, run-script and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
+  fi
+  [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] || wrap_desc="$wrap_desc, --no-plugins"
+  log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"
+  record_wrapper composer
   end_section
 }
 
 harden_bun() {
   section "bun"
-  mkdir -p "$HOME"
 
-  # Detect bun version for tier-rendering. saveTextLockfile requires
-  # bun 1.2+; key is silently ignored on older versions but emitted
-  # unconditionally for forward-compat.
   local bun_version
   bun_version=$(detect_version bun "bun --version")
-  local has_save_text_lockfile=true
-  if [[ -n "$bun_version" ]] && ! version_ge "$bun_version" "1.2.0"; then
-    has_save_text_lockfile=false
+
+  # VERSION TIERING — MEASURED across bun 1.1.38 / 1.2.0 / 1.2.10 / 1.2.20 /
+  # 1.2.22 / 1.2.23 / 1.3.0 / 1.4.0:
+  #
+  #   ignoreScripts      INERT below bun 1.2.0. The GLOBAL bunfig and a LOCAL
+  #                      bunfig are BOTH ignored there; only the CLI
+  #                      --ignore-scripts blocks lifecycle scripts on 1.1.x.
+  #                      Honoured 1.2.0 -> 1.4.0.
+  #   minimumReleaseAge  DOES NOT EXIST below bun 1.3.0 (absent through
+  #                      1.2.23). Present 1.3.0 -> 1.4.0.
+  #   saveTextLockfile   bun 1.2.0+; older bun defaults to binary bun.lockb.
+  #   exact / frozenLockfile / auto = "disable"
+  #                      universal 1.1.38 -> 1.4.0. auto = "disable" is still
+  #                      a valid enum value on 1.4.0 — do not "fix" it.
+  #
+  # Below its threshold a key is OMITTED rather than written-and-ignored, and
+  # the gap is announced with notice() — so the job log says the protection
+  # is missing instead of the file claiming a protection bun never applies.
+  #
+  # Version UNDETECTED (bun not installed on this runner, or --version
+  # failed): emit everything. bun accepts unknown [install] keys SILENTLY
+  # (measured on all eight versions above), so an over-emitted key is inert
+  # on old bun, while an under-emitted one would leave a modern bun
+  # unhardened. This is the opposite of composer's tiering, where the emit
+  # direction is the one that can brick the tool.
+  local has_save_text_lockfile=true has_ignore_scripts=true has_min_release_age=true
+  if [[ -n "$bun_version" ]]; then
+    if ! version_ge "$bun_version" "1.2.0"; then
+      has_save_text_lockfile=false
+      has_ignore_scripts=false
+    fi
+    if ! version_ge "$bun_version" "1.3.0"; then
+      has_min_release_age=false
+    fi
   fi
 
-  # ~/.bunfig.toml — install-time hardening. NOTE: per bun's docs,
-  # this file is NOT consulted for `bun run`; only for `bun install`.
-  # The runtime auto-install gap is closed by the wrapper below.
+  # FAIL-WHOLE HAZARD, not fail-silent. bun rejects the ENTIRE bunfig on ONE
+  # bad value — "Invalid Bunfig: failed to load bunfig", exit 1 — MEASURED
+  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d"). One malformed
+  # key disarms every other key in the file AND breaks bun itself, so a bad
+  # value here is strictly worse than writing nothing. BUN_AGE_SECONDS is
+  # $(( RELEASE_AGE_HOURS * 3600 )), i.e. always a bare integer and never
+  # quoted — but RELEASE_AGE_HOURS is caller-supplied, so a negative or
+  # otherwise non-integer value drops the key rather than risking the file.
+  # Never interpolate a duration string ("2d") or a quoted number here.
+  if [[ "$has_min_release_age" == "true" ]] && ! [[ "$BUN_AGE_SECONDS" =~ ^[0-9]+$ ]]; then
+    has_min_release_age=false
+    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted: bun rejects the WHOLE bunfig on one bad value, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
+  fi
+
+  # WHERE THE GLOBAL BUNFIG LIVES — resolved from bun's environment, never
+  # hardcoded. MEASURED (1.1.38 -> 1.4.0): bun reads
+  #   $XDG_CONFIG_HOME/.bunfig.toml  — DOT-PREFIXED — when XDG_CONFIG_HOME is
+  #                                    set, and
+  #   $HOME/.bunfig.toml             — only when XDG_CONFIG_HOME is unset.
+  # There is NO fallback between them: with XDG_CONFIG_HOME pointing at a
+  # directory holding no .bunfig.toml, $HOME/.bunfig.toml is never read (the
+  # fixture's preinstall ran). $XDG_CONFIG_HOME/bunfig.toml WITHOUT the dot
+  # is not read either. This wrote $HOME/.bunfig.toml unconditionally, which
+  # was dead on every runner image that sets XDG_CONFIG_HOME — the wrappers
+  # below were the only surviving layer there.
+  # docs/design-principles.md Axis 5, "Assumed canonical config homes".
+  local bunfig_path
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    bunfig_path="$XDG_CONFIG_HOME/.bunfig.toml"
+  else
+    bunfig_path="$HOME/.bunfig.toml"
+  fi
+  mkdir -p "$(dirname "$bunfig_path")"
+
+  # The bunfig is install-time hardening. NOTE: per bun's docs, this file is
+  # NOT consulted for `bun run`; only for `bun install`. The runtime
+  # auto-install gap is closed by the wrapper below.
   #
   # ignoreScripts (NOT lifecycleScripts — earlier action versions wrote
   # the wrong key which bun silently ignored) blocks bun install's
   # preinstall/install/postinstall/prepare hooks. Fixed 2026-05-28 after
   # a fresh audit caught the made-up key. Same bug-shape as the original
   # composer COMPOSER_NO_SCRIPTS bug we shipped + later fixed.
-  cat > "$HOME/.bunfig.toml" <<EOF
-# Managed by supply-chain-harden action
-[install]
-minimumReleaseAge = $BUN_AGE_SECONDS
-exact = true
-ignoreScripts = true
-frozenLockfile = true
-auto = "disable"
-EOF
-  if [[ "$has_save_text_lockfile" == "true" ]]; then
-    echo "saveTextLockfile = true" >> "$HOME/.bunfig.toml"
+  #
+  # Written with `if` blocks, not `[[ ... ]] && echo`: a false test as the
+  # last command of the group would return 1 and `set -e` would kill the run.
+  {
+    echo "# Managed by supply-chain-harden action"
+    echo "[install]"
+    if [[ "$has_min_release_age" == "true" ]]; then
+      echo "minimumReleaseAge = $BUN_AGE_SECONDS"
+    fi
+    echo "exact = true"
+    if [[ "$has_ignore_scripts" == "true" ]]; then
+      echo "ignoreScripts = true"
+    fi
+    echo "frozenLockfile = true"
+    echo 'auto = "disable"'
+    if [[ "$has_save_text_lockfile" == "true" ]]; then
+      echo "saveTextLockfile = true"
+    fi
+  } > "$bunfig_path"
+  log "bun: global bunfig written at $bunfig_path"
+
+  if [[ "$has_ignore_scripts" != "true" ]]; then
+    notice "bun $bun_version ignores the [install] ignoreScripts bunfig key (MEASURED inert below 1.2.0 in BOTH a global and a local bunfig; honoured 1.2.0+), so it was not written. \`bun install\` lifecycle scripts are NOT blocked by config on this runner — only the CLI --ignore-scripts blocks them on this version. Upgrade bun to >= 1.2.0 and re-run."
+  fi
+  # Guarded on the version, not on has_min_release_age: the bad-value branch
+  # above already warned for its own reason and must not claim "old bun".
+  if [[ -n "$bun_version" ]] && ! version_ge "$bun_version" "1.3.0"; then
+    notice "bun $bun_version has no [install] minimumReleaseAge key (MEASURED: added in 1.3.0, absent through 1.2.23), so it was not written. \`bun install\` on this runner will accept a package published seconds ago; the ${BUN_AGE_SECONDS}s cooldown is not enforced. Upgrade bun to >= 1.3.0 and re-run."
   fi
 
   HARDENED+=("bun")
@@ -796,6 +1012,7 @@ esac
 EOF
   sudo chmod 755 "$wrapper_target"
   log "bun: wrapper deployed at $wrapper_target (injects --no-install for runtime paths)"
+  record_wrapper bun
 
   # ---- bunx ----
   #
@@ -805,7 +1022,7 @@ EOF
   #
   # Wrapping `bun` above does NOT cover it. bunx is a SEPARATE entry point
   # (the official installer creates ~/.bun/bin/bunx alongside bun), and the
-  # global ~/.bunfig.toml does not apply to it either — so none of
+  # global bunfig does not apply to it either — so none of
   # minimumReleaseAge / ignoreScripts / frozenLockfile reach this path.
   # Verified 2026-08 on a host where the bun wrapper was already deployed:
   # `bunx cowsay` still auto-downloaded and executed. That is finding V5;
@@ -861,6 +1078,7 @@ exec -a bunx "\$REAL_BUN" --no-install "\$@"
 EOF
     sudo chmod 755 "$real_bunx"
     log "bunx: wrapper deployed at $real_bunx (injects --no-install; fails closed on uninstalled packages)"
+    record_wrapper bunx
   fi
 
   end_section
@@ -1180,6 +1398,7 @@ WRAPPER
   subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|"
   sudo cp "$tmp_wrapper" "$wrapper_target"
   sudo chmod 755 "$wrapper_target"
+  record_wrapper cargo
   rm -f "$tmp_wrapper"
 
   if [[ -n "$cooldown_bin" ]]; then
@@ -1358,6 +1577,7 @@ DENOWRAP
   rm -f "$tmp_deno"
   sudo chmod 755 "$wrapper_path"
   log "deno: wrapper deployed at $wrapper_path (injects --minimum-dependency-age=$DENO_AGE_ISO)"
+  record_wrapper deno
   end_section
 }
 
@@ -1390,8 +1610,63 @@ EOF
 
 harden_gradle() {
   section "gradle"
-  mkdir -p "$HOME/.gradle"
-  cat > "$HOME/.gradle/init.gradle.kts" <<'EOF'
+
+  # WHERE GRADLE ACTUALLY LOOKS.
+  #
+  # Gradle resolves its user home as $GRADLE_USER_HOME, and when that is unset
+  # as <user.home>/.gradle — where user.home is a JVM system property that on
+  # Linux comes from the PASSWD ENTRY, not from $HOME. MEASURED (gradle 8.14.3
+  # on openjdk-21, linux-arm64): with HOME=/tmp/.../fakehome,
+  # System.getProperty("user.home") was still /home/vscode and gradle loaded
+  # NO init script from fakehome/.gradle.
+  #
+  # So the Axis-5 fix that is sufficient for uv/bun/cargo — resolve the tool's
+  # own env var, `${GRADLE_USER_HOME:-$HOME/.gradle}` — is NOT sufficient here,
+  # because the DEFAULT is passwd-derived rather than $HOME-derived. This
+  # function used to write a bare $HOME/.gradle, so on every host where $HOME
+  # diverges from the passwd home (docker run -u <uid>, OpenShift's arbitrary
+  # uids, sudo -E, any runner that relocates HOME) the init script was written,
+  # was correct, and was never read.
+  #
+  # BOTH halves of the fix are applied, because either alone leaves a hole:
+  #   1. write into the home gradle will resolve on its own — the passwd home
+  #      when GRADLE_USER_HOME is unset. This is the layer that survives a
+  #      build which never sees our env layer at all (container CMD, systemd:
+  #      Axis 2), which is why (2) alone is not enough.
+  #   2. export GRADLE_USER_HOME at exactly the directory we wrote, so there is
+  #      no ambiguity left for a later step to resolve differently — and so
+  #      that a passwd home we could NOT write to (an arbitrary uid has no
+  #      passwd entry at all, and $HOME is then the only writable home) is
+  #      redirected to the home we did use. This is why (1) alone is not
+  #      enough either.
+  # Unlike the role, exporting here is safe: harden.sh's env layer is scoped to
+  # one CI job running as one user, not a system-wide /etc/profile.d shared by
+  # every account on a long-lived host.
+  local gradle_home="" passwd_home="" uid
+  if [[ -n "${GRADLE_USER_HOME:-}" ]]; then
+    gradle_home="$GRADLE_USER_HOME"
+  else
+    # id -u, never $USER/$LOGNAME: those are env-derived and can lie in exactly
+    # the relocated-HOME containers this resolution exists for. getent is
+    # missing from some minimal images, so fall back to /etc/passwd directly.
+    uid=$(id -u)
+    passwd_home=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || passwd_home=""
+    if [[ -z "$passwd_home" ]]; then
+      passwd_home=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || passwd_home=""
+    fi
+    if [[ -n "$passwd_home" && -d "$passwd_home" && -w "$passwd_home" ]]; then
+      gradle_home="$passwd_home/.gradle"
+      if [[ "$passwd_home" != "${HOME:-}" ]]; then
+        log "gradle: \$HOME is '${HOME:-<unset>}' but the passwd home is '$passwd_home' — writing the init script where the JVM will look, and pinning GRADLE_USER_HOME to it"
+      fi
+    else
+      gradle_home="${HOME:-.}/.gradle"
+      warn "gradle: no writable passwd home for uid $uid (passwd says '${passwd_home:-<none>}'), so the init script goes to '$gradle_home' and GRADLE_USER_HOME is exported to point gradle at it. A gradle build that does not inherit this job's environment will not load it."
+    fi
+  fi
+
+  mkdir -p "$gradle_home"
+  cat > "$gradle_home/init.gradle.kts" <<'EOF'
 // Managed by supply-chain-harden action
 // Enforce HTTPS-only repositories and disable dynamic version resolution.
 allprojects {
@@ -1412,16 +1687,32 @@ allprojects {
   }
 }
 EOF
+  # Layer 2 of the fix above. Written AFTER the file exists so the value we
+  # publish is always a directory we actually populated.
+  write_env GRADLE_USER_HOME "$gradle_home"
   HARDENED+=("gradle")
   set_tool_version "gradle" "$(detect_version gradle "gradle --version")"
-  log "gradle: HTTPS-only repos enforced, dynamic versions blocked"
+  log "gradle: HTTPS-only repos enforced, dynamic versions blocked (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
   end_section
 }
 
 harden_nuget() {
   section "nuget"
-  mkdir -p "$HOME/.config/NuGet"
-  cat > "$HOME/.config/NuGet/NuGet.Config" <<'EOF'
+  # The dotnet CLI reads ONLY <cli-home>/.nuget/NuGet/NuGet.Config. It does NOT
+  # read $HOME/.config/NuGet/NuGet.Config, and XDG_CONFIG_HOME / XDG_DATA_HOME
+  # do not move it. MEASURED on SDK 6.0.428, 8.0.424, 9.0.317 and 10.0.400
+  # (linux-arm64) three ways: `dotnet nuget config paths` lists only the .nuget
+  # path; a decoy source planted under ~/.config/NuGet never shows in
+  # `dotnet nuget list source`; a fresh profile auto-creates the stock config at
+  # the .nuget path. This wrote to ~/.config until ECH-157, which made the whole
+  # CI-side nuget hardening — source allowlist, signatureValidationMode,
+  # trustedSigners — inert. tasks/nuget.yml always used the correct path.
+  # The cli home itself is NOT $HOME when DOTNET_CLI_HOME is set: MEASURED on
+  # 9.0.317, `HOME=a DOTNET_CLI_HOME=b dotnet nuget config paths` reports
+  # b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5).
+  local nuget_home="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet"
+  mkdir -p "$nuget_home"
+  cat > "$nuget_home/NuGet.Config" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Managed by supply-chain-harden action -->
 <configuration>
@@ -1432,16 +1723,38 @@ harden_nuget() {
   <config>
     <add key="signatureValidationMode" value="require" />
   </config>
+  <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
+       packages signed under a rotation we do not trust fail with NU3034 and the
+       install is refused -- signatureValidationMode=require makes that fatal.
+       Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
+       Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
   <trustedSigners>
     <repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">
+      <!-- current; deployed 2024-04-08 -->
+      <certificate fingerprint="1F4B311D9ACC115C8DC8018B5A49E00FCE6DA8E2855F9F014CA6F34570BC482D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
+      <!-- previous; renewed 2021-03-15, expired 2024-05-15 -->
+      <certificate fingerprint="5A2901D6ADA3D18260B9C6DFE2133C95D74B9EEF6AE0E5DC334C8454D1477DF4" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
+      <!-- intermediate/original; still required for older packages -->
       <certificate fingerprint="0E5F38F57DC1BCC806D8494F4F90FBCEDD988B46760709CBEEC6F4219AA6157D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
     </repository>
   </trustedSigners>
 </configuration>
 EOF
+  # The env layer OVERRIDES the config file in both directions, on every SDK.
+  # MEASURED: DOTNET_NUGET_SIGNATURE_VERIFICATION=false disables signature
+  # enforcement on 6.0.428/8.0.424/9.0.317/10.0.400 regardless of
+  # signatureValidationMode=require above — so an attacker-controlled or merely
+  # careless env var silently disarms the file. Setting it =true pins the safe
+  # side of that conflict AND buys real enforcement on the 6.x tier, where the
+  # config key alone is accepted-and-inert: MEASURED, 6.0.428 parses
+  # signatureValidationMode=require and restores an unsigned package anyway,
+  # but refuses with NU3004 once this variable is true. 8.0.424+ enforce the
+  # config key on their own; setting it true there is a no-op that keeps a
+  # later `=false` from being the last word. (ECH-165, Axis 1.)
+  write_env DOTNET_NUGET_SIGNATURE_VERIFICATION true
   HARDENED+=("nuget")
   set_tool_version "nuget" "$(detect_version nuget "dotnet nuget --version")"
-  log "nuget: nuget.org only, signature validation required"
+  log "nuget: nuget.org only, signature validation required (config + DOTNET_NUGET_SIGNATURE_VERIFICATION=true)"
   end_section
 }
 
@@ -1526,6 +1839,7 @@ EOF
   sudo chmod 755 "$wrapper_target"
   SFW_INSTALLED=true
   log "sfw installed; npm wrapper deployed at $wrapper_target"
+  record_wrapper npm
   end_section
 }
 
@@ -1580,11 +1894,26 @@ for _i in "${!TV_KEYS[@]}"; do
 done
 tool_versions_json+="}"
 
+wrappers_str=$(IFS=,; echo "${WRAPPED[*]:-}")
+
 emit_output ecosystems_hardened "$ecosystems_str"
 emit_output release_age_hours     "$RELEASE_AGE_HOURS"
 emit_output sfw_installed         "$SFW_INSTALLED"
 emit_output tool_versions         "$tool_versions_json"
 emit_output env_file              "$HARDENING_ENV_FILE"
+emit_output wrappers_deployed     "$wrappers_str"
+emit_output job_id                "$(job_identity)"
+
+# THE COMPLETION MARKER, AND IT MUST STAY LAST.
+#
+# verify.sh used to treat the mere EXISTENCE of this file as "we know what was
+# requested", and then reported everything absent from the list as N/A. A
+# harden.sh that died anywhere between truncating the file and here therefore
+# produced an empty ecosystem list, an all-N/A table, "RESULT: no gaps" and
+# exit 0 — the run failed and verification called it clean. This marker is
+# written only on the path that reached the end, so a partial record now reads
+# as a partial record.
+emit_output hardening_complete    true
 
 # ---- Job summary ----
 # How later steps actually inherit the env layer differs per platform, so

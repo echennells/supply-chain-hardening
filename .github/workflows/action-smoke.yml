@@ -504,8 +504,16 @@ jobs:
           grep -q 'BUNDLE_DEPLOYMENT: "true"' "$HOME/.bundle/config"
           grep -q "central-https-only" "$HOME/.m2/settings.xml"
           grep -q "failOnDynamicVersions" "$HOME/.gradle/init.gradle.kts"
-          grep -q '"require"' "$HOME/.config/NuGet/NuGet.Config"
-          grep -q "api.nuget.org" "$HOME/.config/NuGet/NuGet.Config"
+          # dotnet reads only <cli-home>/.nuget/NuGet/NuGet.Config; it never
+          # reads $HOME/.config/NuGet, which is where this used to look (and
+          # where harden.sh used to write) — ECH-157.
+          NUGET_CFG="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+          grep -q '"require"' "$NUGET_CFG"
+          grep -q "api.nuget.org" "$NUGET_CFG"
+          [ ! -e "$HOME/.config/NuGet/NuGet.Config" ]
+          # ECH-165: the env layer overrides signatureValidationMode on every
+          # SDK, so the action must pin the safe side of it.
+          [ "$DOTNET_NUGET_SIGNATURE_VERIFICATION" = "true" ]
           echo "✓ all four ecosystem configs deployed with expected keys"
 
   action-bundler-behavioral-frozen:

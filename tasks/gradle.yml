@@ -8,16 +8,59 @@
   check_mode: false
   failed_when: false
 
+- name: Resolve the gradle user home that gradle itself will read
+  # WHERE GRADLE ACTUALLY LOOKS.
+  #
+  # Gradle resolves its user home as $GRADLE_USER_HOME, and when that is unset
+  # as <user.home>/.gradle — where user.home is a JVM system property that on
+  # Linux comes from the PASSWD ENTRY, not from $HOME. MEASURED (gradle 8.14.3
+  # on openjdk-21, linux-arm64): with HOME=/tmp/.../fakehome,
+  # System.getProperty("user.home") was still /home/vscode and gradle loaded
+  # NO init script from fakehome/.gradle.
+  #
+  # This task used to write to `ansible_env.HOME`, i.e. the HOME of ansible's
+  # connection. On any host where that differs from the passwd home — a
+  # container run with `-u <uid>`, OpenShift's arbitrary-uid pattern, sudo -E,
+  # or a connection plugin that sets its own HOME — the init script was
+  # written, was correct, and was never read.
+  #
+  # Note this is NOT the same shape of fix as uv/bun/cargo (design-principles
+  # Axis 5): resolving `${GRADLE_USER_HOME:-$HOME/.gradle}` is still wrong,
+  # because the DEFAULT itself is passwd-derived, not $HOME-derived. So:
+  #   1. $GRADLE_USER_HOME from the target's own environment wins, as always;
+  #   2. otherwise `ansible_user_dir` — which ansible's user fact collector
+  #      reads out of the passwd entry with pwd.getpw*(), the same source the
+  #      JVM uses for user.home. These tasks do not `become`, so the fact and
+  #      the JVM are describing the same account;
+  #   3. `ansible_env.HOME` only as a last resort, when facts are too thin to
+  #      have collected ansible_user_dir. That case is recorded below rather
+  #      than left to chance.
+  #
+  # The action (action/harden.sh) additionally EXPORTS GRADLE_USER_HOME so the
+  # ambiguity cannot come back. The role deliberately does not: its env layer
+  # is system-wide (/etc/profile.d + /etc/environment, see tasks/shell_env.yml)
+  # and is read by EVERY account on the host, so pinning one user's absolute
+  # gradle home there would point root and every other user at this user's
+  # ~/.gradle. Writing into the home gradle resolves on its own is the half of
+  # the fix that is correct for a long-lived multi-user host, and it is also
+  # the half that survives a build which never loads the env layer at all
+  # (container CMD, systemd — Axis 2).
+  ansible.builtin.set_fact:
+    gradle_user_home_resolved: >-
+      {{ ansible_env.GRADLE_USER_HOME | default('', true)
+      or ((ansible_user_dir | default('', true) or ansible_env.HOME) ~ '/.gradle') }}
+  when: gradle_check.rc == 0
+
 - name: Create Gradle init.d directory
   ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.gradle/init.d"
+    path: "{{ gradle_user_home_resolved }}/init.d"
     state: directory
     mode: "0755"
   when: gradle_check.rc == 0
 
 - name: Deploy Gradle init script to enforce HTTPS-only repositories
   ansible.builtin.copy:
-    dest: "{{ ansible_env.HOME }}/.gradle/init.d/supply-chain-security.gradle"
+    dest: "{{ gradle_user_home_resolved }}/init.d/supply-chain-security.gradle"
     mode: "0644"
     content: |
       // Managed by ansible-supply-chain-security
@@ -30,5 +73,47 @@
                   }
               }
           }
+          // Refuse dynamic / changing version selectors (1.+, latest.release,
+          // -SNAPSHOT): parity with action/harden.sh, which has emitted these
+          // two since it was written while this file emitted only the HTTP
+          // refusal.
+          //
+          // Guarded by respondsTo() rather than by a version tier. An init
+          // script is CODE, not a key/value file: a method this gradle does
+          // not implement is a hard evaluation error that fails EVERY build on
+          // the host, not a silently-ignored key (design-principles Axis 3).
+          // The only gradle measured for this repo is 8.14.3, which has both
+          // methods; no threshold below that has been measured, and the house
+          // rule is that a version comment states the MEASURED number. Asking
+          // the object what it implements needs no number at all and cannot
+          // brick a distro gradle old enough to lack them.
+          configurations.all { conf ->
+              def rs = conf.resolutionStrategy
+              if (rs.metaClass.respondsTo(rs, 'failOnDynamicVersions')) {
+                  rs.failOnDynamicVersions()
+              }
+              if (rs.metaClass.respondsTo(rs, 'failOnChangingVersions')) {
+                  rs.failOnChangingVersions()
+              }
+          }
       }
   when: gradle_check.rc == 0
+
+- name: Record skipped protection — gradle user home could not be resolved from passwd
+  # Feeds the end-of-run summary in main.yml. Reached only when facts are too
+  # thin to carry ansible_user_dir and the target sets no GRADLE_USER_HOME: the
+  # script was written to ansible's HOME, which is gradle's home only when that
+  # HOME happens to match the passwd entry.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['gradle init script — GRADLE_USER_HOME is unset and ansible_user_dir was not gathered, so the script was written to ' ~ gradle_user_home_resolved ~ ' (the HOME of the ansible connection). Gradle takes its default user home from the PASSWD entry, so if that differs from $HOME on this host the script is present and never read. Gather the default fact set, or set GRADLE_USER_HOME on the target.'] }}
+  when:
+    - gradle_check.rc == 0
+    - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
+    - ansible_user_dir | default('', true) | length == 0
+
+- name: Record skipped protection — gradle absent
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['gradle init script — gradle is not installed, so no init script was deployed. Installing gradle later will NOT pick up this hardening; re-run the role.'] }}
+  when: gradle_check.rc != 0
