@@ -67,6 +67,16 @@ inputs:
       composer plugin; --no-scripts injection still applies regardless.
     required: false
     default: 'false'
+  cargo_socket_firewall:
+    description: >-
+      Route cargo's registry-touching commands through Socket Firewall for
+      threat-intel blocking, mirroring the role's `cargo_socket_firewall`
+      (which defaults on). Only takes effect when sfw is actually present —
+      the wrapper guards on `command -v sfw`, so with `install_sfw: false`
+      this is a no-op rather than a broken cargo. Set false to keep cargo
+      unfiltered even when sfw is installed.
+    required: false
+    default: 'true'
   install_cargo_cooldown:
     description: >-
       Install the cargo-cooldown backend that ENFORCES the cargo publish-age
@@ -118,6 +128,7 @@ runs:
         COMPOSER_ALLOW_PLUGINS: ${{ inputs.composer_allow_plugins }}
         PNPM_BUILT_DEPENDENCIES: ${{ inputs.pnpm_built_dependencies }}
         INSTALL_CARGO_COOLDOWN: ${{ inputs.install_cargo_cooldown }}
+        CARGO_SOCKET_FIREWALL: ${{ inputs.cargo_socket_firewall }}
         # The script auto-detects GitHub from $GITHUB_ACTIONS; pinning it
         # here means a future runner change can't silently reroute emission.
         EMIT: github

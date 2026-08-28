@@ -40,6 +40,7 @@ WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
+CARGO_SOCKET_FIREWALL="${CARGO_SOCKET_FIREWALL:-true}"
 
 # ---- CI platform adapter ----
 #
@@ -1241,7 +1242,28 @@ fi
 # which dispatches on the name it was invoked as; a backup named cargo-real
 # is rejected with "unknown proxy name: 'cargo-real'". On a non-rustup cargo
 # argv[0] is not consulted, so this is safe for both shapes.
-run_real() { exec -a cargo "$REAL_CARGO" "$@"; }
+# Threat-intel filtering for the paths that actually touch the registry.
+#
+# sfw is only prefixed when SCH_NET=1 — set by the dispatch arms below on the
+# resolution-affecting commands and nowhere else, so `cargo fmt` and friends
+# are not routed through a network filter that has nothing to inspect.
+#
+# Guarded by `command -v sfw` rather than assumed: sfw is opt-in
+# (install_sfw), and a cargo wrapper that hard-required it would break every
+# build on a runner that did not install it. Absent sfw, this is a no-op.
+run_real() {
+  local pfx=""
+  if [ "__CARGO_SFW__" = "true" ] && [ "${SCH_NET:-0}" = "1" ] \
+     && command -v sfw >/dev/null 2>&1; then
+    pfx="sfw"
+  fi
+  if [ -n "$pfx" ]; then
+    # sfw execs the child itself, so argv[0] cannot be set here. Safe because
+    # cargo-real is an argv[0] shim on rustup hosts.
+    exec "$pfx" "$REAL_CARGO" "$@"
+  fi
+  exec -a cargo "$REAL_CARGO" "$@"
+}
 
 subcmd=""
 skip_value=0
@@ -1358,12 +1380,12 @@ case "$KIND" in
       case "$subcmd" in
         update)
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
-          exec_sub cooldown update "$@" ;;
+          SCH_NET=1 exec_sub cooldown update "$@" ;;
       esac
     else
       echo "[supply-chain-harden] warning: cargo-cooldown not installed — 'cargo $subcmd' can write a lockfile entry for a freshly published crate with no age check" >&2
     fi
-    run_real "$@"
+    SCH_NET=1 run_real "$@"
     ;;
 
   RESOLVING)
@@ -1377,25 +1399,25 @@ case "$KIND" in
       esac
       if [ -n "$SUB" ]; then
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
-        exec_sub cooldown "$SUB" "$@"
+        SCH_NET=1 exec_sub cooldown "$SUB" "$@"
       fi
     fi
     # No age gate available, or a subcommand cooldown has no verb for. Fall
     # back to --locked, and say so when nothing at all applies rather than
     # leaving an unprotected build indistinguishable from a gated one.
     if has_resolution_flag "$@"; then
-      run_real "$@"
+      SCH_NET=1 run_real "$@"
     fi
     if has_lockfile; then
-      exec_with "--locked" "$@"
+      SCH_NET=1 exec_with "--locked" "$@"
     fi
     echo "[supply-chain-harden] warning: no Cargo.lock found and no publish-age gate available — 'cargo $subcmd' will resolve the newest matching versions unchecked" >&2
-    run_real "$@"
+    SCH_NET=1 run_real "$@"
     ;;
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|; s|__CARGO_SFW__|$CARGO_SOCKET_FIREWALL|"
   sudo cp "$tmp_wrapper" "$wrapper_target"
   sudo chmod 755 "$wrapper_target"
   record_wrapper cargo

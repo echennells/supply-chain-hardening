@@ -314,6 +314,62 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
   [[ "$output" != *"--no-plugins"* ]]
 }
 
+# --- cargo <-> socket firewall ---------------------------------------------
+
+cargo_sfw_stubs() {
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.80.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  stub_bin sfw   'echo "SFW-WRAPPED: $*"'
+  mkdir -p "$BATS_TEST_TMPDIR/proj"; touch "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+}
+
+@test "cargo+sfw: registry-touching commands are routed through sfw" {
+  # The role defaults cargo_socket_firewall on; the action had no equivalent,
+  # so cargo was the one ecosystem where installing sfw bought nothing.
+  cargo_sfw_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"--locked"* ]]
+}
+
+@test "cargo+sfw: a lockfile-writing command is routed too" {
+  # `cargo update` is the one resolution path --locked can never cover, so it
+  # is the one that most needs the network filter.
+  cargo_sfw_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' update 2>/dev/null"
+  [[ "$output" == *"SFW-WRAPPED"* ]]
+}
+
+@test "cargo+sfw: commands that touch no registry are NOT routed" {
+  # Prefixing everything would put a network filter in front of `cargo fmt`,
+  # which has nothing to inspect and only adds latency and a failure mode.
+  cargo_sfw_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fmt"
+  [[ "$output" != *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"ARGS=[fmt]"* ]]
+}
+
+@test "cargo+sfw: absent sfw is a no-op, not a broken cargo" {
+  # sfw is opt-in. A wrapper that hard-required it would break every build on
+  # a runner that did not install it.
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.80.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$BATS_TEST_TMPDIR/proj2"; touch "$BATS_TEST_TMPDIR/proj2/Cargo.lock"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj2' && '$TEST_BIN/cargo' build"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+}
+
+@test "cargo+sfw: the input can turn it off with sfw still installed" {
+  cargo_sfw_stubs
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=false -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" != *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"--locked"* ]]
+}
+
 # --- deno ------------------------------------------------------------------
 
 @test "deno: the age gate is injected for a fetching subcommand" {
