@@ -818,10 +818,17 @@ jobs:
       # scripts ran despite the claim. Real bun key is `ignoreScripts`.
       - name: bunfig.toml has ignoreScripts=true, NOT lifecycleScripts
         run: |
-          grep -qE '^ignoreScripts = true$' "$HOME/.bunfig.toml" \
-            || { echo "::error::~/.bunfig.toml missing ignoreScripts=true (real bun key)"; cat "$HOME/.bunfig.toml"; exit 1; }
-          if grep -q '^lifecycleScripts' "$HOME/.bunfig.toml"; then
-            echo "::error::~/.bunfig.toml still contains the made-up 'lifecycleScripts' key — regression"
+          # bun reads $XDG_CONFIG_HOME/.bunfig.toml (DOT-prefixed) when
+          # XDG_CONFIG_HOME is set, and $HOME/.bunfig.toml only when it is not.
+          # There is no fallback. GitHub runners DO set XDG_CONFIG_HOME, so
+          # this assertion used to grep a file bun never reads - it passed
+          # while the whole bunfig layer was dead in CI (ECH-159).
+          BUNFIG="${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml"
+          echo "checking $BUNFIG (XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-<unset>})"
+          grep -qE '^ignoreScripts = true$' "$BUNFIG" \
+            || { echo "::error::$BUNFIG missing ignoreScripts=true (real bun key)"; cat "$BUNFIG" || true; exit 1; }
+          if grep -q '^lifecycleScripts' "$BUNFIG"; then
+            echo "::error::$BUNFIG still contains the made-up 'lifecycleScripts' key — regression"
             exit 1
           fi
           echo "✓ bunfig.toml uses real bun key ignoreScripts (not the made-up lifecycleScripts)"

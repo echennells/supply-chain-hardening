@@ -368,6 +368,47 @@ version_ge() {
   return 0  # equal counts as ge
 }
 
+# PER-ECOSYSTEM EFFECT, as distinct from per-ecosystem ATTEMPT.
+#
+# HARDENED records what was REQUESTED and not unknown. It does not record
+# whether anything is actually in force, and it was being reported — in the
+# summary, in the final line, and in the ecosystems_hardened output — as
+# though it did. Measured example: with ECOSYSTEMS=npm,cargo,deno on a host
+# with neither cargo nor deno, the run said "npm,cargo,deno hardened". deno's
+# ONLY mechanism is a PATH wrapper, so deno received nothing whatsoever.
+#
+#   APPLIED  every layer this ecosystem depends on is in place
+#   PARTIAL  some layers landed, at least one did not
+#   NONE     nothing effective was applied
+#   INERT    written and correct, but the installed tool does not implement it
+#
+# Anything in HARDENED with no explicit status defaults to APPLIED at report
+# time — a handler that knows it is degraded says so.
+ECO_KEYS=()
+ECO_STATUS=()
+ECO_NOTE=()
+set_eco_status() {
+  local k="$1" s="$2" n="${3:-}" i
+  for i in "${!ECO_KEYS[@]}"; do
+    if [ "${ECO_KEYS[$i]}" = "$k" ]; then ECO_STATUS[$i]="$s"; ECO_NOTE[$i]="$n"; return 0; fi
+  done
+  ECO_KEYS+=("$k"); ECO_STATUS+=("$s"); ECO_NOTE+=("$n")
+}
+eco_status_of() {
+  local k="$1" i
+  for i in "${!ECO_KEYS[@]}"; do
+    [ "${ECO_KEYS[$i]}" = "$k" ] && { printf '%s' "${ECO_STATUS[$i]}"; return 0; }
+  done
+  printf 'APPLIED'
+}
+eco_note_of() {
+  local k="$1" i
+  for i in "${!ECO_KEYS[@]}"; do
+    [ "${ECO_KEYS[$i]}" = "$k" ] && { printf '%s' "${ECO_NOTE[$i]}"; return 0; }
+  done
+  printf ''
+}
+
 HARDENED=()
 SFW_INSTALLED=false
 
@@ -429,7 +470,26 @@ allow-git=none"
 
   HARDENED+=("npm")
   set_tool_version "npm" "$(detect_version npm "npm --version")"
-  log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d"
+  # SAY IT HERE, NOT ONLY IN THE VERIFIER.
+  #
+  # min-release-age landed in npm 11.10.0. Older npm ACCEPTS the key, echoes
+  # it back from `npm config get`, and enforces nothing — so the line below
+  # would otherwise claim an age gate that does not exist. GitHub's
+  # ubuntu-24.04 runners ship npm 10.9.8, which means the default runner is
+  # the inert case.
+  #
+  # The version is already in hand from detect_version, so this costs nothing.
+  # Leaving it to `action/verify.sh` put the truth behind an opt-in step, while
+  # the mandatory tool asserted the opposite.
+  local npm_v
+  npm_v=$(detect_version npm "npm --version")
+  if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.10.0"; then
+    warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) — the age gate is written and NOT enforced. Script blocking is unaffected. Install npm >= 11.10 before this action (e.g. setup-node 24, or npm i -g npm@latest) to make it effective."
+    set_eco_status npm INERT "age gate written but npm $npm_v does not implement min-release-age; script blocking still applies"
+    log "npm: ignore-scripts=true (age gate written but INERT on npm $npm_v)"
+  else
+    log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d"
+  fi
   end_section
 }
 
@@ -745,6 +805,9 @@ harden_composer() {
   real_composer=$(command -v composer 2>/dev/null || true)
   if [[ -z "$real_composer" ]]; then
     log "composer not installed — wrapper not deployed (config still written)"
+    # composer's script blocking is wrapper-only; the config covers plugins
+    # and secure-http but not --no-scripts.
+    set_eco_status composer PARTIAL "config written; script blocking needs the wrapper, and composer was not installed"
     end_section
     return 0
   fi
@@ -968,7 +1031,10 @@ harden_bun() {
   local real_bun
   real_bun=$(command -v bun 2>/dev/null || true)
   if [[ -z "$real_bun" ]]; then
-    log "bun not installed — wrapper not deployed (only ~/.bunfig.toml written)"
+    log "bun not installed — wrapper not deployed (only the global bunfig written)"
+    # bunfig covers install-time; the runtime auto-install gap and bunx
+    # fetch-and-execute are wrapper-only.
+    set_eco_status bun PARTIAL "bunfig written; runtime auto-install and bunx need the wrappers, and bun was not installed"
     end_section
     return 0
   fi
@@ -1165,6 +1231,8 @@ EOF
   real_cargo=$(command -v cargo 2>/dev/null || true)
   if [[ -z "$real_cargo" ]]; then
     log "cargo not installed — config written, wrapper not deployed"
+    # --locked has no config or env route at all; it is wrapper-only.
+    set_eco_status cargo PARTIAL "config and cooldown.toml written; --locked injection needs the wrapper, and cargo was not installed"
     end_section
     return 0
   fi
@@ -1426,7 +1494,9 @@ WRAPPER
   if [[ -n "$cooldown_bin" ]]; then
     log "cargo: wrapper at $wrapper_target (--locked injection + ${RELEASE_AGE_HOURS}h publish-age gate via cargo-cooldown)"
   else
-    log "cargo: wrapper at $wrapper_target (--locked injection; age-gate config written but no backend — set install_cargo_cooldown: true to enforce it)"
+    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. Set install_cargo_cooldown: true, or install cargo-cooldown in an earlier step."
+    set_eco_status cargo PARTIAL "--locked injection active; publish-age gate written but no cargo-cooldown backend to enforce it"
+    log "cargo: wrapper at $wrapper_target (--locked injection; age gate written but inert without cargo-cooldown)"
   fi
   end_section
 }
@@ -1479,6 +1549,9 @@ harden_go() {
     fi
   else
     log "go not installed — env layer written, go env -w skipped"
+    # Without go env -w the settings live only in the env layer, which does
+    # not survive a step that fails to inherit it.
+    set_eco_status go PARTIAL "env layer written; not persisted via go env -w because go was not installed"
   fi
 
   HARDENED+=("go")
@@ -1515,6 +1588,10 @@ harden_deno() {
   real_deno=$(command -v deno 2>/dev/null || true)
   if [[ -z "$real_deno" ]]; then
     log "deno not installed — wrapper not deployed"
+    # Deno has NO config file. The wrapper is the entire mechanism, so an
+    # absent deno means nothing at all was applied.
+    warn "deno: nothing was applied — deno has no config file and its only mechanism is a PATH wrapper, which needs deno present at hardening time"
+    set_eco_status deno NONE "deno has no config file; the PATH wrapper is the entire mechanism and deno was not installed"
     end_section
     return 0
   fi
@@ -1747,7 +1824,7 @@ harden_nuget() {
   </config>
   <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
        packages signed under a rotation we do not trust fail with NU3034 and the
-       install is refused -- signatureValidationMode=require makes that fatal.
+       install is refused — signatureValidationMode=require makes that fatal.
        Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
        Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
   <trustedSigners>
@@ -1897,6 +1974,20 @@ fi
 # ---- Outputs ----
 ecosystems_str=$(IFS=,; echo "${HARDENED[*]:-}")
 
+# SPLIT ATTEMPT FROM EFFECT.
+#
+# ecosystems_hardened is kept, unchanged, for consumers already reading it —
+# but it answers "what was requested and recognised", which is not the
+# question its name invites. These three answer the real one.
+eff_list=""; part_list=""; none_list=""
+for _e in ${HARDENED[@]+"${HARDENED[@]}"}; do
+  case "$(eco_status_of "$_e")" in
+    APPLIED)        eff_list="${eff_list:+$eff_list,}$_e" ;;
+    PARTIAL|INERT)  part_list="${part_list:+$part_list,}$_e" ;;
+    NONE)           none_list="${none_list:+$none_list,}$_e" ;;
+  esac
+done
+
 # Build tool_versions JSON output. Each key is an ecosystem; each value is
 # the detected tool version (empty string if the tool isn't installed in
 # this runner). Downstream steps can use this for conditional logic
@@ -1918,7 +2009,13 @@ tool_versions_json+="}"
 
 wrappers_str=$(IFS=,; echo "${WRAPPED[*]:-}")
 
-emit_output ecosystems_hardened "$ecosystems_str"
+# "hardened" = requested and recognised. Kept for compatibility; the three
+# below are the ones that answer whether anything is in force.
+emit_output ecosystems_hardened   "$ecosystems_str"
+emit_output ecosystems_requested  "$ecosystems_str"
+emit_output ecosystems_effective  "$eff_list"
+emit_output ecosystems_degraded   "$part_list"
+emit_output ecosystems_ineffective "$none_list"
 emit_output release_age_hours     "$RELEASE_AGE_HOURS"
 emit_output sfw_installed         "$SFW_INSTALLED"
 emit_output tool_versions         "$tool_versions_json"
@@ -1954,7 +2051,10 @@ esac
   echo ""
   echo "| Setting | Value |"
   echo "|---|---|"
-  echo "| Ecosystems hardened | \`$ecosystems_str\` |"
+  echo "| Ecosystems requested | \`$ecosystems_str\` |"
+  echo "| Fully applied | \`${eff_list:-none}\` |"
+  [ -n "$part_list" ] && echo "| **Degraded** | \`$part_list\` |"
+  [ -n "$none_list" ] && echo "| **Not applied** | \`$none_list\` |"
   echo "| Release age gate | \`$RELEASE_AGE_HOURS\` hours |"
   echo "| Strict mode | \`$STRICT\` |"
   echo "| Socket Firewall | \`$SFW_INSTALLED\` |"
@@ -1963,6 +2063,28 @@ esac
   echo "| Env file | \`$HARDENING_ENV_FILE\` |"
   echo ""
   echo "All subsequent steps in this job inherit the hardening $inherit_note."
+
+  # Spell out every ecosystem that is NOT fully applied, with the reason. A
+  # reader should not have to run the verifier to learn that something they
+  # asked for is not in force.
+  if [ -n "$part_list$none_list" ]; then
+    echo ""
+    echo "### Not fully in force"
+    echo ""
+    echo "| Ecosystem | Status | Why |"
+    echo "|---|---|---|"
+    for _e in ${HARDENED[@]+"${HARDENED[@]}"}; do
+      _s=$(eco_status_of "$_e")
+      case "$_s" in APPLIED) continue ;; esac
+      echo "| \`$_e\` | $_s | $(eco_note_of "$_e") |"
+    done
+    echo ""
+    echo "Run \`action/verify.sh\` (or the \`verify\` action) after your setup steps to check what is actually enforcing."
+  fi
 } | emit_summary
 
-log "done. $ecosystems_str hardened (emit=$PLATFORM)."
+if [ -n "$part_list$none_list" ]; then
+  log "done (emit=$PLATFORM). applied: ${eff_list:-none}${part_list:+ | degraded: $part_list}${none_list:+ | NOT applied: $none_list}"
+else
+  log "done (emit=$PLATFORM). applied: ${eff_list:-none}"
+fi

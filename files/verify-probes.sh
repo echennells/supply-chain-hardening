@@ -603,6 +603,9 @@ deno_field() { printf '%s\n' "$1" | grep "^$2|" | head -1 | sed "s/^$2|//"; }
 if ! have deno; then
   row "N/A" - "deno publish-age gate" "deno not installed"
   row "N/A" - "deno age-gate flag support (precondition)" "deno not installed"
+elif ! requested deno; then
+  row "N/A" - "deno publish-age gate" "deno installed but not in the requested ecosystems"
+  row "N/A" - "deno age-gate flag support (precondition)" "deno installed but not in the requested ecosystems"
 else
   dp=$(command -v deno 2>/dev/null)
   dwrapped=0
@@ -2477,7 +2480,9 @@ maven_probe() {
   return 0
 }
 
-if have mvn; then
+if have mvn && ! requested maven; then
+  row "N/A" - "maven" "maven installed but not in the requested ecosystems"
+elif have mvn; then
   maven_probe
   # ok | fatal | wrongfile | unknown - rows 2 and 3 consume this verdict so
   # each of them stays honest instead of re-deriving it from our own file.
@@ -2549,7 +2554,9 @@ else
 fi
 
 # --- maven http repo mirroring  [FUNCTIONAL] ---
-if have mvn; then
+if have mvn && ! requested maven; then
+  row "N/A" - "maven http repo mirroring" "maven installed but not in the requested ecosystems"
+elif have mvn; then
   # ---- row 2: is a planted http:// repository actually overridden? --------
   # Requires the maven preamble from the "maven settings honored" probe above;
   # every shared reference is :- guarded so a partial paste degrades instead of
@@ -2619,7 +2626,9 @@ if have mvn; then
 fi
 
 # --- maven strict checksums  [PARSED] ---
-if have mvn; then
+if have mvn && ! requested maven; then
+  row "N/A" - "maven strict checksums" "maven installed but not in the requested ecosystems"
+elif have mvn; then
   # ---- row 3: strict checksums (role surface; the action omits them) ------
   # Requires the maven preamble from the "maven settings honored" probe.
   # Which profile ids actually carry <checksumPolicy>fail. A file-level grep
@@ -2972,7 +2981,9 @@ gradle_script_deployed() {
   return 1
 }
 
-if have gradle; then
+if have gradle && ! requested gradle; then
+  row "N/A" - "gradle HTTPS-only repos" "gradle installed but not in the requested ecosystems"
+elif have gradle; then
   gradle_probe_once
   gradle_facts
   if [ -z "$gend" ]; then
@@ -3258,7 +3269,9 @@ gradle_script_deployed() {
   return 1
 }
 
-if have gradle; then
+if have gradle && ! requested gradle; then
+  row "N/A" - "gradle dynamic-version refusal" "gradle installed but not in the requested ecosystems"
+elif have gradle; then
   gradle_probe_once
   gradle_facts
   gbsdyn=$(gradle_field SCP_BSDYN)

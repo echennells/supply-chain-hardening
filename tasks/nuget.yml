@@ -54,7 +54,7 @@
              certificate, identical to the one in action/harden.sh. -->
         <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
              packages signed under a rotation we do not trust fail with NU3034 and the
-             install is refused -- signatureValidationMode=require makes that fatal.
+             install is refused — signatureValidationMode=require makes that fatal.
              Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
              Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
         <trustedSigners>
