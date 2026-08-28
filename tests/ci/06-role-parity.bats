@@ -39,13 +39,24 @@ setup() { common_setup; }
   harden -- --emit=plain >/dev/null
   run python3 -c '
 import re, sys
+# Variables the ACTION deliberately sets and the role does not. Each needs a
+# reason, for the same purpose as parity.py EXCLUDED: a divergence has to be
+# argued for in writing rather than accumulate by omission.
+ACTION_ONLY = {
+    "GRADLE_USER_HOME":
+        "gradle resolves its user home from the JVM passwd entry, not $HOME. "
+        "The action pins the variable at the directory it wrote so a later "
+        "step cannot resolve it differently; the role relies on writing into "
+        "the passwd home instead. Documented at tasks/gradle.yml:39.",
+}
 role = {m.group(1) for m in (re.match(r"\s*export\s+([A-Z_][A-Z0-9_]*)=", l)
                              for l in open("templates/supply-chain-env.sh.j2")) if m}
 act  = {m.group(1) for m in (re.search(r"write_env\s+([A-Z_][A-Z0-9_]*)", l)
                              for l in open("action/harden.sh")) if m}
-missing, extra = sorted(role - act), sorted(act - role)
+missing = sorted(role - act)
+extra   = sorted(v for v in act - role if v not in ACTION_ONLY)
 if missing: print("IN ROLE, NOT IN ACTION:", ", ".join(missing))
-if extra:   print("IN ACTION, NOT IN ROLE:", ", ".join(extra))
+if extra:   print("IN ACTION, NOT IN ROLE (add to ACTION_ONLY with a reason):", ", ".join(extra))
 sys.exit(1 if (missing or extra) else 0)
 '
   echo "$output"

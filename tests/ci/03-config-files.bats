@@ -144,9 +144,23 @@ setup() { common_setup; }
 }
 
 @test "composer: plugins blocked by default, permitted only on request" {
+  # The blocking value is `{}` (an empty allowlist), not `false`. Measured:
+  # `false` BRICKS composer on Ubuntu 22.04's version — every command errors —
+  # so it is tiered on 2.2.15 and the safe baseline is the empty object.
+  # Asserting `false` here was asserting the version that breaks the tool.
   run harden ECOSYSTEMS=composer -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/composer/config.json" '"allow-plugins": false'
+  assert_file_contains "$TEST_HOME/.config/composer/config.json" '"allow-plugins"'
+  run node -e '
+    const c = JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).config;
+    const v = c["allow-plugins"];
+    // Blocking means: false, or an EMPTY allowlist object. A non-empty object
+    // would be permitting something.
+    const blocking = v === false || (v && typeof v === "object" && Object.keys(v).length === 0);
+    process.exit(blocking ? 0 : 1);
+  ' "$TEST_HOME/.config/composer/config.json"
+  [ "$status" -eq 0 ]
+
   run harden ECOSYSTEMS=composer COMPOSER_ALLOW_PLUGINS=true -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_lacks "$TEST_HOME/.config/composer/config.json" '"allow-plugins": false'
