@@ -56,7 +56,13 @@ setup() { common_setup; }
   run harden ECOSYSTEMS=yarn -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableScripts: false"
-  assert_file_contains "$TEST_HOME/.yarnrc.yml" 'npmMinimalAgeGate: "2d"'
+  # BARE INTEGER MINUTES, UNQUOTED. "2d" parses to NaN and silently disables
+  # the gate (measured, yarn 4.10.3). This assertion used to demand "2d" - it
+  # asserted the bug, and stayed green, while tests/bats/06-js-ecosystem.bats
+  # asserted the fix. Two suites, opposite claims, both passing.
+  assert_file_contains "$TEST_HOME/.yarnrc.yml" "npmMinimalAgeGate: 2880"
+  ! grep -qE 'npmMinimalAgeGate: *"' "$TEST_HOME/.yarnrc.yml" \
+    || { echo "npmMinimalAgeGate is quoted; yarn needs a YAML number"; return 1; }
 }
 
 @test "yarn: hardened mode is emitted on yarn 4+" {
@@ -220,6 +226,6 @@ setup() { common_setup; }
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc"                   "min-release-age=2"        # days
   assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "minimumReleaseAge: 2880"  # minutes
-  assert_file_contains "$TEST_HOME/.yarnrc.yml"              'npmMinimalAgeGate: "2d"'  # days
+  assert_file_contains "$TEST_HOME/.yarnrc.yml"              "npmMinimalAgeGate: 2880"  # minutes
   assert_file_contains "$TEST_HOME/.bunfig.toml"             "minimumReleaseAge = 172800" # seconds
 }

@@ -17,7 +17,13 @@ release_age_hours: 48
 # overrides via CLI (`-e release_age_hours=72`), which Ansible passes as
 # a string. Without the cast, `(release_age_hours / 24)` would error on
 # string-divided-by-int.
-npm_minimum_release_age_days: "{{ (release_age_hours | int / 24) | int }}"     # 2 days
+# FLOORED AT 1. Unfloored, any release_age_hours < 24 renders 0, and npm
+# reads 0 as "no gate" - so tightening the window to 12h silently DISABLED
+# npm while every other ecosystem kept working. action/harden.sh:273 has
+# floored this since it was written; the role did not. Third instance of
+# this class after yarn (c9a250f, fixed by deriving in minutes) and deno
+# (ECH-166, floored to P1D).
+npm_minimum_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  # 2 days at the 48h default
 pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" # 2880 min
 # bun 1.3.0+ ONLY (MEASURED: the [install] minimumReleaseAge key does not
 # exist through 1.2.23 and bun accepts unknown keys silently). tasks/bun.yml

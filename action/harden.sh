@@ -275,7 +275,15 @@ PNPM_AGE_MINUTES=$(( RELEASE_AGE_HOURS * 60 ))
 BUN_AGE_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
-YARN_AGE="${NPM_AGE_DAYS}d"
+# INTEGER MINUTES, and rendered UNQUOTED. A duration-suffix string ("2d")
+# hits a yarn parser bug that yields NaN and silently disables the gate
+# entirely, and yarn has no second age-gate layer to fall back on.
+# MEASURED against yarn 4.10.3 (2026-08), recorded in defaults/main.yml:53:
+# "36500d" let a fresh package install; 52560000 (minutes) blocked it.
+# Quoting it lands a YAML string where yarn wants a number, which fails
+# the same way. The role has derived this in minutes since c9a250f; the
+# action was still shipping the exact bug the role documented.
+YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
 # uv requires an absolute RFC 3339 datetime — "48 hours" or similar
 # relative-duration strings fail uv's TOML parser with
 # "failed to parse year in date '48 hours'", breaking every uv
@@ -599,7 +607,7 @@ harden_yarn() {
 
   {
     echo "# Managed by supply-chain-harden action"
-    echo "npmMinimalAgeGate: \"$YARN_AGE\""
+    echo "npmMinimalAgeGate: $YARN_AGE"
     echo "enableScripts: false"
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
@@ -616,7 +624,7 @@ harden_yarn() {
 
   {
     echo "# Managed by supply-chain-harden action"
-    echo "npmMinimalAgeGate: \"$YARN_AGE\""
+    echo "npmMinimalAgeGate: $YARN_AGE"
     echo "enableScripts: false"
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
