@@ -1538,6 +1538,16 @@ harden_go() {
   write_env GOPRIVATE   ""
   write_env GONOPROXY   ""
   write_env GOINSECURE  ""
+  # GONOSUMDB is REAL and is a sumdb bypass. MEASURED on go1.27.0:
+  #   go env -w GONOSUMDB=example.com  -> rc 0, accepted
+  #   go env -w GONOSUMCHECK=1         -> unknown go command variable
+  # `go help environment` groups GOPRIVATE, GONOPROXY and GONOSUMDB as
+  # prefixes 'not compared against the checksum database', and names
+  # GONOSUMDB under GOINSECURE as a way to disable sumdb validation.
+  # Omitted because tests/bats/10-go-adversarial.bats asserted it was not
+  # a real variable - a wrong test comment is the documented reason a
+  # recommended sweep (SOURCES.md:16) was dropped.
+  write_env GONOSUMDB   ""
 
   local go_version
   go_version=$(detect_version go "go version")
@@ -1554,7 +1564,8 @@ harden_go() {
       "GOTOOLCHAIN=local" \
       "GOPRIVATE=" \
       "GONOPROXY=" \
-      "GOINSECURE="
+      "GOINSECURE=" \
+      "GONOSUMDB="
     do
       go env -w "$gokey" 2>/dev/null || failed+="${gokey%%=*} "
     done

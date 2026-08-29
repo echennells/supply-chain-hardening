@@ -101,6 +101,8 @@ go_proxy: "https://proxy.golang.org,direct"
 go_private: ""
 go_noproxy: ""
 go_insecure: ""
+# See templates/supply-chain-env.sh.j2 for why this one was missing.
+go_nosumdb: ""
 goflags_mod: "readonly"
 
 # pnpm settings

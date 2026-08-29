@@ -35,6 +35,16 @@ export GOFLAGS='-mod={{ goflags_mod }}'
 export GOPRIVATE='{{ go_private }}'
 export GONOPROXY='{{ go_noproxy }}'
 export GOINSECURE='{{ go_insecure }}'
+# GONOSUMDB is REAL and is a sumdb bypass. MEASURED on go1.27.0:
+#   go env -w GONOSUMDB=example.com   -> rc 0, accepted
+#   go env -w GONOSUMCHECK=1          -> unknown go command variable
+# `go help environment` documents GOPRIVATE, GONOPROXY, GONOSUMDB together
+# as prefixes 'not compared against the checksum database', and the
+# GOINSECURE entry names GONOSUMDB as a way to disable sumdb validation.
+# It was omitted because 10-go-adversarial.bats asserted it was not a real
+# variable - a wrong test comment was the documented reason a recommended
+# sweep (SOURCES.md:16) got dropped. Clearing it, like the other three.
+export GONOSUMDB='{{ go_nosumdb | default('', true) }}'
 export GOTOOLCHAIN=local
 
 # === PHP (Composer) ===
