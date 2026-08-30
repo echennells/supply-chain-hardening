@@ -139,6 +139,12 @@ SCV_EXPECT_KNOWN=1
 {% endif %}
 {#- npq.yml is unconditional. -#}
 {% set _ = scv_expect.append('tool.npq') %}
+{#- python_safe_path is opt-in and defaults false, so the token is only present
+    when the operator asked for it. Without it the row reports N/A BYDESIGN
+    rather than a GAP nobody can action by re-running the role. -#}
+{% if python_safe_path | default(false) | bool %}
+{%- set _ = scv_expect.append('python.safepath') %}
+{% endif %}
 SCV_EXPECT='{{ scv_expect | join(" ") }}'
 
 # Appended to every "N/A BYDESIGN" detail so a suppressed row can always be
@@ -577,6 +583,48 @@ if have pip3 || have pip; then
   fi
 else
   row "N/A" - "pip" "pip not installed"
+fi
+
+# ------------------------------------------------- python import shadowing ---
+# ROLE-ONLY, and deliberately not in the shared probe body. python_safe_path is
+# opt-in on this surface and absent from the action, so a shared probe would
+# fire on CI wherever expected() falls open (SCV_EXPECT_KNOWN=0).
+#
+# Reports on a control WE DEPLOY, which is the whole reason this row is
+# allowed to exist: with python_safe_path=false it is N/A BYDESIGN, not a GAP
+# nobody can clear by re-running the role. An un-actionable GAP would make the
+# exit code permanently non-zero and poison every actionable row with it.
+if ! expected python.safepath; then
+  na_design "python import-path shadowing" "python_safe_path is not enabled"
+elif ! have python3; then
+  row "N/A" - "python import-path shadowing" "python3 not installed"
+else
+  pysd=$(mktemp -d 2>/dev/null) || pysd=""
+  if [ -z "$pysd" ]; then
+    row WEAK PRESENT "python import-path shadowing" "could not create a temp dir to run the probe"
+  else
+    printf 'import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)),"M"),"w").write("x")\n' > "$pysd/struct.py"
+    pyv=$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)
+    # CONTROL first: strip the protection and require the marker. A probe for
+    # "nothing happened" is worthless without proof it can observe something.
+    rm -f "$pysd/M"
+    ( cd "$pysd" && env -u PYTHONSAFEPATH python3 -c "import base64" ) >/dev/null 2>&1
+    if [ ! -f "$pysd/M" ]; then
+      row WEAK FUNCTIONAL "python import-path shadowing" \
+        "control failed: a hostile struct.py did not execute even with PYTHONSAFEPATH stripped on python ${pyv:-?}, so this probe cannot tell protected from blind"
+    else
+      rm -f "$pysd/M"
+      ( cd "$pysd" && python3 -c "import base64" ) >/dev/null 2>&1
+      if [ -f "$pysd/M" ]; then
+        row GAP FUNCTIONAL "python import-path shadowing" \
+          "python_safe_path is enabled but python ${pyv:-?} still executed a struct.py from the working directory during 'import base64' - PYTHONSAFEPATH is not reaching this context (needs 3.11+; env layer does not load for container CMD, systemd or cron)"
+      else
+        row OK FUNCTIONAL "python import-path shadowing" \
+          "python ${pyv:-?} refused a struct.py in the working directory, and the control proved one executes without the protection"
+      fi
+    fi
+    rm -rf "$pysd"
+  fi
 fi
 
 # =========================================================================

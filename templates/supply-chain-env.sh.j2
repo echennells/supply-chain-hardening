@@ -12,6 +12,11 @@ export NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}
 
 # === Python (pip / uv) ===
 export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
+{% if python_safe_path | default(false) | bool %}
+# Opt-in (python_safe_path). Blocks stdlib module shadowing from the working
+# directory. Inert below python 3.11 — tasks/pip.yml records that gap.
+export PYTHONSAFEPATH=1
+{% endif %}
 export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
 export UV_LINK_MODE=copy
 # Note: we deliberately do NOT set UV_NO_SYSTEM_CONFIG=1 here, even though
