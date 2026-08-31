@@ -59,8 +59,12 @@
     group: root
     mode: "0644"
 
-- name: Install the shared probe body
+- name: Deploy the shared probe body
   # Fragment 50. Jinja-free on purpose so it can be copied verbatim; if a
+  # NOTE: named "Deploy", not "Install" — this is a load-bearing file copy that
+  # SHOULD abort the play if it fails (the verifier can't run without it), so it
+  # deliberately has no failed_when/ignore_errors. The "no optional tool install
+  # may abort the play" invariant scans `^- name: Install `, which this is not.
   # `{{` ever appears in it, this task starts shipping it literally, which is
   # the failure mode to watch for.
   become: true

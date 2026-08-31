@@ -258,15 +258,19 @@ task_block() { # file, task-name substring
 # asserting it mutates nothing — so running it under check mode is safe by
 # construction. These two tests keep that invariant paired.
 
-@test "check-mode: every changed_when:false probe also sets check_mode:false" {
+@test "check-mode: every changed_when:false probe is check-mode-safe (check_mode:false OR a not-ansible_check_mode guard)" {
   local missing=0
   for f in "$ROLE_DIR"/tasks/*.yml; do
-    # Report any `changed_when: false` whose immediately following line is
-    # not `check_mode:`. Paired insertion is the convention in this role.
+    # A changed_when:false probe must not falsely run/report during a dry run.
+    # Two valid ways: `check_mode: false` (run for real, report no change), or a
+    # `when: ... not ansible_check_mode` guard that skips the task in check mode
+    # entirely (the pattern tasks/verify.yml uses for the read-only verify probe
+    # under ECH-152). Accept either, scanning the task block forward from the
+    # changed_when line to the next task.
     while IFS= read -r lineno; do
-      next=$(sed -n "$((lineno + 1))p" "$f")
-      if ! echo "$next" | grep -qE '^\s*check_mode:'; then
-        echo "MISSING check_mode: false -> $(basename "$f"):$lineno" >&2
+      blk=$(awk -v s="$lineno" 'NR>=s { if (NR>s && /^- name: /) exit; print }' "$f")
+      if ! echo "$blk" | grep -qE '^\s*check_mode:|not ansible_check_mode'; then
+        echo "NOT check-mode-safe (needs check_mode:false or a not-ansible_check_mode guard) -> $(basename "$f"):$lineno" >&2
         missing=$((missing + 1))
       fi
     done < <(grep -nE '^\s*changed_when:\s*false\s*$' "$f" | cut -d: -f1)

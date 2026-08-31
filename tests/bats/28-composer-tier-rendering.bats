@@ -82,17 +82,19 @@ assert_has_baseline() {
     || { echo "missing allow-plugins denial in $f" >&2; return 1; }
 }
 
-@test "tier-render: allow-plugins is {} below 2.2.15, false at/above it (false is fatal on older composer)" {
-  # The regression this pins: emitting false on composer < 2.2.15 makes every
-  # composer command except --version exit 255 with a PHP TypeError.
-  grep -q '"allow-plugins": {}' "$TIER_DIR/undetected.json" \
-    || { echo "FAIL: undetected must use the {} baseline" >&2; cat "$TIER_DIR/undetected.json" >&2; return 1; }
-  grep -q '"allow-plugins": {}' "$TIER_DIR/tier3-jammy.json" \
-    || { echo "FAIL: composer 2.2.6 (jammy) must use {} — false is fatal there" >&2; cat "$TIER_DIR/tier3-jammy.json" >&2; return 1; }
+@test "tier-render: allow-plugins is {} on EVERY tier (false is fatal on old composer and the upstream fix is non-monotonic)" {
+  # allow-plugins is NOT tiered. `false` is a hard fatal below 2.2.15 (exit 255,
+  # array_merge TypeError on every command but --version), and the upstream fix
+  # did not land linearly — 2.3.0-2.3.7 predate it while sorting ABOVE 2.2.15 —
+  # so no version predicate over `false` is safe. `{}` (the empty allowlist)
+  # returns rc 0 on every version tested (2.0.14 → 2.10.3) and denies every
+  # plugin, so the template emits `{}` unconditionally. Assert exactly that on
+  # every tier, including the "detected recent version" ones that a stale test
+  # expected to carry `false`.
   local f
-  for f in tier3-bookworm tier2-noble tier1-current tier1-future; do
-    grep -q '"allow-plugins": false' "$TIER_DIR/$f.json" \
-      || { echo "FAIL: $f (composer >= 2.2.15) should emit the explicit false" >&2; cat "$TIER_DIR/$f.json" >&2; return 1; }
+  for f in undetected tier3-jammy tier3-bookworm tier2-noble tier1-current tier1-future; do
+    grep -q '"allow-plugins": {}' "$TIER_DIR/$f.json" \
+      || { echo "FAIL: $f must emit the {} baseline (never false)" >&2; cat "$TIER_DIR/$f.json" >&2; return 1; }
   done
 }
 

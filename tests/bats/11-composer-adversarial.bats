@@ -24,11 +24,14 @@ setup() {
   assert_file_contains "$HOME/.config/composer/config.json" '"preferred-install": "dist"'
 }
 
-@test "Composer config default-denies plugin execution (allow-plugins: false)" {
+@test "Composer config default-denies plugin execution (allow-plugins: {})" {
   # composer.json plugins are arbitrary code that runs during composer
-  # operations. allow-plugins=false makes the role fail-closed: projects
-  # have to opt in to specific plugins via their own composer.json.
-  assert_file_contains "$HOME/.config/composer/config.json" '"allow-plugins": false'
+  # operations. The role fail-closes with the EMPTY allowlist `{}`, not the
+  # literal `false`: `false` is a hard fatal on composer < 2.2.15 (array_merge
+  # TypeError, exit 255) and the upstream fix is non-monotonic across 2.3.x, so
+  # the template always emits `{}` — which denies every plugin on every version
+  # tested (2.0.14 → 2.10.3). See templates/composer-config.json.j2.
+  assert_file_contains "$HOME/.config/composer/config.json" '"allow-plugins": {}'
 }
 
 @test "Composer audit.abandoned defaults to fail (Composer >=2.7; test env runs 2.9+)" {

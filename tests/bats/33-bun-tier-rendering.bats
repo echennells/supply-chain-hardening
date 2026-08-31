@@ -257,7 +257,11 @@ EOF
 @test "tier-render: no rendered tier ever quotes minimumReleaseAge" {
   # bun rejects the WHOLE bunfig on one bad value, so a quoted age would
   # disarm ignoreScripts, frozenLockfile and auto along with itself.
-  ! grep -rq 'minimumReleaseAge *= *"' "$TIER_DIR"
+  # Anchor to real KEY lines (optional indent, then the key): the template's own
+  # comment documents the failure mode with a literal `minimumReleaseAge = "2d"`
+  # example, and bun ignores comment (#) lines — matching that would be a false
+  # positive. Only a quoted ACTIVE key must fail this test.
+  ! grep -rqE '^[[:space:]]*minimumReleaseAge[[:space:]]*=[[:space:]]*"' "$TIER_DIR"
 }
 
 @test "tier-render: every tier stays valid TOML with keys omitted" {
