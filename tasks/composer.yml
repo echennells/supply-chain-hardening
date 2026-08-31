@@ -125,6 +125,90 @@
     group: root
     mode: "0644"
 
+# ECH-169. ~/.config/composer is NOT where composer reads its global config on
+# most hosts. MEASURED: `composer config --global home` reports /root/.composer
+# (or ~/.composer, or $XDG_CONFIG_HOME/composer) depending on version, XDG and
+# whether a legacy ~/.composer already exists — writing 888 to the reported home
+# makes `composer config` report 888; writing it to ~/.config/composer leaves
+# composer on its default. The ~/.config/composer writes above are the safe
+# baseline used when composer is absent at apply time; when composer IS
+# installed, ALSO deploy to the directory it actually reads. Ask composer, do
+# not guess — same "config-home" remedy as npm globalconfig / uv / gradle (see
+# docs/design-principles.md Axis 5).
+- name: Resolve composer's real global config home (invoking user)
+  ansible.builtin.command: composer config --global home
+  register: composer_home_user
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: composer_detected_version | length > 0
+
+- name: Ensure composer's real global config home exists (invoking user)
+  ansible.builtin.file:
+    path: "{{ composer_home_user.stdout | trim }}"
+    state: directory
+    mode: "0755"
+  when:
+    - composer_detected_version | length > 0
+    - composer_home_user is defined
+    - composer_home_user.stdout | default('') | trim | length > 0
+    - (composer_home_user.stdout | trim) is match('^/')
+    - (composer_home_user.stdout | trim) != (ansible_env.HOME ~ '/.config/composer')
+
+- name: Deploy hardened composer config.json to composer's real home (invoking user)
+  ansible.builtin.template:
+    src: composer-config.json.j2
+    dest: "{{ (composer_home_user.stdout | trim) }}/config.json"
+    mode: "0644"
+  when:
+    - composer_detected_version | length > 0
+    - composer_home_user is defined
+    - composer_home_user.stdout | default('') | trim | length > 0
+    - (composer_home_user.stdout | trim) is match('^/')
+    - (composer_home_user.stdout | trim) != (ansible_env.HOME ~ '/.config/composer')
+
+- name: Resolve composer's real global config home (root, sudo coverage)
+  # sudo flips HOME to /root; composer then reports /root/.composer (or a
+  # legacy/XDG variant). composer warns "Do not run as root" on stderr but
+  # still prints the home on stdout, so the value is clean.
+  become: true
+  ansible.builtin.command: composer config --global home
+  register: composer_home_root
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: composer_detected_version | length > 0
+
+- name: Ensure root's composer global config home exists (sudo coverage)
+  become: true
+  ansible.builtin.file:
+    path: "{{ composer_home_root.stdout | trim }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - composer_detected_version | length > 0
+    - composer_home_root is defined
+    - composer_home_root.stdout | default('') | trim | length > 0
+    - (composer_home_root.stdout | trim) is match('^/')
+    - (composer_home_root.stdout | trim) != '/root/.config/composer'
+
+- name: Deploy hardened composer config.json to root's real composer home (sudo coverage)
+  become: true
+  ansible.builtin.template:
+    src: composer-config.json.j2
+    dest: "{{ (composer_home_root.stdout | trim) }}/config.json"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - composer_detected_version | length > 0
+    - composer_home_root is defined
+    - composer_home_root.stdout | default('') | trim | length > 0
+    - (composer_home_root.stdout | trim) is match('^/')
+    - (composer_home_root.stdout | trim) != '/root/.config/composer'
+
 # --- /usr/local/bin/composer wrapper (primary layer) ---
 # Composer has no host-wide config-file or env-var way to disable script
 # execution. The wrapper at the discovered composer path injects
