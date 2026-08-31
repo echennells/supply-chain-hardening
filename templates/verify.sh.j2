@@ -637,12 +637,35 @@ fi
 
 # ---------------------------------------------------------------- pip --------
 if have pip3 || have pip; then
+  # ECH-188. On a role-hardened host `command -v pip` resolves to OUR pip->uv
+  # wrapper, which has NO `config` subcommand — so `pip config list` errored and
+  # this row false-GAP'd while the protection was actually in effect. Two paths,
+  # two sources of truth; do NOT shell `config` through a wrapper:
+  #   - pip is our wrapper  -> the source-build block is uv's `no-build`, read
+  #     from the uv config FILE (pip.conf is inert for uv pip).
+  #   - pip is a real pip   -> read `only-binary` from the pip config FILES pip
+  #     actually consults.
   PIPBIN=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
-  v=$("$PIPBIN" config list 2>/dev/null | tr -d ' ')
-  if printf '%s' "$v" | grep -q 'only-binary'; then
-    row OK PARSED "pip source-build blocking" "pip reports only-binary in its effective config"
+  if grep -q 'supply-chain-hardening' "$PIPBIN" 2>/dev/null; then
+    uv_nb=""
+    for f in "${UV_CONFIG_FILE:-}" /etc/uv/uv.toml "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" "$HOME/.config/uv/uv.toml"; do
+      [ -n "$f" ] && [ -f "$f" ] && grep -qiE '^[[:space:]]*no-build[[:space:]]*=[[:space:]]*true' "$f" && { uv_nb="$f"; break; }
+    done
+    if [ -n "$uv_nb" ]; then
+      row OK PARSED "pip source-build blocking" "pip delegates to uv; no-build=true in $uv_nb"
+    else
+      row GAP PARSED "pip source-build blocking" "pip delegates to uv but no-build=true is not set in any uv config"
+    fi
   else
-    row GAP PARSED "pip source-build blocking" "pip config list does not report only-binary"
+    pip_ob=""
+    for f in "${PIP_CONFIG_FILE:-}" /etc/pip.conf "${XDG_CONFIG_HOME:-$HOME/.config}/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf"; do
+      [ -n "$f" ] && [ -f "$f" ] && grep -qi 'only-binary' "$f" && { pip_ob="$f"; break; }
+    done
+    if [ -n "$pip_ob" ]; then
+      row OK PARSED "pip source-build blocking" "only-binary set in $pip_ob"
+    else
+      row GAP PARSED "pip source-build blocking" "no only-binary in any pip config file pip reads"
+    fi
   fi
 else
   row "N/A" - "pip" "pip not installed"

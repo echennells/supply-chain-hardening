@@ -1714,6 +1714,19 @@ rustc_below_cooldown_msrv() {
 # summary line is "no gaps" is design-principles.md Axis 4, "absent signal read
 # as a passing signal"; the previous block also emitted its N/A row AND fell
 # through, double-reporting.
+
+# ECH-189. `have cargo` probed only the verifier's non-interactive PATH, which
+# lacks ~/.cargo/bin — so a rustup cargo (the common case, and what a gateway's
+# systemd unit actually runs) was reported "cargo not installed", turning a real
+# GAP into a false N/A pass — the opposite of the npm false-OK, same root cause:
+# reporting on the verifier's own PATH, not the host's. Resolve cargo the way
+# the host does and prepend its dir to PATH so the wrapper/dispatch probes below
+# find it too. Only a genuinely absent cargo now reaches the N/A branch.
+if ! have cargo; then
+  for _cbin in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin"; do
+    if [ -x "$_cbin/cargo" ]; then PATH="$_cbin:$PATH"; export PATH; break; fi
+  done
+fi
 if ! have cargo; then
   row "N/A" - "cargo publish-age gate"        "cargo not installed"
   row "N/A" - "cargo age-gate refuses"        "cargo not installed"
