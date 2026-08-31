@@ -48,7 +48,7 @@ ROLE_ONLY = {
         "absent from the action. It fails the attribution test: it breaks "
         "`python script.py` importing a sibling and `python -m` against a local "
         "package, at runtime, with an error naming neither the role nor the "
-        "protection. A CI job's whole purpose is running code from a checkout, "
+        "protection. A CI job exists to run code from a checkout, "
         "so the trade is wrong there in a way it is not on an agent host. "
         "Revisit if ECH-183 lands profiles.",
 }
