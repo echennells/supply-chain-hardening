@@ -158,11 +158,19 @@ if [ -x "$COOLDOWN" ]; then
   vrow=$(/usr/local/bin/supply-chain-verify 2>/dev/null \
            | sed 's/\x1b\[[0-9;]*m//g' | grep -iE 'cargo publish-age gate' | head -1)
   vstat=$(printf '%s' "$vrow" | awk '{print $1}')
-  if [ "$vstat" = "OK" ]; then
-    ok "supply-chain-verify AGREES the gate is enforcing, matching the behaviour above"
+  # The cargo publish-age row is CAPPED AT WEAK by design (verify-probes.sh):
+  # everything it can observe is our own wrapper or a re-read of our own config
+  # — it never gets evidence from cargo/cargo-cooldown itself, so OK would be
+  # the weakest evidence carrying the strongest verdict. So WEAK is the ceiling,
+  # and this check's real job is to catch a FALSE-BROKEN verdict (GAP / CANNOT
+  # EXECUTE) on an apt-cargo host — the off-PATH-assumption regression. OK or
+  # WEAK both AGREE that the gate is recognised as routed; only GAP/N-A disagree
+  # with the behaviour proven above.
+  if [ "$vstat" = "OK" ] || [ "$vstat" = "WEAK" ]; then
+    ok "supply-chain-verify recognises the gate is routed ('$vstat' — cargo caps at WEAK by design), matching the behaviour above"
     eviden "$(printf '%s' "$vrow" | sed 's/   */ /g' | cut -c1-140)"
   else
-    bad "verifier DISAGREES with behaviour: the build was gated above, but the verifier row is '$vstat', not OK"
+    bad "verifier DISAGREES with behaviour: the build was gated above, but the verifier row is '$vstat' (a broken/absent verdict), not OK or the WEAK ceiling"
     eviden "$(printf '%s' "$vrow" | sed 's/   */ /g' | cut -c1-160)"
   fi
 else

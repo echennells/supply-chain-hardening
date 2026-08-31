@@ -56,6 +56,7 @@ COPY --chown=dev:dev meta /home/dev/role/meta/
 COPY --chown=dev:dev defaults /home/dev/role/defaults/
 COPY --chown=dev:dev tasks /home/dev/role/tasks/
 COPY --chown=dev:dev templates /home/dev/role/templates/
+COPY --chown=dev:dev files /home/dev/role/files/
 COPY --chown=dev:dev tests/fixtures /home/dev/fixtures/
 
 USER dev
