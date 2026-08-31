@@ -14,13 +14,19 @@
     dest: "{{ ansible_env.HOME }}/.npmrc"
     mode: "0644"
 
-- name: Deploy hardened /etc/npmrc (system-wide; covers sudo and non-deploying users)
-  # The per-user ~/.npmrc above only protects the user the role was run
-  # against. `sudo npm install` flips $HOME to /root and misses it; same
-  # for any other account on the host. /etc/npmrc is npm's documented
-  # global config (the default value of npm's `globalconfig` setting) and
-  # is also read by pnpm as the lowest-priority layer in its resolution
-  # chain — so one file covers both tools for every user including root.
+- name: Deploy hardened /etc/npmrc (correct on Debian/Ubuntu apt npm; harmless baseline elsewhere)
+  # The per-user ~/.npmrc above only protects the user the role ran against.
+  # `sudo npm install` flips $HOME to /root and misses it; so does any other
+  # account. /etc/npmrc is npm's global config ONLY on Debian/Ubuntu apt npm,
+  # whose builtin /usr/share/npm/npmrc redirects `globalconfig` here. On
+  # NodeSource, nvm, fnm, volta, asdf, Homebrew and the official node images
+  # npm's globalconfig is {prefix}/etc/npmrc (e.g. /usr/etc, /usr/local/etc)
+  # and this file is never read — so the sudo / other-user path gets no
+  # config-file coverage there (ECH-149). The "Resolve npm's real global
+  # config path" tasks after npm detection below deploy to the actual path on
+  # those layouts. This file is kept unconditionally because it is correct on
+  # apt hosts, is also read by pnpm as its lowest-priority layer, and is
+  # harmless where inert.
   become: true
   ansible.builtin.template:
     src: etc-npmrc.j2
@@ -61,6 +67,58 @@
   changed_when: false
   check_mode: false
   failed_when: false
+
+- name: Resolve npm's real global config path (globalconfig is prefix-relative, not /etc/npmrc)
+  # ECH-149. npm's `globalconfig` defaults to {prefix}/etc/npmrc. That is
+  # /etc/npmrc ONLY on Debian/Ubuntu apt npm; on NodeSource, nvm, fnm, volta,
+  # asdf, Homebrew and the official node images it resolves to /usr/etc/npmrc,
+  # /usr/local/etc/npmrc, etc., and the /etc/npmrc written above is never read.
+  # Ask npm where it actually reads global config. The path is prefix-relative
+  # and identical for every user on the host (it is not $HOME-derived), so
+  # resolving it once as the invoking user also fixes the sudo / other-user
+  # path. (A host that sets NPM_CONFIG_GLOBALCONFIG to a per-user override is
+  # out of scope — we harden npm's real default global config location.)
+  ansible.builtin.command: "{{ npm_check.stdout }} config get globalconfig"
+  register: npm_globalconfig
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: npm_check.rc == 0
+
+- name: Ensure npm's resolved global config directory exists
+  # {prefix}/etc may not exist yet (e.g. /usr/etc on NodeSource). Skipped when
+  # globalconfig resolves to /etc/npmrc (already deployed) or to an empty /
+  # relative value.
+  become: true
+  ansible.builtin.file:
+    path: "{{ (npm_globalconfig.stdout | trim) | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - npm_check.rc == 0
+    - npm_globalconfig is defined
+    - npm_globalconfig.stdout | default('') | trim | length > 0
+    - (npm_globalconfig.stdout | trim) is match('^/')
+    - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
+
+- name: Deploy hardened npmrc to npm's resolved global config path (non-apt layouts)
+  # Closes the sudo / other-user gap on every layout where globalconfig is not
+  # /etc/npmrc. Idempotent no-op on Debian apt (guarded out above).
+  become: true
+  ansible.builtin.template:
+    src: etc-npmrc.j2
+    dest: "{{ npm_globalconfig.stdout | trim }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - npm_check.rc == 0
+    - npm_globalconfig is defined
+    - npm_globalconfig.stdout | default('') | trim | length > 0
+    - (npm_globalconfig.stdout | trim) is match('^/')
+    - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
 
 - name: Check if lockfile-lint is already installed
   ansible.builtin.command: which lockfile-lint
