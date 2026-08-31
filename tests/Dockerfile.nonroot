@@ -40,6 +40,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && hash -r \
     && echo "npm now: $(npm --version)"
 
+# uv, system-wide on PATH. A real hardened host that has pip also has uv — the
+# role's pip source-build protection IS the pip->uv wrapper, which only deploys
+# when uv is present. Without uv here, pip is installed but unwrapped, which the
+# refactored verifier (correctly) reports as a GAP. Installing uv makes this box
+# represent a real host and lets the wrapper deploy.
+RUN curl -LsSf https://astral.sh/uv/install.sh \
+      | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh \
+    && uv --version
+
 # The NON-ROOT invoking user, with passwordless sudo — exactly a normal
 # operator/agent account on a real host. uid 1000 so it is unmistakably not root.
 # Ubuntu 24.04's base image ships a stock uid-1000 `ubuntu` user; remove it so

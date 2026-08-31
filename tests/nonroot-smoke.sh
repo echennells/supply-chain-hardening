@@ -24,10 +24,18 @@ echo "user=$u  npm=$(command -v npm) ($(npm --version 2>&1))  home=$HOME"
 say "verify: no gaps as non-root"
 vout=$(/usr/local/bin/supply-chain-verify 2>&1); vrc=$?
 printf '%s\n' "$vout" | tail -45
-if printf '%s\n' "$vout" | grep -qiE "RESULT: no gaps"; then
-  ok "verify reports no gaps (rc=$vrc)"
+# Tolerate ONLY the Socket Firewall gap: sfw's firewall binary is fetched from
+# GitHub at apply time (best-effort, network-dependent) and the role records it
+# as a skipped protection when the fetch fails — a CI runner's network flakes on
+# it. Any OTHER gap is a real regression this smoke must catch (e.g. the pip
+# PATH wrapper before uv was installed).
+unexpected=$(printf '%s\n' "$vout" | sed 's/\x1b\[[0-9;]*m//g' \
+  | grep -E '(^|[[:space:]])GAP[[:space:]]' | grep -viE 'Socket Firewall')
+if [ -z "$unexpected" ]; then
+  ok "verify: no unexpected gaps as non-root (sfw binary-fetch is best-effort/network-dependent; rc=$vrc)"
 else
-  no "verify reports gaps after non-root apply (rc=$vrc)"
+  no "verify reports UNEXPECTED gaps after non-root apply (rc=$vrc):"
+  printf '  %s\n' "$unexpected"
 fi
 
 # 2) A real install as dev must SUCCEED — guards the root-owned sfw cache EACCES
