@@ -254,6 +254,12 @@ row() { # status, strength, protection, detail
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# True when version $1 >= $2 (dotted numeric). GNU sort -V; hosts are Linux.
+# Used as a deterministic, offline backstop for gates that only exist above a
+# known tool version — a version cannot be faked by config echo the way a
+# `config get` value can (see npm_implements and ECH-187).
+ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V 2>/dev/null | tail -n1)" = "$1" ]; }
+
 # Normalise once so the substring tests below can rely on single-space
 # separators and leading/trailing padding.
 : "${SCV_EXPECT_KNOWN:=0}"
@@ -317,10 +323,37 @@ npm_implements() {
   : > "$tmp/u"; : > "$tmp/g"
   # env -i also drops NPM_CONFIG_*, which otherwise supplies the value and
   # recreates the exact false positive.
-  v=$(env -i PATH="$PATH" HOME="$tmp" npm config get "$key" \
+  # Run FROM the scratch dir too: npm ALSO reads a project .npmrc from the
+  # current working directory, which --userconfig/--globalconfig do NOT
+  # override. A real deploy (ECH-187) false-OK'd the age gate on npm 10.9.8
+  # because supply-chain-verify ran in a directory whose .npmrc set
+  # min-release-age, leaking it into this "clean" query.
+  # (Not used for the age gate any more — its key defaults to null even when
+  # implemented, so a value-returned probe can't judge it; the age gate uses a
+  # version check instead. Still valid for keys with a non-null default, e.g.
+  # ignore-scripts.)
+  v=$( cd "$tmp" && env -i PATH="$PATH" HOME="$tmp" npm config get "$key" \
         --userconfig="$tmp/u" --globalconfig="$tmp/g" 2>/dev/null | head -1 | tr -d '\r')
   rm -rf "$tmp"
   [ -n "$v" ] && [ "$v" != "undefined" ]
+}
+
+# Behavioral probe for the npm age gate. Opt-in via SCV_BEHAVIORAL=1 because it
+# runs a live (dry-run) resolution. FUNCTIONAL evidence — observed behavior — is
+# the only tier that survives the "config echoed but not enforced" failure this
+# whole script exists to catch; a real deploy (ECH-187) proved the age gate
+# PARSED-OK while functionally inert.
+npm_age_gate_behaves() {
+  # A working min-release-age gate REFUSES an old package under a ~million-year
+  # window (every version is "too new"); an inert gate resolves one. --dry-run,
+  # so nothing installs. The window is forced via env so the box's own (small,
+  # legitimate) window can't let an old package through and mask the result.
+  local tmp out; tmp=$(mktemp -d 2>/dev/null) || return 1
+  out=$( cd "$tmp" && npm init -y >/dev/null 2>&1
+         NPM_CONFIG_MIN_RELEASE_AGE=99999999 npm install lodash@4.17.21 \
+           --dry-run --no-audit --no-fund </dev/null 2>&1 )
+  rm -rf "$tmp"
+  printf '%s' "$out" | grep -qiE 'date before|No matching version|notarget'
 }
 
 # ---------------------------------------------------------------- npm --------
@@ -332,6 +365,12 @@ if have npm; then
   else
     v=$(npm config get ignore-scripts 2>/dev/null | tr -d '\r')
     if [ "$v" = "true" ]; then
+      # NOTE: a behavioral probe here would be a TAUTOLOGY on npm >= 12, which
+      # blocks dependency install-scripts by default (the allowScripts model) —
+      # a postinstall marker never fires whether our config is set or not, so
+      # "blocked" proves nothing about the role. Kept PARSED deliberately; see
+      # the [npm] allowScripts ticket for the redundancy + test-tautology it
+      # creates for existing postinstall tests.
       row OK PARSED "npm lifecycle scripts blocked" "npm implements ignore-scripts and reports true"
     else
       row GAP PARSED "npm lifecycle scripts blocked" "npm reports ignore-scripts=${v:-<unset>}"
@@ -342,15 +381,39 @@ if have npm; then
   # npm echoes back keys it does not implement, so the value alone is not
   # evidence — see npm_implements() above.
   nv=$(npm --version 2>/dev/null)
-  if ! npm_implements min-release-age; then
-    row GAP FUNCTIONAL "npm age gate" "npm $nv does NOT implement min-release-age (added in npm 11.10.0). Our config sets it and npm echoes it back, but nothing enforces it."
+  if [ -z "$nv" ]; then
+    row GAP FUNCTIONAL "npm age gate" "npm is present but 'npm --version' returned nothing — cannot verify the age gate"
+  elif ! ver_ge "$nv" "11.10.0"; then
+    # Deterministic, OFFLINE backstop (ECH-187). min-release-age landed in npm
+    # 11.10.0; below that npm echoes the key but nothing enforces it. A real
+    # deploy false-OK'd here on npm 10.9.8 because the config-echo probe was
+    # defeated by a leaked project .npmrc — a version comparison cannot be
+    # defeated by config echo. Version, not npm_implements, is the reliable
+    # signal for this key: min-release-age's DEFAULT is null even when
+    # implemented (npm 12.0.2 returns null for a clean query), so a
+    # "does npm return a value?" probe cannot tell implemented from unknown.
+    row GAP FUNCTIONAL "npm age gate" "npm $nv is below 11.10.0, where min-release-age was implemented — npm echoes the key but nothing enforces it."
   else
+    # npm >= 11.10.0: implemented (version is authoritative). Validate the
+    # configured value; under SCV_BEHAVIORAL, prove enforcement behaviorally.
     v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
     case "$v" in
       ''|null|undefined) row GAP PARSED "npm age gate" "npm implements min-release-age but reports no value" ;;
       *[!0-9]*)          row GAP PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
       0)                 row GAP PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
-      *)                 row OK  PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)" ;;
+      *)
+        # PARSED is a floor, not the ceiling. With SCV_BEHAVIORAL=1, prove
+        # ENFORCEMENT: resolve an old package under a huge window; a working
+        # gate refuses it, an inert one resolves it.
+        if [ "${SCV_BEHAVIORAL:-0}" = "1" ]; then
+          if npm_age_gate_behaves; then
+            row OK FUNCTIONAL "npm age gate" "npm $nv ENFORCES min-release-age (window ${v}d): an old package was refused under a huge window"
+          else
+            row GAP FUNCTIONAL "npm age gate" "npm $nv reports min-release-age=$v but a package RESOLVED under a huge window — the gate is not enforcing"
+          fi
+        else
+          row OK PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s) (set SCV_BEHAVIORAL=1 to prove enforcement)"
+        fi ;;
     esac
   fi
 else
