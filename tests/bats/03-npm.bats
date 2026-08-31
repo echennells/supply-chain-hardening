@@ -11,6 +11,21 @@ load setup
   rm -rf /tmp/npm-script-test
 }
 
+@test "npm: ECH-149 — the file at npm's REAL globalconfig path is hardened, not just /etc/npmrc" {
+  # ECH-149. The role used to deploy only /etc/npmrc, which npm reads as global
+  # config ONLY on Debian/Ubuntu apt npm. On NodeSource (this image), nvm, fnm,
+  # volta, asdf and the official node images, npm's globalconfig is
+  # prefix-relative (/usr/etc/npmrc, /usr/local/etc/npmrc, …) and /etc/npmrc is
+  # inert — so `sudo npm install` and other-user installs got no config-file
+  # coverage. Assert the role deployed hardening to the path npm ACTUALLY reads,
+  # rather than grepping the file the role chose to write. This is the
+  # PARSED-vs-FUNCTIONAL discipline: ask npm where it reads, then check there.
+  gp=$(npm config get globalconfig 2>/dev/null | tr -d '\r')
+  [ -n "$gp" ] || skip "npm did not report a globalconfig path"
+  [ -f "$gp" ]
+  grep -q 'ignore-scripts=true' "$gp"
+}
+
 @test "npm: .npmrc contains allow-git=none (file-content check)" {
   # File-content layer only. `npm config get allow-git` returns the literal
   # value from .npmrc regardless of whether npm honors the key — so a test
