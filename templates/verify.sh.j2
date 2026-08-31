@@ -392,7 +392,7 @@ if have npm; then
     # signal for this key: min-release-age's DEFAULT is null even when
     # implemented (npm 12.0.2 returns null for a clean query), so a
     # "does npm return a value?" probe cannot tell implemented from unknown.
-    row GAP FUNCTIONAL "npm age gate" "npm $nv is below 11.10.0, where min-release-age was implemented — npm echoes the key but nothing enforces it."
+    row GAP FUNCTIONAL "npm age gate" "npm $nv does NOT implement min-release-age (added in npm 11.10.0) — below that version npm echoes the key but nothing enforces it."
   else
     # npm >= 11.10.0: implemented (version is authoritative). Validate the
     # configured value; under SCV_BEHAVIORAL, prove enforcement behaviorally.
