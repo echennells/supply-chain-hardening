@@ -56,6 +56,59 @@ home (see the `bun_wrap_become` / `cargo_wrap_become` facts).
 restating a default.** `GOPRIVATE=""` is Go's default; emitting it changes
 nothing unless something already set it, which presupposes execution.
 
+### The attribution test
+
+The boundary test asks whether a control is *in scope*. This one asks whether
+it is *shippable*, and it is a separate gate — a control can pass the first and
+fail this one.
+
+> **When this control breaks something legitimate, does the error name the
+> control?**
+
+- **Yes — it fails at admission, immediately, with a message that points here**
+  → shippable, even if it breaks a lot.
+- **No — it succeeds at admission and fails later, elsewhere, in code that has
+  nothing to do with us** → do not ship it on by default, however good the
+  protection is.
+
+Every admission control prevents intended execution in proportion to how well
+it prevents unintended execution. That is not a flaw, it is what admission
+control *is*. `only-binary = :all:` breaks every sdist-only dependency;
+`ignore-scripts` breaks packages with legitimate native-binding postinstalls;
+`--locked` breaks the legitimate lockfile update. We ship all three.
+
+What makes those survivable is not that they break less. It is that they break
+**loudly, at the moment of admission, with the tool naming the reason**. pip
+says "no binary distribution available"; the operator can find this role in one
+grep and make an informed choice about the trade.
+
+A control that fails at *runtime* gets diagnosed as a broken toolchain, and the
+fix an operator reaches for is deleting the file we wrote — which takes every
+other protection in that file with it. **The blast radius of a badly-attributed
+control is not the control; it is the whole layer it lives in.**
+
+Two instances:
+
+- `BUNDLE_DEPLOYMENT: "true"` is documented as "equivalent to setting `frozen`
+  to `true` and `path` to `vendor/bundle`." The `path` half silently relocates
+  where every `bundle install` on the host puts gems. The operator whose fresh
+  clone hard-fails does not find us; they delete `~/.bundle/config`, and take
+  `BUNDLE_FROZEN` with it. We shipped a control that removes a real one.
+- `PYTHONSAFEPATH=1` closes real-world stdlib module shadowing — an attacker's
+  `struct.py` in the working directory being imported by stdlib `base64`. It is
+  a genuine execution boundary. It also strips the script directory and the CWD
+  from `sys.path`, so `python script.py` importing a sibling, and `python -m`
+  against a local package, stop resolving. That surfaces as an `ImportError`
+  in someone else's code, weeks later, naming neither this role nor the
+  protection. In scope by the boundary test; not shippable on by default by
+  this one.
+
+The remedy for a control that fails this test is not to discard it. It is to
+make it opt-in, or profile-scoped where the trade is obviously correct (an
+agent host, where "a script imports a file next to it" is closer to the threat
+than to the workflow), and to say plainly in the README what breaks and why —
+so the runtime error is one search away from its cause.
+
 ### Things that are in scope but are not protections
 
 Two large categories are legitimate and should NOT be counted in the
@@ -476,7 +529,48 @@ correct and never read.
 **Principle**: resolve the tool's config home from the tool's own
 environment (`${CARGO_HOME:-$HOME/.cargo}`), never from the default path.
 Applies equally to NPM_CONFIG_USERCONFIG, PIP_CONFIG_FILE, COMPOSER_HOME,
-GRADLE_USER_HOME, BUNDLE_USER_CONFIG.
+GRADLE_USER_HOME, BUNDLE_USER_CONFIG, and UV_CONFIG_FILE / XDG_CONFIG_HOME.
+
+**uv is the quiet case.** Its user config is
+`${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml`, and `UV_CONFIG_FILE` overrides
+whatever is discovered. MEASURED: with `uv.toml` written to `$HOME/.config/uv`
+while `XDG_CONFIG_HOME` pointed elsewhere, `uv pip list` still exits 0, a grep
+for `no-build` still matches the file we wrote, and uv reports
+`no_build: None` — it read nothing of ours. Both writers hardcoded
+`$HOME/.config/uv` and so did the verifier, so writer and checker agreed with
+each other and disagreed with uv. Grepping the file you wrote proves only that
+you wrote it; ask the tool what it resolved (`uv --show-settings`).
+
+**bun is the sharp-edged case: XDG changes the FILENAME, and there is no
+fallback.** MEASURED across bun 1.1.38 → 1.4.0: bun reads
+`$XDG_CONFIG_HOME/.bunfig.toml` — *dot-prefixed* — when `XDG_CONFIG_HOME` is
+set, and `$HOME/.bunfig.toml` only when it is unset. With `XDG_CONFIG_HOME`
+pointing at a directory that holds no `.bunfig.toml`, `$HOME/.bunfig.toml` is
+never consulted, and `$XDG_CONFIG_HOME/bunfig.toml` without the dot is not
+read either. So the usual "write the default path, the tool will find it"
+intuition fails twice: wrong directory *and* wrong name. Both writers
+hardcoded `$HOME` and were dead on every image that sets `XDG_CONFIG_HOME`.
+Check what the tool calls the file in each home, not just where the home is.
+
+**gradle is the case where resolving the env var is NOT enough.** Gradle reads
+`$GRADLE_USER_HOME`, and when that is unset it falls back to
+`<user.home>/.gradle` — where `user.home` is a JVM system property that on
+Linux comes from the **passwd entry**, not from `$HOME`. MEASURED (gradle
+8.14.3 on openjdk-21, linux-arm64): with `HOME=/tmp/.../fakehome`,
+`System.getProperty("user.home")` was still `/home/vscode` and gradle loaded no
+init script from `fakehome/.gradle`. So `${GRADLE_USER_HOME:-$HOME/.gradle}` —
+the shape that fixes cargo, uv and bun — is still wrong for gradle, because the
+DEFAULT half of it is passwd-derived. Both writers hardcoded `$HOME` and were
+dead on `docker run -u <uid>`, OpenShift arbitrary uids and `sudo -E`.
+
+**Principle**: when the tool's default config home is not derived from `$HOME`,
+resolving its env var only covers the case where the env var is set. Resolve
+the default the way the TOOL derives it (`getent passwd "$(id -u)"`,
+`ansible_user_dir` — ansible reads the same passwd entry the JVM does), and
+where the surface owns a private, single-user env layer, pin the env var to the
+directory you wrote so the ambiguity cannot return. A system-wide env layer is
+not such a place: one absolute path in `/etc/profile.d` would point every
+account on the host at one user's home.
 
 ---
 
@@ -524,10 +618,20 @@ cargo-audit, govulncheck, pip-audit, etc.
 
 ## How to use this document
 
-**When adding a new defense**, walk Axis 1, 3, 5 in order:
+**When adding a new defense**, two gates first, then walk Axis 1, 3, 5:
+
+0a. **Boundary test** — does this change how a package manager treats a
+    package that has not yet run? No → out of scope; document it, do not ship
+    it as a protection.
+0b. **Attribution test** — when it breaks something legitimate, does the error
+    name the control? No → not shippable on by default; make it opt-in or
+    profile-scoped and say in the README what breaks.
+
 1. Is there an existing layer in this area? (Axis 1)
 2. Does the tool actually honor this key/var/flag, on every supported version? (Axis 3)
 3. Does it interact with anything the role already does? (Axis 5)
+
+A defense can pass 0a and fail 0b. `PYTHONSAFEPATH` is the worked example.
 
 **When reviewing a PR**, check each modified template/task against
 the relevant axes. A pattern this document warns about should not

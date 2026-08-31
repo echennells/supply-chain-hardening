@@ -1,0 +1,36 @@
+# Drone / Woodpecker
+#
+# THE INTERESTING CASE. Each step is its own container, so nothing in a
+# process environment survives a step boundary — there is no mechanism to
+# emit to, native or otherwise.
+#
+# What still works without any help: the config files and PATH wrappers, as
+# long as steps share a workspace volume (they do by default) AND the
+# hardening writes into that shared path rather than a container-local $HOME.
+#
+# So: point HOME and the env file at the workspace, then source the env file
+# at the top of each later step.
+
+kind: pipeline
+type: docker
+name: default
+
+steps:
+  - name: harden
+    image: node:22
+    environment:
+      HOME: /drone/src/.home
+      HARDENING_ENV_FILE: /drone/src/.hardening.env
+    commands:
+      - mkdir -p /drone/src/.home
+      # write_etc is off: /etc is container-local and would not survive.
+      - WRITE_ETC=false ./action/harden.sh --emit=plain
+
+  - name: build
+    image: node:22
+    environment:
+      HOME: /drone/src/.home        # picks up the config files from step 1
+    commands:
+      - source /drone/src/.hardening.env
+      - npm ci
+      - npm run build

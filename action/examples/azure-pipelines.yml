@@ -1,0 +1,23 @@
+# Azure Pipelines
+#
+# Azure's logging command `##vso[task.setvariable]` promotes a variable to
+# subsequent steps. harden.sh emits those when --emit=azure, so later steps
+# inherit the env layer with no extra work.
+
+trigger: [main]
+
+pool:
+  vmImage: ubuntu-24.04
+
+steps:
+  - checkout: self
+
+  - script: ./action/harden.sh --emit=azure
+    displayName: Supply-chain hardening
+
+  # Subsequent steps inherit the hardened environment.
+  - script: npm ci
+    displayName: Install dependencies
+
+  - script: npm run build
+    displayName: Build

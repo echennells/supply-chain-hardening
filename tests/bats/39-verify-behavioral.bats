@@ -187,7 +187,42 @@ EOF
   # jammy 2.2.6, bookworm 2.5.5, noble 2.7.1 — none reach the 2.9 needed for
   # audit.block-insecure / block-abandoned. Before this row existed the
   # verifier emitted nothing at all for composer, which read as "fine".
-  mk() { printf '#!/bin/bash\n[ "$1" = "--version" ] && echo "Composer version %s 2024-01-01"\n' "$1" > "$FAKEBIN/composer"; chmod +x "$FAKEBIN/composer"; }
+  #
+  # The stand-in also answers `composer config --global --list --source`,
+  # which the shared probe body (files/verify-probes.sh) requires. A version
+  # at or above the 2.9 floor is a CAPABILITY claim and nothing more — the
+  # probe will not call it OK until composer also reports the audit keys back
+  # WITH a source file, because composer echoes any audit subkey verbatim
+  # (measured on 2.7.1/2.8.12/2.10.3, invented keys included). A fixture that
+  # only answers --version therefore reads as "supports it, cannot confirm
+  # it", which is the honest answer and not what this test is about.
+  mk() {
+    cat > "$FAKEBIN/composer" <<EOF
+#!/bin/bash
+case "\$1" in
+  --version) echo "Composer version $1 2024-01-01"; exit 0 ;;
+  config)
+    shift
+    for a in "\$@"; do [ "\$a" = "--list" ] && { list=1; }; done
+    if [ -n "\${list:-}" ]; then
+      echo "[home] \$HOME/.config/composer (default)"
+      echo "[secure-http] true (\$HOME/.config/composer/config.json)"
+      echo "[allow-plugins] false (\$HOME/.config/composer/config.json)"
+      echo "[audit.block-insecure] true (\$HOME/.config/composer/config.json)"
+      echo "[audit.block-abandoned] true (\$HOME/.config/composer/config.json)"
+      exit 0
+    fi
+    # single-key query: answer for keys composer really implements, so the
+    # verifier's composer_implements() discriminator behaves as designed
+    for a in "\$@"; do
+      case "\$a" in secure-http|allow-plugins) echo true; exit 0 ;; esac
+    done
+    exit 1 ;;
+esac
+exit 1
+EOF
+    chmod +x "$FAKEBIN/composer"
+  }
 
   mk 2.9.0
   PATH="$FAKEBIN:$PATH" run "$VERIFY"

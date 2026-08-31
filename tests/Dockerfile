@@ -81,6 +81,10 @@ COPY meta /opt/ansible-supply-chain-security/meta/
 COPY defaults /opt/ansible-supply-chain-security/defaults/
 COPY tasks /opt/ansible-supply-chain-security/tasks/
 COPY templates /opt/ansible-supply-chain-security/templates/
+# files/ carries verify-probes.sh, the probe body tasks/verify.yml copies
+# verbatim into the assembled verifier. Without this line the role apply
+# below fails with "Could not find or access 'verify-probes.sh'".
+COPY files /opt/ansible-supply-chain-security/files/
 WORKDIR /opt/ansible-supply-chain-security
 
 # Apply the hardening role. Use bash with pipefail so the playbook's exit

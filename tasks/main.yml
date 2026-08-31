@@ -165,12 +165,18 @@
   when: socket_firewall_install | bool
   tags: [socket, npm]
 
-- name: Include GitHub Actions hardening tools
+- name: Include GitHub Actions workflow auditing tools
+  # Tagged `github` ONLY, deliberately. This include is genuinely
+  # GitHub-specific — zizmor and pinact audit GitHub Actions workflow YAML —
+  # and it is detection-only. It used to also carry a `ci` tag, which reads as
+  # "generic CI hardening" and is the opposite of what it does; the CI-runner
+  # hardening is a separate deliverable (see action/). Nothing invoked
+  # `--tags ci`, so dropping it breaks no caller.
   ansible.builtin.include_tasks:
     file: github.yml
     apply:
-      tags: [github, ci]
-  tags: [github, ci]
+      tags: [github]
+  tags: [github]
 
 - name: Include shell environment hardening
   # NOTE: `always` tag is intentional. shell_env.yml deploys
@@ -215,7 +221,7 @@
   # SCOPE-QUALIFIED ON PURPOSE.
   #
   # The tasks that append to `skipped_protections` live in tag-scoped includes
-  # (go.yml -> [go], github.yml -> [github, ci], socket.yml -> [socket, npm]
+  # (go.yml -> [go], github.yml -> [github], socket.yml -> [socket, npm]
   # plus `when: socket_firewall_install`). These two summary tasks are
   # `tags: always`. So a scoped run — `--tags npm`, `--tags shell`, or any run
   # with socket_firewall_install=false — never executes the producers, leaving

@@ -4,7 +4,7 @@ Audit of fast-moving package managers in the role to identify hardening settings
 
 Scope: **uv, yarn, bun** — chosen because their release cadence and security-feature evolution are high enough that the role's static config files have plausibly fallen behind.
 
-**Not audited**: npm (config format stable; lower yield), cargo / go / bundler / maven / gradle / nuget (config-only role tasks with no version-keyed behavior — same call as documented at the matrix's initial design).
+**Not audited**: npm (config format stable; lower yield), cargo / go / bundler / maven / gradle (config-only role tasks with no version-keyed behavior — same call as documented at the matrix's initial design), nuget (audited as not version-sensitive; **that call was wrong** — see ECH-165 below).
 
 ---
 
@@ -62,9 +62,11 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 ## bun (latest 1.2.x)
 
 **Currently deployed** (`templates/bunfig.toml.j2`, 3 settings):
-- `minimumReleaseAge` — age gate
-- `exact = true` — exact version pinning
-- `ignoreScripts = true` — script blocking (corrected 2026-05-28 from the made-up `lifecycleScripts = false` which bun silently ignored; see commit message)
+- `minimumReleaseAge` — age gate. **bun 1.3.0+** (MEASURED across 1.1.38 / 1.2.0 / 1.2.10 / 1.2.20 / 1.2.22 / 1.2.23 / 1.3.0 / 1.4.0: the key does not exist through 1.2.23, and bun accepts unknown `[install]` keys silently, so on older bun the file looked age-gated and was not). Tiered since 2026-08-28.
+- `exact = true` — exact version pinning. All bun.
+- `ignoreScripts = true` — script blocking (corrected 2026-05-28 from the made-up `lifecycleScripts = false` which bun silently ignored; see commit message). **bun 1.2.0+** (MEASURED: below 1.2.0 the key is inert in the GLOBAL bunfig *and* in a local one — only the CLI `--ignore-scripts` blocks lifecycle scripts there). Tiered since 2026-08-28.
+
+**Not a version question but the same blast radius:** bun rejects the ENTIRE bunfig on one bad value (`Invalid Bunfig: failed to load bunfig`, exit 1 — MEASURED with a quoted `minimumReleaseAge = "2d"`). Fail-whole, not fail-silent: a single malformed key disarms every other key AND breaks bun. Any new tiered key must render a value bun's parser accepts on every version that reads it.
 
 **Findings:**
 
@@ -73,9 +75,11 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 | `install.frozenLockfile = true` | Refuses install if `package.json` diverges from lockfile | All bun |
 | `install.auto = "disable"` | Disables bun's auto-install feature (which would silently install missing deps at runtime — significant foot-gun in CI/agent contexts) | All bun |
 | `install.saveTextLockfile = true` | Text-format `bun.lock` instead of binary `bun.lockb` (diff-able for audit) | bun 1.2+ |
+| `install.ignoreScripts = true` | Blocks install lifecycle scripts | bun 1.2.0+ (MEASURED inert below, global and local) |
+| `install.minimumReleaseAge = <seconds>` | Age gate on newly published versions | bun 1.3.0+ (MEASURED absent through 1.2.23) |
 | `install.security.scanner = "<path>"` | Extension point for external security scanners (Socket, Snyk, etc.) | Recent versions |
 
-**Tiering verdict**: **Partial tiering.** The high-impact settings (`frozenLockfile`, `auto = "disable"`) work across all bun versions. `saveTextLockfile` needs 1.2+. The scanner integration is a separate larger design question (would tie bun's install to sfw — out of scope for this audit).
+**Tiering verdict**: **Tiering required, and it is three keys, not one.** `frozenLockfile`, `exact` and `auto = "disable"` work across all bun versions (`auto = "disable"` is still a valid enum on 1.4.0). `saveTextLockfile` and `ignoreScripts` need 1.2.0+; `minimumReleaseAge` needs 1.3.0+. The original "partial tiering" verdict below undercounted: it treated `ignoreScripts` and `minimumReleaseAge` as universal, so both shipped untiered and were reported as applied on versions that ignore them. The scanner integration is a separate larger design question (would tie bun's install to sfw — out of scope for this audit).
 
 **Action**: Add `frozenLockfile` and `auto = "disable"` unconditionally + tier `saveTextLockfile` via bun version detection. ~30-45 min implementation.
 
@@ -87,7 +91,7 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 |---|---|---|---|
 | **yarn** | 5 settings (immutable\*, checksumBehavior, approvedGitRepositories, unsafeHttpWhitelist) | `enableHardenedMode` (4.0+) — lockfile tampering defense | **HIGH** |
 | **uv** | 4 settings + 1 env var | None (env var silently ignored on older versions; safe unconditional) | **MEDIUM** |
-| **bun** | 2 settings | `saveTextLockfile` (1.2+) | **LOW-MEDIUM** |
+| **bun** | 3 settings (`frozenLockfile`, `exact`, `auto`) | `saveTextLockfile` + `ignoreScripts` (1.2.0+), `minimumReleaseAge` (1.3.0+) | **LOW-MEDIUM** |
 
 **Standout finding**: Yarn's `enableHardenedMode` is the most consequential discovery — a real defense against an attack class (lockfile tampering at install time) the role currently has no coverage for.
 
@@ -95,7 +99,18 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 
 - **npm**: config format too stable for an audit to be high-yield; the role's npm settings haven't needed updates in years
 - **cargo / go**: same — stable config formats, no version-keyed role logic, matrix would be theater (decided at matrix design time)
-- **bundler / maven / gradle / nuget**: stable config formats with config-only role tasks; no version-sensitive surface to test
+- **bundler / maven / gradle**: stable config formats with config-only role tasks; no version-sensitive surface to test
+- **nuget**: audited as "no version-sensitive surface to test" — **that call was wrong** (ECH-165). The
+  config key IS version-tiered and the env layer beats it: MEASURED on SDK 6.0.428, 8.0.424, 9.0.317
+  and 10.0.400 (linux-arm64), `signatureValidationMode=require` is accepted-and-inert on 6.0.428 —
+  it parses the key and restores an unsigned package anyway — and enforcing from 8.0.424 up. On top
+  of that, `DOTNET_NUGET_SIGNATURE_VERIFICATION` overrides the file on EVERY version in both
+  directions: `false` disarms `require` even on 10.0.400, and `true` turns enforcement on for the
+  6.x tier (6.0.428 then refuses with NU3004). Both surfaces now export it `true`
+  (`templates/supply-chain-env.sh.j2`, `tasks/shell_env.yml`, `harden_nuget`'s `write_env`).
+  The lesson for future audits: "stable config format" was read as "no version-sensitive surface",
+  but a key can be stably *accepted* on every version and only *enforced* on some, and an env var
+  outside the config format can decide the outcome regardless.
 - **deno**: detection-based wrapper, not config-tiered. The wrapper itself handles version differences in subcommand allowlist; no static-config improvements identified
 - **pip**: deferred — role's pip side is mostly wrapper redirect to uv, so uv improvements above cover the indirect path
 

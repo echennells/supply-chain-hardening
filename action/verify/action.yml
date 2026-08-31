@@ -1,0 +1,136 @@
+name: 'Supply Chain Hardening — Verify'
+description: >-
+  Report which supply-chain protections are ACTUALLY enforcing in this job,
+  and fail the step when any are not. Run it AFTER your setup steps, not
+  immediately after hardening — its value is catching what your workflow
+  undoes (a toolchain install shadowing a wrapper, an env layer that never
+  propagated), which nothing else reports.
+author: 'echennells'
+
+inputs:
+  strict:
+    description: >-
+      Also fail when a protection could only be verified as PRESENT — i.e. a
+      file exists and nothing was observed enforcing. Off by default because
+      several protections have no cheap functional probe; turn it on for
+      pipelines that want unverified to count as unprotected.
+    required: false
+    default: 'false'
+  quiet:
+    description: >-
+      Suppress the table on stdout. The job summary and the exit code are
+      still produced.
+    required: false
+    default: 'false'
+  fail-on:
+    description: >-
+      Which gaps fail the step. `any` (default) is the historical contract.
+      `config` fails only on gaps a re-run of the hardening can close and not
+      on ones no configuration can — a runner whose npm predates
+      min-release-age still PRINTS that gap but no longer fails a job for a
+      capability the toolchain does not have. `never` reports and always
+      exits 0. Gaps are reported identically under all three; only the exit
+      code differs.
+    required: false
+    default: 'any'
+  env-file:
+    description: >-
+      Path to the env file the harden step wrote. Set this whenever you set
+      `env-file` on the harden action — the verifier cannot find a custom
+      path on its own, and silently degrades the env-propagation row to WEAK
+      when it looks in the default place and finds nothing.
+    required: false
+    default: ''
+  output-file:
+    description: >-
+      Path to the outputs file the harden step wrote. As above: this is the
+      record of what the job actually hardened, and without it the verifier
+      cannot tell "never requested" from "silently skipped" and falls back to
+      checking every installed tool.
+    required: false
+    default: ''
+
+outputs:
+  gaps:
+    description: >-
+      Number of protections found NOT in effect (0 when the step passes).
+      `unknown` if the verifier died before writing its outputs.
+    value: ${{ steps.verify.outputs.gaps }}
+  gaps_config:
+    description: 'Of those, how many a re-run of the hardening can close.'
+    value: ${{ steps.verify.outputs.gaps_config }}
+  gaps_toolchain:
+    description: 'Of those, how many need a newer toolchain and no config can fix.'
+    value: ${{ steps.verify.outputs.gaps_toolchain }}
+  weak:
+    description: 'Number of rows carrying PRESENT-level evidence only.'
+    value: ${{ steps.verify.outputs.weak }}
+  rows:
+    description: 'Total rows in the verification table. 0 means the verifier did not run.'
+    value: ${{ steps.verify.outputs.rows }}
+  expectations:
+    description: >-
+      `known` when the harden step left a complete record and verification was
+      scoped to it; `unknown` when it did not and every installed tool was
+      checked.
+    value: ${{ steps.verify.outputs.expectations }}
+  strict_failed:
+    description: 'true when --strict escalated WEAK rows into the failure.'
+    value: ${{ steps.verify.outputs.strict_failed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: verify
+      shell: bash
+      env:
+        EMIT: github
+        VERIFY_STRICT: ${{ inputs.strict }}
+        VERIFY_QUIET: ${{ inputs.quiet }}
+        VERIFY_FAIL_ON: ${{ inputs.fail-on }}
+        HARDENING_ENV_FILE: ${{ inputs.env-file }}
+        HARDENING_OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        args=()
+        [[ "$VERIFY_STRICT" == "true" ]] && args+=(--strict)
+        [[ "$VERIFY_QUIET"  == "true" ]] && args+=(--quiet)
+        [[ -n "$VERIFY_FAIL_ON" ]] && args+=("--fail-on=$VERIFY_FAIL_ON")
+        # An empty input must not become an empty PATH — unset it so the
+        # script falls back to its own default instead of looking for a file
+        # called "".
+        [[ -z "$HARDENING_ENV_FILE"    ]] && unset HARDENING_ENV_FILE
+        [[ -z "$HARDENING_OUTPUT_FILE" ]] && unset HARDENING_OUTPUT_FILE
+
+        VERIFY_OUTPUT_FILE="${RUNNER_TEMP:-/tmp}/supply-chain-verify.outputs"
+        export VERIFY_OUTPUT_FILE
+
+        set +e
+        "${{ github.action_path }}/../verify.sh" "${args[@]}"
+        rc=$?
+        set -e
+
+        # THE OUTPUTS COME FROM THE SCRIPT, NOT FROM THE EXIT CODE.
+        #
+        # This used to be `echo "gaps=$rc"`. verify.sh exits 0 or 1, so an
+        # output named and documented as a COUNT reported 1 for five gaps —
+        # and, under --strict, reported 1 for zero gaps and one WEAK row. Any
+        # consumer branching on `gaps > 1`, summing it, or printing it was
+        # reading a boolean wearing a count's name. The script now writes the
+        # real numbers to $VERIFY_OUTPUT_FILE.
+        #
+        # And never substitute 0 for a script that died: if the file is
+        # missing or empty the verifier did not get far enough to count
+        # anything, and `unknown` says so rather than reporting a clean run.
+        if [[ -s "$VERIFY_OUTPUT_FILE" ]]; then
+          cat "$VERIFY_OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+        else
+          printf 'gaps=unknown\ngaps_config=unknown\ngaps_toolchain=unknown\nweak=unknown\nrows=0\nexpectations=unknown\nstrict_failed=unknown\n' >> "$GITHUB_OUTPUT"
+        fi
+
+        # The exit code is unchanged: it is the pass/fail signal, and --fail-on
+        # is the only thing that moves it.
+        exit $rc
+
+branding:
+  icon: 'check-circle'
+  color: 'blue'

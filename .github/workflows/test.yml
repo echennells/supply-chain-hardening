@@ -1,8 +1,15 @@
 name: Test Supply Chain Hardening
 
 on:
+  # feat/** and fix/** included deliberately. This workflow is the ONLY thing
+  # that builds tests/Dockerfile and runs the 375-test role suite; the other
+  # workflows filter on action/** and cover the CI action only. With main-only
+  # triggers a branch could change 12 role tasks, verify.sh.j2 and 6 bats files
+  # and see nothing but green - which is how a verifier that aborted on an
+  # unbound variable, and therefore did not run at all on hosts, reached a
+  # branch tip. Coverage that does not fire reads exactly like coverage.
   push:
-    branches: [main]
+    branches: [main, 'feat/**', 'fix/**']
   pull_request:
     branches: [main]
 

@@ -1,0 +1,73 @@
+name: Verify matrix (real environments)
+
+# WHY THIS EXISTS
+#
+# The verifier must tell the truth across the environments the role actually
+# meets — not just the one the test image happens to build. A real deploy
+# false-OK'd the npm age gate on npm 10.9.8 (ECH-187) because CI had never run
+# the verifier on an npm below 11.10, where min-release-age does not exist.
+#
+# This matrix runs supply-chain-verify across representative npm sources and
+# asserts the age-gate verdict PER CELL:
+#   - npm  < 11.10  -> the gate is inert, the row MUST be a GAP
+#   - npm >= 11.10  -> the gate is live, the row MUST be OK
+# It runs with SCV_BEHAVIORAL=1 so the "OK" is FUNCTIONAL (an old package is
+# actually refused under a huge window), not merely PARSED.
+#
+# Each cell runs in a pristine container (the way the role meets a real host),
+# not on the pre-provisioned runner, so the npm under test is exactly the one
+# the cell installs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify-npm-source:
+    name: "verify age gate: ${{ matrix.name }}"
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: apt npm (below 11.10 — gate inert)
+            setup: 'apt-get install -y -qq nodejs npm'
+            expect: GAP
+          - name: nodesource npm@latest (>= 11.10 — gate live)
+            setup: 'curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1; apt-get install -y -qq nodejs; npm install -g npm@latest >/dev/null 2>&1'
+            expect: OK
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Apply role + assert npm age-gate verdict for this npm
+        env:
+          SETUP: ${{ matrix.setup }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          docker run --rm -e SETUP -e EXPECT -v "$PWD":/src:ro ubuntu:24.04 bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq >/dev/null 2>&1
+            apt-get install -y -qq ansible curl ca-certificates git sudo >/dev/null 2>&1
+            eval "$SETUP"
+            hash -r
+            echo "npm under test: $(npm --version)"
+            cp -r /src /role && cd /role
+            ansible-playbook site.yml --connection=local --limit localhost \
+              -e verify_protections=false --tags npm    >/tmp/a.log 2>&1 \
+              || { echo "APPLY FAILED"; tail -20 /tmp/a.log; exit 1; }
+            ansible-playbook site.yml --connection=local --limit localhost \
+              -e verify_protections=false --tags verify  >/tmp/v.log 2>&1 \
+              || { echo "VERIFY DEPLOY FAILED"; tail -20 /tmp/v.log; exit 1; }
+            row=$(SCV_BEHAVIORAL=1 /usr/local/bin/supply-chain-verify 2>/dev/null | grep -i "npm age gate" | head -1)
+            echo "age-gate row: $(echo "$row" | tr -s " ")"
+            status=$(printf "%s" "$row" | awk "{print \$1}")
+            if [ "$status" != "$EXPECT" ]; then
+              echo "::error::npm age gate: expected $EXPECT on npm $(npm --version), got [$status]"
+              exit 1
+            fi
+            echo "PASS: npm age gate = $status as expected for npm $(npm --version)"
+          '

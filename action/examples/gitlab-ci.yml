@@ -1,0 +1,46 @@
+# GitLab CI
+#
+# GitLab has no per-step env mechanism — a job's script is one shell, and
+# harden.sh runs inside it as a SUBPROCESS, so its exports do not survive.
+# Source the env file it writes; that is the whole difference from GitHub.
+#
+# The config files and PATH wrappers it deploys need no such step.
+
+variables:
+  # Where harden.sh writes the sourceable env file. Defaults to
+  # $RUNNER_TEMP/$TMPDIR; pinning it makes the source line below explicit.
+  HARDENING_ENV_FILE: "$CI_PROJECT_DIR/.supply-chain-hardening.env"
+
+.harden: &harden
+  - ./action/harden.sh --emit=gitlab
+  - source "$HARDENING_ENV_FILE"
+
+build:
+  image: node:22
+  before_script:
+    - *harden
+  script:
+    # Everything from here runs with scripts blocked and the age gate on.
+    - npm ci
+    - npm run build
+
+test:
+  image: node:22
+  before_script:
+    - *harden
+  script:
+    - npm ci
+    - npm test
+
+# Cross-JOB propagation (as opposed to within a job) uses a dotenv report.
+# Only needed if a later job must inherit the env layer without re-running
+# the hardening — usually it is cheaper to just harden again.
+build-with-dotenv:
+  image: node:22
+  script:
+    - ./action/harden.sh --emit=gitlab
+    - cp "$HARDENING_ENV_FILE" hardening.env
+    - sed -i 's/^export //' hardening.env    # dotenv wants KEY=value
+  artifacts:
+    reports:
+      dotenv: hardening.env

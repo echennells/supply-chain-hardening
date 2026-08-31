@@ -4,16 +4,36 @@
 # is actually present — otherwise the wrapper would recurse into itself and
 # brick pip system-wide. See tests/bats/22-pip-wrapper-safety.bats.
 
+- name: Determine uv user config directory
+  # uv's user config is $XDG_CONFIG_HOME/uv/uv.toml, falling back to
+  # $HOME/.config/uv/uv.toml ONLY when XDG_CONFIG_HOME is unset. Resolve it
+  # from uv's environment rather than hardcoding $HOME/.config.
+  # MEASURED: uv.toml at $HOME/.config/uv with XDG_CONFIG_HOME pointed
+  # elsewhere -> uv reports `no_build: None`, i.e. it read nothing of ours,
+  # while the verifier (sharing the same wrong assumption) still said OK.
+  # docs/design-principles.md Axis 5, "Assumed canonical config homes".
+  # NOT MEASURED, per uv's documentation only: UV_CONFIG_FILE / --config-file
+  # names an explicit uv.toml that overrides the discovered user config. We do
+  # not write to it (it is a caller-owned path); a host that sets it is not
+  # covered by the file we deploy here.
+  ansible.builtin.set_fact:
+    uv_config_dir: >-
+      {{
+        ansible_env.XDG_CONFIG_HOME ~ '/uv'
+        if ansible_env.XDG_CONFIG_HOME is defined and ansible_env.XDG_CONFIG_HOME | length > 0
+        else ansible_env.HOME ~ '/.config/uv'
+      }}
+
 - name: Create uv config directory
   ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.config/uv"
+    path: "{{ uv_config_dir }}"
     state: directory
     mode: "0755"
 
 - name: Deploy hardened uv.toml
   ansible.builtin.template:
     src: uv.toml.j2
-    dest: "{{ ansible_env.HOME }}/.config/uv/uv.toml"
+    dest: "{{ uv_config_dir }}/uv.toml"
     mode: "0644"
 
 - name: Create system-wide uv config directory

@@ -3,6 +3,41 @@
 # This task deploys pip.conf as a fallback in case the real pip binary
 # is invoked directly (bypassing the wrapper) — e.g. on hosts without uv.
 
+# --- python_safe_path tier ------------------------------------------------
+# PYTHONSAFEPATH landed in python 3.11. Below that it is accepted silently and
+# does nothing, which is the "accepted and inert" shape this repo keeps hitting
+# (npm min-release-age, composer block-insecure, bun ignoreScripts). Detect and
+# record rather than let the env layer imply a protection that is not there.
+- name: Detect the python3 version (PYTHONSAFEPATH needs 3.11+)
+  ansible.builtin.command: python3 -c 'import sys;print("%d.%d" % sys.version_info[:2])'
+  register: python_version_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: python_safe_path | bool
+
+- name: Record skipped protection — PYTHONSAFEPATH inert on this python
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['PYTHONSAFEPATH — python ' ~
+         (python_version_check.stdout | default('?') | trim) ~
+         ' ignores it (needs 3.11+). A file in the working directory can still
+         shadow a stdlib module; python_safe_path=true had no effect.'] }}
+  when:
+    - python_safe_path | bool
+    - python_version_check.rc | default(1) == 0
+    - (python_version_check.stdout | default('0.0') | trim) is version('3.11', '<')
+
+- name: Record skipped protection — PYTHONSAFEPATH requested but python3 absent
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['PYTHONSAFEPATH — python3 is not
+         installed, so python_safe_path=true was not verified against a real
+         interpreter.'] }}
+  when:
+    - python_safe_path | bool
+    - python_version_check.rc | default(1) != 0
+
 - name: Create pip config directory
   ansible.builtin.file:
     path: "{{ ansible_env.HOME }}/.config/pip"

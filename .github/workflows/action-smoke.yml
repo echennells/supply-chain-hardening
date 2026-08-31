@@ -1,0 +1,1269 @@
+name: Action smoke test
+
+on:
+  push:
+    branches: [main, feat/**]
+    paths:
+      - 'action/**'
+      - '.github/workflows/action-smoke.yml'
+  pull_request:
+    paths:
+      - 'action/**'
+      - '.github/workflows/action-smoke.yml'
+
+jobs:
+  action-defaults:
+    name: 'Action: default invocation works'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        id: harden
+
+      - name: Outputs are populated
+        run: |
+          echo "ecosystems-hardened=${{ steps.harden.outputs.ecosystems-hardened }}"
+          echo "release-age-hours=${{ steps.harden.outputs.release-age-hours }}"
+          echo "sfw-installed=${{ steps.harden.outputs.sfw-installed }}"
+          test -n "${{ steps.harden.outputs.ecosystems-hardened }}"
+          test "${{ steps.harden.outputs.release-age-hours }}" = "48"
+
+      - name: Env vars propagated to subsequent step
+        run: |
+          test "$NPM_CONFIG_IGNORE_SCRIPTS" = "true"
+          test "$NPM_CONFIG_AUDIT" = "true"
+          test "$PIP_DISABLE_PIP_VERSION_CHECK" = "1"
+
+      - name: Config files written to $HOME
+        run: |
+          grep -q "ignore-scripts=true" "$HOME/.npmrc"
+          grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
+          grep -q "enableScripts: false" "$HOME/.yarnrc.yml"
+          grep -q "only-binary = :all:" "$HOME/.config/pip/pip.conf"
+          grep -q "no-build = true" "$HOME/.config/uv/uv.toml"
+
+      - name: /etc files written (write_etc default true)
+        run: |
+          sudo grep -q "ignore-scripts=true" /etc/npmrc
+          sudo grep -q "only-binary = :all:" /etc/pip.conf
+
+  action-blocks-postinstall:
+    name: 'Action: blocks npm postinstall (the actual attack)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      - name: Attempt to install fixture with postinstall — must be blocked
+        run: |
+          rm -f /tmp/postinstall-marker
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y >/dev/null
+          npm install ${GITHUB_WORKSPACE}/tests/fixtures/npm-postinstall-pkg 2>&1 || true
+          if [ -f /tmp/postinstall-marker ]; then
+            echo "::error::Postinstall ran — hardening did NOT block it. This is the bug the action exists to prevent."
+            exit 1
+          fi
+          echo "✓ postinstall correctly blocked"
+
+  action-subset:
+    name: 'Action: subset selection (npm,pip only)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm,pip
+          write_etc: 'false'   # also exercise the opt-out path
+
+      - name: Only requested ecosystems hardened
+        run: |
+          test "${{ steps.harden.outputs.ecosystems-hardened }}" = "npm,pip"
+          # npm + pip configs exist
+          test -f "$HOME/.npmrc"
+          test -f "$HOME/.config/pip/pip.conf"
+          # pnpm/yarn/uv configs do NOT exist
+          test ! -f "$HOME/.config/pnpm/config.yaml"
+          test ! -f "$HOME/.yarnrc.yml"
+          test ! -f "$HOME/.config/uv/uv.toml"
+
+      - name: write_etc=false skipped system files
+        run: |
+          if [ -f /etc/npmrc ]; then
+            echo "::error::/etc/npmrc was written despite write_etc=false"
+            exit 1
+          fi
+
+  action-rejects-bad-input:
+    name: 'Action: rejects release_age_hours=0'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        id: harden
+        continue-on-error: true
+        with:
+          release_age_hours: '0'
+
+      - name: Action must have failed
+        run: |
+          if [ "${{ steps.harden.outcome }}" != "failure" ]; then
+            echo "::error::Action did not fail on release_age_hours=0 (outcome: ${{ steps.harden.outcome }})"
+            exit 1
+          fi
+          echo "✓ action correctly refused release_age_hours=0"
+
+  action-blocks-pnpm-project-script:
+    name: 'Action: blocks pnpm project-level postinstall (pnpm 11 config.yaml is load-bearing)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: Install pnpm via corepack
+        run: corepack enable && corepack prepare pnpm@latest --activate && pnpm --version
+
+      - uses: ./action
+        with:
+          ecosystems: pnpm
+
+      # pnpm 11 BLOCKS dependency build scripts by default (without our help) —
+      # the meaningful test is whether it blocks the PROJECT'S OWN postinstall,
+      # which pnpm 11 runs unless ignoreScripts: true is set in config.yaml.
+      # That's the file the action deploys and the file pnpm 11 actually reads.
+      - name: Project-level postinstall must be blocked
+        run: |
+          rm -f /tmp/marker-pnpm-project
+          mkdir -p /tmp/pnpm-victim && cd /tmp/pnpm-victim
+          cat > package.json <<'EOF'
+          {
+            "name": "victim",
+            "version": "1.0.0",
+            "scripts": {"postinstall": "touch /tmp/marker-pnpm-project"}
+          }
+          EOF
+          pnpm install --ignore-workspace 2>&1 | tail -3 || true
+          if [ -f /tmp/marker-pnpm-project ]; then
+            echo "::error::pnpm project postinstall RAN — action's config.yaml is not effective"
+            exit 1
+          fi
+          echo "✓ pnpm 11 project-level postinstall blocked via config.yaml"
+
+  action-blocks-uv-sdist:
+    name: 'Action: uv pip install refuses sdist (setup.py blocked via no-build)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install uv (the action's recommended Python interface)
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      # Build the sdist BEFORE the action runs. The action's hardening blocks
+      # sdist BUILDS via uv no-build, so once the action runs we can't even
+      # build the fixture. Building during this step is fine — the action
+      # hasn't applied yet.
+      - name: Build malicious-pattern sdist fixture
+        run: |
+          python3 -m pip install --quiet --break-system-packages setuptools
+          cd ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil
+          python3 setup.py sdist 2>&1 | tail -3
+          ls dist/
+
+      - uses: ./action
+        with:
+          ecosystems: uv
+
+      # Note: we test uv, not pip. `pip install <local-sdist>` with
+      # only-binary=:all: turns out NOT to block local file paths in
+      # modern pip (only-binary applies to PyPI resolution, not explicit
+      # file arguments). uv's no-build setting DOES refuse sdist builds
+      # regardless of source. The action's README explicitly recommends
+      # uv as the safe Python interface; this test verifies that
+      # recommendation holds.
+      - name: uv pip install must refuse the sdist
+        run: |
+          rm -f /tmp/marker-python-setup-exfil
+          sdist=$(ls ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil/dist/*.tar.gz | head -1)
+          uv venv /tmp/uv-victim >/dev/null 2>&1
+          VIRTUAL_ENV=/tmp/uv-victim uv pip install "$sdist" 2>&1 | tail -5 || true
+          if [ -f /tmp/marker-python-setup-exfil ]; then
+            echo "::error::uv ran setup.py — no-build=true was not honored"
+            exit 1
+          fi
+          echo "✓ uv refused sdist build — setup.py never ran"
+
+  action-uv-config-valid-on-old-uv:
+    # Regression catcher for the "exclude-newer = '48 hours'" bug class.
+    # The action initially shipped (b9e1d4a) with UV_EXCLUDE_NEWER as a
+    # relative-duration string ("48 hours"), which uv's TOML parser
+    # rejects. The existing smoke test (action-blocks-uv-sdist) didn't
+    # catch it because it runs `curl ...astral.sh/uv/install.sh | sh`
+    # which gets latest uv — and uv 0.11.4+ silently coerces strings to
+    # timestamps. A real consumer who pins uv to a stable older version
+    # gets `failed to parse year in date '48 hours'` and every uv
+    # invocation breaks.
+    #
+    # This job pins uv to 0.5.7 (matrix-tested, pre-coercion) and asserts
+    # `uv --version` succeeds AFTER the action ran. If the action emits
+    # invalid TOML, uv refuses to start at all → this fails loud.
+    name: 'Action: uv config remains valid on pinned older uv (regression catcher)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned older uv (0.5.7)
+        run: |
+          curl -LsSf https://astral.sh/uv/0.5.7/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - uses: ./action
+        with:
+          ecosystems: uv
+
+      - name: uv must accept the action's rendered uv.toml
+        # If exclude-newer is a relative duration on older uv, this
+        # fails with "Failed to parse: /root/.config/uv/uv.toml" before
+        # printing the version. The grep ensures we got an actual
+        # version line, not an error message.
+        run: |
+          uv --version 2>&1 | tee /tmp/uv-version.log
+          grep -qE '^uv [0-9]+\.[0-9]+\.[0-9]+' /tmp/uv-version.log
+          ! grep -qi 'failed to parse\|toml parse error' /tmp/uv-version.log
+
+      - name: Assert exclude-newer is RFC 3339, not a relative duration
+        # Belt-and-suspenders: even if uv silently coerces in a future
+        # version, the action's emitted config should be RFC 3339 so
+        # consumers on older uv don't break.
+        run: |
+          grep -qE '^exclude-newer = "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"$' "$HOME/.config/uv/uv.toml"
+          ! grep -qE '"[0-9]+ hours?"' "$HOME/.config/uv/uv.toml"
+
+  action-pip-only-binary-limitation:
+    name: 'DOCUMENTED LIMIT: pip only-binary does not block local-file sdist install'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Build fixture sdist before hardening applies
+        run: |
+          python3 -m pip install --quiet --break-system-packages setuptools
+          cd ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil
+          python3 setup.py sdist 2>&1 | tail -3
+
+      - uses: ./action
+        with:
+          ecosystems: pip
+
+      # Locks in the documented limit: `python3 -m pip install <local-sdist>`
+      # bypasses only-binary=:all: in modern pip (the flag applies to PyPI
+      # resolution, not explicit file arguments). README's "CLI flags beat
+      # config in pip" limitation extends here. If a future pip change
+      # actually starts enforcing only-binary for local file paths, this
+      # test will fail and tell us we can tighten the README.
+      - name: Local sdist install via pip SHOULD succeed (documenting the gap)
+        run: |
+          rm -f /tmp/marker-python-setup-exfil
+          sdist=$(ls ${GITHUB_WORKSPACE}/tests/fixtures/python-setup-exfil/dist/*.tar.gz | head -1)
+          python3 -m pip install --break-system-packages "$sdist" 2>&1 | tail -3 || true
+          if [ ! -f /tmp/marker-python-setup-exfil ]; then
+            echo "::warning::pip refused the sdist — this is BETTER than documented. Tighten README."
+            # Don't fail; better-than-expected behavior shouldn't break CI
+            exit 0
+          fi
+          echo "✓ documented limit confirmed: pip only-binary does not protect against local-file sdist installs"
+          rm -f /tmp/marker-python-setup-exfil
+          python3 -m pip uninstall -y --break-system-packages test-setup-exfil 2>/dev/null || true
+
+  action-blocks-real-npm-package:
+    name: 'Action: blocks real npm package install script (bcrypt native bindings)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      # bcrypt@5.1.1 (released 2023) has an `install` lifecycle script that
+      # uses node-pre-gyp to fetch prebuilt native bindings — without that
+      # script running, the .node addon file is never on disk, and require()
+      # fails. This is a real package from npm (not a controlled fixture).
+      # Old enough to clear the 48h age gate by years.
+      - name: Install bcrypt — install script must be blocked
+        run: |
+          mkdir -p /tmp/bcrypt-real && cd /tmp/bcrypt-real
+          npm init -y >/dev/null
+          npm install bcrypt@5.1.1 2>&1 | tail -3 || true
+          # Package downloaded?
+          if [ ! -f node_modules/bcrypt/package.json ]; then
+            echo "::error::bcrypt failed to download — test inconclusive (network or registry issue)"
+            exit 2
+          fi
+          # Native bindings should NOT be present (install script blocked)
+          if node -e "require('bcrypt')" 2>/dev/null; then
+            echo "::error::bcrypt loaded successfully — install script RAN despite ignore-scripts"
+            exit 1
+          fi
+          echo "✓ bcrypt downloaded but native bindings absent (install script blocked)"
+
+  action-blocks-bun-auto-install:
+    name: 'Action: bun PATH wrapper blocks runtime auto-install on bun run'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+
+      - uses: ./action
+        with:
+          ecosystems: bun
+
+      # bun run X with a missing import would silently auto-install it
+      # without the wrapper. With the wrapper injecting --no-install, bun
+      # must fail-loud instead.
+      #
+      # FIXTURE NOTE: use require() with the result actually USED. The
+      # `import x from "pkg"` form (with x never referenced) gets
+      # DCE'd by bun's TS runtime BEFORE resolution — bun never tries
+      # to fetch the package, the script "succeeds," and the test
+      # passes for the wrong reason. require() runs at evaluation time
+      # and can't be tree-shaken; using the result via typeof/call
+      # prevents any subsequent DCE pass from eliminating it.
+      - name: bun run must refuse runtime auto-install
+        run: |
+          mkdir -p /tmp/bun-victim && cd /tmp/bun-victim
+          cat > script.ts <<'EOF'
+          const isPositive = require("is-positive");
+          console.log("auto-install fired", typeof isPositive, isPositive(5));
+          EOF
+          echo '{"name":"bun-victim"}' > package.json
+          echo "=== invoking bun run script.ts ==="
+          # IMPORTANT: do NOT use `bun ... || true` here — || true makes
+          # $? always 0 regardless of bun's actual exit code, and the test
+          # cannot then distinguish "wrapper blocked, bun errored" from
+          # "bun ran the script successfully."
+          set +e
+          output=$(bun run script.ts 2>&1)
+          rc=$?
+          set -e
+          echo "$output"
+          echo "rc=$rc"
+          ls node_modules 2>/dev/null && nm_present=yes || nm_present=no
+          echo "nm_present=$nm_present"
+          if [ "$nm_present" = "yes" ]; then
+            echo "::error::node_modules created — wrapper did NOT block auto-install"
+            exit 1
+          fi
+          if [ "$rc" = "0" ]; then
+            echo "::error::bun ran the script (rc=0) — wrapper did NOT block runtime auto-install"
+            exit 1
+          fi
+          # Sanity-check the failure is the right shape (Cannot find package),
+          # not a syntax error or other unexpected mode.
+          echo "$output" | grep -qiE "cannot find|could not resolve|not found|is-positive" \
+            || { echo "::error::bun errored but not with the expected resolution-blocked shape"; exit 1; }
+          echo "✓ bun wrapper blocked runtime auto-install (rc=$rc, error matched expected shape)"
+
+      - name: bun install (package mgmt) still works through the wrapper
+        run: |
+          # Wrapper SKIPS --no-install injection for package-mgmt subcommands.
+          # bun install must work normally so users can still install deps.
+          mkdir -p /tmp/bun-install-test && cd /tmp/bun-install-test
+          echo '{"name":"t","dependencies":{"is-positive":"3.1.0"}}' > package.json
+          bun install 2>&1 | tail -3
+          test -d node_modules/is-positive || { echo "::error::bun install was blocked by the wrapper — wrapper subcommand routing is broken"; exit 1; }
+          echo "✓ bun install works (wrapper correctly skipped --no-install for package-mgmt subcommand)"
+
+  action-blocks-composer-script:
+    name: 'Action: composer wrapper blocks lifecycle script'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install composer
+        run: |
+          curl -sS https://getcomposer.org/installer | php
+          sudo mv composer.phar /usr/local/bin/composer
+          composer --version
+
+      - uses: ./action
+        with:
+          ecosystems: composer
+
+      - name: composer install must NOT run post-install-cmd from project composer.json
+        run: |
+          rm -f /tmp/marker-composer-script
+          mkdir -p /tmp/composer-victim && cd /tmp/composer-victim
+          cat > composer.json <<'EOF'
+          {
+            "name": "victim/test",
+            "scripts": {
+              "post-install-cmd": "touch /tmp/marker-composer-script"
+            }
+          }
+          EOF
+          composer install --no-interaction 2>&1 | tail -3 || true
+          if [ -f /tmp/marker-composer-script ]; then
+            echo "::error::composer ran post-install-cmd — wrapper did NOT inject --no-scripts"
+            exit 1
+          fi
+          echo "✓ composer wrapper blocked post-install-cmd"
+
+      - name: composer audit tier present in config
+        run: |
+          # composer was just installed via upstream installer → 2.9.x → tier 1
+          grep -q '"block-insecure": true' "$HOME/.config/composer/config.json"
+          grep -q '"block-abandoned": true' "$HOME/.config/composer/config.json"
+          echo "✓ tier-1 audit settings present (composer 2.9+ detected)"
+
+  action-go-env-set:
+    name: 'Action: go env vars propagate to subsequent steps'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: go
+
+      - name: Go env vars set
+        run: |
+          test "$GOSUMDB" = "sum.golang.org"
+          test "$GOPROXY" = "https://proxy.golang.org,direct"
+          test "$GOFLAGS" = "-mod=readonly"
+          test "$GOTOOLCHAIN" = "local"
+          test -z "$GOPRIVATE"
+          test -z "$GONOPROXY"
+          test -z "$GOINSECURE"
+          echo "✓ all 7 Go env vars set as expected"
+
+  action-cargo-config:
+    name: 'Action: cargo config has hardening keys'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: cargo
+
+      - name: Cargo config written with expected hardening
+        run: |
+          test -f "$HOME/.cargo/config.toml"
+          grep -q "git-fetch-with-cli = true" "$HOME/.cargo/config.toml"
+          grep -q "retry = 3" "$HOME/.cargo/config.toml"
+          # Catch regression where the old decorative keys come back
+          ! grep -q "check-revoke" "$HOME/.cargo/config.toml"
+          ! grep -q "dep-info-basedir" "$HOME/.cargo/config.toml"
+          echo "✓ cargo config has git-fetch-with-cli + retry, omits Windows-only check-revoke"
+
+  action-bundler-maven-gradle-nuget-configs:
+    name: 'Action: bundler/maven/gradle/nuget configs deployed'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: bundler,maven,gradle,nuget
+
+      - name: All four configs present with expected hardening keys
+        run: |
+          grep -q 'BUNDLE_FROZEN: "true"' "$HOME/.bundle/config"
+          grep -q 'BUNDLE_DEPLOYMENT: "true"' "$HOME/.bundle/config"
+          grep -q "central-https-only" "$HOME/.m2/settings.xml"
+          grep -q "failOnDynamicVersions" "$HOME/.gradle/init.gradle.kts"
+          # dotnet reads only <cli-home>/.nuget/NuGet/NuGet.Config; it never
+          # reads $HOME/.config/NuGet, which is where this used to look (and
+          # where harden.sh used to write) — ECH-157.
+          NUGET_CFG="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+          grep -q '"require"' "$NUGET_CFG"
+          grep -q "api.nuget.org" "$NUGET_CFG"
+          [ ! -e "$HOME/.config/NuGet/NuGet.Config" ]
+          # ECH-165: the env layer overrides signatureValidationMode on every
+          # SDK, so the action must pin the safe side of it.
+          [ "$DOTNET_NUGET_SIGNATURE_VERIFICATION" = "true" ]
+          echo "✓ all four ecosystem configs deployed with expected keys"
+
+  action-bundler-behavioral-frozen:
+    name: 'Action: bundler BUNDLE_FROZEN actually rejects out-of-sync Gemfile.lock'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install ruby + bundler (ubuntu runners ship neither)
+        # The test asserted BUNDLE_FROZEN behavior against a `bundle` that was
+        # never installed, so it failed 127 rather than proving anything.
+        # apt rather than a third-party setup action: no extra SHA to pin.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ruby-full
+          sudo gem install bundler --no-document
+          bundle --version
+
+      - uses: ./action
+        with:
+          ecosystems: bundler
+
+      # Behavioral: BUNDLE_FROZEN=true requires Gemfile and Gemfile.lock
+      # to be in sync. If they're not, `bundle install` must refuse.
+      # Build a project where the Gemfile adds a dep not in the lockfile,
+      # then confirm bundler rejects.
+      - name: bundle install must refuse out-of-sync Gemfile.lock
+        run: |
+          mkdir -p /tmp/bundler-victim && cd /tmp/bundler-victim
+          cat > Gemfile <<'EOF'
+          source 'https://rubygems.org'
+          gem 'rake', '13.0.6'
+          EOF
+          # Pretend the lockfile says we already locked an OLDER rake version.
+          # BUNDLE_FROZEN should refuse to update it.
+          cat > Gemfile.lock <<'EOF'
+          GEM
+            remote: https://rubygems.org/
+            specs:
+              rake (13.0.0)
+
+          PLATFORMS
+            ruby
+
+          DEPENDENCIES
+            rake (= 13.0.0)
+
+          BUNDLED WITH
+             2.4.10
+          EOF
+          set +e
+          output=$(bundle install 2>&1)
+          rc=$?
+          set -e
+          echo "$output"
+          echo "rc=$rc"
+          if [ "$rc" = "0" ]; then
+            echo "::error::bundle install succeeded — BUNDLE_FROZEN did NOT block out-of-sync lockfile"
+            exit 1
+          fi
+          echo "$output" | grep -qiE "frozen|deployment|out.of.sync|update.*not.*allowed|cannot.*update|dependencies were changed" \
+            || { echo "::error::bundle errored but not with the expected frozen-mode shape:"; echo "$output"; exit 1; }
+          echo "✓ bundler BUNDLE_FROZEN correctly blocked out-of-sync lockfile"
+
+  action-maven-behavioral-https-only:
+    name: 'Action: maven mirror actually blocks HTTP-only repository'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: ./action
+        with:
+          ecosystems: maven
+
+      # Behavioral: the action's settings.xml has
+      #   <mirrorOf>external:http:*</mirrorOf> + <blocked>true</blocked>
+      # which should cause Maven to refuse any HTTP-only repo at resolve time.
+      # Build a pom that declares an HTTP-only repo + attempts to resolve from it.
+      - name: mvn must refuse HTTP-only repository at resolve time
+        run: |
+          mkdir -p /tmp/maven-victim && cd /tmp/maven-victim
+          cat > pom.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>victim</groupId>
+            <artifactId>victim</artifactId>
+            <version>1.0</version>
+            <packaging>pom</packaging>
+            <repositories>
+              <repository>
+                <id>http-repo</id>
+                <url>http://repo.example.com/maven2</url>
+              </repository>
+            </repositories>
+            <!-- A dependency that exists on NO public repo, so Maven is
+                 forced to consult http-repo and hit the blocked mirror.
+                 Without this the pom declared an HTTP repo that nothing
+                 ever needed: dependency:resolve had nothing to resolve,
+                 fetched its own plugin from central over HTTPS, and exited
+                 0 — the mirror was never exercised at all. -->
+            <dependencies>
+              <dependency>
+                <groupId>com.example.blocked</groupId>
+                <artifactId>only-on-http</artifactId>
+                <version>1.0</version>
+              </dependency>
+            </dependencies>
+          </project>
+          EOF
+          set +e
+          output=$(mvn -B dependency:resolve 2>&1)
+          rc=$?
+          set -e
+          echo "$output" | tail -30
+          echo "rc=$rc"
+          # Maven prints "blocked mirror" when a repo matches a <blocked> mirror.
+          # Older Maven (<3.8.1) doesn't recognize <blocked> — fail this test
+          # there so we know our setup-java pin needs review.
+          if echo "$output" | grep -qiE "blocked.*mirror|http.*blocked|mirror.*blocked|external:http:.*blocked"; then
+            echo "✓ maven blocked HTTP-only repo via <blocked> mirror"
+            exit 0
+          fi
+          # Acceptable alternative: Maven 3.8+ refuses HTTP repos with an error
+          # about non-https. Either signal is fine.
+          if echo "$output" | grep -qiE "non.https|http url|protocol http"; then
+            echo "✓ maven rejected HTTP repo (different signal but same effect)"
+            exit 0
+          fi
+          echo "::error::maven did NOT block the HTTP repo. settings.xml may not be effective. Output above."
+          exit 1
+
+  action-gradle-behavioral-dynamic-version:
+    name: 'Action: gradle init script actually rejects dynamic versions'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: ./action
+        with:
+          ecosystems: gradle
+
+      # Behavioral: ~/.gradle/init.gradle.kts has
+      #   resolutionStrategy { failOnDynamicVersions() }
+      # which should cause Gradle to reject any dynamic version selector
+      # (1.+, latest.release, 1.0-SNAPSHOT, etc.).
+      - name: gradle must reject dynamic version selectors
+        run: |
+          mkdir -p /tmp/gradle-victim && cd /tmp/gradle-victim
+          cat > settings.gradle.kts <<'EOF'
+          rootProject.name = "victim"
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins { java }
+          repositories { mavenCentral() }
+          dependencies {
+            // Dynamic version — must be refused by init script.
+            implementation("com.google.guava:guava:33.+")
+          }
+          // `gradle dependencies` only REPORTS the graph; it marks an
+          // unresolved entry "(n)" and still exits 0, so it proved nothing
+          // here. Force an actual resolve so failOnDynamicVersions fires and
+          // the build genuinely fails.
+          tasks.register("resolveAll") {
+            doLast { configurations.getByName("compileClasspath").resolve() }
+          }
+          EOF
+          set +e
+          output=$(gradle --no-daemon --init-script "$HOME/.gradle/init.gradle.kts" resolveAll 2>&1)
+          rc=$?
+          set -e
+          echo "$output" | tail -30
+          echo "rc=$rc"
+          if [ "$rc" = "0" ]; then
+            echo "::error::gradle resolved a dynamic version — init script did NOT block"
+            exit 1
+          fi
+          echo "$output" | grep -qiE "dynamic version|failOnDynamicVersions" \
+            || { echo "::error::gradle errored but not with the expected dynamic-version-blocked shape"; exit 1; }
+          echo "✓ gradle init script blocked dynamic version selector"
+
+  action-nuget-behavioral-cert-valid:
+    name: 'Action: nuget cert fingerprint accepts current nuget.org packages'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-dotnet@3e891b0cb619bf60e2c25674b222b8940e2c1c25 # v4.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: ./action
+        with:
+          ecosystems: nuget
+
+      # Behavioral: the action's NuGet.Config sets
+      #   signatureValidationMode = require
+      # and pins a SHA256 cert fingerprint for nuget.org. If the fingerprint
+      # is correct and current, restoring a real nuget package succeeds.
+      # If the fingerprint is stale or wrong, even a popular package like
+      # Newtonsoft.Json fails with a signature-validation error.
+      #
+      # This is essentially a control test: a healthy NuGet should restore
+      # cleanly under our config. If it fails, our cert pin is wrong.
+      - name: dotnet restore must succeed under require-mode + pinned cert
+        run: |
+          # NOTHING here is allowed to hide its output. A previous version ran
+          # `dotnet new` and `dotnet add package` with >/dev/null under
+          # `bash -e`, so when a malformed NuGet.Config made dotnet unable to
+          # build a dependency graph, the step aborted at setup with a generic
+          # message and the run read as a signature failure. The test could
+          # not tell "our config is broken" from "our cert pin is stale".
+          set -uo pipefail
+
+          CFG="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+          echo "::group::NuGet.Config under test ($CFG)"
+          cat "$CFG" || { echo "::error::no NuGet.Config at $CFG"; exit 1; }
+          echo "::endgroup::"
+
+          # GATE 1 - can dotnet PARSE it at all? This is the check that was
+          # missing. An unparseable config (a stray `--` inside an XML comment
+          # will do it) disables every nuget protection AND breaks dotnet, and
+          # it must not be reported as a certificate problem.
+          if ! out=$(dotnet nuget list source 2>&1); then
+            echo "$out"
+            echo "::error::dotnet cannot read our NuGet.Config — the file is malformed, not the cert"
+            exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q 'api.nuget.org' \
+            || { echo "::error::nuget.org missing from the source list dotnet actually reads"; exit 1; }
+
+          # GATE 2 - project setup. Run it visibly; a failure here is still
+          # our config's fault more often than not.
+          mkdir -p /tmp/nuget-victim && cd /tmp/nuget-victim
+          if ! out=$(dotnet new console -o app --no-restore 2>&1); then
+            echo "$out"; echo "::error::dotnet new failed — infrastructure, not hardening"; exit 1
+          fi
+          cd app
+          if ! out=$(dotnet add package Newtonsoft.Json --version 13.0.3 2>&1); then
+            echo "$out"
+            echo "::error::dotnet add package failed. This does an implicit restore, so our config is in play — read the output above before blaming the cert"
+            exit 1
+          fi
+
+          # GATE 3 - the actual security property.
+          out=$(dotnet restore 2>&1); rc=$?
+          echo "$out" | tail -20
+          echo "rc=$rc"
+          if [ "$rc" != "0" ]; then
+            # NU3034 = package signed by a repository we do not trust, i.e. the
+            # pinned fingerprint set is stale. NU3008 = signature invalid.
+            # nuget.org has rotated this cert twice (2021-03, 2024-04), so a
+            # single pinned fingerprint goes stale on a schedule — see ECH-168.
+            if echo "$out" | grep -qiE "NU3034|NU3008|signature.*invalid|not.*trusted"; then
+              echo "::error::cert fingerprint set is STALE or WRONG — Newtonsoft.Json failed signature validation. harden_nuget and tasks/nuget.yml both need the current nuget.org fingerprints"
+              exit 1
+            fi
+            echo "::error::dotnet restore failed for an unexpected reason — see output above"
+            exit 1
+          fi
+          echo "✓ config parses, sources resolve, and signed nuget.org packages install under require-mode"
+
+  action-pnpm-allowlist-input:
+    name: 'Action: pnpm_built_dependencies input correctly switches to allowlist mode'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: pnpm
+          pnpm_built_dependencies: 'esbuild,sharp'
+
+      - name: config.yaml + rc reflect onlyBuiltDependencies allowlist
+        run: |
+          # pnpm 11+ format: ignoreScripts=false + onlyBuiltDependencies list
+          grep -q '^ignoreScripts: false$' "$HOME/.config/pnpm/config.yaml"
+          grep -q '^onlyBuiltDependencies:$' "$HOME/.config/pnpm/config.yaml"
+          grep -q '^  - esbuild$' "$HOME/.config/pnpm/config.yaml"
+          grep -q '^  - sharp$' "$HOME/.config/pnpm/config.yaml"
+          # pnpm 10 format: ini-style allowlist entries
+          grep -q '^ignore-scripts=false$' "$HOME/.config/pnpm/rc"
+          grep -q '^only-built-dependencies\[\]=esbuild$' "$HOME/.config/pnpm/rc"
+          grep -q '^only-built-dependencies\[\]=sharp$' "$HOME/.config/pnpm/rc"
+          echo "✓ pnpm allowlist correctly emitted in both pnpm 10 + 11 formats"
+
+      - name: Rejection of injection attempts (control char + special chars)
+        run: |
+          # Subshell so we can capture the action's exit without failing this step.
+          set +e
+          # newline injection
+          PNPM_BUILT_DEPENDENCIES="$(printf 'esbuild,sharp\nrm=evil')" \
+            ECOSYSTEMS=pnpm INSTALL_SFW=false WRITE_ETC=false STRICT=true \
+            RELEASE_AGE_HOURS=48 COMPOSER_ALLOW_PLUGINS=false \
+            bash ./action/harden.sh 2>&1 | head -5
+          # PIPESTATUS, not $?. `cmd | head -5` makes $? head's exit status,
+          # which is 0 whenever head reads anything at all — so this recorded
+          # rc=0 while quoting the guard's own refusal message back in the
+          # failure output.
+          newline_rc=${PIPESTATUS[0]}
+          # special-char injection
+          PNPM_BUILT_DEPENDENCIES='esbuild,foo;rm -rf /' \
+            ECOSYSTEMS=pnpm INSTALL_SFW=false WRITE_ETC=false STRICT=true \
+            RELEASE_AGE_HOURS=48 COMPOSER_ALLOW_PLUGINS=false \
+            bash ./action/harden.sh 2>&1 | head -5
+          special_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$newline_rc" = "0" ] || [ "$special_rc" = "0" ]; then
+            echo "::error::injection guard didn't fire (newline_rc=$newline_rc, special_rc=$special_rc)"
+            exit 1
+          fi
+          echo "✓ injection guards rejected both newline and special-char inputs"
+
+  action-bun-ignorescripts-key-check:
+    name: 'Action: bunfig.toml uses ignoreScripts (real key) not lifecycleScripts (made-up)'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: bun
+
+      # Regression catcher for the bug we just fixed. Earlier versions wrote
+      # `lifecycleScripts = false` which bun silently ignored — install-time
+      # scripts ran despite the claim. Real bun key is `ignoreScripts`.
+      - name: bunfig.toml has ignoreScripts=true, NOT lifecycleScripts
+        run: |
+          # bun reads $XDG_CONFIG_HOME/.bunfig.toml (DOT-prefixed) when
+          # XDG_CONFIG_HOME is set, and $HOME/.bunfig.toml only when it is not.
+          # There is no fallback. GitHub runners DO set XDG_CONFIG_HOME, so
+          # this assertion used to grep a file bun never reads - it passed
+          # while the whole bunfig layer was dead in CI (ECH-159).
+          BUNFIG="${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml"
+          echo "checking $BUNFIG (XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-<unset>})"
+          grep -qE '^ignoreScripts = true$' "$BUNFIG" \
+            || { echo "::error::$BUNFIG missing ignoreScripts=true (real bun key)"; cat "$BUNFIG" || true; exit 1; }
+          if grep -q '^lifecycleScripts' "$BUNFIG"; then
+            echo "::error::$BUNFIG still contains the made-up 'lifecycleScripts' key — regression"
+            exit 1
+          fi
+          echo "✓ bunfig.toml uses real bun key ignoreScripts (not the made-up lifecycleScripts)"
+
+  action-per-step-skip:
+    name: 'Action: SUPPLY_CHAIN_HARDEN_SKIP env var bypasses hardening'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        id: harden
+        env:
+          SUPPLY_CHAIN_HARDEN_SKIP: 'true'
+
+      - name: Action output reflects skip (empty ecosystems list)
+        run: |
+          test -z "${{ steps.harden.outputs.ecosystems-hardened }}"
+          # Defensive sanity: skip path should NOT have created any config files
+          test ! -f "$HOME/.npmrc" || { echo "::error::SKIP did not actually skip — .npmrc was created"; exit 1; }
+          echo "✓ SUPPLY_CHAIN_HARDEN_SKIP=true correctly bypassed hardening"
+
+  action-tool-versions-output:
+    name: 'Action: tool-versions output is valid JSON with expected keys'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm,pnpm,pip
+
+      - name: tool-versions output parses as JSON
+        run: |
+          versions='${{ steps.harden.outputs.tool-versions }}'
+          echo "tool-versions: $versions"
+          echo "$versions" | jq . >/dev/null
+          # Expected keys present (corresponding to requested ecosystems)
+          for key in npm pnpm pip; do
+            echo "$versions" | jq -e ".\"$key\"" >/dev/null \
+              || { echo "::error::tool-versions JSON missing key: $key"; exit 1; }
+          done
+          # npm version should be a non-empty string (npm is preinstalled on runners)
+          npm_v=$(echo "$versions" | jq -r '.npm')
+          [[ -n "$npm_v" ]] || { echo "::error::npm version detection returned empty"; exit 1; }
+          echo "✓ tool-versions output structure validated; npm=$npm_v"
+
+  action-external-reference:
+    name: 'Action: works when consumed by external ref (uses owner/repo/path@branch)'
+    runs-on: ubuntu-24.04
+    steps:
+      # Deliberately NO `actions/checkout` of this repo — proves the action
+      # resolves and runs purely via GitHub Actions runtime, which is what a
+      # consumer in a separate repo experiences.
+      #
+      # NOTE: `uses:` cannot interpolate ${{ }}, so this ref is hardcoded and
+      # is the one thing here that does NOT track the current branch. It
+      # pointed at feat/github-action, which is the PARKED branch carrying the
+      # pre-fix script (dead npm env key, no bunx wrapper, no cargo gate) — so
+      # this job was validating stale code while every other job tested the
+      # checkout. Retarget on release; until this branch is pushed, expect
+      # this single job to fail to resolve.
+      - uses: echennells/supply-chain-hardening/action@feat/ci-hardening
+        id: harden
+
+      - name: Outputs are populated (same as local-checkout test)
+        run: |
+          test -n "${{ steps.harden.outputs.ecosystems-hardened }}"
+          test "${{ steps.harden.outputs.release-age-hours }}" = "48"
+          echo "ecosystems=${{ steps.harden.outputs.ecosystems-hardened }}"
+
+      - name: Env vars propagated
+        run: |
+          test "$NPM_CONFIG_IGNORE_SCRIPTS" = "true"
+          test "$PIP_DISABLE_PIP_VERSION_CHECK" = "1"
+
+      - name: Config files written
+        run: |
+          grep -q "ignore-scripts=true" "$HOME/.npmrc"
+          grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
+
+  action-npm-age-gate-env-key:
+    name: 'Action: npm age-gate env key is the one npm reads (regression catcher)'
+    runs-on: ubuntu-24.04
+    # npm ignores NPM_CONFIG_MINIMUM_RELEASE_AGE. The action shipped that dead
+    # key while its .npmrc used the correct min-release-age, so the gate held
+    # via the file layer and the env layer was silently a no-op — invisible to
+    # any test that only checks behavior. This asserts the key by name.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      - name: The live key is set and the dead key is absent
+        run: |
+          test "$NPM_CONFIG_MIN_RELEASE_AGE" = "2" \
+            || { echo "::error::NPM_CONFIG_MIN_RELEASE_AGE=${NPM_CONFIG_MIN_RELEASE_AGE:-<unset>}, expected 2"; exit 1; }
+          if [ -n "${NPM_CONFIG_MINIMUM_RELEASE_AGE:-}" ]; then
+            echo "::error::NPM_CONFIG_MINIMUM_RELEASE_AGE is set — npm ignores that key; the env-layer age gate is a no-op again"
+            exit 1
+          fi
+          grep -q "^min-release-age=2$" "$HOME/.npmrc"
+
+  action-blocks-bunx:
+    name: 'Action: bunx cannot fetch-and-execute (finding V5)'
+    runs-on: ubuntu-24.04
+    # bunx is a SEPARATE entry point from bun: wrapping the bun binary leaves
+    # it untouched and ~/.bunfig.toml never applies to it. Before the bunx
+    # wrapper, `bunx <pkg>` downloaded and ran arbitrary code on a host whose
+    # bun was already hardened.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install bun BEFORE the action (so the wrapper lands on it)
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - uses: ./action
+        with:
+          ecosystems: bun
+
+      - name: bunx must refuse to auto-download an uninstalled package
+        run: |
+          set +e
+          out=$(bunx cowsay "hardening test" 2>&1); rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::bunx fetched and executed an uninstalled package — V5 has regressed"
+            exit 1
+          fi
+          echo "$out" | grep -qi "no-install\|Could not find an existing" \
+            || echo "::warning::bunx failed, but not with the --no-install message; check the wrapper is what refused it"
+
+      - name: bunx metadata flags still work (wrapper is not a brick)
+        run: bunx --version
+
+  action-cargo-locked:
+    name: 'Action: cargo wrapper injects --locked'
+    runs-on: ubuntu-24.04
+    # There is no config or env route to --locked, so the wrapper is the only
+    # mechanism. This proves it behaviorally: a lockfile deliberately out of
+    # sync with Cargo.toml builds fine WITHOUT --locked and must fail WITH it.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Build a project whose lockfile is out of sync
+        run: |
+          cargo init --name locktest /tmp/locktest
+          cd /tmp/locktest
+          cargo generate-lockfile
+          # Add a dependency the lockfile does not know about.
+          printf 'anyhow = "1"\n' >> Cargo.toml
+
+      - uses: ./action
+        with:
+          ecosystems: cargo
+
+      - name: cargo build must refuse the stale lockfile
+        run: |
+          cd /tmp/locktest
+          set +e
+          out=$(cargo build 2>&1); rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::cargo build succeeded against a stale lockfile — --locked was not injected"
+            exit 1
+          fi
+          echo "$out" | grep -qi "lock file\|--locked\|needs to be updated" \
+            || { echo "::error::cargo failed for some other reason than --locked"; exit 1; }
+
+      - name: The publish-age gate config was written
+        run: |
+          grep -q 'global-min-publish-age = "48 hours"' "$HOME/.cargo/cooldown.toml"
+          grep -q 'incompatible-publish-age = "deny"' "$HOME/.cargo/cooldown.toml"
+
+  action-go-persisted-without-env:
+    name: 'Action: go hardening survives with the env layer stripped'
+    runs-on: ubuntu-24.04
+    # go is the one ecosystem with no config file behind its settings, so it
+    # was the single thing that made the "generic across CI" claim untrue.
+    # `go env -w` is the fix; this proves the file layer holds on its own by
+    # unsetting every variable the action exported.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: go
+
+      - name: go settings hold with all exported vars removed
+        run: |
+          strip() { env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN \
+                        -u GOPRIVATE -u GONOPROXY -u GOINSECURE "$@"; }
+          test "$(strip go env GOFLAGS)"     = "-mod=readonly"     || { echo "::error::GOFLAGS did not persist"; exit 1; }
+          test "$(strip go env GOSUMDB)"     = "sum.golang.org"    || { echo "::error::GOSUMDB did not persist"; exit 1; }
+          test "$(strip go env GOTOOLCHAIN)" = "local"             || { echo "::error::GOTOOLCHAIN did not persist"; exit 1; }
+          test -z "$(strip go env GOPRIVATE)"                      || { echo "::error::GOPRIVATE is non-empty — a sumdb bypass survived"; exit 1; }
+          echo "go env file: $(go env GOENV)"
+
+  action-emit-plain:
+    name: 'Action: --emit=plain works with no CI variables at all'
+    runs-on: ubuntu-24.04
+    # The portability claim in the README, exercised. Running the script with
+    # every GitHub marker stripped must still harden and must produce a
+    # sourceable env file — this is the path Drone/Woodpecker and a Dockerfile
+    # would take.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Run bare, outside any CI context
+        run: |
+          mkdir -p /tmp/plainhome /tmp/plain
+          env -i PATH="$PATH" HOME=/tmp/plainhome TMPDIR=/tmp/plain \
+            ECOSYSTEMS=npm,go,pip WRITE_ETC=false \
+            bash ./action/harden.sh --emit=plain | tee /tmp/plain.log
+
+      - name: Config files landed and the env file round-trips
+        run: |
+          grep -q "^min-release-age=2$" /tmp/plainhome/.npmrc
+          grep -q "emit=plain" /tmp/plain.log
+          envfile=$(ls /tmp/plain/supply-chain-hardening.env 2>/dev/null || ls /tmp/supply-chain-hardening.env)
+          echo "env file: $envfile"; cat "$envfile"
+          # Source it in a pristine shell and confirm values survive quoting.
+          out=$(env -i bash -c "source '$envfile'; echo \"\$GOPROXY|\$NPM_CONFIG_MIN_RELEASE_AGE\"")
+          test "$out" = "https://proxy.golang.org,direct|2" \
+            || { echo "::error::env file did not round-trip: got '$out'"; exit 1; }
+
+      - name: No GitHub-specific annotations were emitted
+        run: |
+          if grep -q '::error::\|::warning::\|::group::' /tmp/plain.log; then
+            echo "::error::plain mode emitted GitHub workflow commands"
+            exit 1
+          fi
+
+  action-sfw-wrapper-not-shadowed:
+    name: 'Action: the sfw npm wrapper lands on the npm PATH resolves'
+    runs-on: ubuntu-24.04
+    # setup-node puts npm in /opt/hostedtoolcache and PREPENDS it to PATH, so
+    # a wrapper written to a hardcoded /usr/local/bin/npm is never reached.
+    # That shipped: sfw installed, wrapper written, sfw-installed=true, and
+    # not one install routed through it. This job pins the invariant that
+    # matters — the wrapper must be on the binary PATH actually resolves.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: Confirm npm is NOT at /usr/local/bin (the shadowing precondition)
+        run: |
+          echo "npm resolves to: $(command -v npm)"
+          if [ "$(command -v npm)" = "/usr/local/bin/npm" ]; then
+            echo "::warning::npm is at /usr/local/bin here, so this job cannot detect shadowing"
+          fi
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm
+          install_sfw: true
+
+      - name: The npm PATH resolves to must be our wrapper
+        run: |
+          resolved=$(command -v npm)
+          echo "npm now resolves to: $resolved"
+          grep -q "supply-chain-harden" "$resolved" || {
+            echo "::error::the npm PATH resolves to ($resolved) is NOT the wrapper — sfw is being bypassed"
+            exit 1
+          }
+
+      - name: And the original binary was preserved next to it
+        run: |
+          resolved=$(command -v npm)
+          test -x "${resolved}-real" || {
+            echo "::error::${resolved}-real missing; the wrapper cannot delegate"
+            exit 1
+          }
+
+      - name: npm still works through the wrapper
+        run: |
+          npm --version
+          mkdir -p /tmp/sfwproj && cd /tmp/sfwproj && npm init -y >/dev/null && echo "npm init OK"
+
+      - name: Output agrees with reality
+        run: test "${{ steps.harden.outputs.sfw-installed }}" = "true"
+
+  action-verify-catches-post-hardening-shadowing:
+    name: 'Verify: catches a toolchain installed AFTER hardening'
+    runs-on: ubuntu-24.04
+    # The verifier's whole reason to exist. Hardening runs, then a later step
+    # installs a fresh Node — which puts an unhardened npm ahead of the wrapper
+    # on PATH. Nothing in the job fails; the workflow goes green while
+    # unprotected.
+    #
+    # Asserts on the WRAPPER ROW specifically, not on the overall exit code.
+    # An earlier version demanded "no gaps" before the toolchain install, which
+    # a stock runner cannot deliver — its npm 10.9.8 does not implement
+    # min-release-age, so there is always one legitimate gap unrelated to what
+    # this job tests. Asserting the exit code made an unrelated true finding
+    # look like a broken test.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+          install_sfw: true
+
+      - name: Before — the npm wrapper is the binary PATH resolves to
+        run: |
+          echo "npm resolves to: $(command -v npm)"
+          ./action/verify.sh --emit=plain > before.txt 2>&1 || true
+          grep -E '^OK .*npm PATH wrapper' before.txt || {
+            echo "::error::the wrapper was not active even before the toolchain install"
+            cat before.txt; exit 1
+          }
+
+      - name: Install a different Node AFTER hardening
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+
+      - name: After — the verifier must report the wrapper as shadowed
+        run: |
+          echo "npm now resolves to: $(command -v npm)"
+          ./action/verify.sh --emit=plain > after.txt 2>&1 || true
+          cat after.txt
+          if grep -qE '^OK .*npm PATH wrapper' after.txt; then
+            echo "::error::the wrapper still reads as active after a new toolchain was installed — the verifier is not detecting shadowing"
+            exit 1
+          fi
+          grep -E 'npm PATH wrapper' after.txt | grep -qiE 'shadow|not deployed' || {
+            echo "::error::expected a shadowed/not-deployed verdict for the npm wrapper"
+            exit 1
+          }
+          echo "verifier correctly reported the post-hardening change"
+
+  action-verify-clean-run:
+    name: 'Verify: a correctly hardened job reports no gaps'
+    runs-on: ubuntu-24.04
+    # Requires an npm that IMPLEMENTS min-release-age. ubuntu-24.04 ships npm
+    # 10.9.8, where the key is accepted, echoed back by `npm config get`, and
+    # enforced by nothing — so a stock runner cannot reach zero gaps for npm,
+    # and the verifier is right to say so. See the inverse job below.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '24'
+
+      - name: Ensure npm implements the age gate (>= 11.10.0)
+        run: |
+          npm install -g npm@latest
+          echo "npm now $(npm --version)"
+
+      - uses: ./action
+        with:
+          ecosystems: npm,pip
+      - uses: ./action/verify
+
+  action-verify-reports-inert-npm-gate:
+    name: 'Verify: reports the age gate as a GAP on an npm that lacks it'
+    runs-on: ubuntu-24.04
+    # The more valuable half. A detector that only ever passes is not a
+    # detector. ubuntu-24.04's stock npm 10.9.8 does NOT implement
+    # min-release-age, so the verifier MUST report it — proving it discriminates
+    # by implementation rather than by echoing our own config back at us.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Record the stock npm version
+        run: npm --version
+
+      - uses: ./action
+        with:
+          ecosystems: npm
+
+      - name: Verify must fail, naming the npm version and the real key
+        id: v
+        continue-on-error: true
+        uses: ./action/verify
+
+      - name: Assert it detected the inert gate rather than passing
+        run: |
+          major=$(npm --version | cut -d. -f1)
+          minor=$(npm --version | cut -d. -f2)
+          if [ "$major" -gt 11 ] || { [ "$major" -eq 11 ] && [ "$minor" -ge 10 ]; }; then
+            echo "runner npm now implements min-release-age; nothing to detect"
+            exit 0
+          fi
+          if [ "${{ steps.v.outcome }}" = "success" ]; then
+            echo "::error::npm $(npm --version) does not implement min-release-age, but the verifier reported no gap — it is echoing our config back instead of probing"
+            exit 1
+          fi
+          echo "verifier correctly reported the inert npm age gate"

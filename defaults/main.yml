@@ -17,8 +17,21 @@ release_age_hours: 48
 # overrides via CLI (`-e release_age_hours=72`), which Ansible passes as
 # a string. Without the cast, `(release_age_hours / 24)` would error on
 # string-divided-by-int.
-npm_minimum_release_age_days: "{{ (release_age_hours | int / 24) | int }}"     # 2 days
+# FLOORED AT 1. Unfloored, any release_age_hours < 24 renders 0, and npm
+# reads 0 as "no gate" - so tightening the window to 12h silently DISABLED
+# npm while every other ecosystem kept working. action/harden.sh:273 has
+# floored this since it was written; the role did not. Third instance of
+# this class after yarn (c9a250f, fixed by deriving in minutes) and deno
+# (ECH-166, floored to P1D).
+npm_minimum_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  # 2 days at the 48h default
 pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" # 2880 min
+# bun 1.3.0+ ONLY (MEASURED: the [install] minimumReleaseAge key does not
+# exist through 1.2.23 and bun accepts unknown keys silently). tasks/bun.yml
+# omits it below that and records the gap in skipped_protections.
+# Must render as a BARE INTEGER of seconds: bun rejects the ENTIRE bunfig on
+# one bad value ("Invalid Bunfig: failed to load bunfig", exit 1 — measured
+# with a quoted "2d"), which disarms every other key AND breaks bun.
+# tasks/bun.yml asserts this is ^[0-9]+$ before the template renders.
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
 # uv requires an absolute RFC 3339 datetime here — "48 hours" or similar
 # relative-duration strings fail with "failed to parse year in date '48 hours'"
@@ -51,7 +64,16 @@ uv_exclude_newer: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch |
 # lands as a YAML number rather than a string. Deriving in minutes also avoids
 # the /24 truncation that turned any release_age_hours < 24 into "0d" (gate off).
 yarn_minimal_age_gate: "{{ (release_age_hours | int * 60) | int }}"            # 2880 min
-deno_minimum_dependency_age: "P{{ (release_age_hours | int / 24) | int }}D"    # "P2D"
+# deno's --minimum-dependency-age takes an ISO 8601 duration. The /24 here has
+# the same truncation hazard the yarn gate above was fixed for: any
+# release_age_hours < 24 truncated to "P0D" — syntactically valid ISO 8601 that
+# deno accepts and that gates nothing at all, so a 12-hour policy silently
+# became no policy. yarn was fixed by deriving in a finer unit; whether deno
+# accepts a sub-day duration (PT12H) is NOT measured, so do what the other
+# surface already does instead of diverging: floor to P1D, as
+# action/harden.sh:275-276 does. Flooring only ever makes the gate MORE
+# restrictive, so it fails safe.
+deno_minimum_dependency_age: "P{{ (release_age_hours | int // 24) if (release_age_hours | int) >= 24 else 1 }}D"  # "P2D"
 
 # npm settings
 npm_ignore_scripts: true
@@ -64,6 +86,41 @@ npm_update_notifier: false
 pip_only_binary: true
 pip_disable_version_check: true
 python_dont_write_bytecode: true
+
+# Remove the script's directory (and CWD for -c / -m) from sys.path, so a file
+# in an untrusted directory cannot shadow a stdlib module.
+#
+# THE THREAT, MEASURED (cpython 3.13.12). A hostile `struct.py` beside a script
+# executes on `import base64`, because stdlib base64 does `import struct`
+# internally — the caller never names the shadowed module:
+#     python app.py   (script in the dir)  -> SHADOWED
+#     python -m base64                     -> SHADOWED
+#     python -c "import base64"            -> SHADOWED
+#     PYTHONSAFEPATH=1, any of the above   -> clean
+# 273 of python's 290 stdlib module names are shadowable; the 17 that are not
+# are the ones already imported at interpreter startup (os, sys, io, codecs...).
+#
+# ALREADY SAFE WITHOUT THIS, so weigh the trade knowing what it does NOT buy:
+# an installed console-script (`ruff`, `pytest`, anything pip-installed) is
+# immune even in a hostile directory, because sys.path[0] is its own bin
+# directory, not the cwd. The exposed case is specifically "write a script into
+# an untrusted directory and run it" — which is what an agent does.
+#
+# WHY THIS DEFAULTS TO FALSE. It fails the attribution test in
+# docs/design-principles.md: it also breaks `python script.py` importing a
+# sibling module, and `python -m` against a local uninstalled package, and it
+# does so at RUNTIME with a ModuleNotFoundError that names neither this role
+# nor the protection. Installed tooling is unaffected, so the blast radius is
+# narrower than "breaks python" — but an operator cannot trace the failure back
+# to us, and the fix they reach for is deleting the file we wrote.
+#
+# TURN IT ON where "a script imports a file sitting next to it" is closer to
+# the threat than to the workflow — a dedicated agent host running untrusted
+# work. Do not turn it on where people run their own code from checkouts.
+#
+# Requires python 3.11+. Below that the variable is inert and the role records
+# the gap in skipped_protections rather than pretending it applied.
+python_safe_path: false
 
 # uv settings
 uv_no_build: true
@@ -79,6 +136,8 @@ go_proxy: "https://proxy.golang.org,direct"
 go_private: ""
 go_noproxy: ""
 go_insecure: ""
+# See templates/supply-chain-env.sh.j2 for why this one was missing.
+go_nosumdb: ""
 goflags_mod: "readonly"
 
 # pnpm settings
@@ -147,6 +206,10 @@ bun_exact: true                  # exact version pinning
 # Behavior change for anyone who relied on the (broken) default: the
 # protection now actually fires. If your workflow needs lifecycle scripts
 # to run (rare), set this to false explicitly.
+# bun 1.2.0+ ONLY (MEASURED across 1.1.38 -> 1.4.0: below 1.2.0 the key is
+# inert in the GLOBAL bunfig and in a local one; only the CLI
+# --ignore-scripts blocks lifecycle scripts there). tasks/bun.yml omits the
+# key below 1.2.0 and records the gap in skipped_protections.
 bun_ignore_scripts: true
 bun_frozen_lockfile: true        # refuse install if package.json diverges from lockfile
 bun_auto: "disable"              # alternatives: auto, fallback, force.
@@ -268,7 +331,9 @@ composer_allow_plugins: false
 # --no-plugins on every invocation. Belt-and-suspenders second layer is
 # COMPOSER_SKIP_SCRIPTS=<events> in /etc/environment + /etc/profile.d,
 # which catches composer-real and `php composer.phar` callers in PAM-
-# loaded shells (composer >= 2.9). Documented bypass for both layers:
+# loaded shells (composer >= 2.8.0 — MEASURED: ignored on 2.2.6 and 2.7.1,
+# honoured on 2.8.12+; the wrapper is the only layer below 2.8, and the run
+# summary records that). Documented bypass for both layers:
 # `COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install`. Set
 # this var to false to restore the real binary at the wrap location on
 # next apply (env-var layer remains).
@@ -471,4 +536,36 @@ podman_allowed_registries:
 # Prove protections are in effect rather than merely written. See tasks/verify.yml
 # for why this is a separate question from the coverage summary.
 verify_protections: true       # run /usr/local/bin/supply-chain-verify after applying
-verify_fail_on_gap: false      # fail the play when a protection is not in effect
+
+# Fail the play when a protection is not in effect. Default false, unchanged.
+#
+# WHAT "A GAP" MEANS NOW — this is the part that changed.
+#
+# The verifier used to have no idea what this host had ASKED for. It probed
+# whatever it found and reported what was missing, so "any GAP fails the play"
+# meant "fails on any host that is not ideal", which is every honest host:
+# stock npm 10.9.8 cannot implement the age gate at all, and no configuration
+# closes that. A gate that fires on every run gets turned off, and this one
+# was shipped off.
+#
+# /usr/local/bin/supply-chain-verify now carries a context preamble rendered
+# from this file's own variables at apply time (see tasks/verify.yml). A GAP
+# is therefore measured against what THIS host declared:
+#
+#   bun_path_wrapper: true,  no wrapper on the host  -> GAP  (broken promise)
+#   bun_path_wrapper: false, no wrapper on the host  -> N/A BYDESIGN
+#
+# Before the preamble both of those printed the same WEAK row and the same
+# "RESULT: no gaps". Turning this on now means "fail when this host is below
+# what it promised" rather than "fail when this host is not perfect", which is
+# a threshold an operator can actually hold a fleet to.
+#
+# What it still does NOT distinguish is a gap that a re-apply can close
+# (a wrapper that failed to deploy) from one that only a toolchain upgrade can
+# close (npm 10.9.8 and the age gate). Both are GAPs and both fail. That split
+# needs the probes to classify their own negatives and is not in this change,
+# so leaving this false remains the right default for a mixed fleet. Turn it
+# on where the host is expected to be fully covered and the toolchain is yours
+# to upgrade: CI images, golden images, anything an agent will run untrusted
+# package installs on.
+verify_fail_on_gap: false

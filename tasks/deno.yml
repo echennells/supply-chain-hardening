@@ -1,11 +1,13 @@
 ---
 # Deno supply chain hardening
 # Two mechanisms (mutually exclusive, controlled by deno_path_wrapper):
-#   1. Default: shell alias at /etc/profile.d/deno-cooldown.sh. Interactive
-#      shells only — won't fire for scripts, agents, or CI.
-#   2. deno_path_wrapper: true: PATH wrapper installed IN-PLACE at the
-#      discovered deno location (typically ~/.deno/bin/deno). The original
-#      deno binary is preserved as <path>-real in the same directory.
+#   1. deno_path_wrapper: true (DEFAULT, see defaults/main.yml): PATH wrapper
+#      installed IN-PLACE at the discovered deno location (typically
+#      ~/.deno/bin/deno). The original deno binary is preserved as
+#      <path>-real in the same directory.
+#   2. deno_path_wrapper: false: shell alias at
+#      /etc/profile.d/deno-cooldown.sh. Interactive shells only — won't fire
+#      for scripts, agents, or CI, which is why it is NOT the default.
 #
 # Why in-place rather than /usr/local/bin/deno:
 # Deno's official installer (curl ... | sh) writes to ~/.deno/bin and
@@ -97,7 +99,7 @@
     state: absent
   when: deno_path_wrapper | bool
 
-# --- ALIAS MODE (deno_path_wrapper: false; default) ---
+# --- ALIAS MODE (deno_path_wrapper: false; NOT the default) ---
 
 - name: Restore original deno binary when wrapper is disabled
   become: true
