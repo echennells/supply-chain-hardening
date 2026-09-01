@@ -140,3 +140,42 @@ setup() {
 
   [ "$marker_present" = "yes" ]
 }
+
+@test "ECH-197: a leading global flag does not skip the npm wrapper's sfw routing" {
+  # REGRESSION. The wrapper picked the subcommand by scanning for the first
+  # non-flag argument and did not skip the VALUE of a value-taking global
+  # flag, so `npm --registry <url> install <pkg>` set subcmd to the URL, fell
+  # through the fetching-subcommand case, and exec'd the real npm with sfw
+  # skipped — fail-open and silent. That is the registry-redirection shape
+  # (arXiv:2607.15143 R5/R6) defeating the control aimed at it.
+  #
+  # Exercises the DEPLOYED wrapper, with REAL_NPM repointed at a stub so the
+  # assertion is about routing rather than about npm reaching a registry.
+  [ -x /usr/local/bin/npm ] || skip "npm PATH wrapper not deployed"
+  grep -q 'skip_value' /usr/local/bin/npm || skip "wrapper predates the ECH-197 fix"
+
+  d=$(mktemp -d)
+  printf '#!/bin/sh\necho DIRECT\n'        > "$d/npm-real"
+  printf '#!/bin/sh\nshift\necho SFW\n'    > "$d/sfw"
+  chmod +x "$d/npm-real" "$d/sfw"
+  sed "s|^REAL_NPM=.*|REAL_NPM='$d/npm-real'|" /usr/local/bin/npm > "$d/npm"
+  chmod +x "$d/npm"
+
+  # control: a bare install must route through sfw, or the rest proves nothing
+  [ "$(PATH="$d:$PATH" sh "$d/npm" install pkg | tail -1)" = "SFW" ]
+
+  # the bug: each of these previously reached npm with sfw skipped
+  for flag_pair in "--registry https://evil.example" "--prefix ./x" \
+                   "--loglevel silly" "-w somepkg" "--cache /tmp/c"; do
+    set -- $flag_pair
+    out=$(PATH="$d:$PATH" sh "$d/npm" "$1" "$2" install pkg | tail -1)
+    [ "$out" = "SFW" ] || { echo "npm $1 $2 install pkg -> $out (expected SFW)"; false; }
+  done
+
+  # negative control: read-only subcommands must STILL bypass sfw, whose
+  # banner corrupts captured `npm config get` output
+  [ "$(PATH="$d:$PATH" sh "$d/npm" config get registry | tail -1)" = "DIRECT" ]
+  [ "$(PATH="$d:$PATH" sh "$d/npm" --loglevel silly config get registry | tail -1)" = "DIRECT" ]
+
+  rm -rf "$d"
+}
