@@ -552,7 +552,16 @@ elif ! requested pip; then
   row "N/A" BYDESIGN "pip" "pip installed but not in the requested ecosystems"
 else
   pipbin=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
-  v=$("$pipbin" config get install.only-binary 2>/dev/null | tr -d '\r')
+  # MUST be `config list`, not `config get` (ECH-198). MEASURED on pip 26.0.1:
+  # `pip config get install.only-binary` returns "ERROR: No such key" whenever
+  # PIP_CONFIG_FILE is set — including when the file it names carries the key —
+  # because `config get` does not read the env-var layer. `config list` reports
+  # the effective merged config and is immune. The role probe already uses
+  # `config list` (templates/verify.sh.j2); this row disagreed with it and
+  # emitted a false GAP on any host with PIP_CONFIG_FILE set, which is ordinary
+  # corporate CI as well as the config-poisoning attack in arXiv:2607.15143 R10.
+  # Strip spaces/quotes/CR so `install.only-binary = ':all:'` normalises.
+  v=$("$pipbin" config list 2>/dev/null | tr -d " '\"\r" | sed -n 's/^install\.only-binary=//p' | tail -1)
   if [ "$v" = ":all:" ]; then
     row OK PARSED "pip sdist execution blocked" "pip reports only-binary=:all:"
   else
