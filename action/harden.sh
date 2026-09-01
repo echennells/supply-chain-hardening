@@ -1587,19 +1587,93 @@ harden_go() {
   end_section
 }
 
+# bundler_implements_cooldown — the npm_implements() discriminator, for Ruby.
+#
+# `bundle config get cooldown` is NOT evidence. Measured on bundler 4.0.19: it
+# echoes ANY key back, including `totally_fake_key`, exactly like
+# `npm config get`. Asking bundler's own settings table is the discriminator —
+# `cooldown` is registered in Bundler::Settings::NUMBER_KEYS alongside jobs,
+# retry and timeout on a version that implements it, and absent on one that
+# does not. That is a capability probe rather than a version guess, so it stays
+# correct if the feature is backported or the version string is unusual.
+bundler_implements_cooldown() {
+  command -v ruby >/dev/null 2>&1 || return 1
+  ruby -e 'require "bundler"; exit(Bundler::Settings::NUMBER_KEYS.include?("cooldown") ? 0 : 1)' \
+    >/dev/null 2>&1
+}
+
 harden_bundler() {
   section "bundler"
   mkdir -p "$HOME/.bundle"
-  cat > "$HOME/.bundle/config" <<'EOF'
-# Managed by supply-chain-harden action
----
-BUNDLE_FROZEN: "true"
-BUNDLE_DEPLOYMENT: "true"
-BUNDLE_DISABLE_EXEC_LOAD: "true"
-EOF
+
+  # THE AGE GATE IS THE POINT HERE, and it was missing entirely.
+  #
+  # Ruby is the ecosystem where install-time execution provably CANNOT be
+  # blocked: RubyGems runs a native extension's extconf.rb during
+  # `gem install`, before anything requires the gem, and there is no
+  # --ignore-scripts equivalent. That is not theoretical — it is the live
+  # vector. BufferZoneCorp (May 2026, already cited in SOURCES.md) harvested
+  # env vars matching token/key/secret/aws/github and read SSH private keys
+  # from extconf.rb; the StubMaker campaign published 16 typosquatted gems on
+  # 2026-08-16 using the same hook to pull a 22MB loader.
+  #
+  # When execution cannot be blocked, refusing to RESOLVE the bad version is
+  # the only lever left — which is this repo's own stated doctrine for cargo,
+  # in exactly these words. Bundler grew the native control for it; we were
+  # not using it.
+  #
+  # Units are DAYS, integer, non-negative — from bundler's own CLI banner:
+  # "Only consider gem versions published at least N days ago. Use 0 to
+  # disable", and dsl.rb raises InvalidOption on anything else. Same rounding
+  # rule as npm: never round a sub-day window down to 0, which would silently
+  # disable the gate for anyone asking for a short one.
+  local bundle_age_days=$(( RELEASE_AGE_HOURS / 24 ))
+  [ "$bundle_age_days" -lt 1 ] && bundle_age_days=1
+
+  # WHAT IS DELIBERATELY NOT HERE.
+  #
+  # BUNDLE_DEPLOYMENT was removed. Per bundler's config reference it is
+  # "equivalent to setting frozen to true AND path to vendor/bundle" — so it
+  # is strictly redundant with the frozen line below, and its second half
+  # silently redirects EVERY install on the host into ./vendor/bundle, for
+  # every project, forever. Combined with frozen's "commands will be blocked
+  # unless the lockfile can be installed exactly as written", a fresh clone
+  # that gitignores its lockfile hard-fails with no advisory mode. That is the
+  # self-disarming shape this repo already reasons about elsewhere: the
+  # operator deletes ~/.bundle/config to unbreak their day and loses the real
+  # protection with it. frozen alone gives the whole security benefit.
+  #
+  # BUNDLE_DISABLE_EXEC_LOAD was removed too. It changes `bundle exec` from
+  # in-process `load` to Kernel.exec. Same gem code, same privileges, purely a
+  # process-model knob — it was being counted as a security control and is not.
+  {
+    echo "# Managed by supply-chain-harden"
+    echo "---"
+    echo "BUNDLE_FROZEN: \"true\""
+    echo "BUNDLE_COOLDOWN: \"$bundle_age_days\""
+    # Pin the fail-safe side explicitly rather than relying on the default,
+    # the same argument already made for DOTNET_NUGET_SIGNATURE_VERIFICATION:
+    # a default we do not state is a default someone else can flip.
+    echo "BUNDLE_DISABLE_CHECKSUM_VALIDATION: \"false\""
+  } > "$HOME/.bundle/config"
+
   HARDENED+=("bundler")
-  set_tool_version "bundler" "$(detect_version bundler "bundler --version")"
-  log "bundler: BUNDLE_FROZEN=true, BUNDLE_DEPLOYMENT=true"
+  local bundler_version
+  bundler_version=$(detect_version bundler "bundler --version")
+  set_tool_version "bundler" "$bundler_version"
+
+  # Say it here when the gate cannot fire, rather than leaving it to a
+  # verifier step nobody added — same rule as npm's min-release-age.
+  if ! command -v bundle >/dev/null 2>&1 && ! command -v bundler >/dev/null 2>&1; then
+    log "bundler: config written (frozen + ${bundle_age_days}d cooldown); bundler not installed, so nothing was probed"
+    set_eco_status bundler PARTIAL "config written but bundler is not installed, so the cooldown gate could not be confirmed"
+  elif bundler_implements_cooldown; then
+    log "bundler: BUNDLE_FROZEN=true, BUNDLE_COOLDOWN=${bundle_age_days}d (implemented by this bundler)"
+  else
+    warn "bundler ${bundler_version:-<unknown>} does NOT implement BUNDLE_COOLDOWN — the age gate is written and NOT enforced. Ruby install-time execution (extconf.rb) cannot be blocked, so the age gate is the only control here. Upgrade bundler to make it effective."
+    set_eco_status bundler INERT "cooldown written but this bundler does not implement it; extconf.rb execution is unblockable, so nothing is gating gem resolution"
+    log "bundler: BUNDLE_FROZEN=true (cooldown written but INERT on bundler ${bundler_version:-<unknown>})"
+  fi
   end_section
 }
 
