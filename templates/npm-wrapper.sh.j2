@@ -33,6 +33,65 @@ if [ -n "${SUPPLY_CHAIN_NPM_WRAPPED:-}" ]; then
   exec "$REAL_NPM" "$@"
 fi
 
+# --- age-gate observability (opt-in: SCV_AGE_NOTICE=1) ---------------------
+# The age gate is npm's own min-release-age: on an unpinned/range install npm
+# SILENTLY resolves to the newest version old enough and skips fresher ones.
+# Real protection, but with no evidence — an agent or operator cannot tell the
+# gate just spared them a release younger than the window. When SCV_AGE_NOTICE=1
+# the non-interactive install path below reports, per explicitly-named package,
+# when the registry `latest` is newer than what we installed AND is younger than
+# the window (i.e. the gate protected you on this install).
+#
+# This runs AFTER enforcement and only PRINTS, so — unlike the subcommand router
+# below — a parse miss here costs a missed notice, never a bypass. Best-effort
+# and fail-silent: non-registry specs (paths, tarballs, git) and any lookup
+# error simply produce no line. Read-only `npm view` bypasses the gate, so it
+# adds one registry lookup per named package and nothing more.
+scv_age_notice() {
+  [ "${SCV_AGE_NOTICE:-}" = "1" ] || return 0
+  _win="${NPM_CONFIG_MIN_RELEASE_AGE:-}"
+  case "$_win" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$_win" -gt 0 ] || return 0
+
+  _seen=0; _skip=0
+  for _a in "$@"; do
+    if [ "$_skip" = 1 ]; then _skip=0; continue; fi
+    case "$_a" in
+      --registry|--prefix|-C|--cache|--loglevel|--userconfig|--globalconfig|\
+      --workspace|-w|--omit|--include|--before|--node-options|--script-shell|\
+      --depth|--tag|--otp|--auth-type|--ca|--cafile|--cert|--key|\
+      --proxy|--https-proxy|--noproxy)
+        _skip=1; continue ;;
+      -*) continue ;;
+    esac
+    if [ "$_seen" = 0 ]; then _seen=1; continue; fi   # the subcommand token itself
+    # strip a trailing @version/@range, keep the (possibly scoped) name
+    case "$_a" in
+      @*) _n=$(printf '%s' "$_a" | sed -E 's#^(@[^/]+/[^@]+)@.*#\1#') ;;
+      *)  _n="${_a%@*}" ;;
+    esac
+    case "$_n" in ''|./*|../*|/*|*://*|*.tgz|*.tar.gz) continue ;; esac
+
+    "$REAL_NPM" view "$_n" --json 2>/dev/null | node -e '
+      const fs = require("fs");
+      const name = process.argv[1], win = parseFloat(process.argv[2]);
+      let v; try { v = JSON.parse(fs.readFileSync(0, "utf8")); } catch (e) { process.exit(0); }
+      if (Array.isArray(v)) v = v[v.length - 1];
+      const latest = (v["dist-tags"] && v["dist-tags"].latest) || v.version;
+      const t = v.time && v.time[latest];
+      if (!latest || !t) process.exit(0);
+      let inst;
+      try { inst = JSON.parse(fs.readFileSync("node_modules/" + name + "/package.json", "utf8")).version; }
+      catch (e) { process.exit(0); }
+      if (!inst || inst === latest) process.exit(0);
+      const ageDays = (Date.now() - Date.parse(t)) / 86400000;
+      if (!(ageDays < win)) process.exit(0);   // difference not attributable to the gate
+      process.stderr.write("[supply-chain-hardening] age gate: " + name + "@" + latest +
+        " (" + ageDays.toFixed(1) + "d old) skipped as < " + win + "d; installed " + inst + "\n");
+    ' "$_n" "$_win"
+  done
+}
+
 # Find the first non-flag argument — that's the npm subcommand. Bare `npm`,
 # `npm --version`, `npm -v` etc. leave subcmd empty.
 #
@@ -96,7 +155,26 @@ if [ -t 0 ] && [ -t 1 ] && command -v npq-hero >/dev/null 2>&1; then
   exec npq-hero "$@"
 fi
 
-# Non-interactive path — sfw blocks Socket-flagged packages silently
+# Non-interactive path — sfw blocks Socket-flagged packages silently.
+#
+# Default behaviour is unchanged: exec straight into sfw+npm (zero added
+# latency). Only when SCV_AGE_NOTICE=1 AND this is an install do we run (not
+# exec) so scv_age_notice can report an age-gate skip once the install
+# succeeds. Everything else still execs exactly as before.
+_is_install=0
+case "$subcmd" in install|i|add|ci|update|up) _is_install=1 ;; esac
+
+if [ "${SCV_AGE_NOTICE:-}" = "1" ] && [ "$_is_install" = 1 ]; then
+  if command -v sfw >/dev/null 2>&1; then
+    sfw "$REAL_NPM" "$@"; _rc=$?
+  else
+    echo "[supply-chain-hardening] warning: sfw not found; npm call not filtered through threat intel" >&2
+    "$REAL_NPM" "$@"; _rc=$?
+  fi
+  [ "$_rc" -eq 0 ] && scv_age_notice "$@"
+  exit "$_rc"
+fi
+
 if command -v sfw >/dev/null 2>&1; then
   exec sfw "$REAL_NPM" "$@"
 fi
