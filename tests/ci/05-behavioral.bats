@@ -169,7 +169,14 @@ TOML
   # The discriminator the action uses: bundler registers cooldown in its own
   # NUMBER_KEYS table alongside jobs/retry/timeout. That distinguishes
   # implemented from merely echoed, which config get cannot.
+  #
+  # cooldown landed in bundler 4.0.13 (BUNDLE_COOLDOWN, integer days, 0=off).
+  # On an older bundler the key does not exist and the gate is correctly INERT
+  # (harden.sh reports PARTIAL, not enforced), so the premise is not testable
+  # here — skip rather than fail. On >= 4.0.13 we still ASSERT it, so a future
+  # rename regresses loudly instead of silently disarming the only Ruby control.
   command -v ruby >/dev/null 2>&1 || skip "ruby not installed"
-  run ruby -e 'require "bundler"; exit(Bundler::Settings::NUMBER_KEYS.include?("cooldown") ? 0 : 1)'
+  run ruby -e 'require "bundler"; exit(2) if Gem::Version.new(Bundler::VERSION) < Gem::Version.new("4.0.13"); exit(Bundler::Settings::NUMBER_KEYS.include?("cooldown") ? 0 : 1)'
+  [ "$status" -ne 2 ] || skip "local bundler predates cooldown (< 4.0.13); gate is INERT here, premise not testable"
   [ "$status" -eq 0 ]
 }
