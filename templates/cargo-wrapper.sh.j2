@@ -221,11 +221,16 @@ case "$KIND" in
     # check was inert for binary-only crates and failed open on any network or
     # interpreter problem. A deliberate, interactive command gets an honest
     # line instead of a control that only looks like one.
-    echo "[supply-chain-hardening] note: 'cargo install' is not age-gated; check the crate's publish date before installing" >&2
+    #
+    # SCH_NET=1 so `cargo install` still routes through Socket Firewall like every
+    # other network path. MEASURED: before this, install set neither SCH_NET nor a
+    # gate, so cargo's most network-heavy subcommand was fully unfiltered while the
+    # README claimed cargo was wired to sfw. Only the age gate skips install now.
+    echo "[supply-chain-hardening] note: 'cargo install' is not age-gated (it is routed through Socket Firewall); check the crate's publish date before installing" >&2
     if has_resolution_flag "$@"; then
-      run_real "$@"
+      SCH_NET=1 run_real "$@"
     fi
-    exec_with "--locked" "$@"
+    SCH_NET=1 exec_with "--locked" "$@"
     ;;
 
   WRITER)
