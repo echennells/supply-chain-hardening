@@ -253,7 +253,7 @@ short green table.
 | `install_sfw` | `false` | Install Socket Firewall and deploy an npm wrapper that routes `install`/`ci`/`update`/`audit` through threat-intel blocking. Adds ~10–20 seconds to job startup. Requires Node ≥ 20. |
 | `write_etc` | `true` | Write system-wide `/etc/*` config in addition to user-home config. Useful if any subsequent step uses `sudo npm install` etc. Requires passwordless sudo, which all stock GitHub runners have. |
 | `install_cargo_cooldown` | `false` | Install the `cargo-cooldown` backend that **enforces** the cargo publish-age gate. Compiles from source, costing minutes on a cold runner — hence off by default, same trade-off as `install_sfw`. With it off the gate config is still written and `--locked` still injected, but `cargo update` can resolve a freshly published crate unchecked. Already-cached installs are picked up automatically. |
-| `composer_allow_plugins` | `false` | When `false`, composer wrapper injects `--no-plugins` and JSON config sets `"allow-plugins": false`. Set to `true` for workflows that legitimately need composer Plugin classes (e.g., `composer/installers`, `phpstan/extension-installer`). `--no-scripts` injection still applies regardless. |
+| `composer_allow_plugins` | `false` | When `false`, composer wrapper injects `--no-plugins` and JSON config sets `"allow-plugins": {}` — the empty allowlist, which denies every plugin. NOT the literal `false`: that is a hard fatal below composer 2.2.15 and again on 2.3.0-2.3.7, because the upstream fix was not backported linearly. Set to `true` for workflows that legitimately need composer Plugin classes (e.g., `composer/installers`, `phpstan/extension-installer`). `--no-scripts` injection still applies regardless. |
 
 ### Per-step opt-out
 
