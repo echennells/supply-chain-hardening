@@ -139,3 +139,44 @@ TOML
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
+
+# --- bundler ----------------------------------------------------------------
+
+@test "bundler: bundler itself reads our age gate back" {
+  # PARSED-strength: proves bundler read our file and accepted the key. Note
+  # what this does NOT prove — see the next test.
+  have bundle || skip "bundler not installed"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bundle config get cooldown
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"2"* ]]
+  [[ "$output" == *".bundle/config"* ]]
+}
+
+@test "bundler: config get echoes ANY key, so it is not evidence on its own" {
+  # The npm trap, reproduced in Ruby. `bundle config get <anything>` reports a
+  # value for a key bundler has never heard of, so a passing `config get` says
+  # the file was READ, not that the setting is implemented. This test exists so
+  # nobody later mistakes the test above for proof of enforcement.
+  have bundle || skip "bundler not installed"
+  run env -i PATH="$PATH" HOME="$TEST_HOME" \
+    BUNDLE_TOTALLY_FAKE_KEY=9 bundle config get totally_fake_key
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"9"* ]]
+}
+
+@test "bundler: cooldown is a real registered setting, not an echoed one" {
+  # The discriminator the action uses: bundler registers cooldown in its own
+  # NUMBER_KEYS table alongside jobs/retry/timeout. That distinguishes
+  # implemented from merely echoed, which config get cannot.
+  #
+  # cooldown landed in bundler 4.0.13 (BUNDLE_COOLDOWN, integer days, 0=off).
+  # On an older bundler the key does not exist and the gate is correctly INERT
+  # (harden.sh reports PARTIAL, not enforced), so the premise is not testable
+  # here — skip rather than fail. On >= 4.0.13 we still ASSERT it, so a future
+  # rename regresses loudly instead of silently disarming the only Ruby control.
+  command -v ruby >/dev/null 2>&1 || skip "ruby not installed"
+  run ruby -e 'require "bundler"; exit(2) if Gem::Version.new(Bundler::VERSION) < Gem::Version.new("4.0.13"); exit(Bundler::Settings::NUMBER_KEYS.include?("cooldown") ? 0 : 1)'
+  [ "$status" -ne 2 ] || skip "local bundler predates cooldown (< 4.0.13); gate is INERT here, premise not testable"
+  [ "$status" -eq 0 ]
+}

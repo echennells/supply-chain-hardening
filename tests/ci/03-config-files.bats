@@ -143,10 +143,46 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.bunfig.toml" 'auto = "disable"'
 }
 
-@test "bundler: frozen and deployment mode" {
+@test "bundler: lockfile frozen and a publish-age gate" {
+  # The age gate is the point. Ruby install-time execution (extconf.rb) cannot
+  # be blocked, so refusing to RESOLVE the bad version is the only control —
+  # and it was missing entirely until BUNDLE_COOLDOWN was added.
   run harden ECOSYSTEMS=bundler -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.bundle/config" 'BUNDLE_FROZEN: "true"'
+  assert_file_contains "$TEST_HOME/.bundle/config" 'BUNDLE_COOLDOWN: "2"'
+}
+
+@test "bundler: the age window follows release_age_hours, in days" {
+  # bundler's own CLI banner: "gem versions published at least N days ago".
+  run harden ECOSYSTEMS=bundler RELEASE_AGE_HOURS=168 -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.bundle/config" 'BUNDLE_COOLDOWN: "7"'
+}
+
+@test "bundler: a sub-day window rounds UP, never to zero" {
+  # bundler documents 0 as "disable". Rounding 6h down would silently turn the
+  # gate off for anyone asking for a short window — the npm NPM_AGE_DAYS trap.
+  run harden ECOSYSTEMS=bundler RELEASE_AGE_HOURS=6 -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.bundle/config" 'BUNDLE_COOLDOWN: "1"'
+  assert_file_lacks    "$TEST_HOME/.bundle/config" 'BUNDLE_COOLDOWN: "0"'
+}
+
+@test "bundler: the two non-controls are NOT written" {
+  # BUNDLE_DEPLOYMENT is redundant with frozen AND silently redirects every
+  # install on the host into ./vendor/bundle; BUNDLE_DISABLE_EXEC_LOAD is a
+  # process-model knob that was being counted as security. Both removed.
+  run harden ECOSYSTEMS=bundler -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$TEST_HOME/.bundle/config" "BUNDLE_DEPLOYMENT"
+  assert_file_lacks "$TEST_HOME/.bundle/config" "BUNDLE_DISABLE_EXEC_LOAD"
+}
+
+@test "bundler: checksum validation is pinned on, not left to the default" {
+  run harden ECOSYSTEMS=bundler -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.bundle/config" 'BUNDLE_DISABLE_CHECKSUM_VALIDATION: "false"'
 }
 
 @test "composer: plugins blocked by default, permitted only on request" {
