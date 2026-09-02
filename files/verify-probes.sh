@@ -1644,9 +1644,16 @@ cargo_wrapper_uses_sfw() {
   grep -Fq "REAL_CARGO='$tmp/real'" "$tmp/cargo" 2>/dev/null || { rm -rf "$tmp"; return 1; }
   chmod +x "$tmp/cargo" 2>/dev/null
   : > "$tmp/Cargo.lock"
-  out=$( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo build 2>/dev/null )
+  # Probe BOTH the RESOLVING path (build) and the INSTALL path. `cargo install`
+  # is the most network-heavy subcommand yet routed sfw for neither SCH_NET nor a
+  # gate, so a build-only probe reported OK while install ran unfiltered. Both
+  # must route through sfw, or the wrapper is not actually filtering downloads.
+  local out_build out_install
+  out_build=$(   cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo build          2>/dev/null )
+  out_install=$( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo install ripgrep 2>/dev/null )
   rm -rf "$tmp"
-  printf '%s\n' "$out" | grep -q 'SFW-INVOKED'
+  printf '%s\n' "$out_build"   | grep -q 'SFW-INVOKED' || return 1
+  printf '%s\n' "$out_install" | grep -q 'SFW-INVOKED'
 }
 
 # Read a single-quoted assignment the wrapper embeds (REAL_CARGO, COOLDOWN_BIN).
@@ -1854,13 +1861,19 @@ else
   elif printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
     cbin=$(cargo_embedded COOLDOWN_BIN "$cw")
     cool=""
-    # Probing `cargo-cooldown` by bare name fails on apt-cargo hosts where
-    # $CARGO_HOME/bin is not on PATH - a bug that once reported a working gate
-    # as broken. Resolve via the wrapper's own embedded COOLDOWN_BIN first.
-    for cand in "$cbin/cargo-cooldown" "$ch/bin/cargo-cooldown" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    # Resolve cargo-cooldown EXACTLY the way the deployed wrapper does at runtime:
+    # its embedded COOLDOWN_BIN (prepended to PATH), else the ambient PATH. A prior
+    # version also tried "$ch/bin/cargo-cooldown", but that let the verifier find a
+    # backend the WRAPPER cannot - #376: when COOLDOWN_BIN renders EMPTY the
+    # wrapper's PATH prepend is a no-op, yet $ch/bin still resolved, so the row
+    # reported OK while the gate was inert on the host. Match the wrapper or lie.
+    for cand in "$cbin/cargo-cooldown" "$(command -v cargo-cooldown 2>/dev/null)"; do
       [ -n "$cand" ] && [ -x "$cand" ] && { cool="$cand"; break; }
     done
-    if [ -z "$cool" ]; then
+    if [ -z "$cool" ] && [ -z "$cbin" ]; then
+      row GAP FUNCTIONAL "cargo publish-age gate" \
+        "the wrapper's COOLDOWN_BIN is EMPTY (#376), so its \$CARGO_HOME/bin PATH prepend is a no-op and cargo-cooldown - which lives in ~/.cargo/bin, off PATH on apt-cargo hosts - is never reached at runtime. The route dead-ends; \`cargo build\` is BROKEN, not gated. Re-apply with cargo_home resolved."
+    elif [ -z "$cool" ]; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper routes builds through \`cargo cooldown\` but cargo-cooldown is not installed where the wrapper looks (${cbin:-\$CARGO_HOME/bin}). The route dead-ends, so \`cargo build\` is BROKEN, not gated"
     elif ! cargo_run_ok "$cool" --version; then
