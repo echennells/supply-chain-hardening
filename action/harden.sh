@@ -1449,11 +1449,13 @@ case "$KIND" in
     # lockfile applies. --locked makes it honour the lockfile the crate was
     # published with. It is NOT age-gated: an install-time crates.io check is
     # inert for binary-only crates, which is most of what this installs.
-    echo "[supply-chain-harden] note: 'cargo install' is not age-gated; check the crate's publish date before installing" >&2
+    # SCH_NET=1 so `cargo install` still routes through Socket Firewall like every
+    # other network path (parity with the role wrapper; it was fully unfiltered).
+    echo "[supply-chain-harden] note: 'cargo install' is not age-gated (it is routed through Socket Firewall); check the crate's publish date before installing" >&2
     if has_resolution_flag "$@"; then
-      run_real "$@"
+      SCH_NET=1 run_real "$@"
     fi
-    exec_with "--locked" "$@"
+    SCH_NET=1 exec_with "--locked" "$@"
     ;;
 
   WRITER)
@@ -1465,6 +1467,12 @@ case "$KIND" in
         update)
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
+        *)
+          # Parity with the role wrapper: add/remove/generate-lockfile/vendor
+          # write Cargo.lock but cooldown has no verb for them, so warn instead
+          # of falling through SILENTLY when cooldown IS installed — previously
+          # only the cooldown-ABSENT branch warned, the inverted (dangerous) case.
+          echo "[supply-chain-harden] warning: 'cargo $subcmd' writes Cargo.lock and is NOT age-gated; a freshly published version recorded here is trusted by later gated commands" >&2 ;;
       esac
     else
       echo "[supply-chain-harden] warning: cargo-cooldown not installed — 'cargo $subcmd' can write a lockfile entry for a freshly published crate with no age check" >&2
@@ -2037,7 +2045,7 @@ skip_value=0
 for arg in "\$@"; do
   if [ "\$skip_value" = "1" ]; then skip_value=0; continue; fi
   case "\$arg" in
-    --registry|--prefix|-C|--cache|--loglevel|--userconfig|--globalconfig|\\
+    --registry|--prefix|-C|--cache|--location|--loglevel|--userconfig|--globalconfig|\\
     --workspace|-w|--omit|--include|--before|--node-options|--script-shell|\\
     --depth|--tag|--otp|--auth-type|--ca|--cafile|--cert|--key|\\
     --proxy|--https-proxy|--noproxy)
@@ -2047,7 +2055,10 @@ for arg in "\$@"; do
   esac
 done
 case "\$subcmd" in
-  install|i|add|ci|update|up|audit|dedupe)
+  # Parity with the role wrapper (templates/npm-wrapper.sh.j2): rebuild/exec/x/
+  # link/view/info/show/search/outdated also touch the registry and were routed
+  # there but not here, so `npm exec`/`npx`-style fetch-and-run went unfiltered.
+  install|i|add|ci|update|up|rebuild|exec|x|dedupe|link|audit|view|info|show|search|outdated)
     if command -v sfw >/dev/null 2>&1; then
       exec sfw "\$REAL_NPM" "\$@"
     fi

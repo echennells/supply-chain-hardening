@@ -93,11 +93,21 @@
   become: true
   ansible.builtin.shell:
     cmd: |
-      if timeout 120 sfw /bin/true >/dev/null 2>&1; then
+      # Capture sfw's real exit code and error text. The old form
+      # (`sfw /bin/true >/dev/null 2>&1 … echo broken`) discarded stderr and
+      # ended on `echo`, so the shell's rc was ALWAYS 0 — a GitHub 403 while
+      # fetching the firewall binary was quarantined fail-open but recorded as
+      # "exit 0" with no reason. Surface both: stdout still ends in ok/broken for
+      # the recorder, the diagnostic goes to stderr, and the shell exits with
+      # sfw's real code so `sfw_warm.rc` is truthful.
+      if out=$(timeout 120 sfw /bin/true 2>&1); then
         echo ok
       else
+        rc=$?
         P=$(command -v sfw 2>/dev/null) && mv -f "$P" "$P.broken" 2>/dev/null || true
+        printf 'sfw warm failed (rc=%s): %s\n' "$rc" "$(printf '%s' "$out" | head -1)" >&2
         echo broken
+        exit "$rc"
       fi
     executable: /bin/bash
   register: sfw_warm
