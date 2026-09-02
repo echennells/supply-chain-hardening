@@ -25,9 +25,22 @@ fi
 
 # Find first non-flag arg — that's the deno subcommand. Bare `deno`,
 # `deno --version`, `deno -V` leave subcmd empty.
+#
+# Value-taking global flags must have their VALUE skipped, or the scan lands on
+# the value and treats it as the subcommand. MEASURED: before this loop skipped
+# values, `deno --config deno.json run app.ts` set subcmd to `deno.json`, missed
+# the fetch case below, and ran without --minimum-dependency-age. Same argv class
+# already fixed for cargo (--color) and npm (ECH-197, --registry). `--flag=value`
+# is one token starting with `-`, so the `-*` branch already covers it; only
+# separate-word values matter. The list raises the floor, not a boundary: a
+# value-flag missing from it fails open exactly as the whole scan did before.
 subcmd=""
+skip_value=0
 for arg in "$@"; do
+  if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
   case "$arg" in
+    --config|-c|--import-map|--lock|--cert|--log-level|-L|--v8-flags|--seed)
+      skip_value=1 ;;
     -*) ;;
     *) subcmd="$arg"; break ;;
   esac

@@ -82,16 +82,32 @@ fi
 # The case patterns include short-form aliases bun supports (i for
 # install, a for add, rm for remove, un/uninstall for uninstall, etc.).
 #
-# `--` IS DELIBERATELY NOT IN THIS LIST. It terminates flag parsing, so
-# `bun -- script.ts` is a RUNTIME invocation and must receive --no-install
-# like any other. Listing it here would hand every caller a one-token
-# bypass of the only control this wrapper provides, and an undocumented
-# one at that. It was briefly added in 2cb25b1 to satisfy a rendering test
-# (36-bun-wrapper-tier-rendering.bats) whose assertion had never actually
-# executed — the old grep pattern `[|]--[|)]` could not match. Injecting
-# before `--` is safe: --no-install is consumed by bun's own parser, which
-# is what `--` terminates.
-case "$1" in
+# Find the first non-flag argument — that's the bun subcommand. Keying off $1
+# (as this did) misclassified any leading global flag: MEASURED, `bun --cwd /tmp
+# install pkg` saw $1=--cwd, fell to the runtime branch, and wrongly injected
+# --no-install into a package install. Scan instead, skipping the VALUES of
+# value-taking global flags (--cwd/--config/…) or the scan lands on the value.
+# Same argv class already fixed for cargo (--color) and npm (ECH-197).
+#
+# `--` STOPS the scan with subcmd empty, so `bun -- script.ts` (and `bun -- foo`)
+# stays a RUNTIME invocation and still gets --no-install. This preserves the
+# deliberate choice from 2cb25b1: `--` must never be treated as, or shield, a
+# subcommand, or it hands callers a one-token bypass of the only control here.
+# Injecting --no-install is safe — bun's own parser (which `--` terminates)
+# consumes it. `--flag=value` is one token, covered by the `-*` branch.
+subcmd=""
+skip_value=0
+for arg in "$@"; do
+  if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
+  case "$arg" in
+    --cwd|--config|-c|--env-file) skip_value=1 ;;
+    --) break ;;
+    -*) ;;
+    *) subcmd="$arg"; break ;;
+  esac
+done
+
+case "$subcmd" in
   install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision)
     exec "$REAL_BUN" "$@"
     ;;

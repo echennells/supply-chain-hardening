@@ -57,7 +57,7 @@ scv_age_notice() {
   for _a in "$@"; do
     if [ "$_skip" = 1 ]; then _skip=0; continue; fi
     case "$_a" in
-      --registry|--prefix|-C|--cache|--loglevel|--userconfig|--globalconfig|\
+      --registry|--prefix|-C|--cache|--location|--loglevel|--userconfig|--globalconfig|\
       --workspace|-w|--omit|--include|--before|--node-options|--script-shell|\
       --depth|--tag|--otp|--auth-type|--ca|--cafile|--cert|--key|\
       --proxy|--https-proxy|--noproxy)
@@ -115,7 +115,7 @@ skip_value=0
 for arg in "$@"; do
   if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
   case "$arg" in
-    --registry|--prefix|-C|--cache|--loglevel|--userconfig|--globalconfig|\
+    --registry|--prefix|-C|--cache|--location|--loglevel|--userconfig|--globalconfig|\
     --workspace|-w|--omit|--include|--before|--node-options|--script-shell|\
     --depth|--tag|--otp|--auth-type|--ca|--cafile|--cert|--key|\
     --proxy|--https-proxy|--noproxy)
