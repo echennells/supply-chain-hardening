@@ -86,6 +86,19 @@ EOF
   # If this test fails, the BEHAVIORAL test above may be a tautology.
   [ -x /usr/local/bin/bun-real ] || skip "bun-real not present (bun_path_wrapper may be false)"
 
+  # Bun dropped default `bun run` auto-install at 1.4.0: a missing import now
+  # errors "package not found" instead of silently installing. On >= 1.4.0 this
+  # control has no behavior to prove — bun itself no longer auto-installs, so the
+  # wrapper's --no-install is belt-and-suspenders, not the load-bearing control it
+  # is on older bun. Skip rather than assert a behavior the toolchain removed
+  # (MEASURED: field report, bun 1.4.0 says "package not found").
+  bun_ver=$(/usr/local/bin/bun-real --version 2>/dev/null | tr -d '[:space:]')
+  bun_major=${bun_ver%%.*}; bun_rest=${bun_ver#*.}; bun_minor=${bun_rest%%.*}
+  if [ "${bun_major:-0}" -gt 1 ] 2>/dev/null || \
+     { [ "${bun_major:-0}" -eq 1 ] && [ "${bun_minor:-0}" -ge 4 ]; } 2>/dev/null; then
+    skip "bun ${bun_ver:-?} >= 1.4.0 no longer auto-installs on \`bun run\`; nothing for this control to prove"
+  fi
+
   cd /tmp && rm -rf bun-control-test && mkdir bun-control-test && cd bun-control-test
   # Same fixture shape as the BEHAVIORAL test above — require()-based
   # so bun can't tree-shake the resolution away.
