@@ -99,9 +99,14 @@ subcmd=""
 skip_value=0
 for arg in "$@"; do
   if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
+  # `--` terminates flags: stop scanning so subcmd stays empty and the caller
+  # takes the runtime path (--no-install). Written as an `if`, NOT a `--)` case
+  # arm, on purpose — 36-bun-wrapper-tier-rendering.bats forbids `--` appearing
+  # as a case pattern (its old home in the subcommand list was a one-token
+  # bypass), and greps for exactly `--[|)]`.
+  if [ "$arg" = "--" ]; then break; fi
   case "$arg" in
     --cwd|--config|-c|--env-file) skip_value=1 ;;
-    --) break ;;
     -*) ;;
     *) subcmd="$arg"; break ;;
   esac
