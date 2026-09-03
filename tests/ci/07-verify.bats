@@ -132,7 +132,11 @@ EOF
     run env -i PATH="$p" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
       HARDENING_ENV_FILE="$ENV_FILE" bash "$VERIFY_SH" --emit=plain
     local verdict=bypassed
-    [[ "$output" == *"observed running"* ]] && verdict=ran
+    # Scope to the bun row: composer/cargo wrappers also print "observed
+    # running", so an unscoped match reads THEIR success as bun's (the 'blocker'
+    # case bun row correctly says "did NOT run", but the whole-output grep hit
+    # composer's line -> false 'ran').
+    echo "$output" | grep 'bun PATH wrapper' | grep -q "observed running" && verdict=ran
 
     [ "$truth" = "$verdict" ] || {
       echo "front-runner '$dir': wrapper $truth, verifier said $verdict"
