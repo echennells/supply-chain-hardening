@@ -519,7 +519,11 @@ wrapper_target_of() {
 }
 
 WRAPPERS_SEEN=" "
-for w in npm bun bunx composer deno cargo; do
+# npx is wrapped (and record_wrapper'd) by install_sfw_and_wrap, and its wrapper
+# is faithful (embeds REAL_NPX + the run-probe), so it needs a row like the rest
+# — without it the verifier's own coverage check flags wrapper.npx as claimed
+# but not measured. The row is expected-gated, so on a non-sfw run npx is N/A.
+for w in npm npx bun bunx composer deno cargo; do
   WRAPPERS_SEEN="$WRAPPERS_SEEN$w "
   have "$w" || { na_absent "$w PATH wrapper" "$w not installed"; continue; }
   p=$(command -v "$w" 2>/dev/null)
