@@ -6,6 +6,25 @@ Deploys hardened config files and system-wide environment variables (`/etc/profi
 
 Apply it to a bare host, inside a sandbox, or to a container image — anywhere a package manager runs. The role configures the package managers you already have — it doesn't install them (podman is the opt-in exception). This raises the default posture; it isn't a sandbox. Process-level isolation is a separate, complementary concern: a sandbox controls what can run, this controls how package managers behave when they do.
 
+> ### Hardening CI instead of a host? Use the action, not the role.
+>
+> The same defences ship as a GitHub Action (and a CI-generic `harden.sh` with
+> adapters for GitLab, CircleCI, Azure, Buildkite and plain shells). It is the
+> CI-shaped subset of this role — no PAM layer, no podman, no interactive npq —
+> and it applies to every step after it in the job:
+>
+> ```yaml
+>       - uses: actions/setup-node@v4          # toolchains first
+>         with: { node-version: '24' }
+>       - uses: echennells/supply-chain-hardening/action@v2
+>       - run: npm ci                          # protected
+>       - uses: echennells/supply-chain-hardening/action/verify@v2
+> ```
+>
+> Order matters more than any input — see **[action/README.md](action/README.md)**.
+> Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo`
+> prints the exceptions your project needs before the first build breaks.
+
 ## What it does
 
 | Protection | npm | pnpm | Yarn | Bun | Deno | pip/uv | Cargo | Go | Composer | Bundler | Maven | Gradle | NuGet |

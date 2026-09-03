@@ -449,38 +449,124 @@ find_wrapper_on_path() {
   return 1
 }
 
+# WHAT WON, NAMED.
+#
+# "an unwrapped binary" was false for every front-runner that is itself a
+# wrapper, which is most of them: version-manager shims, another vendor's
+# security wrap, a corporate PATH wrapper. Naming it turns "your wrapper is
+# not in front" into a diagnosis someone can act on.
+describe_binary() {
+  local f="$1"
+  [ -n "$f" ] || { echo "nothing on PATH"; return; }
+  if grep -q "supply-chain-harden" "$f" 2>/dev/null; then echo "our own wrapper"; return; fi
+  if grep -qi "safe-chain" "$f" 2>/dev/null; then echo "an Aikido safe-chain shim"; return; fi
+  case "$f" in
+    */.asdf/shims/*)                      echo "an asdf shim" ;;
+    */mise/shims/*|*/.local/share/mise/*) echo "a mise shim" ;;
+    */.volta/*)                           echo "a volta shim" ;;
+    */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
+    */hostedtoolcache/*)                  echo "a toolcache binary — a setup-* step ran AFTER hardening" ;;
+    *)
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      else echo "an unwrapped binary"; fi ;;
+  esac
+}
+
+# DID OUR WRAPPER ACTUALLY RUN?
+#
+# This is the row's whole question, and until now it was answered by INFERENCE
+# from PATH position: if `command -v npm` is not our file, conclude the wrapper
+# "never runs". Position tells you what resolves FIRST, not what executes AT
+# ALL, and every front-runner that delegates makes those different answers.
+#
+# MEASURED: with an Aikido safe-chain shim first on PATH, our wrapper ran on
+# every invocation (the shim strips its own directory from PATH and execs the
+# next match, which is us) while this row reported "shadowed and never runs" at
+# FUNCTIONAL strength. The strongest evidence grade, asserting the opposite of
+# the fact. Every version manager — asdf, mise, volta, nodenv, pyenv — is
+# shim-first and delegates the same way, so this fired for those users too,
+# with no second security tool involved.
+#
+# So stop inferring and observe: set SCH_WRAPPER_PROBE, invoke the tool, and
+# read back which wrappers executed. Immune to how many layers sit in front,
+# because it asks the wrapper instead of reasoning about its position.
+WRAPPER_RAN_PATH=""
+wrapper_ran() {
+  local w="$1" probe line
+  WRAPPER_RAN_PATH=""
+  probe=$(mktemp 2>/dev/null) || return 2
+  if have timeout; then
+    SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+  else
+    SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ -f "$line" ] && grep -q "supply-chain-harden" "$line" 2>/dev/null; then
+      WRAPPER_RAN_PATH="$line"
+      break
+    fi
+  done < "$probe"
+  rm -f "$probe"
+  [ -n "$WRAPPER_RAN_PATH" ]
+}
+
+# The real binary the wrapper delegates to. Most rename it to <tool>-real and
+# exec that; npm embeds REAL_NPM='<path>'. Read the target the wrapper
+# ACTUALLY execs rather than assuming a -real file exists.
+wrapper_target_of() {
+  grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$1" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//"
+}
+
 WRAPPERS_SEEN=" "
 for w in npm bun bunx composer deno cargo; do
   WRAPPERS_SEEN="$WRAPPERS_SEEN$w "
   have "$w" || { na_absent "$w PATH wrapper" "$w not installed"; continue; }
   p=$(command -v "$w" 2>/dev/null)
+  shadow=$(find_wrapper_on_path "$w" || true)
 
-  if [ -n "$p" ] && grep -q "supply-chain-harden" "$p" 2>/dev/null; then
-    # Wrappers reach the real tool two ways: most rename it to <tool>-real and
-    # exec that; npm embeds REAL_NPM='<path>'. Read the target the wrapper
-    # ACTUALLY execs rather than assuming a -real file exists.
-    target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$p" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
+  wrapper_ran "$w"; probe_rc=$?
+
+  if [ "$probe_rc" -eq 0 ]; then
+    # OBSERVED. Still check it can reach the real tool: the probe fires before
+    # the recursion guard, so an orphaned wrapper records a run and then exits
+    # 127 on every call. Running is necessary, not sufficient.
+    target=$(wrapper_target_of "$WRAPPER_RAN_PATH")
     if [ -n "$target" ] && [ -x "$target" ]; then
-      row OK FUNCTIONAL "$w PATH wrapper" "active at $p; callers bypassing PATH are unaffected"
+      if [ "$WRAPPER_RAN_PATH" = "$p" ]; then
+        row OK FUNCTIONAL "$w PATH wrapper" "observed running when $w was invoked (at $p)"
+      else
+        row OK FUNCTIONAL "$w PATH wrapper" \
+          "observed running when $w was invoked — chained behind $(describe_binary "$p") at $p"
+      fi
     else
       gap "wrapper.$w" FUNCTIONAL "$w PATH wrapper" \
-        "wrapper at $p but its real target '${target:-<none>}' is missing or not executable — the recursion guard makes it refuse to run"
+        "wrapper at $WRAPPER_RAN_PATH ran, but its real target '${target:-<none>}' is missing or not executable — the recursion guard makes it refuse to run"
     fi
-  elif shadow=$(find_wrapper_on_path "$w"); then
-    # A wrapper for this tool exists SOMEWHERE on PATH but is not what
-    # resolves. Two ways to arrive here and both are silent:
-    #   - it was deployed to a fixed directory that PATH never reaches
-    #   - a later step (setup-node, a toolchain installer, a PATH prepend)
-    #     put an unhardened binary in front of it
+
+  elif [ "$probe_rc" -eq 2 ]; then
+    row WEAK PRESENT "$w PATH wrapper" \
+      "could not create a temp file to run the probe; falling back to position: $w resolves to $p ($(describe_binary "$p"))"
+
+  elif [ -n "$p" ] && grep -q "supply-chain-harden" "$p" 2>/dev/null; then
+    # Ours is what resolves, but it did not record. That means a wrapper
+    # written before the run-probe existed — expected on a long-lived host
+    # that has not been re-hardened, impossible within a single CI job.
+    # Position evidence only, and it must not read as observation.
+    row WEAK PRESENT "$w PATH wrapper" \
+      "wrapper is in place at $p but predates the run-probe, so this is position evidence, not observation — re-run the hardening to upgrade this row"
+
+  elif [ -n "$shadow" ]; then
     gap "wrapper.$w" FUNCTIONAL "$w PATH wrapper" \
-      "wrapper is at $shadow but $w resolves to $p — the wrapper is shadowed and never runs"
+      "wrapper is at $shadow and did NOT run — $w resolves to $p ($(describe_binary "$p"))"
+
   else
     # DEFECT #1, the row that used to lie. This was `WEAK PRESENT`, and WEAK
     # does not move the exit code — so a job with every wrapper and a job with
     # none both printed "RESULT: no gaps". It is a GAP when this job asked for
     # the wrapper and N/A when it did not, and those are now different runs.
     gap "wrapper.$w" FUNCTIONAL "$w PATH wrapper" \
-      "not deployed; $w resolves to an unwrapped binary at $p"
+      "not deployed; $w resolves to $p ($(describe_binary "$p"))"
   fi
 done
 

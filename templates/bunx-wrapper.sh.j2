@@ -55,6 +55,24 @@
 #   on the next role apply).
 
 REAL_BUN='{{ bun_real_path }}'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Free on a real invocation (SCH_WRAPPER_PROBE is unset, so this is one test).
+# supply-chain-verify sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# tell a bypassed wrapper from one chained behind another wrap. MEASURED: with
+# an Aikido safe-chain shim first on PATH the wrapper ran on every call while
+# the verifier reported "shadowed and never runs". Every version manager
+# (asdf, mise, volta, nodenv, pyenv) is shim-first and delegates the same way.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 
 # Recursion guard — same pattern as the bun/composer/deno/npm wrappers.
 if [ -z "$REAL_BUN" ] || [ ! -x "$REAL_BUN" ] || [ "$REAL_BUN" = "$0" ]; then

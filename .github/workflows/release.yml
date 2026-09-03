@@ -1,0 +1,122 @@
+name: release
+
+# WHAT PUBLISHES THIS ACTION IS A TAG, NOT A BUILD.
+#
+# Consumers write `uses: echennells/supply-chain-hardening/action@v2`, and
+# GitHub resolves that ref against this repo when the job starts. If the ref
+# does not exist the job fails before harden.sh runs at all — no annotation,
+# no partial hardening, nothing to debug.
+#
+# That is what shipped: action/README.md told every reader to use @v2 while
+# the newest tag in the repo was v1.2.1 (May 2026, 180 commits before the
+# action existed). The documented adoption path was broken for 100% of
+# readers, and no test could catch it because the failure is in GitHub's ref
+# resolution, upstream of everything this repo runs.
+#
+# So this workflow has exactly one job: keep the floating major tag pointing
+# at the newest release on that major. Push v2.1.0 and `v2` moves to it.
+# Pre-releases (v2.1.0-rc.1) get a GitHub Release but do NOT move `v2` —
+# a consumer pinned to @v2 must never be handed a release candidate.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing vX.Y.Z tag to (re-)publish and point its major tag at'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: 'Publish ${{ github.event.inputs.tag || github.ref_name }}'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the tag being published
+        id: tag
+        env:
+          # Never interpolate ${{ }} into a run: body — a tag name is
+          # attacker-influenceable on a fork and would be shell-injected.
+          # Through env it is data.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$REF_NAME}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::'$tag' is not a vX.Y.Z tag"; exit 1 ;;
+          esac
+          git rev-parse -q --verify "refs/tags/$tag" >/dev/null || {
+            echo "::error::tag '$tag' does not exist in this repo"; exit 1
+          }
+          major="${tag%%.*}"                       # v2.1.0 -> v2
+          prerelease=false
+          case "$tag" in *-*) prerelease=true ;; esac
+          {
+            echo "tag=$tag"
+            echo "major=$major"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing $tag (major=$major, prerelease=$prerelease)"
+
+      - name: The action must be resolvable at this tag
+        # A major tag pointing at a commit with no action/action.yml is worse
+        # than no tag: `uses: .../action@v2` then fails with a confusing
+        # "file not found" instead of an honest "ref not found".
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for f in action/action.yml action/harden.sh action/verify/action.yml action/verify.sh; do
+            git cat-file -e "$TAG:$f" 2>/dev/null || {
+              echo "::error::$f is missing at $TAG — refusing to publish"; exit 1
+            }
+          done
+          echo "action/ is complete at $TAG"
+
+      - name: Move the floating major tag
+        if: steps.tag.outputs.prerelease == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          MAJOR: ${{ steps.tag.outputs.major }}
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # Annotated, so `git describe` and the Marketplace both show
+          # something meaningful rather than a bare lightweight ref.
+          git tag -f -a "$MAJOR" -m "$MAJOR -> $TAG" "$TAG^{commit}"
+          git push -f origin "refs/tags/$MAJOR"
+          echo "$MAJOR now points at $TAG"
+
+      - name: Skipped major tag (pre-release)
+        if: steps.tag.outputs.prerelease == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          MAJOR: ${{ steps.tag.outputs.major }}
+        run: echo "::notice::$TAG is a pre-release — $MAJOR was left where it was. Pin @$TAG to test it."
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — leaving it alone"
+            exit 0
+          fi
+          args=(--generate-notes --title "$TAG")
+          [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+          gh release create "$TAG" "${args[@]}"

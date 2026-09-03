@@ -36,6 +36,47 @@
 #   EFFECTIVE the user's real environment, untouched
 #             -> is the protection actually live for this user.
 # OK requires all three. Blocking without attribution is capped at WEAK.
+# WHERE IS OUR WRAPPER FOR THIS TOOL?
+#
+# `command -v <tool>` answers "what runs FIRST", which stops being the same
+# question the moment a front-runner delegates -- a version-manager shim
+# (asdf, mise, volta, nodenv, pyenv) or another vendor's security wrap.
+# MEASURED with an Aikido safe-chain shim in front: our wrapper ran on every
+# invocation (the shim strips its own directory from PATH and execs the next
+# match, which is us) while every row resolving through `command -v` reported
+# it as an unwrapped binary and skipped its behavioural probes entirely.
+#
+# So ask the wrapper instead of reasoning about its position: it appends its
+# own path when SCH_WRAPPER_PROBE is set. Falls back to PATH resolution so a
+# wrapper deployed before the probe existed still resolves; callers fall back
+# again to `command -v` so the "not ours" branch can still name what did win.
+scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
+  scv__wt="$1"
+  eval "scv__wc=\${SCV_WRAP_CACHE_${scv__wt}:-}"
+  if [ -n "$scv__wc" ]; then
+    [ "$scv__wc" = "-" ] && return 1
+    printf '%s\n' "$scv__wc"; return 0
+  fi
+  scv__wh=""
+  if scv__wp=$(mktemp 2>/dev/null); then
+    SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version >/dev/null 2>&1 || true
+    while IFS= read -r scv__wl; do
+      [ -n "$scv__wl" ] || continue
+      if [ -f "$scv__wl" ] && grep -q 'supply-chain-harden' "$scv__wl" 2>/dev/null; then
+        scv__wh="$scv__wl"; break
+      fi
+    done < "$scv__wp"
+    rm -f "$scv__wp"
+  fi
+  if [ -z "$scv__wh" ]; then
+    scv__wh=$(command -v "$scv__wt" 2>/dev/null)
+    grep -q 'supply-chain-harden' "$scv__wh" 2>/dev/null || scv__wh=""
+  fi
+  eval "SCV_WRAP_CACHE_${scv__wt}=\"\${scv__wh:--}\""
+  [ -n "$scv__wh" ] || return 1
+  printf '%s\n' "$scv__wh"
+}
+
 bun_global_bunfig() {
   if [ -n "${XDG_CONFIG_HOME:-}" ]; then
     printf '%s\n' "${XDG_CONFIG_HOME}/.bunfig.toml"
@@ -81,7 +122,7 @@ bun_scripts_arm() {
 
 if have bun; then
   bver=$(bun --version 2>/dev/null | head -1 | tr -d '\r')
-  bpath=$(command -v bun 2>/dev/null)
+  bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bcfg=$(bun_global_bunfig)
   bhint=""
   [ -n "${XDG_CONFIG_HOME:-}" ] && [ ! -f "$bcfg" ] && [ -f "${HOME:-}/.bunfig.toml" ] && \
@@ -213,7 +254,7 @@ bunfig_implements() {
 
 if have bun; then
   bver=$(bun --version 2>/dev/null | head -1 | tr -d '\r')
-  bpath=$(command -v bun 2>/dev/null)
+  bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bcfg=$(bun_global_bunfig)
   bhint=""
   [ -n "${XDG_CONFIG_HOME:-}" ] && [ ! -f "$bcfg" ] && [ -f "${HOME:-}/.bunfig.toml" ] && \
@@ -275,9 +316,9 @@ bun_entrypoint_mode() { # $1 = path to the entry point
 bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
   local name w tmp
   name="$1"; shift
-  w=$(command -v "$name" 2>/dev/null) || return 1
-  [ -n "$w" ] || return 1
-  grep -q 'supply-chain-harden' "$w" 2>/dev/null || return 1
+  # OURS, not whatever resolves first: a delegating front-runner makes those
+  # different files, and this probe must dissect ours.
+  w=$(scv_our_wrapper "$name" 2>/dev/null) || return 1
   tmp=$(mktemp -d 2>/dev/null) || return 1
   printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$tmp/real"
   chmod +x "$tmp/real" 2>/dev/null
@@ -289,7 +330,7 @@ bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
 
 if have bun; then
   bver=$(bun --version 2>/dev/null | head -1 | tr -d '\r')
-  bpath=$(command -v bun 2>/dev/null)
+  bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   if ! grep -q 'supply-chain-harden' "$bpath" 2>/dev/null; then
     row GAP PRESENT    "bun runtime auto-install blocked" "bun resolves to an unwrapped binary at $bpath; \`bun run\` downloads and executes missing imports, and the global bunfig is not consulted for \`bun run\` at all"
   elif [ "$(bun_entrypoint_mode "$bpath")" != "bun" ]; then
@@ -333,9 +374,9 @@ bun_entrypoint_mode() { # $1 = path to the entry point
 bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
   local name w tmp
   name="$1"; shift
-  w=$(command -v "$name" 2>/dev/null) || return 1
-  [ -n "$w" ] || return 1
-  grep -q 'supply-chain-harden' "$w" 2>/dev/null || return 1
+  # OURS, not whatever resolves first: a delegating front-runner makes those
+  # different files, and this probe must dissect ours.
+  w=$(scv_our_wrapper "$name" 2>/dev/null) || return 1
   tmp=$(mktemp -d 2>/dev/null) || return 1
   printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$tmp/real"
   chmod +x "$tmp/real" 2>/dev/null
@@ -353,7 +394,7 @@ elif ! have bunx; then
   # `create` and `init` are already in the wrapper's pass-through list; if `x`
   # ever joined them this entry point would be unhardened while the runtime row
   # still reported OK.
-  bpath=$(command -v bun 2>/dev/null)
+  bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bxo=$(bun_wrapper_dispatch bun x some-cli)
   if ! grep -q 'supply-chain-harden' "$bpath" 2>/dev/null; then
     row GAP PRESENT    "bunx fetch-and-execute blocked" "bunx is not on PATH and bun at $bpath is unwrapped, so \`bun x <pkg>\` fetches and executes with no age gate and no script blocking"
@@ -365,7 +406,7 @@ elif ! have bunx; then
     row OK  FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is not on PATH; the deployed bun wrapper hands real bun \`--no-install x some-cli\` (observed argv), so the surviving fetch-and-execute entry point is covered"
   fi
 else
-  bxpath=$(command -v bunx 2>/dev/null)
+  bxpath=$(scv_our_wrapper bunx 2>/dev/null) || bxpath=$(command -v bunx 2>/dev/null)
   bxmode=$(bun_entrypoint_mode "$bxpath")
   if ! grep -q 'supply-chain-harden' "$bxpath" 2>/dev/null; then
     row GAP PRESENT    "bunx fetch-and-execute blocked" "bunx resolves to an unwrapped binary at $bxpath; \`bunx <pkg>\` fetches and executes in one step with no age gate and no script blocking"
@@ -607,7 +648,7 @@ elif ! requested deno; then
   row "N/A" - "deno publish-age gate" "deno installed but not in the requested ecosystems"
   row "N/A" - "deno age-gate flag support (precondition)" "deno installed but not in the requested ecosystems"
 else
-  dp=$(command -v deno 2>/dev/null)
+  dp=$(scv_our_wrapper deno 2>/dev/null) || dp=$(command -v deno 2>/dev/null)
   dwrapped=0
   grep -q 'supply-chain-harden' "$dp" 2>/dev/null && dwrapped=1
 
@@ -1439,7 +1480,7 @@ if have composer; then
   "scripts": { "post-autoload-dump": ["@php -r \"file_put_contents(getenv('SCH_MARK'), '1');\""] }
 }
 CJSON
-    cpath=$(command -v composer 2>/dev/null)
+    cpath=$(scv_our_wrapper composer 2>/dev/null) || cpath=$(command -v composer 2>/dev/null)
     creal="$cpath"; cwrapped=0
     if [ -n "$cpath" ] && grep -q "supply-chain-harden" "$cpath" 2>/dev/null; then
       cwrapped=1
