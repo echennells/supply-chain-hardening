@@ -49,9 +49,15 @@ inputs:
       wrong one for every build in a busy monorepo, so it is your call rather
       than ours.
 
-      Covers npm, npx, pnpm, yarn, bun, bunx, pip, uv and cargo.
+      Routes npm, npx and cargo through Socket Firewall — the entry points the
+      action actually invokes sfw for. The pnpm/yarn/bun/bunx/pip/uv wrappers do
+      config/flag hardening only and are NOT threat-intel scanned.
     required: false
-    default: 'none'
+    # Empty default (not 'none') so harden.sh can distinguish an EXPLICIT
+    # `intel: none` from an unset input — the former conflicts with a legacy
+    # `install_sfw: true` and must error; the latter must let install_sfw win
+    # for backward compatibility. harden.sh maps empty -> none.
+    default: ''
   install_sfw:
     description: >-
       DEPRECATED — use `intel: sfw`. Accepted for now; `true` is treated as

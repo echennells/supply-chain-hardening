@@ -86,6 +86,15 @@ harden_nosudo() {
   [[ "$output" == *"not both"* ]]
 }
 
+@test "explicit intel=none + install_sfw is a conflict, not a silent intel-ON" {
+  # Regression: intel: none + install_sfw: true slipped past the conflict guard
+  # (its `!= none` clause) and silently turned intel ON against an explicit
+  # `intel: none` — a workflow that reads as "intel off" was running intel.
+  run harden ECOSYSTEMS=npm INTEL=none INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not both"* ]]
+}
+
 # ------------------------------------------------------------ privilege ----
 
 @test "no sudo, writable target: still wraps — this is the container-as-root case" {
@@ -158,10 +167,9 @@ EOF
 
 # --------------------------------------------------------- npm subcommands --
 
-@test "the npm wrapper covers exec and x — npx's engine" {
-  # DRIFT. The role's wrapper has always routed `npm exec`; the action's did
-  # not, so `npm exec <pkg>` was filtered on an Ansible host and unfiltered
-  # in CI. npx runs npm exec underneath, which made this the npx hole too.
-  run grep -E 'install\|i\|add\|ci\|update\|up\|audit\|dedupe\|exec\|x' "$HARDEN_SH"
-  [ "$status" -eq 0 ]
-}
+# Removed: "the npm wrapper covers exec and x" grep'd HARDEN_SH's own source
+# text, not the deployed wrapper's behavior — the "assert the tool's own echo,
+# not observed enforcement" anti-pattern this suite otherwise avoids. The npm
+# exec/x allowlist is covered by the deployed wrapper (reconciled to match the
+# role) and the action-smoke integration suite; a real behavioral check here
+# would need a live sfw install, out of scope for this unit file.

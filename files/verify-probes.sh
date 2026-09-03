@@ -51,15 +51,23 @@
 # wrapper deployed before the probe existed still resolves; callers fall back
 # again to `command -v` so the "not ours" branch can still name what did win.
 scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
+  # No result memo: every caller invokes this inside a $(...) command
+  # substitution, so any `SCV_WRAP_CACHE_*` write is trapped in the subshell and
+  # never reaches the parent — a cache here would be pure dead code (and a trap
+  # for anyone who later assumed it worked). Re-probing costs one bounded
+  # `--version` per call; that is the honest cost.
   scv__wt="$1"
-  eval "scv__wc=\${SCV_WRAP_CACHE_${scv__wt}:-}"
-  if [ -n "$scv__wc" ]; then
-    [ "$scv__wc" = "-" ] && return 1
-    printf '%s\n' "$scv__wc"; return 0
-  fi
   scv__wh=""
   if scv__wp=$(mktemp 2>/dev/null); then
-    SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version >/dev/null 2>&1 || true
+    # Bound the probe like the sibling verifiers (timeout 30): a hanging tool or
+    # a hanging front-runner shim must not hang the whole verify. `timeout`
+    # preserves the SCH_WRAPPER_PROBE env var for the tool; absent it (macOS),
+    # fall back unbounded rather than skip the probe.
+    if command -v timeout >/dev/null 2>&1; then
+      SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version >/dev/null 2>&1 || true
+    else
+      SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version >/dev/null 2>&1 || true
+    fi
     while IFS= read -r scv__wl; do
       [ -n "$scv__wl" ] || continue
       if [ -f "$scv__wl" ] && grep -q 'supply-chain-harden' "$scv__wl" 2>/dev/null; then
@@ -72,7 +80,6 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
     scv__wh=$(command -v "$scv__wt" 2>/dev/null)
     grep -q 'supply-chain-harden' "$scv__wh" 2>/dev/null || scv__wh=""
   fi
-  eval "SCV_WRAP_CACHE_${scv__wt}=\"\${scv__wh:--}\""
   [ -n "$scv__wh" ] || return 1
   printf '%s\n' "$scv__wh"
 }

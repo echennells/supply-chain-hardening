@@ -54,7 +54,12 @@ case "$INTEL" in
     echo "  supported: none (default), sfw" >&2
     exit 2 ;;
 esac
-if [ -n "$INSTALL_SFW" ] && [ -n "$INTEL" ] && [ "$INTEL" != "none" ]; then
+# A non-empty INTEL means the input was set EXPLICITLY (action.yml defaults it to
+# empty, not 'none'), so intel + install_sfw together is the "both set" conflict —
+# INCLUDING intel: none + install_sfw: true, which previously slipped past the
+# now-removed `!= none` clause and silently turned intel ON against an explicit
+# `intel: none`. Unset intel (empty) still lets legacy install_sfw win below.
+if [ -n "$INSTALL_SFW" ] && [ -n "$INTEL" ]; then
   echo "[supply-chain-harden] error: set either 'intel' or the deprecated 'install_sfw', not both" >&2
   echo "  got intel='$INTEL' and install_sfw='$INSTALL_SFW'" >&2
   exit 2
@@ -621,15 +626,20 @@ can_write() {
 # Wrappers are the ONLY mechanism for deno's age gate, bun's --no-install,
 # bunx, composer --no-scripts, cargo --locked and the sfw route, so losing one
 # is a real reduction and has to be recorded rather than logged and forgotten.
+# $3/$4 optional: the degrade status + message. Defaults suit ecosystems WITH a
+# config layer (npm/cargo/composer) — "PARTIAL, config still applies". A
+# wrapper-only ecosystem (deno) passes NONE + its own message: with the wrapper
+# undeployed, nothing is enforced, so PARTIAL would overstate coverage.
 require_privilege() {
   local tool="$1" target="$2"
+  local status="${3:-PARTIAL}"
+  local msg="${4:-PATH wrapper not deployed: no root and no usable sudo in this job (common in \`container:\` jobs on slim images). Config-file layer still applies.}"
   can_write "$target" && return 0
-  warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo. Config-file hardening for $tool still applies; the wrapper layer does not."
-  # PARTIAL, not a new status word. The summary classifies APPLIED / PARTIAL /
-  # INERT and nothing else, so an invented status lands in neither list and the
-  # ecosystem disappears from the verdict line while still showing in the
-  # table below it — reported and unreported at the same time.
-  set_eco_status "$tool" PARTIAL "PATH wrapper not deployed: no root and no usable sudo in this job (common in \`container:\` jobs on slim images). Config-file layer still applies."
+  warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
+  # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
+  # lands in neither summary list and the ecosystem disappears from the verdict
+  # line while still showing in the table below it.
+  set_eco_status "$tool" "$status" "$msg"
   return 1
 }
 
@@ -2097,6 +2107,17 @@ harden_deno() {
 
   # Wrap in place (deno installs to ~/.deno/bin/deno typically; we wrap
   # at the discovered path).
+  # Gate BEFORE any filesystem mutation. On a host where deno lives in a
+  # non-writable dir (system install, no root/sudo) the `mv` below would fail
+  # under `set -e` and kill the whole run before the summary is written — the
+  # exact "partial config, no verdict" defect this change set fixes everywhere
+  # else, and it gated AFTER the mv here. deno has no config layer, so a blocked
+  # wrap means NONE is enforced, not PARTIAL.
+  local wrapper_path="${real_deno%-real}"
+  require_privilege deno "$wrapper_path" NONE \
+    "PATH wrapper not deployed (no root/sudo). deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
+    || { end_section; return 0; }
+
   if grep -q "supply-chain-harden" "$real_deno" 2>/dev/null; then
     if [[ -x "${real_deno}-real" ]]; then
       real_deno="${real_deno}-real"
@@ -2109,9 +2130,6 @@ harden_deno() {
     $SUDO mv "$real_deno" "${real_deno}-real"
     real_deno="${real_deno}-real"
   fi
-
-  local wrapper_path="${real_deno%-real}"
-  require_privilege deno "$wrapper_path" || { end_section; return 0; }
   # Placeholders + sed rather than an interpolating heredoc — same reason as
   # the cargo wrapper: this text is dense with $ and the escaping is where
   # generated wrappers go wrong without failing loudly.
