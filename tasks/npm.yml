@@ -106,9 +106,16 @@
 - name: Deploy hardened npmrc to npm's resolved global config path (non-apt layouts)
   # Closes the sudo / other-user gap on every layout where globalconfig is not
   # /etc/npmrc. Idempotent no-op on Debian apt (guarded out above).
+  #
+  # Uses npmrc.j2 (npm-recognised keys only), NOT etc-npmrc.j2. This is the file
+  # npm reads as its global config, and npm warns `Unknown global config` about
+  # the pnpm-only keys (minimum-release-age*) on every command (ECH-196, measured
+  # npm 11.19). pnpm does not read this path — it reads /etc/npmrc, deployed above
+  # with the full key set — so emitting the pnpm keys here bought no pnpm coverage
+  # and only produced the warning. /etc/npmrc keeps them for pnpm's lowest layer.
   become: true
   ansible.builtin.template:
-    src: etc-npmrc.j2
+    src: npmrc.j2
     dest: "{{ npm_globalconfig.stdout | trim }}"
     owner: root
     group: root
