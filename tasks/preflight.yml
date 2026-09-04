@@ -154,7 +154,12 @@
       missing_marker=0
       conflict=""
       for f in /etc/npmrc /etc/yarnrc.yml /etc/pip.conf /etc/uv/uv.toml; do
-        if [ -f "$f" ] && ! grep -q "Managed by ansible-supply-chain-security" "$f" 2>/dev/null; then
+        # Recognize files placed by EITHER supply-chain surface — the role
+        # ("ansible-supply-chain-security") OR the GitHub Action
+        # ("supply-chain-harden action"). Same project; before this, a host
+        # hardened by the action tripped the role's guard on re-apply because
+        # each surface only knew its own marker (#351).
+        if [ -f "$f" ] && ! grep -qE "Managed by (ansible-supply-chain-security|supply-chain-harden)" "$f" 2>/dev/null; then
           missing_marker=1
           conflict="${conflict}${f}\n"
         fi
