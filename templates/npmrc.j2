@@ -1,7 +1,11 @@
 ; Managed by ansible-supply-chain-security
-; Per-user npm config. The system-wide /etc/npmrc has the same npm
-; settings (mirrored from the same defaults), so root and other
-; users on the host are also covered.
+; npm config — npm-RECOGNISED keys only. Deployed both as per-user ~/.npmrc and
+; as npm's resolved global config on non-apt layouts (e.g. /usr/etc/npmrc on
+; NodeSource/nvm/fnm/volta). The pnpm-only keys (minimum-release-age*) are
+; deliberately NOT emitted here: npm warns `Unknown global config` about them on
+; every command (measured npm 11.19), and pnpm does not read this path anyway —
+; pnpm reads /etc/npmrc, which carries those keys. See tasks/npm.yml and
+; templates/etc-npmrc.j2 (ECH-196).
 ignore-scripts={{ npm_ignore_scripts | bool | lower }}
 audit={{ npm_audit | bool | lower }}
 save-exact={{ npm_save_exact | bool | lower }}

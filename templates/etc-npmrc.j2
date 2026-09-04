@@ -1,9 +1,18 @@
 ; Managed by ansible-supply-chain-security
-; System-wide config read by both npm and pnpm. pnpm's resolution chain
-; (per https://pnpm.io/npmrc) includes /etc/npmrc as the lowest-priority
-; layer, so a single file covers both. Closes the gap where `sudo npm
-; install` or any other-user process flips $HOME and misses the deploying
-; user's ~/.npmrc or ~/.config/pnpm/rc.
+; System-wide config. pnpm's resolution chain (per https://pnpm.io/npmrc)
+; includes /etc/npmrc as the lowest-priority layer, so the pnpm-only keys
+; below cover `sudo pnpm` and other-user pnpm (<= 10) system-wide. Closes the
+; gap where flipping $HOME misses the deploying user's ~/.npmrc / ~/.config/pnpm.
+;
+; WHY npm's globalconfig gets a DIFFERENT file (npmrc.j2, npm-keys only):
+; npm also reads a global config, but it warns `Unknown global config` about the
+; pnpm-only keys below on EVERY command (measured npm 11.19). On non-apt layouts
+; npm's globalconfig is {prefix}/etc/npmrc (e.g. /usr/etc/npmrc), NOT this file,
+; so tasks/npm.yml deploys the npm-only npmrc.j2 there and npm never sees these
+; keys. On Debian/Ubuntu apt npm, globalconfig IS /etc/npmrc: npm and pnpm share
+; this file, and the warning is the unavoidable cost of pnpm-<=10 coverage there.
+; (pnpm 11 reads NEITHER system file — measured — so for it these keys are inert
+; and per-user ~/.config/pnpm carries the live settings.)
 ;
 ; User-level config still wins — npm and pnpm both treat per-user
 ; settings as higher precedence than system config.
@@ -20,7 +29,9 @@ update-notifier={{ npm_update_notifier | bool | lower }}
 min-release-age={{ npm_minimum_release_age_days }}
 allow-git=none
 
-; --- pnpm-relevant keys (npm ignores these) ---
+; --- pnpm-relevant keys (npm does NOT ignore these — it warns `Unknown global
+;     config` about them on every command; see the header for why they are kept
+;     out of the file npm reads as globalconfig) ---
 minimum-release-age={{ pnpm_minimum_release_age_minutes }}
 minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
 {% for pkg in pnpm_minimum_release_age_exclude %}

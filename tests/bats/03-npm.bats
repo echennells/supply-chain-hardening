@@ -26,6 +26,33 @@ load setup
   grep -q 'ignore-scripts=true' "$gp"
 }
 
+@test "npm: ECH-196 — npm's globalconfig carries no pnpm-only keys, so npm does not warn" {
+  # ECH-196. The role deployed etc-npmrc.j2 (npm + pnpm keys) to BOTH /etc/npmrc
+  # and npm's RESOLVED globalconfig. npm reads the globalconfig and warns
+  # `Unknown global config "minimum-release-age"` (and -strict) on EVERY command
+  # — measured npm 11.19. pnpm does not read the globalconfig path anyway (it
+  # reads /etc/npmrc), so those keys bought zero coverage and only produced the
+  # warning. The role now deploys the npm-only npmrc.j2 to the globalconfig.
+  gp=$(npm config get globalconfig 2>/dev/null | tr -d '\r')
+  [ -n "$gp" ] || skip "npm did not report a globalconfig path"
+  [ -f "$gp" ]
+
+  # On apt npm the globalconfig IS /etc/npmrc, which legitimately carries the
+  # pnpm keys for pnpm's lowest layer, and the warning is the unavoidable cost
+  # of pnpm-<=10 coverage there. The fix targets every other layout.
+  if [ "$gp" != "/etc/npmrc" ]; then
+    ! grep -qE '^minimum-release-age' "$gp"
+    # Behavioral: a plain npm command emits no unknown-config warning. Harmless
+    # on an npm too old to warn; catches the regression on one that does.
+    run npm config get registry
+    [[ "$output" != *"Unknown global config"* ]]
+  fi
+
+  # /etc/npmrc must STILL carry the pnpm keys — pnpm's lowest-layer coverage is
+  # preserved, only the npm-read globalconfig was cleaned.
+  grep -qE '^minimum-release-age-strict=' /etc/npmrc
+}
+
 @test "npm: .npmrc contains allow-git=none (file-content check)" {
   # File-content layer only. `npm config get allow-git` returns the literal
   # value from .npmrc regardless of whether npm honors the key — so a test
