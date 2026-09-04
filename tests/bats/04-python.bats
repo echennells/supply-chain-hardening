@@ -84,3 +84,33 @@ load setup
 # checks for the RFC 3339 shape AND explicit absence of any "N hours"
 # pattern. Removing the stale assertion here rather than updating it
 # avoids two tests asserting the same thing in different files.
+
+@test "uv: ECH-192 — supply-chain-allow-build is deployed and executable" {
+  assert_file_exists /usr/local/bin/supply-chain-allow-build
+  [ -x /usr/local/bin/supply-chain-allow-build ]
+}
+
+@test "uv: ECH-192 — the hatch lifts no-build while keeping every other uv protection" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  [ -x /usr/local/bin/supply-chain-allow-build ] || skip "escape hatch not deployed"
+  # Only meaningful when the hardened config actually blocks builds. no-build
+  # renders as `no_build: All` in uv --show-settings; the default (lifted) is None.
+  uv pip list --show-settings 2>/dev/null | grep -qE 'no_build:[[:space:]]*All' \
+    || skip "hardened uv.toml does not set no-build=true on this host"
+
+  run /usr/local/bin/supply-chain-allow-build -- uv pip list --show-settings
+  [ "$status" -eq 0 ]
+  # no-build lifted for this command …
+  echo "$output" | grep -qE 'no_build:[[:space:]]*None'
+  # … but the age gate is NOT dropped (the --config-file footgun this avoids).
+  ! echo "$output" | grep -qE 'exclude_newer:[[:space:]]*None'
+  # … and the scope is announced, not silent.
+  echo "$output" | grep -q "no-build lifted for THIS command"
+}
+
+@test "uv: ECH-192 — the hatch refuses a non-uv command" {
+  [ -x /usr/local/bin/supply-chain-allow-build ] || skip "escape hatch not deployed"
+  run /usr/local/bin/supply-chain-allow-build -- echo pwned
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"only for 'uv'"* ]]
+}

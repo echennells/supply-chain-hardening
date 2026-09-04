@@ -131,6 +131,33 @@ count is how the role starts believing its own marketing:
 | Repo-local `.cargo/config.toml`, `[alias]`, `rust-toolchain.toml path=` | **In scope as a threat, not closable by this role.** Do NOT reason that "you already chose to build untrusted code" — MEASURED: `cargo metadata` and `cargo tree` execute a repo-local `[build] rustc-wrapper`, and `cargo metadata` is what rust-analyzer and every IDE run on folder open. Cloning and opening is enough; no build required. It stays out because the delivery surface is open (`RUSTC_WRAPPER` as an env var is not in any file; `--config` takes a file path, so a key denylist does not cover it; `rust-toolchain.toml path=` supplies its own cargo and bypasses the wrapper before it can act). A detector over this surface enumerates an open set — the shape that produced the `argv[1]` bug. The honest mitigation is not to open untrusted Rust repos outside a container. |
 | `.pyc` / bytecode artifacts, systemd linger, socket lifetime | Persistence and availability concerns, not admission. |
 
+### Safe-by-construction overrides (developer mode)
+
+A control that people legitimately need to cross will get crossed. The only
+question is whether the crossing is safe or a footgun. `supply-chain-allow-build`
+(ECH-192) is the worked example: uv's `no-build = true` blocks source builds
+(MEASURED uv 0.12.7: `uv pip install .`, `--no-binary :all:`, any sdist that must
+compile — a pure-Python editable install slips through as a PEP 660 install), so
+building the operator's OWN trusted source needs an override — but uv's built-in
+escapes are all-or-nothing (`--no-config` drops every setting; `--config-file` /
+`UV_CONFIG_FILE` *replace* discovery, silently dropping the other four hardened
+fields). The principles the helper embodies:
+
+- **Two personas.** An AGENT executing a task should fail CLOSED — no smooth
+  escape hatch, boundary-crossings explicit and logged. A DEV building code
+  VOUCHES for one specific, trusted build. Design the override for the second
+  persona without handing it to the first (here: a named, logging helper, not a
+  quiet flag an agent would reach for).
+- **A good override RE-SCOPES to the real trust boundary** — "your source is
+  trusted, the index is not" — it is NOT "less security for developers". The
+  hatch lifts exactly one setting and keeps every other control on.
+- **When the only built-in override is a footgun, ship a safe-by-construction
+  one.** Don't rely on operators mirroring five config fields by hand at 3am;
+  make the safe path the path of least resistance.
+- **State the honest residual.** uv cannot scope build permission per package,
+  so the hatch opens the build engine for the whole command; it says so, logs
+  what actually built, and scopes to a single invocation.
+
 ---
 
 ## Axis 1 — Layer-conflict patterns
