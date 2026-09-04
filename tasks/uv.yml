@@ -72,15 +72,21 @@
   # On real hosts where the user follows the official installer, a login
   # shell may have empty PATH for ~/.local/bin and `command -v uv` returns
   # nothing — pip wrappers then silently don't deploy.
+  #
+  # SYSTEM paths are searched BEFORE $HOME/.local/bin: the value found here is
+  # baked into a SYSTEM-WIDE wrapper (/usr/local/bin/pip). Baking a home path
+  # when a root-owned system uv also exists breaks every non-deploying,
+  # non-root user who cannot traverse that home (0750/0700 is common on
+  # hardened hosts) — see the wrapper's own runtime fallback below (#ECH-191).
   ansible.builtin.shell:
     cmd: |
-      for p in "$HOME/.local/bin/uv" /usr/local/bin/uv /usr/bin/uv; do
+      for p in /usr/local/bin/uv /usr/bin/uv "$HOME/.local/bin/uv"; do
         if [ -x "$p" ]; then
           echo "$p"
           exit 0
         fi
       done
-      PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH" command -v uv 2>/dev/null
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v uv 2>/dev/null
     executable: /bin/bash
   register: uv_binary_path
   changed_when: false
@@ -97,8 +103,9 @@
     content: |
       #!/bin/sh
       # Managed by ansible-supply-chain-security
-      # Belt-and-suspenders: refuse to run if uv isn't where we expect,
-      # rather than recursing into ourselves and bricking pip.
+      # Belt-and-suspenders: resolve a reachable uv (see the loop below) and
+      # refuse to run if none is found, rather than recursing into ourselves
+      # and bricking pip.
       UV='{{ uv_binary_path.stdout }}'
       # RUN-PROBE. Record that this wrapper actually executed.
       #
@@ -117,8 +124,20 @@
       if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
         printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
       fi
+      # ECH-191: this wrapper is SYSTEM-WIDE (/usr/local/bin, every account uses
+      # it) but $UV was resolved in the DEPLOYING user's context. If uv lives in
+      # that user's ~/.local/bin and their home is not traversable by others
+      # (0750/0700 is common on hardened hosts), every other non-root user hits
+      # the guard below and loses pip entirely. Resolve uv for THIS caller:
+      # prefer a root-owned system copy, then the deploy-time path, then the
+      # caller's PATH. Preferring the system copy also keeps a root `sudo pip`
+      # from execing an unprivileged user's uv. Resolving `uv` (never `pip`)
+      # cannot recurse into this wrapper.
+      for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
+        if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
+      done
       if [ -z "$UV" ] || [ ! -x "$UV" ]; then
-        echo "[supply-chain-hardening] error: uv not found at '$UV'; refusing to recurse" >&2
+        echo "[supply-chain-hardening] error: uv not found in /usr/local/bin, /usr/bin, the deploy-time path, or PATH; refusing to recurse" >&2
         exit 127
       fi
       echo "[supply-chain-hardening] pip redirected through uv" >&2
@@ -153,8 +172,16 @@
       if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
         printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
       fi
+      # ECH-191: see the pip wrapper above. $UV was resolved in the DEPLOYING
+      # user's context but this is SYSTEM-WIDE; if it points into a home other
+      # users cannot traverse they lose pip3. Prefer a root-owned system copy,
+      # then the deploy-time path, then the caller's PATH. Resolving `uv` (never
+      # `pip3`) cannot recurse into this wrapper.
+      for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
+        if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
+      done
       if [ -z "$UV" ] || [ ! -x "$UV" ]; then
-        echo "[supply-chain-hardening] error: uv not found at '$UV'; refusing to recurse" >&2
+        echo "[supply-chain-hardening] error: uv not found in /usr/local/bin, /usr/bin, the deploy-time path, or PATH; refusing to recurse" >&2
         exit 127
       fi
       echo "[supply-chain-hardening] pip3 redirected through uv" >&2
