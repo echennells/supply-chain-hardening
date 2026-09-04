@@ -71,3 +71,26 @@ load setup
   # 124 = timeout fired = infinite loop. Anything else = failed safely.
   [ "$status" -ne 124 ]
 }
+
+@test "pip wrapper prefers a reachable system uv over an unreachable baked path (ECH-191)" {
+  # The bug: tasks/uv.yml resolved uv preferring $HOME/.local/bin/uv, so on a
+  # host with BOTH a system uv and a per-user uv it baked the home path into
+  # the SYSTEM-WIDE wrapper. Any non-deploying, non-root user who can't
+  # traverse that home (0750/0700) then hit the guard and lost pip entirely,
+  # even though /usr/local/bin/uv was right there. The wrapper now resolves uv
+  # at runtime, system copy first, so it self-heals for those callers.
+  command -v uv >/dev/null 2>&1 || skip "uv not on PATH; wrapper not deployed"
+  [ -x /usr/local/bin/uv ] || skip "no system uv to fall back to"
+
+  # Reproduce the precondition: rewrite ONLY the baked deploy-time path to a
+  # home dir that does not exist / this caller cannot reach.
+  wrapper="$BATS_TEST_TMPDIR/pip"
+  sed "s#^UV=.*#UV='/home/nonexistent-deployer/.local/bin/uv'#" /usr/local/bin/pip > "$wrapper"
+  chmod +x "$wrapper"
+
+  run "$wrapper" --version
+  # The system-first fallback must resolve a reachable uv and proceed to exec,
+  # NOT hit the "refusing to recurse" guard.
+  [[ "$output" != *"refusing to recurse"* ]]
+  [[ "$output" == *"redirected through uv"* ]]
+}
