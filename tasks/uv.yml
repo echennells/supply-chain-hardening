@@ -65,6 +65,23 @@
     group: root
     mode: "0644"
 
+- name: Deploy the safe build escape-hatch (supply-chain-allow-build)
+  # ECH-192. no-build=true blocks EVERY source build, including an editable
+  # install of the operator's OWN trusted source. uv's built-in overrides are
+  # footguns: --no-config drops all config, and --config-file / UV_CONFIG_FILE
+  # REPLACE discovery, silently dropping the other four hardened settings. This
+  # helper is the safe-by-construction path: it mirrors the hardened uv.toml,
+  # flips ONLY no-build, and scopes that to one command. Deployed unconditionally
+  # alongside the config (ready when uv arrives); it self-checks for a hardened
+  # uv.toml at runtime and refuses non-uv commands.
+  become: true
+  ansible.builtin.copy:
+    src: supply-chain-allow-build
+    dest: /usr/local/bin/supply-chain-allow-build
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Find uv binary path
   # Check the canonical install location first. `bash -lc` (login shell) was
   # the previous approach but it's fragile: the uv installer adds PATH only
