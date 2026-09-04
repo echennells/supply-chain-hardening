@@ -17,7 +17,7 @@ Before your workflow runs any package install (`npm install`, `pnpm install`, `p
 - **HTTPS-only repositories** enforced for Maven (`mirrorOf: external:http:*` blocks HTTP repos), Gradle (init script refuses HTTP repos + dynamic version selectors), NuGet (single trusted source: nuget.org with signature validation).
 - **Go module integrity** kept on by clearing all the bypass env vars (`GOPRIVATE`/`GONOPROXY`/`GOINSECURE` set empty so nothing skips sumdb).
 - **Strict mode fails loud** rather than silently falling back to older versions when the gate rejects everything available.
-- **Optional Socket Firewall integration** (`install_sfw: true`) installs sfw and wraps `npm` to route installs through real-time threat-intel blocking.
+- **Optional malware intelligence** (`intel: sfw`) installs Socket Firewall and routes `npm`, `npx` and `cargo` through a local filtering proxy that blocks versions Socket has flagged as malware. This is the one axis the rest of the action cannot cover: a known-bad package that is 30 days old and runs no install script passes the age gate and `ignore-scripts` both. Off by default — see [Intel](#intel-optional-malware-blocking).
 
 The action sets env vars via `$GITHUB_ENV` (every subsequent step inherits) and writes config files to user-home paths (and optionally `/etc/*` for `sudo` callers). Both layers apply independently — env vars catch CLI invocations, config files catch direct binary calls.
 
@@ -31,7 +31,7 @@ This action ships the hardening that makes sense for **ephemeral CI runners**. F
 - composer PATH wrapper (script blocking)
 - deno PATH wrapper (minimum-dependency-age injection)
 - cargo PATH wrapper (`--locked` injection) + publish-age gate config
-- Optional Socket Firewall + npm wrapper
+- Optional malware intelligence (Socket Firewall) + npm/npx wrappers
 - Optional cargo-cooldown backend to enforce the cargo age gate
 - `/etc/*` writes for `sudo` callers in the same job
 
@@ -115,15 +115,183 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 1. Install your toolchains FIRST.
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }   # npm's age gate needs npm >= 11.10.0
+
+      # 2. Then harden. It configures the toolchains that exist right now.
       - uses: echennells/supply-chain-hardening/action@v2
 
-      - run: npm install   # protected
-      - run: pip install -r requirements.txt   # protected
-      - run: bun run build.ts   # protected (wrapper blocks runtime auto-install)
-      - run: composer install   # protected (wrapper blocks scripts)
+      # 3. Then install. Every step from here on is protected.
+      - run: npm ci
+      - run: pip install -r requirements.txt
+      - run: bun run build.ts        # wrapper blocks runtime auto-install
+      - run: composer install        # wrapper blocks scripts
+
+      # 4. Then check that it is still in force.
+      - uses: echennells/supply-chain-hardening/action/verify@v2
 ```
 
-That's it. The defaults are sensible for most workflows.
+The defaults are sensible for most workflows — every ecosystem, a 48h age gate,
+scripts off. The only thing you have to get right is the order.
+
+### The order is the one thing that matters
+
+**Toolchain setup → harden → install → verify.**
+
+Hardening wraps package-manager binaries *in place, at the path they resolve to
+when the action runs*. A `setup-*` step afterwards installs a **different**
+binary at a **different** path and puts it first on `PATH`, so the wrapper is
+still on disk, still correct, and never called again:
+
+```yaml
+      # ✗ WRONG — the wrapper is silently bypassed
+      - uses: echennells/supply-chain-hardening/action@v2
+      - uses: actions/setup-node@v4      # ← installs an unhardened npm, ahead of ours
+        with: { node-version: '24' }
+      - run: npm ci                      # ← unprotected. Build stays green.
+```
+
+Nothing fails. The summary still says `applied: npm`. This is why the `verify`
+step exists and why it belongs in your workflow rather than in a section you
+read later — it is the only thing that catches this, and it catches it by
+running *after* the steps that would undo the hardening.
+
+The config-file layer (age gates, `ignore-scripts`, `only-binary`) survives a
+late toolchain install, because config files are read by whichever binary runs.
+What is lost is every wrapper: bun, bunx, composer, deno, cargo `--locked`, and
+the optional npm/sfw route.
+
+> **npm specifically:** GitHub's `ubuntu-24.04` runners ship npm 10.9.8, which
+> accepts `min-release-age`, echoes it back from `npm config get`, and enforces
+> nothing. The action detects this and emits a warning annotation, and `verify`
+> reports it as a GAP — but the fix is `setup-node` with Node 24 (or
+> `npm i -g npm@latest`) **before** this action, as above. Script blocking is
+> unaffected either way; every other ecosystem's age gate is unaffected.
+
+## Intel: optional malware blocking
+
+Everything else here blocks *classes* of behaviour — code running at install
+time, versions too young to have been scanned, unpinned resolution. None of it
+answers "is this specific tarball known malware?" A package that is 30 days
+old, ships as a wheel, and runs no install script passes every other control in
+this action.
+
+`intel: sfw` fills that gap:
+
+```yaml
+- uses: echennells/supply-chain-hardening/action@v2
+  with:
+    intel: sfw
+```
+
+Socket Firewall starts a local filtering proxy and the action wraps `npm` and
+`npx` to route fetches through it; `cargo` goes through the same proxy via
+`cargo_socket_firewall` (on by default, and a no-op when intel is off). A
+flagged package is refused:
+
+```
+=== Socket Firewall ===
+ - blocked npm package: name: safe-chain-test; version: 0.0.1-security;
+   reason: malware (critical)
+```
+
+### Why it is off by default
+
+The rest of the action is config on disk. It works offline, applies to every
+caller, and cannot fail open. Intel is a different kind of control and the
+trade is yours to make, not ours:
+
+- **It is a network dependency** on a third-party service.
+- **It is fail-open.** If Socket is unreachable, sfw warns and the install
+  proceeds unfiltered. It raises the floor; it is not a boundary.
+- **It costs ~10–20s** of job startup and needs **Node ≥ 20**.
+- **A warm cache defeats it.** Measured: a second install served from
+  `~/.npm` produced *zero* policy checks. If your job restores a dependency
+  cache, intel inspects only what that cache missed. This applies to any
+  install-time filter, not just this one.
+
+Right for a release pipeline or anything that installs from a lockfile you
+did not review. Wrong as a tax on every push in a busy monorepo.
+
+### Turning it off
+
+Three levels, most specific last:
+
+| | |
+|---|---|
+| `intel: none` | the default — nothing installed |
+| `SUPPLY_CHAIN_HARDEN_SKIP: true` | on one step's `env:`, skips the whole action for that step |
+| `ecosystems:` | narrow the list to drop an ecosystem entirely |
+
+### Why one vendor
+
+Aikido Safe Chain was evaluated as an alternative or a per-job companion. It
+blocks real malware and its `--ci` mode ships 18 ready-made shims, which is
+genuinely more delivery than we had. It was not adopted, for reasons that were
+measured rather than assumed:
+
+- **No cargo at all.** Any Rust or mixed Node+Rust job could not use it, and a
+  machine gets one intel layer, not one per ecosystem.
+- **sfw reaches the same entry points.** npm, npx, pnpm, yarn, bun, bunx, pip,
+  uv and `python3 -m pip` are all intercepted, because sfw injects proxy and CA
+  settings into the process tree rather than shimming `PATH`. The gap was never
+  what sfw could reach — it was that nothing in this action invoked it for those
+  entry points. That is what the `npx` wrapper fixes.
+- **PATH shims are bypassable.** A call by absolute path
+  (`/opt/hostedtoolcache/.../npm`) walks past a shim. It does not walk past a
+  wrapper deployed *at* that path, which is what this action does.
+
+Two intel layers on one machine is the configuration to avoid regardless of
+vendor: both set `HTTPS_PROXY`, last writer wins, and the loser runs a proxy
+that sees nothing while appearing healthy.
+
+## Adopting it in an existing repo: `--suggest`
+
+The defaults are strict. For a repo that installs from lockfiles and has no
+native dependencies they are also invisible — you add two lines and nothing
+changes. For every other repo, the first encounter is a broken build whose
+error message **does not mention this action**: `ignore-scripts` turns a missing
+native binding into a `node-gyp` failure, `--no-scripts` turns a composer plugin
+into a missing autoload entry.
+
+Rather than reverse-engineer that from a stack trace, ask first:
+
+```bash
+git clone https://github.com/echennells/supply-chain-hardening
+./supply-chain-hardening/action/harden.sh --suggest=/path/to/your/repo
+```
+
+It reads your manifests and prints the block you need:
+
+```
+Add this to your workflow:
+
+      - uses: echennells/supply-chain-hardening/action@v2
+        with:
+          pnpm_built_dependencies: 'esbuild,sharp'
+
+Why, and what else to know:
+
+  - These packages run code at install time. `ignore-scripts` blocks that by
+    default, which for native modules means the install 'succeeds' and the
+    binding is missing. Allowlisting them restores their build scripts and
+    nothing else.
+  - Your own package.json defines: prepare — `npm ci` will NOT run these while
+    ignore-scripts is on. If one of them is load-bearing (husky,
+    patch-package), run it explicitly as its own step.
+```
+
+It reports and changes nothing — no config is written, no tool is installed.
+
+**Where the answer is exact, and where it is a floor.** `package-lock.json`
+records `hasInstallScript` and `pnpm-lock.yaml` records `requiresBuild` — those
+are npm's and pnpm's own answer to "does this package run code on install", so
+with either lockfile present the list is complete. `yarn.lock` and bun's binary
+lockfile carry no such marker, so those fall back to a scan for well-known
+native packages, and the output says so. Whether a Python dependency ships a
+wheel cannot be determined without the network, so Python gets a heads-up
+rather than an input.
 
 ## What it reports, and what that means
 
@@ -250,9 +418,10 @@ short green table.
 | `ecosystems` | `npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget` | Comma-separated subset. Unknown values emit a warning and are skipped. Specify a narrower list to opt out of specific ecosystems. |
 | `release_age_hours` | `48` | Minimum age (in hours) before a package version is allowed to install. Setting `0` is rejected — would silently disable the gate. |
 | `strict` | `true` | When `true`, age-gate violations fail the install. When `false`, the package manager falls back to an older satisfying version if available. |
-| `install_sfw` | `false` | Install Socket Firewall and deploy an npm wrapper that routes `install`/`ci`/`update`/`audit` through threat-intel blocking. Adds ~10–20 seconds to job startup. Requires Node ≥ 20. |
+| `intel` | `none` | `none` or `sfw`. With `sfw`, installs Socket Firewall and wraps `npm` and `npx` to route fetches through threat-intel blocking; `cargo` too via `cargo_socket_firewall`. Adds ~10–20s to job startup. Requires Node ≥ 20. |
+| `install_sfw` | — | **Deprecated**, use `intel`. `true` is treated as `intel: sfw`. Setting both is an error rather than a silent precedence rule. |
 | `write_etc` | `true` | Write system-wide `/etc/*` config in addition to user-home config. Useful if any subsequent step uses `sudo npm install` etc. Requires passwordless sudo, which all stock GitHub runners have. |
-| `install_cargo_cooldown` | `false` | Install the `cargo-cooldown` backend that **enforces** the cargo publish-age gate. Compiles from source, costing minutes on a cold runner — hence off by default, same trade-off as `install_sfw`. With it off the gate config is still written and `--locked` still injected, but `cargo update` can resolve a freshly published crate unchecked. Already-cached installs are picked up automatically. |
+| `install_cargo_cooldown` | `false` | Install the `cargo-cooldown` backend that **enforces** the cargo publish-age gate. Compiles from source, costing minutes on a cold runner — hence off by default, same trade-off as `intel: sfw`. With it off the gate config is still written and `--locked` still injected, but `cargo update` can resolve a freshly published crate unchecked. Already-cached installs are picked up automatically. |
 | `composer_allow_plugins` | `false` | When `false`, composer wrapper injects `--no-plugins` and JSON config sets `"allow-plugins": {}` — the empty allowlist, which denies every plugin. NOT the literal `false`: that is a hard fatal below composer 2.2.15 and again on 2.3.0-2.3.7, because the upstream fix was not backported linearly. Set to `true` for workflows that legitimately need composer Plugin classes (e.g., `composer/installers`, `phpstan/extension-installer`). `--no-scripts` injection still applies regardless. |
 
 ### Per-step opt-out
@@ -314,7 +483,7 @@ Example consumption:
 - uses: echennells/supply-chain-hardening/action@v2
   with:
     release_age_hours: 168   # 7 days
-    install_sfw: true
+    intel: sfw
 ```
 
 **Python-only workflow:**
@@ -368,24 +537,60 @@ The Ansible role at [echennells/supply-chain-hardening](https://github.com/echen
 
 This action ports the role's most-impactful defenses to a CI-shaped deployment. Same templates, same rationale, two-line adoption.
 
-## Migration from v1
+## The default ecosystem set
 
-v1 hardened 5 ecosystems by default (`npm,pnpm,yarn,pip,uv`). v2 broadens the default to all 14 supported ecosystems and adds the bun + composer + deno wrappers, version-tiering, per-step skip, and `tool-versions` output.
+Earlier iterations of this action hardened 5 ecosystems by default
+(`npm,pnpm,yarn,pip,uv`). The default is now all 14, plus the bun, composer and
+deno wrappers, version-tiering, per-step skip, and the `tool-versions` output.
 
-If you want to stay on the v1 ecosystem subset under v2, pin the inputs explicitly:
+To narrow it back, pin the input explicitly:
 
 ```yaml
 - uses: echennells/supply-chain-hardening/action@v2
   with:
-    ecosystems: 'npm,pnpm,yarn,pip,uv'   # v1 default
+    ecosystems: 'npm,pnpm,yarn,pip,uv'
 ```
 
-Or stay on `@v1` (frozen branch; only critical fixes backported).
+Narrowing costs almost nothing to leave alone, though: config files for an
+absent tool are inert, so the wide default is the safer starting point.
 
 ## Versioning
 
-- Pinned tags: `@v2`, `@v2.0.0`
-- Pinned SHA (recommended for security): `@<full-sha>` — use [pinact](https://github.com/suzuki-shunsuke/pinact) to do this automatically across your workflows.
+```yaml
+- uses: echennells/supply-chain-hardening/action@v2        # floating major — gets fixes
+- uses: echennells/supply-chain-hardening/action@v2.0.0    # exact release
+- uses: echennells/supply-chain-hardening/action@<sha>     # immutable; strongest
+```
+
+`@v2` is an annotated tag that moves to the newest `v2.x` release. Pinning a
+full SHA is the strongest option and the one this repo uses for its own
+third-party actions — [pinact](https://github.com/suzuki-shunsuke/pinact) will
+rewrite a whole workflow tree for you.
+
+**Do not pin a branch.** `@main` and `@feat/...` are mutable refs owned by
+whoever can push here, which is the supply-chain problem this action exists to
+address.
+
+### Cutting a release (maintainers)
+
+The tag *is* the publish step — GitHub resolves `uses:` against this repo's
+refs at job start, so a release that is not tagged does not exist to consumers,
+no matter what is on `main`:
+
+```bash
+git tag -a v2.0.0 -m 'v2.0.0' && git push origin v2.0.0
+```
+
+`.github/workflows/release.yml` takes it from there: it checks that `action/` is
+complete at that tag, moves `v2` onto it, and opens the GitHub Release.
+Pre-release tags (`v2.1.0-rc.1`) get a Release but deliberately do **not** move
+`v2`.
+
+One thing the workflow cannot do for you: the
+`action-consumed-as-a-published-ref` job in `action-smoke.yml` is pinned to a
+branch (`@feat/ci-hardening`) because `uses:` cannot interpolate `${{ }}`. Its
+whole purpose is to exercise the ref real consumers write, so **retarget it to
+`@v2` once the tag exists** — until then it is testing a branch nobody uses.
 
 ## License
 

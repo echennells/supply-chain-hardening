@@ -104,14 +104,19 @@ EOF
   echo "$output" | grep "yarn age gate" | grep -q "2880"
 }
 
-@test "verify: wrapper rows are labeled PRESENT, never counted as enforcement" {
-  # PATH wrappers are the weakest evidence in the role: existence says nothing
-  # about whether callers resolve through them. If a wrapper row ever claims
-  # FUNCTIONAL, the evidence taxonomy has been undermined.
+@test "verify: wrapper FUNCTIONAL is earned by observation, never by existence" {
+  # PRE-RUN-PROBE this asserted "wrapper rows are never FUNCTIONAL": existence
+  # said nothing about whether callers resolve through them. The run-probe
+  # changes that — it OBSERVES whether the wrapper actually ran, so a wrapper row
+  # is now legitimately FUNCTIONAL ("observed running" / "did NOT run"). The
+  # invariant that must still hold: FUNCTIONAL is earned by that observation and
+  # NEVER claimed from mere position/existence — those stay WEAK PRESENT
+  # ("predates the run-probe ... position evidence"). A regression that lets
+  # existence read as FUNCTIONAL fails here.
   run "$VERIFY"
   wrapper_rows=$(echo "$output" | grep "PATH wrapper" || true)
   if [ -n "$wrapper_rows" ]; then
-    ! echo "$wrapper_rows" | grep -q "FUNCTIONAL"
+    ! echo "$wrapper_rows" | grep "FUNCTIONAL" | grep -qE "predates the run-probe|position evidence"
   fi
 }
 
@@ -169,16 +174,21 @@ EOF
   # wrapper's guard checks — not a <tool>-real filename, because npm and pip
   # embed a path and never create a <tool>-real file. A fixture without the
   # embed is not a faithful wrapper (and its own guard would refuse).
+  # A faithful CURRENT wrapper also carries the run-probe: it appends $0 to
+  # $SCH_WRAPPER_PROBE so the verifier can OBSERVE it ran (a probe-less fixture
+  # would resolve but read as WEAK PRESENT "predates the run-probe" — still
+  # found, but this test wants the observed-running path specifically).
   cat > "$FAKEBIN/composer" <<EOF
 #!/bin/bash
 # supply-chain-hardening wrapper
 REAL_COMPOSER='$FAKEBIN/composer-real'
+if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true; fi
 [ "\$1" = "--version" ] && echo "Composer version 2.9.0 2025-11-01"
 EOF
   cp "$FAKEBIN/composer" "$FAKEBIN/composer-real"
   chmod +x "$FAKEBIN/composer" "$FAKEBIN/composer-real"
   PATH="$FAKEBIN:$PATH" run "$VERIFY"
-  echo "$output" | grep "composer PATH wrapper" | grep -q "active at"
+  echo "$output" | grep "composer PATH wrapper" | grep -q "observed running"
   ! echo "$output" | grep "composer PATH wrapper" | grep -q "not deployed"
 }
 

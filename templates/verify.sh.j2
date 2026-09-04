@@ -567,6 +567,66 @@ locate_wrapper() { # tool
   return 1
 }
 
+# WHAT WON, NAMED.
+#
+# "an unwrapped binary" is false for every front-runner that is itself a
+# wrapper, which is most of them. Naming it turns "your wrapper is not in
+# front" into a diagnosis with an action attached.
+describe_binary() {
+  f="$1"
+  [ -n "$f" ] || { echo "nothing on PATH"; return; }
+  if grep -q "supply-chain-harden" "$f" 2>/dev/null; then echo "our own wrapper"; return; fi
+  if grep -qi "safe-chain" "$f" 2>/dev/null; then echo "an Aikido safe-chain shim"; return; fi
+  case "$f" in
+    */.asdf/shims/*)                      echo "an asdf shim" ;;
+    */mise/shims/*|*/.local/share/mise/*) echo "a mise shim" ;;
+    */.volta/*)                           echo "a volta shim" ;;
+    */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
+    *)
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      else echo "an unwrapped binary"; fi ;;
+  esac
+}
+
+# DID OUR WRAPPER ACTUALLY RUN?
+#
+# This row used to answer by INFERENCE from PATH position, and graded itself
+# WEAK PRESENT for exactly that reason — the comment below said so: "nothing
+# here EXECUTED the wrapper". Honest, but it meant a working wrapper could
+# never read as OK, and worse, the shadowed branch asserted "never runs" from
+# the same inference.
+#
+# Position tells you what resolves FIRST, not what executes AT ALL. MEASURED:
+# with an Aikido safe-chain shim in front, our wrapper ran on every call (the
+# shim strips its own directory and execs the next match, which is us) while
+# this row said it was shadowed and never ran. Every version manager — asdf,
+# mise, volta, nodenv, pyenv — is shim-first and delegates identically, so the
+# same false report fired for those hosts with no second security tool.
+#
+# The wrappers now record a breadcrumb when SCH_WRAPPER_PROBE is set, so this
+# can observe instead of infer — which is what upgrades the row from PRESENT
+# to genuine FUNCTIONAL evidence.
+SCV_WRAPPER_RAN_PATH=""
+wrapper_ran() {
+  w="$1"
+  SCV_WRAPPER_RAN_PATH=""
+  probe=$(mktemp 2>/dev/null) || return 2
+  if have timeout; then
+    SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+  else
+    SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ -f "$line" ] && grep -q "supply-chain-harden" "$line" 2>/dev/null; then
+      SCV_WRAPPER_RAN_PATH="$line"
+      break
+    fi
+  done < "$probe"
+  rm -f "$probe"
+  [ -n "$SCV_WRAPPER_RAN_PATH" ]
+}
+
 for w in $SCV_WRAPPERS; do
   if ! have "$w"; then
     # The SUBJECT tool is absent, so there is nothing for a wrapper to wrap.
@@ -575,7 +635,23 @@ for w in $SCV_WRAPPERS; do
     continue
   fi
   p=$(command -v "$w" 2>/dev/null)   # what callers resolve to
-  if [ -n "$p" ] && grep -q "supply-chain-harden" "$p" 2>/dev/null; then
+
+  wrapper_ran "$w"; probe_rc=$?
+  if [ "$probe_rc" -eq 0 ]; then
+    # OBSERVED. Still confirm it can reach the real tool: the probe fires
+    # before the recursion guard, so an orphaned wrapper records a run and
+    # then exits 127 on every call. Running is necessary, not sufficient.
+    target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$SCV_WRAPPER_RAN_PATH" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
+    if [ -n "$target" ] && [ -x "$target" ]; then
+      if [ "$SCV_WRAPPER_RAN_PATH" = "$p" ]; then
+        row OK FUNCTIONAL "$w PATH wrapper" "observed running when $w was invoked (at $p); callers bypassing PATH are unaffected"
+      else
+        row OK FUNCTIONAL "$w PATH wrapper" "observed running when $w was invoked — chained behind $(describe_binary "$p") at $p"
+      fi
+    else
+      row GAP FUNCTIONAL "$w PATH wrapper" "wrapper at $SCV_WRAPPER_RAN_PATH ran, but its real target '${target:-<none>}' is missing or not executable — the recursion guard makes it refuse to run"
+    fi
+  elif [ -n "$p" ] && grep -q "supply-chain-harden" "$p" 2>/dev/null; then
     # Wrappers reach the real tool two different ways, and the check must know
     # both or it cries wolf. bun/deno/composer/cargo RENAME the binary to
     # <tool>-real and exec that. npm embeds REAL_NPM='<path>'; pip/pip3 embed
@@ -584,25 +660,27 @@ for w in $SCV_WRAPPERS; do
     # create. (Checking ${p}-real reported npm/pip wrappers as "refuses to run"
     # on every host, a false GAP for a working wrapper — the mirror of the old
     # composer false GAP.)
+    # Ours is what resolves, but it did not record a run. On a long-lived host
+    # that means a wrapper deployed before the run-probe existed — common,
+    # since nothing removes an old wrapper. Position evidence only, and it
+    # must not read as observation.
     target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$p" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
     if [ -n "$target" ] && [ -x "$target" ]; then
-      # WEAK, not OK, and deliberately so: nothing here EXECUTED the wrapper.
-      # We know PATH resolves to it and that its exec target exists. That is
-      # PRESENT evidence, and this file's own rule is that PRESENT evidence is
-      # flagged rather than counted as coverage.
-      row WEAK PRESENT "$w PATH wrapper" "active at $p; callers bypassing PATH are unaffected"
+      row WEAK PRESENT "$w PATH wrapper" "wrapper is in place at $p but predates the run-probe, so this is position evidence, not observation — re-apply the role to upgrade this row"
     else
       row GAP PRESENT "$w PATH wrapper" "wrapper at $p but its real target '${target:-<none>}' is missing or not executable — the recursion guard makes it refuse to run"
     fi
+  elif [ "$probe_rc" -eq 2 ]; then
+    row WEAK PRESENT "$w PATH wrapper" "could not create a temp file to run the probe; falling back to position: $w resolves to $p ($(describe_binary "$p"))"
   elif shadow=$(locate_wrapper "$w"); then
-    # Deployed, but something earlier on PATH shadows it — the wrapper exists
-    # and is bypassed on every call, which reads as coverage and is not. A GAP
-    # regardless of intent: we found our own artifact being ignored.
-    row GAP PRESENT "$w PATH wrapper" "wrapper is at $shadow but $w resolves to $p — the wrapper is shadowed and never runs"
+    # Deployed, and it did NOT run — confirmed by the probe rather than
+    # inferred from PATH order, which is what made this branch wrong for every
+    # front-runner that delegates.
+    row GAP FUNCTIONAL "$w PATH wrapper" "wrapper is at $shadow and did NOT run — $w resolves to $p ($(describe_binary "$p"))"
   elif expected "wrapper.$w"; then
-    row GAP PRESENT "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary at $p"
+    row GAP FUNCTIONAL "$w PATH wrapper" "not deployed; $w resolves to $p ($(describe_binary "$p"))"
   else
-    na_design "$w PATH wrapper" "not deployed; $w resolves to an unwrapped binary at $p"
+    na_design "$w PATH wrapper" "not deployed; $w resolves to $p ($(describe_binary "$p"))"
   fi
 done
 

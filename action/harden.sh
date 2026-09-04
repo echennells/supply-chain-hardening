@@ -35,7 +35,47 @@ set -euo pipefail
 ECOSYSTEMS="${ECOSYSTEMS:-npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget}"
 RELEASE_AGE_HOURS="${RELEASE_AGE_HOURS:-48}"
 STRICT="${STRICT:-true}"
-INSTALL_SFW="${INSTALL_SFW:-false}"
+# ---- intel layer (optional malware intelligence) ----
+#
+# `intel` is capability-named; `INSTALL_SFW` is the older vendor-named form,
+# still accepted. Resolved to INSTALL_SFW=true|false once, here, so nothing
+# downstream has to know both spellings.
+#
+# CONFLICT IS AN ERROR, NOT A PRECEDENCE RULE. `intel: none` next to
+# `install_sfw: true` has no defensible winner, and picking one silently means
+# a workflow that reads as "intel off" can be running intel, or the reverse.
+# Both are bad in a security control, so refuse and say so.
+INTEL="${INTEL:-}"
+INSTALL_SFW="${INSTALL_SFW:-}"
+case "$INTEL" in
+  ""|none|sfw) ;;
+  *)
+    echo "[supply-chain-harden] error: intel='$INTEL' is not recognised" >&2
+    echo "  supported: none (default), sfw" >&2
+    exit 2 ;;
+esac
+# A non-empty INTEL means the input was set EXPLICITLY (action.yml defaults it to
+# empty, not 'none'), so intel + install_sfw together is the "both set" conflict —
+# INCLUDING intel: none + install_sfw: true, which previously slipped past the
+# now-removed `!= none` clause and silently turned intel ON against an explicit
+# `intel: none`. Unset intel (empty) still lets legacy install_sfw win below.
+if [ -n "$INSTALL_SFW" ] && [ -n "$INTEL" ]; then
+  echo "[supply-chain-harden] error: set either 'intel' or the deprecated 'install_sfw', not both" >&2
+  echo "  got intel='$INTEL' and install_sfw='$INSTALL_SFW'" >&2
+  exit 2
+fi
+if [ -n "$INSTALL_SFW" ]; then
+  case "$INSTALL_SFW" in
+    true)  INTEL="sfw" ;;
+    false) INTEL="none" ;;
+    *)
+      echo "[supply-chain-harden] error: install_sfw must be true or false, got '$INSTALL_SFW'" >&2
+      exit 2 ;;
+  esac
+  echo "[supply-chain-harden] notice: 'install_sfw' is deprecated — use 'intel: ${INTEL}'" >&2
+fi
+[ -n "$INTEL" ] || INTEL="none"
+case "$INTEL" in sfw) INSTALL_SFW=true ;; *) INSTALL_SFW=false ;; esac
 WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
@@ -51,11 +91,16 @@ EMIT="${EMIT:-auto}"
 
 # Bare-invocation flag parsing. action.yml passes everything by env, so
 # this only fires when a human or a non-GitHub CI calls the script directly.
+SUGGEST=0
+SUGGEST_PATH="."
 for _arg in "$@"; do
   case "$_arg" in
     --emit=*) EMIT="${_arg#--emit=}" ;;
+    --suggest) SUGGEST=1 ;;
+    --suggest=*) SUGGEST=1; SUGGEST_PATH="${_arg#--suggest=}" ;;
     --help|-h)
       echo "usage: harden.sh [--emit=auto|github|gitlab|circleci|azure|buildkite|plain]"
+      echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs"
       echo "       configuration is read from env: ECOSYSTEMS, RELEASE_AGE_HOURS,"
       echo "       STRICT, INSTALL_SFW, WRITE_ETC, COMPOSER_ALLOW_PLUGINS,"
       echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN"
@@ -64,6 +109,200 @@ for _arg in "$@"; do
     *) echo "[supply-chain-harden] warning: unrecognised argument '$_arg' — ignoring" >&2 ;;
   esac
 done
+
+# ---- --suggest: tell a repo what it needs BEFORE the first failed build ----
+#
+# WHY THIS EXISTS.
+#
+# The defaults are strict, and for a repo that installs from lockfiles and has
+# no native dependencies they are also invisible. For every other repo the
+# first encounter with this action is a broken build whose error message does
+# not mention this action: `ignore-scripts` turns a missing native binding into
+# a node-gyp failure, `--no-scripts` turns a composer plugin into a missing
+# autoload entry. That fails the attribution test in docs/design-principles.md
+# ("when this control breaks something legitimate, does the error name the
+# control?"), and the observed consequence of failing it is not a support
+# ticket — it is the two lines being deleted from the workflow.
+#
+# This mode reads the manifests and prints the `with:` block the repo needs, so
+# the exceptions are chosen at adoption time from evidence rather than
+# reverse-engineered from a stack trace.
+#
+# It reports; it changes nothing. Run it locally, or as a one-off job.
+#
+# EVIDENCE, NOT GUESSWORK, WHERE THE LOCKFILE HAS IT. npm records
+# `hasInstallScript: true` and pnpm records `requiresBuild: true` per package —
+# those are the package manager's own answer to "does this run code on
+# install", so where a lockfile is present the list is exact. yarn.lock and
+# bun's binary lockfile carry no such marker, so those fall back to a
+# known-names scan, which is a floor and is labelled as one.
+_sg_note() { printf '  - %s\n' "$*"; }
+
+suggest_scripted_deps() {
+  # Emits one package name per line. Deduped and sorted by the caller.
+  local dir="$1"
+  if [ -f "$dir/package-lock.json" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '(.packages // {}) | to_entries[]
+             | select(.value.hasInstallScript == true)
+             | .key | sub("^.*node_modules/"; "")' \
+         "$dir/package-lock.json" 2>/dev/null || true
+    else
+      # npm writes one "node_modules/<name>": { per line, so the nearest
+      # preceding key line is the owning package. Approximate by construction:
+      # it depends on npm's formatting, which jq does not.
+      awk -F'"' '/^ *"node_modules\// { split($2, p, "node_modules/"); key=p[length(p)] }
+                 /"hasInstallScript": *true/ { if (key != "") print key }' \
+         "$dir/package-lock.json" 2>/dev/null || true
+    fi
+  fi
+  if [ -f "$dir/pnpm-lock.yaml" ]; then
+    # Quotes come off BEFORE the version suffix: pnpm quotes scoped keys
+    # ('@swc/core@1.4.0':), and a trailing quote makes the @version strip land
+    # one character short, yielding '@swc/core with the quote still attached.
+    awk '/^packages:/ { inp=1; next }
+         /^[^ ]/ { inp=0 }
+         inp && /^  [^ ]/ { key=$1; sub(/:$/, "", key)
+                            gsub(/\047|"/, "", key)
+                            # strip the @version suffix, keeping @scope/name
+                            sub(/@[^@\/]*$/, "", key) }
+         inp && /requiresBuild: *true/ { if (key != "") print key }' \
+       "$dir/pnpm-lock.yaml" 2>/dev/null || true
+  fi
+  # Fallback for lockfiles with no marker (yarn, bun) or no lockfile at all.
+  if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ] \
+     && [ -f "$dir/package.json" ]; then
+    local known p
+    known="esbuild sharp node-sass sass-embedded puppeteer puppeteer-core
+           playwright canvas bcrypt better-sqlite3 sqlite3 cypress electron
+           @swc/core re2 @parcel/watcher lightningcss node-pty keytar
+           sodium-native argon2 usb serialport deasync msgpackr-extract"
+    for p in $known; do
+      grep -q "\"$p\"[[:space:]]*:" "$dir/package.json" 2>/dev/null && echo "$p"
+    done
+  fi
+  # A `for` loop's status is its last iteration's, so a final non-matching
+  # grep returns 1 — and under `set -o pipefail` that failed the enclosing
+  # command substitution and `set -e` killed the whole run. MEASURED: a repo
+  # with no scripted dependencies (the common case, and the one this mode most
+  # needs to answer) printed the header and exited 1 with no output.
+  return 0
+}
+
+suggest_for_repo() {
+  local dir="${1:-.}"
+  local -a with_lines=() notes=()
+  local found_any=0
+
+  if [ ! -d "$dir" ]; then
+    echo "[supply-chain-harden] error: '$dir' is not a directory" >&2
+    return 2
+  fi
+
+  echo "supply-chain-hardening — suggested configuration for ${dir}"
+  echo ""
+
+  # --- npm/pnpm/yarn/bun: packages whose install runs code ---
+  local scripted
+  scripted=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//') || true
+  if [ -n "$scripted" ]; then
+    found_any=1
+    with_lines+=("          pnpm_built_dependencies: '$scripted'")
+    notes+=("These packages run code at install time. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing. Allowlisting them restores their build scripts and nothing else.")
+    if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ]; then
+      notes+=("This list came from a known-names scan, not a lockfile — treat it as a floor, not the full set. Commit a package-lock.json or pnpm-lock.yaml and re-run for the exact answer.")
+    fi
+  fi
+
+  # --- the repo's OWN lifecycle scripts ---
+  #
+  # ignore-scripts is not limited to dependencies: `npm ci` also skips the root
+  # package's own prepare/postinstall. That is how husky and patch-package
+  # stop running, and the failure surfaces later and elsewhere (a missing git
+  # hook, an unpatched dependency) with nothing pointing back here.
+  if [ -f "$dir/package.json" ]; then
+    local own
+    own=$(grep -oE '"(prepare|postinstall|preinstall|install|prepublish)"[[:space:]]*:' \
+          "$dir/package.json" 2>/dev/null | tr -d '":' | tr -d ' ' | sort -u | tr '\n' ' ' || true)
+    if [ -n "$own" ]; then
+      found_any=1
+      notes+=("Your own package.json defines: ${own}— \`npm ci\` will NOT run these while ignore-scripts is on. If one of them is load-bearing (husky, patch-package), run it explicitly as its own step, e.g. \`- run: npm run prepare\`.")
+    fi
+  fi
+
+  # --- composer ---
+  if [ -f "$dir/composer.json" ]; then
+    local needs_plugins=0
+    grep -q '"allow-plugins"' "$dir/composer.json" 2>/dev/null && needs_plugins=1
+    local plug
+    for plug in composer/installers phpstan/extension-installer \
+                dealerdirect/phpcodesniffer-composer-installer php-http/discovery \
+                symfony/flex cweagans/composer-patches; do
+      grep -q "\"$plug\"" "$dir/composer.json" 2>/dev/null && needs_plugins=1
+    done
+    if [ "$needs_plugins" = "1" ]; then
+      found_any=1
+      with_lines+=("          composer_allow_plugins: 'true'")
+      notes+=("composer.json declares plugins. The wrapper injects \`--no-plugins\` by default, which silently skips them; \`--no-scripts\` still applies either way.")
+    fi
+    if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
+      found_any=1
+      notes+=("composer.json defines scripts — the wrapper injects \`--no-scripts\` unconditionally and there is no input to disable it. Run any required script as its own explicit step.")
+    fi
+  fi
+
+  # --- cargo ---
+  if [ -f "$dir/Cargo.toml" ]; then
+    found_any=1
+    with_lines+=("          install_cargo_cooldown: 'true'")
+    notes+=("Rust detected. Without the cargo-cooldown backend the publish-age gate's config is written but nothing enforces it — you get \`--locked\` only. It compiles from source (minutes on a cold runner), so cache it or accept the cost. cargo is also the one ecosystem where \`build.rs\` runs at compile time with your privileges and cannot be blocked, which is what the age gate is standing in for.")
+  fi
+
+  # --- python ---
+  if [ -f "$dir/pyproject.toml" ] || [ -f "$dir/setup.py" ] \
+     || [ -f "$dir/requirements.txt" ]; then
+    notes+=("Python detected. pip is set to \`only-binary=:all:\` — a dependency published only as an sdist will fail to resolve. If that happens, use \`uv pip install\` (it honours no-build with better errors), or drop \`pip\` from \`ecosystems\`. Whether a given dependency has a wheel for this platform cannot be determined without the network, so this is a heads-up rather than a finding.")
+  fi
+
+  # --- output ---
+  if [ "$found_any" = "0" ] && [ ${#notes[@]} -eq 0 ]; then
+    echo "No exceptions needed. The defaults should work as-is:"
+    echo ""
+    echo "      - uses: echennells/supply-chain-hardening/action@v2"
+    echo ""
+    echo "Still put it after your setup-* steps and before your installs, and add"
+    echo "the verify action after your installs."
+    return 0
+  fi
+
+  if [ ${#with_lines[@]} -gt 0 ]; then
+    echo "Add this to your workflow:"
+    echo ""
+    echo "      - uses: echennells/supply-chain-hardening/action@v2"
+    echo "        with:"
+    printf '%s\n' "${with_lines[@]}"
+    echo ""
+  else
+    echo "No inputs need changing — the defaults fit this repo."
+    echo ""
+  fi
+
+  if [ ${#notes[@]} -gt 0 ]; then
+    echo "Why, and what else to know:"
+    echo ""
+    local n
+    for n in "${notes[@]}"; do _sg_note "$n"; done
+    echo ""
+  fi
+
+  echo "Order still matters more than any of the above: setup-* steps first,"
+  echo "then this action, then your installs, then the verify action."
+}
+
+if [ "$SUGGEST" = "1" ]; then
+  suggest_for_repo "$SUGGEST_PATH"
+  exit $?
+fi
 
 detect_platform() {
   # Ordered by signal specificity. Each platform's own marker first; the
@@ -101,6 +340,44 @@ esac
 # On Drone/Woodpecker and other per-step-container runners this file is
 # the only way the env layer survives a step boundary (config files and
 # wrappers still work via the shared workspace volume).
+# ---- privilege: resolve ONCE, never assume ----
+#
+# MEASURED DEFECT. This script called `sudo` unconditionally in 24 places with
+# no check that sudo exists. In a container job — `container: node:24-slim` and
+# friends — the job usually runs AS ROOT and slim images routinely ship without
+# the sudo package, because root has no use for it. So the very first wrapper
+# deployment ran `sudo mv`, got "sudo: command not found", and `set -e` killed
+# the run at exit 127.
+#
+# Two consequences, both measured with ECOSYSTEMS=bun,npm,pip,uv,go:
+#   - only .bunfig.toml was written. npm, pip, uv and go never ran at all —
+#     the same "one failure eats every downstream ecosystem" shape the role
+#     already fixed and documented in tasks/go.yml.
+#   - no summary, no outputs file. A step gating on ecosystems-effective got
+#     an empty string rather than a verdict.
+#
+# The irony is that the privilege was never the problem: as root the target is
+# already writable. We asked for permission we had, through a program that was
+# not installed.
+#
+# So resolve the escalation method once:
+#   root          -> no escalation needed, run the command directly
+#   sudo works    -> use it
+#   neither       -> CAN_ESCALATE=0; the config layer (which needs no
+#                    privilege and is the load-bearing layer anyway) still
+#                    applies, and wrapper deployment degrades with a recorded
+#                    reason instead of taking the run down.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+  CAN_ESCALATE=1
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO="sudo"
+  CAN_ESCALATE=1
+else
+  SUDO=""
+  CAN_ESCALATE=0
+fi
+
 HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
 HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
 # The chosen temp dir is not guaranteed to exist — a caller can point TMPDIR
@@ -317,9 +594,53 @@ write_etc() {
   if [[ "$WRITE_ETC" != "true" ]]; then
     return 0
   fi
-  sudo mkdir -p "$(dirname "$path")"
-  echo "$content" | sudo tee "$path" >/dev/null
-  sudo chmod 644 "$path"
+  if ! can_write "$path"; then
+    # No privilege and the path is not ours. The per-user config for this
+    # ecosystem was already written by the caller, so this is a reduction in
+    # coverage (sudo callers in a later step), not a loss of protection.
+    warn "cannot write $path (no root and no usable sudo) — per-user config still applies, but a later \`sudo\` step will not see it"
+    return 0
+  fi
+  $SUDO mkdir -p "$(dirname "$path")"
+  echo "$content" | $SUDO tee "$path" >/dev/null
+  $SUDO chmod 644 "$path"
+}
+
+# can_write <target> — can we create or replace this path, with or without
+# escalation? Checks the DIRECTORY, because replacing a file is an unlink plus
+# a create and both are governed by directory permissions, not by the file's
+# own mode. That distinction is the one the role got wrong once already: a
+# root-owned 0755 wrapper inside a user-owned directory was removed and
+# replaced by that unprivileged user (docs/design-principles.md, the
+# anti-tamper corollary).
+can_write() {
+  local target="$1" dir
+  dir=$(dirname "$target")
+  [ -w "$dir" ] && return 0                 # ours outright — no escalation needed
+  [ "${CAN_ESCALATE:-0}" -eq 1 ] && return 0
+  return 1
+}
+
+# require_privilege <tool> <target> — gate for wrapper deployment.
+#
+# Wrappers are the ONLY mechanism for deno's age gate, bun's --no-install,
+# bunx, composer --no-scripts, cargo --locked and the sfw route, so losing one
+# is a real reduction and has to be recorded rather than logged and forgotten.
+# $3/$4 optional: the degrade status + message. Defaults suit ecosystems WITH a
+# config layer (npm/cargo/composer) — "PARTIAL, config still applies". A
+# wrapper-only ecosystem (deno) passes NONE + its own message: with the wrapper
+# undeployed, nothing is enforced, so PARTIAL would overstate coverage.
+require_privilege() {
+  local tool="$1" target="$2"
+  local status="${3:-PARTIAL}"
+  local msg="${4:-PATH wrapper not deployed: no root and no usable sudo in this job (common in \`container:\` jobs on slim images). Config-file layer still applies.}"
+  can_write "$target" && return 0
+  warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
+  # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
+  # lands in neither summary list and the ecosystem disappears from the verdict
+  # line while still showing in the table below it.
+  set_eco_status "$tool" "$status" "$msg"
+  return 1
 }
 
 # subst_inplace <file> <sed-script>
@@ -829,6 +1150,7 @@ harden_composer() {
   fi
 
   local wrapper_target="$real_composer"
+  require_privilege composer "$wrapper_target" || { end_section; return 0; }
   if grep -q "supply-chain-harden" "$real_composer" 2>/dev/null; then
     if [[ -x "${real_composer}-real" ]]; then
       real_composer="${real_composer}-real"
@@ -838,7 +1160,7 @@ harden_composer() {
       return 0
     fi
   else
-    sudo mv "$real_composer" "${real_composer}-real"
+    $SUDO mv "$real_composer" "${real_composer}-real"
     real_composer="${real_composer}-real"
   fi
 
@@ -862,7 +1184,7 @@ harden_composer() {
     no_scripts_is_global=true
   fi
 
-  cat <<EOF | sudo tee "$wrapper_target" >/dev/null
+  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
 #
@@ -874,6 +1196,25 @@ harden_composer() {
 # injecting it elsewhere there fails with
 #     The "--no-scripts" option does not exist.
 REAL_COMPOSER='$real_composer'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
+# one test. verify.sh sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# distinguish a wrapper that was bypassed from one that is chained behind
+# another wrap. MEASURED: with an Aikido safe-chain shim first on PATH, the
+# wrapper ran on every call and the verifier reported "shadowed and never
+# runs" at FUNCTIONAL strength -- the strongest evidence grade, asserting the
+# opposite of the fact.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "$wrapper_target" ]; then
   echo "[supply-chain-harden] error: real composer not found at '\$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
@@ -906,7 +1247,7 @@ $plugins_flag_line
 
 exec "\$REAL_COMPOSER" \${FLAGS[@]+"\${FLAGS[@]}"} "\$@"
 EOF
-  sudo chmod 755 "$wrapper_target"
+  $SUDO chmod 755 "$wrapper_target"
   local wrap_desc="--no-scripts on every invocation"
   if [[ "$no_scripts_is_global" != "true" ]]; then
     wrap_desc="--no-scripts on install/update/require/remove/dump-autoload only"
@@ -1056,6 +1397,7 @@ harden_bun() {
   fi
 
   local wrapper_target="$real_bun"
+  require_privilege bun "$wrapper_target" || { end_section; return 0; }
   # If the discovered bun IS our wrapper from a prior step (re-run within
   # the same job), find the real binary at -real and re-wrap.
   if grep -q "supply-chain-harden" "$real_bun" 2>/dev/null; then
@@ -1071,14 +1413,33 @@ harden_bun() {
     # location so PATH-resolved invocations hit the wrapper. Use sudo
     # because ~/.bun/bin is owned by the runner user but /usr/local/bin
     # isn't, and we want this to work in both cases.
-    sudo mv "$real_bun" "${real_bun}-real"
+    $SUDO mv "$real_bun" "${real_bun}-real"
     real_bun="${real_bun}-real"
   fi
 
-  cat <<EOF | sudo tee "$wrapper_target" >/dev/null
+  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_BUN='$real_bun'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
+# one test. verify.sh sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# distinguish a wrapper that was bypassed from one that is chained behind
+# another wrap. MEASURED: with an Aikido safe-chain shim first on PATH, the
+# wrapper ran on every call and the verifier reported "shadowed and never
+# runs" at FUNCTIONAL strength -- the strongest evidence grade, asserting the
+# opposite of the fact.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "$wrapper_target" ]; then
   echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
   exit 127
@@ -1093,7 +1454,7 @@ case "\${1:-}" in
     ;;
 esac
 EOF
-  sudo chmod 755 "$wrapper_target"
+  $SUDO chmod 755 "$wrapper_target"
   log "bun: wrapper deployed at $wrapper_target (injects --no-install for runtime paths)"
   record_wrapper bun
 
@@ -1142,11 +1503,30 @@ EOF
     # No -real backup is kept: unlike bun, bunx carries no unique binary. It
     # is a symlink, and the thing it pointed at is already preserved as
     # bun-real by the wrap above.
-    sudo rm -f "$real_bunx"
-    cat <<EOF | sudo tee "$real_bunx" >/dev/null
+    $SUDO rm -f "$real_bunx"
+    cat <<EOF | $SUDO tee "$real_bunx" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden
 REAL_BUN='$real_bun'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
+# one test. verify.sh sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# distinguish a wrapper that was bypassed from one that is chained behind
+# another wrap. MEASURED: with an Aikido safe-chain shim first on PATH, the
+# wrapper ran on every call and the verifier reported "shadowed and never
+# runs" at FUNCTIONAL strength -- the strongest evidence grade, asserting the
+# opposite of the fact.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "$real_bunx" ]; then
   echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
   exit 127
@@ -1159,7 +1539,7 @@ case "\${1:-}" in
 esac
 exec -a bunx "\$REAL_BUN" --no-install "\$@"
 EOF
-    sudo chmod 755 "$real_bunx"
+    $SUDO chmod 755 "$real_bunx"
     log "bunx: wrapper deployed at $real_bunx (injects --no-install; fails closed on uninstalled packages)"
     record_wrapper bunx
   fi
@@ -1254,6 +1634,7 @@ EOF
   fi
 
   local wrapper_target="$real_cargo"
+  require_privilege cargo "$wrapper_target" || { end_section; return 0; }
   if grep -q "supply-chain-harden" "$real_cargo" 2>/dev/null; then
     if [[ -x "${real_cargo}-real" ]]; then
       real_cargo="${real_cargo}-real"
@@ -1263,7 +1644,7 @@ EOF
       return 0
     fi
   else
-    sudo mv "$real_cargo" "${real_cargo}-real"
+    $SUDO mv "$real_cargo" "${real_cargo}-real"
     real_cargo="${real_cargo}-real"
   fi
 
@@ -1300,6 +1681,25 @@ EOF
 set -u
 
 REAL_CARGO='__REAL_CARGO__'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
+# one test. verify.sh sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# distinguish a wrapper that was bypassed from one that is chained behind
+# another wrap. MEASURED: with an Aikido safe-chain shim first on PATH, the
+# wrapper ran on every call and the verifier reported "shadowed and never
+# runs" at FUNCTIONAL strength -- the strongest evidence grade, asserting the
+# opposite of the fact.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 
 # cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup
 # cargo but NOT for a distro/apt cargo. Without this prepend, both
@@ -1510,8 +1910,8 @@ esac
 WRAPPER
 
   subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|; s|__CARGO_SFW__|$CARGO_SOCKET_FIREWALL|"
-  sudo cp "$tmp_wrapper" "$wrapper_target"
-  sudo chmod 755 "$wrapper_target"
+  $SUDO cp "$tmp_wrapper" "$wrapper_target"
+  $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo
   rm -f "$tmp_wrapper"
 
@@ -1707,6 +2107,17 @@ harden_deno() {
 
   # Wrap in place (deno installs to ~/.deno/bin/deno typically; we wrap
   # at the discovered path).
+  # Gate BEFORE any filesystem mutation. On a host where deno lives in a
+  # non-writable dir (system install, no root/sudo) the `mv` below would fail
+  # under `set -e` and kill the whole run before the summary is written — the
+  # exact "partial config, no verdict" defect this change set fixes everywhere
+  # else, and it gated AFTER the mv here. deno has no config layer, so a blocked
+  # wrap means NONE is enforced, not PARTIAL.
+  local wrapper_path="${real_deno%-real}"
+  require_privilege deno "$wrapper_path" NONE \
+    "PATH wrapper not deployed (no root/sudo). deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
+    || { end_section; return 0; }
+
   if grep -q "supply-chain-harden" "$real_deno" 2>/dev/null; then
     if [[ -x "${real_deno}-real" ]]; then
       real_deno="${real_deno}-real"
@@ -1716,11 +2127,9 @@ harden_deno() {
       return 0
     fi
   else
-    sudo mv "$real_deno" "${real_deno}-real"
+    $SUDO mv "$real_deno" "${real_deno}-real"
     real_deno="${real_deno}-real"
   fi
-
-  local wrapper_path="${real_deno%-real}"
   # Placeholders + sed rather than an interpolating heredoc — same reason as
   # the cargo wrapper: this text is dense with $ and the escaping is where
   # generated wrappers go wrong without failing loudly.
@@ -1741,6 +2150,25 @@ harden_deno() {
 # arm, and ran with NO age gate at all. Silently: an ungated run and a gated
 # one are identical at the terminal.
 REAL_DENO='__REAL_DENO__'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
+# one test. verify.sh sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# distinguish a wrapper that was bypassed from one that is chained behind
+# another wrap. MEASURED: with an Aikido safe-chain shim first on PATH, the
+# wrapper ran on every call and the verifier reported "shadowed and never
+# runs" at FUNCTIONAL strength -- the strongest evidence grade, asserting the
+# opposite of the fact.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 if [ -z "$REAL_DENO" ] || [ ! -x "$REAL_DENO" ] || [ "$REAL_DENO" = "__WRAPPER_PATH__" ]; then
   echo "[supply-chain-harden] error: real deno not found at '$REAL_DENO'; refusing to recurse" >&2
   exit 127
@@ -1781,9 +2209,9 @@ case "$subcmd" in
 esac
 DENOWRAP
   subst_inplace "$tmp_deno" "s|__REAL_DENO__|$real_deno|; s|__WRAPPER_PATH__|$wrapper_path|; s|__MIN_AGE__|$DENO_AGE_ISO|"
-  sudo cp "$tmp_deno" "$wrapper_path"
+  $SUDO cp "$tmp_deno" "$wrapper_path"
   rm -f "$tmp_deno"
-  sudo chmod 755 "$wrapper_path"
+  $SUDO chmod 755 "$wrapper_path"
   log "deno: wrapper deployed at $wrapper_path (injects --minimum-dependency-age=$DENO_AGE_ISO)"
   record_wrapper deno
   end_section
@@ -1991,7 +2419,7 @@ install_sfw_and_wrap() {
   # installed sfw into a different node prefix than the one the job uses.
   local npm_bin
   npm_bin=$(command -v npm)
-  sudo "$npm_bin" install -g sfw@2 >/dev/null 2>&1 || {
+  $SUDO "$npm_bin" install -g sfw@2 >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
@@ -2011,6 +2439,7 @@ install_sfw_and_wrap() {
   local real_npm wrapper_target
   real_npm=$(command -v npm)
   wrapper_target="$real_npm"
+  require_privilege npm "$wrapper_target" || { end_section; return 0; }
 
   if grep -q "supply-chain-harden" "$real_npm" 2>/dev/null; then
     # Already wrapped in a previous run within this job — re-wrap the original.
@@ -2022,14 +2451,33 @@ install_sfw_and_wrap() {
       return 0
     fi
   else
-    sudo mv "$real_npm" "${real_npm}-real"
+    $SUDO mv "$real_npm" "${real_npm}-real"
     real_npm="${real_npm}-real"
   fi
 
-  cat <<EOF | sudo tee "$wrapper_target" >/dev/null
+  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_NPM='$real_npm'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
+# one test. verify.sh sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# distinguish a wrapper that was bypassed from one that is chained behind
+# another wrap. MEASURED: with an Aikido safe-chain shim first on PATH, the
+# wrapper ran on every call and the verifier reported "shadowed and never
+# runs" at FUNCTIONAL strength -- the strongest evidence grade, asserting the
+# opposite of the fact.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
 if [ -z "\$REAL_NPM" ] || [ ! -x "\$REAL_NPM" ] || [ "\$REAL_NPM" = "$wrapper_target" ]; then
   echo "[supply-chain-harden] error: real npm not found at '\$REAL_NPM'; refusing to recurse" >&2
   exit 127
@@ -2067,10 +2515,66 @@ esac
 exec "\$REAL_NPM" "\$@"
 EOF
 
-  sudo chmod 755 "$wrapper_target"
+  $SUDO chmod 755 "$wrapper_target"
   SFW_INSTALLED=true
   log "sfw installed; npm wrapper deployed at $wrapper_target"
   record_wrapper npm
+
+  # ---- npx ----
+  #
+  # npx is a SEPARATE BINARY, not an npm subcommand, so wrapping npm does not
+  # cover it — the same shape as bunx, which this action already wraps for
+  # exactly this reason (finding V5: "a typosquatted name is fetched and run
+  # immediately"). `npx <pkg>` downloads and executes in one step.
+  #
+  # MEASURED that sfw does cover it once something prefixes it: with the sfw
+  # CA stripped inside its child, `npx cowsay` fails with
+  # UNABLE_TO_VERIFY_LEAF_SIGNATURE, and SFW_DEBUG shows a purl check plus
+  # `packageAllowed` per package. So the gap was never sfw's reach; it was
+  # that nothing invoked sfw for this entry point.
+  local real_npx npx_target
+  real_npx=$(command -v npx 2>/dev/null || true)
+  if [[ -z "$real_npx" ]]; then
+    log "npx not found — no npx wrapper deployed"
+    end_section
+    return 0
+  fi
+  npx_target="$real_npx"
+  if grep -q "supply-chain-harden" "$real_npx" 2>/dev/null; then
+    if [[ -x "${real_npx}-real" ]]; then
+      real_npx="${real_npx}-real"
+    else
+      warn "npx wrapper present at $npx_target but ${npx_target}-real missing; skipping re-wrap"
+      end_section
+      return 0
+    fi
+  else
+    require_privilege npx "$npx_target" || { end_section; return 0; }
+    $SUDO mv "$real_npx" "${real_npx}-real"
+    real_npx="${real_npx}-real"
+  fi
+
+  cat <<EOF | $SUDO tee "$npx_target" >/dev/null
+#!/bin/bash
+# Managed by supply-chain-harden action
+REAL_NPX='$real_npx'
+if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+if [ -z "\$REAL_NPX" ] || [ ! -x "\$REAL_NPX" ] || [ "\$REAL_NPX" = "$npx_target" ]; then
+  echo "[supply-chain-harden] error: real npx not found at '\$REAL_NPX'; refusing to recurse" >&2
+  exit 127
+fi
+# EVERY npx invocation may fetch. Unlike npm there is no local-only subcommand
+# to exempt, so there is no argv scan here and nothing to drift out of sync.
+if command -v sfw >/dev/null 2>&1; then
+  exec sfw "\$REAL_NPX" "\$@"
+fi
+exec "\$REAL_NPX" "\$@"
+EOF
+  $SUDO chmod 755 "$npx_target"
+  log "npx wrapper deployed at $npx_target"
+  record_wrapper npx
   end_section
 }
 

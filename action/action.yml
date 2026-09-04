@@ -32,14 +32,39 @@ inputs:
       role's "fail loud, not fail silent" posture.
     required: false
     default: 'true'
+  intel:
+    description: >-
+      Optional malware-intelligence layer. `none` (default) or `sfw` (Socket
+      Firewall). With `sfw`, package managers are routed through a local
+      filtering proxy that blocks versions Socket has flagged as malware —
+      the axis the age gate and script blocking cannot cover, since a
+      known-bad package that is 30 days old and runs no install script
+      passes every other control here.
+
+      Off by default deliberately. The config layer works offline and cannot
+      fail open; this one is a network dependency on a third-party service,
+      is fail-open by design (if Socket is unreachable it warns and the
+      install proceeds unfiltered), needs Node 20+, and costs ~10-20s of job
+      time. That is the right trade for a security-critical pipeline and the
+      wrong one for every build in a busy monorepo, so it is your call rather
+      than ours.
+
+      Routes npm, npx and cargo through Socket Firewall — the entry points the
+      action actually invokes sfw for. The pnpm/yarn/bun/bunx/pip/uv wrappers do
+      config/flag hardening only and are NOT threat-intel scanned.
+    required: false
+    # Empty default (not 'none') so harden.sh can distinguish an EXPLICIT
+    # `intel: none` from an unset input — the former conflicts with a legacy
+    # `install_sfw: true` and must error; the latter must let install_sfw win
+    # for backward compatibility. harden.sh maps empty -> none.
+    default: ''
   install_sfw:
     description: >-
-      Install Socket Firewall (sfw) and wrap npm to route installs through
-      threat-intel blocking. Adds ~10-20s to job startup, requires Node 20+.
-      Off by default because most CI workflows don't tolerate the extra time;
-      flip on for security-critical pipelines.
+      DEPRECATED — use `intel: sfw`. Accepted for now; `true` is treated as
+      `intel: sfw`. Setting both is an error rather than a silent
+      precedence rule.
     required: false
-    default: 'false'
+    default: ''
   write_etc:
     description: >-
       Write system-wide /etc/* configs in addition to user-home configs.
@@ -143,6 +168,7 @@ runs:
         ECOSYSTEMS: ${{ inputs.ecosystems }}
         RELEASE_AGE_HOURS: ${{ inputs.release_age_hours }}
         STRICT: ${{ inputs.strict }}
+        INTEL: ${{ inputs.intel }}
         INSTALL_SFW: ${{ inputs.install_sfw }}
         WRITE_ETC: ${{ inputs.write_etc }}
         COMPOSER_ALLOW_PLUGINS: ${{ inputs.composer_allow_plugins }}

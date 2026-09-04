@@ -1207,7 +1207,7 @@ jobs:
             echo "::error::the wrapper still reads as active after a new toolchain was installed — the verifier is not detecting shadowing"
             exit 1
           fi
-          grep -E 'npm PATH wrapper' after.txt | grep -qiE 'shadow|not deployed' || {
+          grep -E 'npm PATH wrapper' after.txt | grep -qiE 'shadow|not deployed|did NOT run' || {
             echo "::error::expected a shadowed/not-deployed verdict for the npm wrapper"
             exit 1
           }
