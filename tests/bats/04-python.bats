@@ -20,7 +20,7 @@ load setup
 
 @test "uv no-build rejects sdist-only package" {
   # The sdist was pre-built in the Dockerfile
-  sdist=$(ls /opt/test-fixtures/python-sdist-pkg/dist/test-sdist-only-*.tar.gz 2>/dev/null | head -1)
+  sdist=$(find_fixture_sdist python-sdist-pkg)
   [ -n "$sdist" ] || skip "sdist fixture not found"
 
   cd /tmp && rm -rf uv-test-env
@@ -45,7 +45,7 @@ load setup
   # either succeeds or fails with a different error like missing
   # build deps).
   [ -f /etc/uv/uv.toml ] || skip "/etc/uv/uv.toml not deployed"
-  sdist=$(ls /opt/test-fixtures/python-sdist-pkg/dist/test-sdist-only-*.tar.gz 2>/dev/null | head -1)
+  sdist=$(find_fixture_sdist python-sdist-pkg)
   [ -n "$sdist" ] || skip "sdist fixture not found"
 
   tmphome=$(mktemp -d)

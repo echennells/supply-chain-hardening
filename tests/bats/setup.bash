@@ -52,3 +52,27 @@ assert_env_equals() {
     return 1
   fi
 }
+
+# Locate a fixture's built sdist regardless of PEP 625 filename normalization.
+# setuptools >= 69 renders the sdist filename's name component with UNDERSCORES
+# (test-setup-exfil -> test_setup_exfil-<ver>.tar.gz), so globs hard-coded to the
+# hyphen spelling silently MISS on Ubuntu 26.04 / modern setuptools and the
+# adversarial test SKIPS — a coverage loss that reads as green (ECH-172,
+# docs/design-principles.md Axis 4 "absent signal read as a passing signal").
+# Each fixture dir holds exactly one package, so match any *.tar.gz. If dist/
+# exists but holds no sdist, FAIL LOUDLY (return 2) rather than let the caller
+# skip — the guard that stops the silent skip from re-appearing. If dist/ is
+# absent (fixture not built in this environment), return empty so the caller can
+# legitimately skip.
+find_fixture_sdist() {
+  local dir="/opt/test-fixtures/$1"
+  [ -d "$dir/dist" ] || return 0
+  local sdist
+  sdist=$(ls "$dir"/dist/*.tar.gz 2>/dev/null | head -1)
+  if [ -z "$sdist" ]; then
+    echo "find_fixture_sdist: '$dir/dist' exists but holds no .tar.gz — fixture produced no sdist (ECH-172 silent-skip guard)." >&2
+    ls -la "$dir/dist" >&2 2>/dev/null || true
+    return 2
+  fi
+  printf '%s\n' "$sdist"
+}

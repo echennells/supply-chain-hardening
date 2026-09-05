@@ -13,7 +13,7 @@ setup() {
 
 @test "ATTACK: Python setup.py credential exfiltration is blocked" {
   # Simulates LiteLLM: setup.py reads SSH keys and env vars
-  sdist=$(ls /opt/test-fixtures/python-setup-exfil/dist/test-setup-exfil-*.tar.gz 2>/dev/null | head -1)
+  sdist=$(find_fixture_sdist python-setup-exfil)
   [ -n "$sdist" ] || skip "exfil sdist fixture not found"
 
   cd /tmp && rm -rf uv-attack-test
@@ -26,7 +26,7 @@ setup() {
 
 @test "ATTACK: Python setup.py SSH persistence is blocked" {
   # Simulates BufferZoneCorp: setup.py adds SSH key to authorized_keys
-  sdist=$(ls /opt/test-fixtures/python-setup-persistence/dist/test-setup-persistence-*.tar.gz 2>/dev/null | head -1)
+  sdist=$(find_fixture_sdist python-setup-persistence)
   [ -n "$sdist" ] || skip "persistence sdist fixture not found"
 
   cd /tmp && rm -rf uv-attack-test
@@ -41,7 +41,7 @@ setup() {
 
 @test "ATTACK: pip redirect ensures Python attacks go through uv" {
   # Even if someone calls 'pip install' directly, it goes through uv
-  sdist=$(ls /opt/test-fixtures/python-setup-exfil/dist/test-setup-exfil-*.tar.gz 2>/dev/null | head -1)
+  sdist=$(find_fixture_sdist python-setup-exfil)
   [ -n "$sdist" ] || skip "exfil sdist fixture not found"
 
   cd /tmp && rm -rf pip-attack-test
@@ -71,7 +71,7 @@ setup() {
   #
   # Also asserts /etc/pip.conf is still intact — the bypass is purely
   # a flag-precedence story, not a config tampering one.
-  sdist=$(ls /opt/test-fixtures/python-setup-exfil/dist/test-setup-exfil-*.tar.gz 2>/dev/null | head -1)
+  sdist=$(find_fixture_sdist python-setup-exfil)
   [ -n "$sdist" ] || skip "exfil sdist fixture not found"
 
   rm -f /tmp/marker-python-setup-exfil
