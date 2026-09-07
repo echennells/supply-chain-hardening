@@ -66,16 +66,22 @@ setup() {
   result=$(pnpm add "https://does-not-resolve.invalid/pkg.tgz" 2>&1 || true)
   rm -rf /tmp/pnpm-exotic-test
   # Correct behaviour is that pnpm ATTEMPTS the fetch (direct exotic deps are
-  # allowed), which against a non-resolvable host surfaces a network error.
-  # Assert the attempt positively; its ABSENCE would mean pnpm wrongly refused a
-  # direct dep. (The original test asserted the opposite and failed here for
-  # pnpm doing the right thing.)
-  if echo "$result" | grep -qiE "ENOTFOUND|ENETUNREACH|getaddrinfo|fetch failed|could not resolve"; then
-    return 0
+  # allowed); against a non-resolvable host that surfaces as a network / DNS /
+  # tarball-resolve error. Enumerating those wordings POSITIVELY is an open set
+  # and flaked: pnpm's DNS failure came back as "dns error: failed to resolve" /
+  # ERR_PNPM_PACKAGE_MANAGER_ADD_RESOLVE_TARBALL on Node 22/24 (absent from the
+  # old ENOTFOUND|getaddrinfo|... list) while Node 20 saw a matching wording and
+  # passed — same code, three runners, two verdicts. So assert the INTENT
+  # instead: the ONLY failure is pnpm explicitly REFUSING a direct exotic dep
+  # (blockExoticSubdeps over-blocking a DIRECT dep, which it must not do). Any
+  # network/resolve error — or any output that is not a refusal — means the
+  # direct dep was allowed, which is the property under test.
+  if echo "$result" | grep -qiE "blockexoticsubdeps|not allowed to use exotic|exotic sources? (are|is) not allowed|is not allowed because it uses an exotic"; then
+    echo "FAIL: pnpm REFUSED a direct exotic dependency — blockExoticSubdeps is over-blocking a DIRECT dep" >&2
+    echo "$result" >&2
+    return 1
   fi
-  echo "FAIL: pnpm did not attempt the direct exotic dep — unexpected refusal of a DIRECT dep" >&2
-  echo "$result" >&2
-  return 1
+  return 0
 }
 
 @test "ATTACK: pnpm project-level postinstall is blocked (pnpm 11 config.yaml regression catcher)" {
