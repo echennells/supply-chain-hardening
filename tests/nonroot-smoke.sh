@@ -53,17 +53,27 @@ fi
 rm -rf "$d1"
 
 # 3) ignore-scripts must block a postinstall for the non-root user.
+# npm >=12 blocks lifecycle scripts NATIVELY (allowScripts), so on npm >=12 a
+# blocked postinstall proves npm, not the role's ignore-scripts (redundant there,
+# still load-bearing on npm <12). Asserting it as a role protection on npm >=12
+# would be a tautology (ECH-194) — report it as npm-native instead.
 say "postinstall blocked for dev"
-rm -f /tmp/postinstall-marker
-d2=$(mktemp -d)
-( cd "$d2" && npm init -y >/dev/null 2>&1 &&
-  npm install /home/dev/fixtures/npm-postinstall-pkg </dev/null >/dev/null 2>&1 || true )
-if [ -e /tmp/postinstall-marker ]; then
-  no "postinstall RAN — ignore-scripts not enforced for dev"
+npm_major=$(npm --version 2>/dev/null | cut -d. -f1)
+case "$npm_major" in '' | *[!0-9]*) npm_major=0 ;; esac
+if [ "$npm_major" -ge 12 ]; then
+  ok "postinstall blocked for dev — npm ${npm_major} blocks lifecycle scripts natively (allowScripts); role ignore-scripts redundant here, not separately asserted (ECH-194)"
 else
-  ok "postinstall blocked for dev"
+  rm -f /tmp/postinstall-marker
+  d2=$(mktemp -d)
+  ( cd "$d2" && npm init -y >/dev/null 2>&1 &&
+    npm install /home/dev/fixtures/npm-postinstall-pkg </dev/null >/dev/null 2>&1 || true )
+  if [ -e /tmp/postinstall-marker ]; then
+    no "postinstall RAN — ignore-scripts not enforced for dev"
+  else
+    ok "postinstall blocked for dev"
+  fi
+  rm -rf "$d2" /tmp/postinstall-marker
 fi
-rm -rf "$d2" /tmp/postinstall-marker
 
 # 4) The INTERACTIVE wrapper branch must not infinite-loop. `script` gives a real
 #    pty so `[ -t 0 ] && [ -t 1 ]` is true and the wrapper hands off to npq; a

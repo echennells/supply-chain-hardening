@@ -19,6 +19,7 @@ setup() {
 
 @test "ATTACK: npm postinstall SSH key exfiltration is blocked" {
   # Simulates BufferZoneCorp: postinstall reads ~/.ssh/id_rsa
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts natively (allowScripts); the role's ignore-scripts is redundant here, so 'marker absent' would be a tautology (ECH-194)"
   cd /tmp && rm -rf attack-test && mkdir attack-test && cd attack-test
   npm init -y >/dev/null 2>&1
   npm install /opt/test-fixtures/npm-read-ssh-keys 2>/dev/null || true
@@ -28,6 +29,7 @@ setup() {
 
 @test "ATTACK: npm postinstall env var harvesting is blocked" {
   # Simulates credential harvesting: dumps env vars with token/key/secret
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts natively (allowScripts); the role's ignore-scripts is redundant here, so 'marker absent' would be a tautology (ECH-194)"
   cd /tmp && rm -rf attack-test && mkdir attack-test && cd attack-test
   npm init -y >/dev/null 2>&1
   npm install /opt/test-fixtures/npm-env-exfil 2>/dev/null || true
@@ -37,6 +39,7 @@ setup() {
 
 @test "ATTACK: npm postinstall SSH persistence is blocked" {
   # Simulates BufferZoneCorp: appends attacker SSH key to authorized_keys
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts natively (allowScripts); the role's ignore-scripts is redundant here, so 'marker absent' would be a tautology (ECH-194)"
   cd /tmp && rm -rf attack-test && mkdir attack-test && cd attack-test
   npm init -y >/dev/null 2>&1
   npm install /opt/test-fixtures/npm-ssh-persistence 2>/dev/null || true
@@ -48,6 +51,7 @@ setup() {
 
 @test "ATTACK: npm preinstall hook is blocked" {
   # preinstall runs BEFORE package code is even unpacked
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts natively (allowScripts); the role's ignore-scripts is redundant here, so 'marker absent' would be a tautology (ECH-194)"
   cd /tmp && rm -rf attack-test && mkdir attack-test && cd attack-test
   npm init -y >/dev/null 2>&1
   npm install /opt/test-fixtures/npm-preinstall-script 2>/dev/null || true
@@ -57,6 +61,7 @@ setup() {
 
 @test "ATTACK: npm install lifecycle hook is blocked" {
   # The 'install' hook (distinct from pre/postinstall)
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts natively (allowScripts); the role's ignore-scripts is redundant here, so 'marker absent' would be a tautology (ECH-194)"
   cd /tmp && rm -rf attack-test && mkdir attack-test && cd attack-test
   npm init -y >/dev/null 2>&1
   npm install /opt/test-fixtures/npm-install-script 2>/dev/null || true
@@ -82,6 +87,7 @@ setup() {
   # This test asserts the bypass works (locks in the current reality).
   # If a future change adds wrapper-level arg filtering or some other
   # defense, this test fails and forces explicit re-evaluation.
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts even with --ignore-scripts=false (allowScripts), so this documented bypass no longer reproduces on npm >=12 (ECH-194)"
   rm -f /tmp/postinstall-marker
   cd /tmp && rm -rf cli-bypass-test && mkdir cli-bypass-test && cd cli-bypass-test
   npm init -y >/dev/null 2>&1
@@ -109,6 +115,7 @@ setup() {
   # if ~/.npmrc is operator-modified, or PAM-style env loading is
   # extended into non-PAM contexts), this test fails and forces
   # re-evaluation.
+  skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts even with --ignore-scripts=false (allowScripts), so this documented bypass no longer reproduces on npm >=12 (ECH-194)"
   backup=$(mktemp)
   cp "$HOME/.npmrc" "$backup"
 

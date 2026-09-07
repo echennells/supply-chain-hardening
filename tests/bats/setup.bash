@@ -76,3 +76,23 @@ find_fixture_sdist() {
   fi
   printf '%s\n' "$sdist"
 }
+
+# npm >= 12 blocks dependency lifecycle scripts NATIVELY (allowScripts, a
+# deferred-approval allowlist), independently of the role's ignore-scripts and
+# even of a --ignore-scripts=false / user-.npmrc override (MEASURED, npm 12.0.2:
+# the postinstall is blocked with "not covered by allowScripts" regardless).
+# That makes every "did a malicious npm script run?" assertion npm-version
+# specific: the "blocked" tests become tautologies (npm blocks whether or not
+# the role's config is set) and the documented --ignore-scripts=false /
+# user-.npmrc BYPASS tests stop reproducing (npm blocks the bypass too). On
+# npm >= 12 skip with the reason rather than assert something that is no longer
+# about the role (ECH-194); the role's ignore-scripts stays load-bearing on
+# npm < 12, which is where these tests remain real.
+skip_if_npm_ge_12() {
+  local major
+  major=$(npm --version 2>/dev/null | cut -d. -f1)
+  case "$major" in '' | *[!0-9]*) return 0 ;; esac
+  if [ "$major" -ge 12 ]; then
+    skip "${1:-npm >=12 blocks lifecycle scripts natively (allowScripts); this assertion is no longer about the role (ECH-194)}"
+  fi
+}
