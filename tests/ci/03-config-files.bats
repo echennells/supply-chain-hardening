@@ -239,6 +239,14 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.m2/settings.xml" "external:http:\*"
   assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" 'refusing HTTP repo'
   assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "failOnDynamicVersions"
+  # ECH-171: the refusal must cover EVERY repo scope, not just project
+  # repositories — buildscript{} and settings pluginManagement{} fetch and
+  # EXECUTE plugin/build code at configuration time — and Ivy as well as Maven.
+  # Behaviorally verified against gradle 8.14.3; asserted by content here since
+  # the CI image has no gradle to run a build under.
+  assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "buildscript.repositories"
+  assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "pluginManagement.repositories"
+  assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "IvyArtifactRepository"
 }
 
 @test "nuget: single trusted source with signature validation" {

@@ -60,3 +60,18 @@ gradle_home() {
   assert_file_contains "$(gradle_home)/init.d/supply-chain-security.gradle" "failOnChangingVersions"
   assert_file_contains "$(gradle_home)/init.d/supply-chain-security.gradle" "respondsTo"
 }
+
+@test "gradle: ECH-171 — HTTP refusal covers buildscript, pluginManagement and ivy, not just project repos" {
+  command -v gradle >/dev/null 2>&1 || skip "gradle not installed"
+  # The old script covered only allprojects.repositories + MavenArtifactRepository,
+  # so http:// in buildscript{} (the plugin classpath, EXECUTED at configuration
+  # time), settings pluginManagement{} and ivy{} passed silently. Behaviorally
+  # verified on gradle 8.14.3 that these scopes are now refused; asserted by
+  # content here (the role's test image has no gradle to run a build under).
+  local f
+  f="$(gradle_home)/init.d/supply-chain-security.gradle"
+  assert_file_contains "$f" "buildscript.repositories"
+  assert_file_contains "$f" "beforeSettings"
+  assert_file_contains "$f" "pluginManagement.repositories"
+  assert_file_contains "$f" "IvyArtifactRepository"
+}
