@@ -2304,16 +2304,30 @@ harden_gradle() {
   mkdir -p "$gradle_home"
   cat > "$gradle_home/init.gradle.kts" <<'EOF'
 // Managed by supply-chain-harden action
-// Enforce HTTPS-only repositories and disable dynamic version resolution.
-allprojects {
-  repositories.all {
-    if (this is org.gradle.api.artifacts.repositories.MavenArtifactRepository) {
-      val u = url.toString()
-      if (u.startsWith("http://")) {
-        throw GradleException("supply-chain-harden: refusing HTTP repo: $u (use HTTPS)")
-      }
-    }
+// Enforce HTTPS-only repositories in EVERY scope gradle fetches from, and block
+// dynamic versions. Not just project repositories: buildscript{} and the
+// settings pluginManagement{} / dependencyResolutionManagement{} fetch and
+// EXECUTE plugin / build-classpath code at configuration time — the
+// install-time-admission threat this scopes itself to — and Ivy repos count
+// alongside Maven. (ECH-171: the old script covered only project
+// MavenArtifactRepository, so http in buildscript/pluginManagement/ivy passed.)
+val rejectHttp: (org.gradle.api.artifacts.repositories.ArtifactRepository) -> Unit = { repo ->
+  val url = when (repo) {
+    is org.gradle.api.artifacts.repositories.MavenArtifactRepository -> repo.url.toString()
+    is org.gradle.api.artifacts.repositories.IvyArtifactRepository -> repo.url.toString()
+    else -> null
   }
+  if (url != null && url.startsWith("http://")) {
+    throw GradleException("supply-chain-harden: refusing HTTP repo: $url (use HTTPS)")
+  }
+}
+beforeSettings {
+  pluginManagement.repositories.all { rejectHttp(this) }
+  dependencyResolutionManagement.repositories.all { rejectHttp(this) }
+}
+allprojects {
+  repositories.all { rejectHttp(this) }
+  buildscript.repositories.all { rejectHttp(this) }
   configurations.all {
     resolutionStrategy {
       // Refuse dynamic / changing version selectors (1.+, latest.release).

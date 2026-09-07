@@ -64,15 +64,42 @@
     mode: "0644"
     content: |
       // Managed by ansible-supply-chain-security
-      // Reject any HTTP (non-HTTPS) repository
-      allprojects {
-          repositories {
-              all { repo ->
-                  if (repo instanceof MavenArtifactRepository && repo.url.scheme == 'http') {
-                      throw new GradleException("Insecure HTTP repository blocked: ${repo.url}")
-                  }
+      // Reject any HTTP (non-HTTPS) repository in EVERY scope gradle fetches
+      // from, not just project repositories (ECH-171). buildscript{} and the
+      // settings pluginManagement{} fetch and EXECUTE plugin / build-classpath
+      // code at CONFIGURATION time — exactly the install-time-admission threat
+      // this project scopes itself to — so leaving them on plaintext http was a
+      // silent hole. MEASURED (gradle 8.14.3): before this, an http repo in
+      // buildscript{}, pluginManagement{} or an ivy{} block was accepted while
+      // only a project maven{} http repo was refused. Ivy repos are now covered
+      // alongside Maven (the old check matched MavenArtifactRepository only).
+      def rejectHttp = { repo ->
+          if ((repo instanceof MavenArtifactRepository || repo instanceof IvyArtifactRepository)
+                  && repo.url != null && repo.url.scheme == 'http') {
+              throw new GradleException("Insecure HTTP repository blocked: ${repo.url}")
+          }
+      }
+
+      // Settings-level repositories: pluginManagement (plugin resolution) and
+      // the centralized dependencyResolutionManagement (gradle 6.8+).
+      // beforeSettings is gradle 6+. Guarded by respondsTo() rather than a
+      // version tier: an init script is CODE, and calling a method this gradle
+      // lacks is a hard error that fails EVERY build (design-principles Axis 3).
+      // An older gradle keeps the project + buildscript coverage below.
+      if (gradle.metaClass.respondsTo(gradle, 'beforeSettings')) {
+          gradle.beforeSettings { settings ->
+              settings.pluginManagement.repositories.all(rejectHttp)
+              if (settings.metaClass.respondsTo(settings, 'getDependencyResolutionManagement')) {
+                  settings.dependencyResolutionManagement.repositories.all(rejectHttp)
               }
           }
+      }
+
+      allprojects {
+          // project repositories AND the buildscript (plugin) classpath
+          repositories.all(rejectHttp)
+          buildscript.repositories.all(rejectHttp)
+
           // Refuse dynamic / changing version selectors (1.+, latest.release,
           // -SNAPSHOT): parity with action/harden.sh, which has emitted these
           // two since it was written while this file emitted only the HTTP
