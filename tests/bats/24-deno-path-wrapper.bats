@@ -155,3 +155,33 @@ EOF
   [ "$status" -eq 127 ]
   echo "$output" | grep -q "refusing to recurse"
 }
+
+@test "deno wrapper does NOT inject the flag into doc or publish (they break on it — deno 2.9.5)" {
+  # MEASURED on deno 2.9.5 (found on an Omarchy/Arch host): `deno doc` parses
+  # --minimum-dependency-age as a positional module path ("Module not found
+  # …/--minimum-dependency-age=P2D") and `deno publish` rejects it — injecting
+  # there BROKE both commands while `deno run` stayed correctly gated. Verify
+  # the wrapper now bypasses them (ECH: deno subcommand injection list).
+  deno_path=$(get_deno_path)
+  embedded=$(grep -E "^REAL_DENO=" "$deno_path" | head -1 | sed "s/REAL_DENO=//; s/'//g")
+  [ -n "$embedded" ] || skip "no embedded real-deno path"
+
+  mv "$embedded" "${embedded}.bats-real"
+  cat > "$embedded" <<'EOF'
+#!/bin/sh
+printf 'ARGS:'
+for a in "$@"; do printf ' %s' "$a"; done
+printf '\n'
+EOF
+  chmod +x "$embedded"
+
+  run "$deno_path" doc mod.ts
+  doc_out="$output"
+  run "$deno_path" publish
+  pub_out="$output"
+  mv "${embedded}.bats-real" "$embedded"
+
+  echo "doc: $doc_out"; echo "publish: $pub_out"
+  ! echo "$doc_out" | grep -q -- "--minimum-dependency-age"
+  ! echo "$pub_out" | grep -q -- "--minimum-dependency-age"
+}

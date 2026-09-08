@@ -427,6 +427,19 @@ cargo_sfw_stubs() {
   [[ "$output" != *"minimum-dependency-age"* ]]
 }
 
+@test "deno: doc and publish are NOT given the flag (they break on it — deno 2.9.5)" {
+  # MEASURED on deno 2.9.5 (found on an Omarchy/Arch host): `deno doc` parses
+  # --minimum-dependency-age as a positional module path ("Module not found
+  # …/--minimum-dependency-age=…") and `deno publish` rejects it — injecting
+  # there BROKE both commands while `deno run` stayed correctly gated.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" doc mod.ts
+  [[ "$output" != *"minimum-dependency-age"* ]]
+  run "$TEST_BIN/deno" publish
+  [[ "$output" != *"minimum-dependency-age"* ]]
+}
+
 @test "deno: bare deno and --version pass through" {
   stub_bin deno
   harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
