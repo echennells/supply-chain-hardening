@@ -321,8 +321,15 @@ npm_implements() {
   local key="$1" tmp v
   tmp=$(mktemp -d 2>/dev/null) || return 1
   : > "$tmp/u"; : > "$tmp/g"
-  # env -i also drops NPM_CONFIG_*, which otherwise supplies the value and
-  # recreates the exact false positive.
+  # Drop the env-layer config (NPM_CONFIG_*), which would otherwise supply the
+  # value and recreate the exact false positive — but keep the REST of the
+  # environment. `env -i` is too blunt: a version-manager shim (mise/asdf/volta)
+  # needs its own env to resolve the real npm, and under `env -i` it fails
+  # ("mise ERROR: npm is not a valid shim"), leaving empty output the probe read
+  # as "npm does not implement ignore-scripts" — a FALSE GAP. MEASURED on an
+  # Omarchy/Arch host whose npm is a mise shim, where ignore-scripts was in fact
+  # in effect (a postinstall was blocked). HOME is left intact so the shim can
+  # read its config; the user's ~/.npmrc is neutralised by --userconfig instead.
   # Run FROM the scratch dir too: npm ALSO reads a project .npmrc from the
   # current working directory, which --userconfig/--globalconfig do NOT
   # override. A real deploy (ECH-187) false-OK'd the age gate on npm 10.9.8
@@ -332,8 +339,10 @@ npm_implements() {
   # implemented, so a value-returned probe can't judge it; the age gate uses a
   # version check instead. Still valid for keys with a non-null default, e.g.
   # ignore-scripts.)
-  v=$( cd "$tmp" && env -i PATH="$PATH" HOME="$tmp" npm config get "$key" \
-        --userconfig="$tmp/u" --globalconfig="$tmp/g" 2>/dev/null | head -1 | tr -d '\r')
+  v=$( cd "$tmp" && \
+       ( for _k in ${!NPM_CONFIG_@}; do unset "$_k"; done
+         npm config get "$key" --userconfig="$tmp/u" --globalconfig="$tmp/g" 2>/dev/null ) \
+       | head -1 | tr -d '\r')
   rm -rf "$tmp"
   [ -n "$v" ] && [ "$v" != "undefined" ]
 }
