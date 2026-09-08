@@ -597,8 +597,16 @@ npm_implements() {
   local key="$1" tmp v
   tmp=$(mktemp -d 2>/dev/null) || return 1
   : > "$tmp/u"; : > "$tmp/g"
-  v=$(env -i PATH="$PATH" HOME="$tmp" npm config get "$key" \
-        --userconfig="$tmp/u" --globalconfig="$tmp/g" 2>/dev/null | head -1 | tr -d '\r')
+  # Drop NPM_CONFIG_* (the env-layer leak) but keep the rest of the env: `env -i`
+  # breaks version-manager shims (mise/asdf/volta) that need their env to resolve
+  # the real npm — a mise shim under `env -i` errors and the empty output reads
+  # as "npm does not implement ignore-scripts" (a FALSE GAP, MEASURED on an
+  # Omarchy/Arch host). --userconfig neutralises ~/.npmrc; running from the
+  # scratch dir neutralises a project .npmrc.
+  v=$( cd "$tmp" && \
+       ( for _k in ${!NPM_CONFIG_@}; do unset "$_k"; done
+         npm config get "$key" --userconfig="$tmp/u" --globalconfig="$tmp/g" 2>/dev/null ) \
+       | head -1 | tr -d '\r')
   rm -rf "$tmp"
   [ -n "$v" ] && [ "$v" != "undefined" ]
 }

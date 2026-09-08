@@ -246,3 +246,32 @@ EOF
   PATH="$FAKEBIN:$PATH" run "$VERIFY"
   echo "$output" | grep "composer audit blocking" | grep -q "below 2.7"
 }
+
+@test "verify: npm_implements survives a version-manager shim (no false GAP under env -i)" {
+  # ECH (found installing on an Omarchy/Arch host): npm was a mise shim, which
+  # needs its own environment to resolve the real npm. The probe cleaned the env
+  # with `env -i`, under which the shim errors ("mise ERROR: npm is not a valid
+  # shim"); the empty output read as "npm does not implement ignore-scripts" and
+  # the verifier emitted a FALSE GAP — while ignore-scripts was actually in
+  # effect. This fake npm reproduces that shim: it errors unless a resolver var
+  # survives, answers the clean discrimination probe (--userconfig present) with
+  # the builtin default, and the real query with the role's value. The probe
+  # must keep the env (minus NPM_CONFIG_*) so the shim resolves.
+  cat > "$FAKEBIN/npm" <<'EOF'
+#!/bin/bash
+[ -z "${SHIM_RESOLVER:-}" ] && { echo "mise ERROR: npm is not a valid shim" >&2; exit 1; }
+[ "$1" = "--version" ] && { echo "11.19.0"; exit 0; }
+clean=0; for a in "$@"; do case "$a" in --userconfig=*) clean=1 ;; esac; done
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+  case "$3" in
+    ignore-scripts) if [ "$clean" = 1 ]; then echo "false"; else echo "true"; fi ;;
+    *) echo "" ;;
+  esac
+fi
+EOF
+  chmod +x "$FAKEBIN/npm"
+  SHIM_RESOLVER=1 PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  # Must NOT false-GAP: the shim resolved, ignore-scripts reads as implemented.
+  echo "$output" | grep "npm lifecycle scripts blocked" | grep -q "OK"
+  ! echo "$output" | grep "npm lifecycle scripts blocked" | grep -q "does not implement"
+}
