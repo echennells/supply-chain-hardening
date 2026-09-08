@@ -64,12 +64,16 @@ for arg in "$@"; do
   esac
 done
 
-# Inject --minimum-dependency-age only for subcommands that fetch remote
-# modules. Bypass for read-only / non-fetching subcommands — Deno errors
-# if you pass --minimum-dependency-age to subcommands that don't accept
-# it (e.g. `deno fmt`, `deno lint`, `deno repl`, `deno --version`).
+# Inject --minimum-dependency-age only for subcommands that (a) fetch remote
+# modules AND (b) actually accept the flag. Injecting it where deno does not
+# accept it BREAKS the command — MEASURED on deno 2.9.5: `deno doc` parses
+# --minimum-dependency-age as a positional module path ("Module not found
+# …/--minimum-dependency-age=P2D") and `deno publish` rejects it outright, so
+# both used to fail under the wrapper while `deno run` stayed gated. The eight
+# kept here all accept it (measured); read-only / non-fetching subcommands
+# (`deno fmt`, `deno lint`, `deno repl`, `deno --version`) are bypassed too.
 case "$subcmd" in
-  run|cache|install|test|compile|eval|info|doc|bench|publish)
+  run|cache|install|test|compile|eval|info|bench)
     # Build new arg array with the flag injected directly after the subcommand
     new_args=()
     inserted=0

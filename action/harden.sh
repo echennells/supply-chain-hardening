@@ -2187,9 +2187,11 @@ done
 # when given --minimum-dependency-age on a subcommand that does not take it,
 # so a too-wide list does not weaken the gate, it breaks the command. `task`
 # was in this list and is exactly that hazard — it is how most deno projects
-# invoke everything.
+# invoke everything. MEASURED on deno 2.9.5: `deno doc` parses the flag as a
+# positional module path ("Module not found …/--minimum-dependency-age=…") and
+# `deno publish` rejects it — both broke under the wrapper, so both are dropped.
 case "$subcmd" in
-  run|cache|install|test|compile|eval|info|doc|bench|publish)
+  run|cache|install|test|compile|eval|info|bench)
     # Insert directly after the subcommand, never appended: deno passes
     # everything after the script path to the script itself.
     new_args=()
