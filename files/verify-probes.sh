@@ -3384,7 +3384,7 @@ elif have gradle; then
   elif [ "$gdflag" = "true" ]; then
     row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver reports failingOnDynamicVersions=true yet RESOLVED com.example:probe:1.+ - the setting is accepted and NOT enforced on this version"
   else
-    row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver resolved com.example:probe:1.+; failingOnDynamicVersions=$gdflag. tasks/gradle.yml deploys no resolutionStrategy at all - action/harden.sh:1409 does. Role-hardened hosts have NO dynamic-version control$ghome"
+    row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver resolved com.example:probe:1.+; failingOnDynamicVersions=$gdflag. The role's init script IS deployed and calls failOnDynamicVersions()/failOnChangingVersions(), guarded by respondsTo() - so this is NOT 'the role deploys nothing'. But those methods need gradle >= 6.0, and on an older gradle the guard correctly SKIPS them (rather than bricking the build with a missing-method error), leaving this gradle with no dynamic-version control. Upgrade to gradle >= 6.0.$ghome"
   fi
 elif gradle_script_deployed; then
   row WEAK PRESENT "gradle dynamic-version refusal" "no 'gradle' on PATH, but an init script IS deployed under $(gradle_san "$gwrite") and will run for ./gradlew builds - including failOnDynamicVersions(), a hard evaluation error on gradle < 6.0. Unexercised in both directions"
