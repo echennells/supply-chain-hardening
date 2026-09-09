@@ -15,6 +15,38 @@
     group: root
   tags: [shell]
 
+# /etc/environment is parsed by TWO consumers with different grammars:
+# pam_env (tolerant: accepts a bare KEY=) and, on systemd hosts where
+# /usr/lib/environment.d/*.conf symlinks to it, systemd-environment-d-generator
+# (strict: rejects an empty-value KEY= as "invalid syntax" and logs a warning
+# at every login). GOPRIVATE/GONOPROXY/GOINSECURE default to "" (empty is
+# equivalent to unset for Go), which emitted bare `GOPRIVATE=` lines and
+# per-login journal noise. Build the block from KEY=VALUE pairs and drop any
+# whose value is empty so neither parser complains — the dropped vars are
+# exactly the ones for which empty means unset anyway.
+- name: Assemble /etc/environment lines
+  ansible.builtin.set_fact:
+    sch_environment_pairs:
+      - "NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}"
+      - "NPM_CONFIG_AUDIT={{ npm_audit | lower }}"
+      - "NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}"
+      - "NPM_CONFIG_FUND={{ npm_fund | lower }}"
+      - "NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}"
+      - "NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}"
+      - "PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}"
+      - "PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}"
+      - "UV_LINK_MODE=copy"
+      - "GOSUMDB={{ go_sumdb }}"
+      - "GOPROXY={{ go_proxy }}"
+      - "GOFLAGS=-mod={{ goflags_mod }}"
+      - "GOPRIVATE={{ go_private }}"
+      - "GONOPROXY={{ go_noproxy }}"
+      - "GOINSECURE={{ go_insecure }}"
+      - "GOTOOLCHAIN=local"
+      - "COMPOSER_SKIP_SCRIPTS=pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create"
+      - "COMPOSER_ALLOW_SUPERUSER=1"
+      - "DOTNET_NUGET_SIGNATURE_VERIFICATION=true"
+  tags: [shell]
 - name: Deploy to /etc/environment for non-login shells
   become: true
   ansible.builtin.blockinfile:
@@ -22,24 +54,5 @@
     marker: "# {mark} SUPPLY CHAIN HARDENING (managed by ansible)"
     create: true
     mode: "0644"
-    block: |
-      NPM_CONFIG_IGNORE_SCRIPTS={{ npm_ignore_scripts | lower }}
-      NPM_CONFIG_AUDIT={{ npm_audit | lower }}
-      NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
-      NPM_CONFIG_FUND={{ npm_fund | lower }}
-      NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
-      NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}
-      PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
-      PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
-      UV_LINK_MODE=copy
-      GOSUMDB={{ go_sumdb }}
-      GOPROXY={{ go_proxy }}
-      GOFLAGS=-mod={{ goflags_mod }}
-      GOPRIVATE={{ go_private }}
-      GONOPROXY={{ go_noproxy }}
-      GOINSECURE={{ go_insecure }}
-      GOTOOLCHAIN=local
-      COMPOSER_SKIP_SCRIPTS=pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create
-      COMPOSER_ALLOW_SUPERUSER=1
-      DOTNET_NUGET_SIGNATURE_VERIFICATION=true
+    block: "{{ sch_environment_pairs | reject('match', '.*=$') | join('\n') }}"
   tags: [shell]

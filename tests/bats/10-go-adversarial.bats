@@ -51,14 +51,30 @@ setup() {
   [ "$result" = "local" ]
 }
 
-@test "/etc/environment has GOPRIVATE empty (blocks wildcard)" {
-  grep -q "^GOPRIVATE=$" /etc/environment
+# empty == unset == "no module exempted". The role now OMITS these three
+# vars from /etc/environment when empty rather than writing a bare `KEY=`:
+# on systemd hosts /usr/lib/environment.d/*.conf symlinks to /etc/environment,
+# and systemd-environment-d-generator rejects an empty-value KEY= as "invalid
+# syntax", logging a warning at every login. pam_env tolerates it, so the
+# variables were still exported empty — but the journal noise was real. What
+# matters for security is that no NON-EMPTY (bypass) value is ever assigned;
+# absence and empty are equivalent to Go.
+@test "/etc/environment does not assign a GOPRIVATE bypass value" {
+  ! grep -qE "^GOPRIVATE=.+" /etc/environment
 }
 
-@test "/etc/environment has GONOPROXY empty (blocks wildcard)" {
-  grep -q "^GONOPROXY=$" /etc/environment
+@test "/etc/environment does not assign a GONOPROXY bypass value" {
+  ! grep -qE "^GONOPROXY=.+" /etc/environment
 }
 
-@test "/etc/environment has GOINSECURE empty (blocks wildcard)" {
-  grep -q "^GOINSECURE=$" /etc/environment
+@test "/etc/environment does not assign a GOINSECURE bypass value" {
+  ! grep -qE "^GOINSECURE=.+" /etc/environment
+}
+
+@test "/etc/environment managed block has no empty-value lines (systemd environment.d rejects bare KEY=)" {
+  # Regression for the GOPRIVATE=/GONOPROXY=/GOINSECURE= empty-value lines that
+  # made systemd-environment-d-generator log "invalid syntax (around ...)"
+  # twice per login. No line inside the managed block may be a bare KEY=.
+  run bash -c "awk '/BEGIN SUPPLY CHAIN HARDENING/{f=1;next} /END SUPPLY CHAIN HARDENING/{f=0} f' /etc/environment | grep -nE '^[A-Za-z_][A-Za-z0-9_]*=\$'"
+  [ "$status" -ne 0 ]
 }
