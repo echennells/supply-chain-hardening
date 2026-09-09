@@ -77,6 +77,14 @@ deno_minimum_dependency_age: "P{{ (release_age_hours | int // 24) if (release_ag
 
 # npm settings
 npm_ignore_scripts: true
+# npm_audit enables npm's install-time vulnerability REPORT. It is observability,
+# NOT a control: it prints "found N vulnerabilities" and blocks nothing (the
+# install completes regardless). It is also already npm's default, and it POSTs
+# your resolved dependency tree to the registry's audit endpoint on every
+# install — which can disclose internal/private package names (dependency-
+# confusion recon). Left on for at-a-glance awareness during interactive use; for
+# actual gating, run `npm audit --audit-level=high` as a dedicated CI step. Set
+# to false to suppress the report and its network call.
 npm_audit: true
 npm_save_exact: true
 npm_fund: false
