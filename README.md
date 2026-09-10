@@ -41,6 +41,25 @@ Apply it to a bare host, inside a sandbox, or to a container image — anywhere 
 `*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH
 wrapper. See "Cargo" under Limitations for its coverage map.
 
+### Scope (and what is deliberately out of it)
+
+This role hardens **language package managers** — the ecosystems in the table
+above. It does **not** harden the OS package layer (`pacman`, `apt`, and
+especially the AUR) or the browser: those have their own trust mechanisms
+(distro signature verification; for the AUR, reading the `PKGBUILD` before you
+build), and no env var or package-manager config can stand in for them. Judging
+this role against distro/AUR risk measures it against a threat it never claimed.
+
+Each protection is delivered in up to **three overlapping layers** — system-wide
+environment variables, on-disk config files, and `/usr/local/bin` PATH wrappers
+(see *How it works*). The layers overlap on purpose, so one covers another's
+gaps — and the most effective layer is often not the most visible one (e.g. on a
+host where `pip` redirects to `uv`, Python's source-build block is enforced by
+`uv`'s `no-build`, not by `/etc/pip.conf` alone). Because of that, **no single
+deployed file shows the whole posture.** `supply-chain-verify` is the single
+source of truth for what is actually enforcing on a host (OK / WEAK / GAP per
+protection) — read it, not any one config file, to judge coverage.
+
 ### Container image hardening (Podman)
 
 **Opt-in — off by default.** When enabled, installs podman and deploys `/etc/containers/policy.json` with a registry allowlist. Unlike Docker's `DOCKER_CONTENT_TRUST` env var, podman's policy.json is enforced by the runtime — it can't be bypassed by unsetting a variable or passing a CLI flag.
