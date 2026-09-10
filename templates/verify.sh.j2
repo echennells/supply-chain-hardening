@@ -186,17 +186,25 @@ pip3=/usr/local/bin/pip3
 
 STRICT=0
 QUIET=0
+VERBOSE=0
+JSON=0
 
 usage() {
   cat <<'EOF'
 supply-chain-verify — what is ACTUALLY enforcing on this host
 
 USAGE
-  supply-chain-verify [--strict] [--quiet] [--help]
+  supply-chain-verify [--strict] [--verbose] [--json] [--quiet] [--help]
 
-  --strict  also exit non-zero when a row could only be established as
-            PRESENT (a protection that looks deployed but was not proven)
-  --quiet   suppress the table; exit code only
+  --strict   also exit non-zero when a row could only be established as
+             PRESENT (a protection that looks deployed but was not proven)
+  --verbose  show the full rationale for each row. The default prints a
+             one-line summary per row so the table is scannable; -v is an alias
+  --json     emit the rows and result as JSON instead of the table — the shape
+             a CI pre-install gate consumes. The exit code is unchanged
+             (non-zero when any protection is a GAP), so `supply-chain-verify
+             --json` doubles as the gate itself
+  --quiet    suppress the table; exit code only
 
 EVIDENCE STRENGTH — reported per row, because it is the whole point
 
@@ -234,6 +242,8 @@ for arg in "$@"; do
   case "$arg" in
     --strict) STRICT=1 ;;
     --quiet)  QUIET=1 ;;
+    --verbose|-v) VERBOSE=1 ;;
+    --json)   JSON=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[supply-chain-verify] warning: unrecognised argument '$arg'" >&2 ;;
   esac

@@ -13,8 +13,39 @@
 : "${SCV_APPLIED_AT:=unknown}"
 : "${SCV_MIN_AGE_HOURS:=}"
 : "${NA_DESIGN:=0}"
+: "${VERBOSE:=0}"
+: "${JSON:=0}"
 
-if [ "$QUIET" -eq 0 ]; then
+# --json is the machine contract (ECH-195): the rows and result as JSON, the
+# shape a CI pre-install gate consumes. It bypasses the table AND --quiet,
+# because a gate wants the data, not a suppressed table. The exit code below is
+# unchanged, so `supply-chain-verify --json` is itself the gate.
+if [ "$JSON" -eq 1 ]; then
+  # Minimal, dependency-free JSON escaping: backslash and double-quote are the
+  # only characters that can appear in a detail string and break JSON. Rows are
+  # single-line (\t-separated, \n-terminated), so no embedded newlines to handle.
+  scv_jesc() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
+  printf '{\n'
+  printf '  "scope": "%s",\n' "$(scv_jesc "$SCV_SCOPE_LABEL")"
+  printf '  "generated": "%s",\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '  "declared_intent_recorded": "%s",\n' "$(scv_jesc "$SCV_APPLIED_AT")"
+  if [ -n "$SCV_MIN_AGE_HOURS" ]; then
+    printf '  "min_age_hours": %s,\n' "$SCV_MIN_AGE_HOURS"
+  else
+    printf '  "min_age_hours": null,\n'
+  fi
+  printf '  "result": { "gaps": %s, "weaks": %s, "na_design": %s },\n' "$GAPS" "$WEAKS" "$NA_DESIGN"
+  printf '  "rows": [\n'
+  scv_first=1
+  # '%b' expands the row separators; see the note in the table branch below.
+  printf '%b' "$ROWS" | { while IFS=$'\t' read -r s e p d; do
+      [ -n "$s" ] || continue
+      if [ "$scv_first" -eq 1 ]; then scv_first=0; else printf ',\n'; fi
+      printf '    { "status": "%s", "evidence": "%s", "protection": "%s", "detail": "%s" }' \
+        "$(scv_jesc "$s")" "$(scv_jesc "$e")" "$(scv_jesc "$p")" "$(scv_jesc "$d")"
+    done; }
+  printf '\n  ]\n}\n'
+elif [ "$QUIET" -eq 0 ]; then
   echo
   echo "supply-chain-hardening — what is ACTUALLY enforcing $SCV_SCOPE_LABEL"
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -35,9 +66,21 @@ if [ "$QUIET" -eq 0 ]; then
   # together or none do.
   printf '%b' "$ROWS" | while IFS=$'\t' read -r s e p d; do
     [ -n "$s" ] || continue
+    # ECH-195: by default condense DETAIL to a one-line summary so the table is
+    # scannable; --verbose prints the full rationale. STATUS + EVIDENCE +
+    # PROTECTION — the signal a reader actually scans for — is never truncated.
+    if [ "$VERBOSE" -eq 0 ]; then
+      d=${d%%. *}                              # first sentence, if the detail has one
+      # Cap the width with substring + compare, NOT the bash string-length
+      # operator: in a .j2 its brace-hash form opens a Jinja comment and breaks
+      # apply-time rendering. The ${d:0:N} form is brace-letter and safe.
+      dcap=${d:0:66}
+      [ "$dcap" != "$d" ] && d="${d:0:63}..."
+    fi
     printf "%-6s %-11s %-32s %s\n" "$s" "$e" "$p" "$d"
   done
   echo
+  [ "$VERBOSE" -eq 0 ] && { echo "(one-line summaries — run with --verbose for the full rationale, or --json for machine output)"; echo; }
   echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
   echo "setting back · PRESENT = a file exists and nothing more (unverified)."
   echo "N/A rows say '-' (the tool is not installed here) or BYDESIGN (this"

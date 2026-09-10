@@ -280,8 +280,10 @@ asks the **tools** what they ended up believing, on the real host, against the
 real installed versions:
 
 ```bash
-supply-chain-verify           # what is actually enforcing right now
+supply-chain-verify           # what is actually enforcing right now (scannable, one line per row)
+supply-chain-verify --verbose # the full rationale behind each row
 supply-chain-verify --strict  # also fail on unverifiable (PRESENT-only) rows
+supply-chain-verify --json    # machine-readable; exit is non-zero on any GAP, so it doubles as a CI pre-install gate
 ```
 
 ```
