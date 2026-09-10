@@ -70,8 +70,12 @@ elif [ "$QUIET" -eq 0 ]; then
     # scannable; --verbose prints the full rationale. STATUS + EVIDENCE +
     # PROTECTION — the signal a reader actually scans for — is never truncated.
     if [ "$VERBOSE" -eq 0 ]; then
-      d=${d%%. *}                            # first sentence, if the detail has one
-      [ ${#d} -gt 66 ] && d="${d:0:65}..."   # then cap the column width
+      d=${d%%. *}                              # first sentence, if the detail has one
+      # Cap the width with substring + compare, NOT the bash string-length
+      # operator: in a .j2 its brace-hash form opens a Jinja comment and breaks
+      # apply-time rendering. The ${d:0:N} form is brace-letter and safe.
+      dcap=${d:0:66}
+      [ "$dcap" != "$d" ] && d="${d:0:63}..."
     fi
     printf "%-6s %-11s %-32s %s\n" "$s" "$e" "$p" "$d"
   done
