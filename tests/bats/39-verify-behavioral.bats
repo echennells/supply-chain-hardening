@@ -51,7 +51,7 @@ if [ "$1" = "config" ] && [ "$2" = "get" ]; then
 fi
 EOF
   chmod +x "$FAKEBIN/yarn"
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep -q "yarn age gate"
   echo "$output" | grep "yarn age gate" | grep -q "GAP"
   [ "$status" -eq 1 ]
@@ -68,7 +68,7 @@ echo "9.2.0"
 exit 0
 EOF
   chmod +x "$FAKEBIN/npq-hero"
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "npq reputation checks" | grep -q "GAP"
   echo "$output" | grep "npq reputation checks" | grep -q "SUPPRESSED"
   [ "$status" -eq 1 ]
@@ -80,7 +80,7 @@ EOF
 [ "$1" = "--version" ] && { echo "1.22.22"; exit 0; }
 EOF
   chmod +x "$FAKEBIN/yarn"
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "yarn hardening" | grep -q "GAP"
   [ "$status" -eq 1 ]
 }
@@ -99,7 +99,7 @@ if [ "$1" = "config" ] && [ "$2" = "get" ]; then
 fi
 EOF
   chmod +x "$FAKEBIN/yarn"
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "yarn age gate" | grep -q "OK"
   echo "$output" | grep "yarn age gate" | grep -q "2880"
 }
@@ -113,7 +113,7 @@ EOF
   # NEVER claimed from mere position/existence — those stay WEAK PRESENT
   # ("predates the run-probe ... position evidence"). A regression that lets
   # existence read as FUNCTIONAL fails here.
-  run "$VERIFY"
+  run "$VERIFY" --verbose
   wrapper_rows=$(echo "$output" | grep "PATH wrapper" || true)
   if [ -n "$wrapper_rows" ]; then
     ! echo "$wrapper_rows" | grep "FUNCTIONAL" | grep -qE "predates the run-probe|position evidence"
@@ -152,7 +152,7 @@ if [ "$1" = "config" ] && [ "$2" = "get" ]; then
 fi
 EOF
   chmod +x "$FAKEBIN/npm"
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   # the age gate must be reported as a GAP despite npm echoing "2"
   echo "$output" | grep "npm age gate" | grep -q "GAP"
   echo "$output" | grep "npm age gate" | grep -q "does NOT implement"
@@ -187,7 +187,7 @@ if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then printf '%s\n' "\$0" >> "\$SCH_WRAPPER_
 EOF
   cp "$FAKEBIN/composer" "$FAKEBIN/composer-real"
   chmod +x "$FAKEBIN/composer" "$FAKEBIN/composer-real"
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "composer PATH wrapper" | grep -q "observed running"
   ! echo "$output" | grep "composer PATH wrapper" | grep -q "not deployed"
 }
@@ -235,15 +235,15 @@ EOF
   }
 
   mk 2.9.0
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "composer audit blocking" | grep -q "OK"
 
   mk 2.7.1
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "composer audit blocking" | grep -q "GAP"
 
   mk 2.2.6
-  PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   echo "$output" | grep "composer audit blocking" | grep -q "below 2.7"
 }
 
@@ -270,8 +270,47 @@ if [ "$1" = "config" ] && [ "$2" = "get" ]; then
 fi
 EOF
   chmod +x "$FAKEBIN/npm"
-  SHIM_RESOLVER=1 PATH="$FAKEBIN:$PATH" run "$VERIFY"
+  SHIM_RESOLVER=1 PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
   # Must NOT false-GAP: the shim resolved, ignore-scripts reads as implemented.
   echo "$output" | grep "npm lifecycle scripts blocked" | grep -q "OK"
   ! echo "$output" | grep "npm lifecycle scripts blocked" | grep -q "does not implement"
+}
+
+# --------------------------------------------------------------------------
+# ECH-195 — output contract: a scannable one-line-per-row default, a full
+# --verbose view (asserted throughout the correctness tests above), and a
+# --json machine contract that doubles as a CI pre-install gate.
+
+@test "output: the default is the compact one-line-per-row view" {
+  run "$VERIFY"
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]     # gap or no gap, never a crash
+  echo "$output" | grep -q "STATUS"              # headers still render
+  echo "$output" | grep -q "EVIDENCE"            # the evidence tier is kept
+  echo "$output" | grep -q -- "--verbose for the full rationale"
+}
+
+@test "output: --verbose drops the compact hint and shows full rationale" {
+  run "$VERIFY" --verbose
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+  echo "$output" | grep -q "STATUS"
+  ! echo "$output" | grep -q -- "--verbose for the full rationale"
+}
+
+@test "output: --json emits parseable JSON with rows and a result" {
+  run "$VERIFY" --json
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+  [ "${output:0:1}" = "{" ]
+  echo "$output" | grep -q '"rows"'
+  echo "$output" | grep -q '"result"'
+  echo "$output" | grep -qE '"status": "(OK|GAP|WEAK|N/A)"'
+  if command -v python3 >/dev/null 2>&1; then
+    echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "rows" in d and isinstance(d["rows"],list) and "gaps" in d["result"]'
+  fi
+}
+
+@test "output: --json exit code agrees with --quiet (the gate is consistent)" {
+  run "$VERIFY" --json
+  local j=$status
+  run "$VERIFY" --quiet
+  [ "$j" -eq "$status" ]
 }
