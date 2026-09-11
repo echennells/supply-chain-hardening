@@ -101,7 +101,12 @@
   # never functions, and (before the existence gate above) the alias shipped
   # anyway.
   become: true
-  ansible.builtin.command: npm install -g npq@{{ npq_version }}
+  # --ignore-scripts: block lifecycle scripts on the role's OWN tool install —
+  # the same thing the role blocks for every user install. Universal npm CLI flag
+  # (all versions): load-bearing on npm <12, redundant-but-harmless on >=12 where
+  # native allowScripts already blocks. npq is a pure-JS CLI with no required
+  # postinstall, so this is safe. See tasks/socket.yml for the sfw reasoning.
+  ansible.builtin.command: npm install -g --ignore-scripts npq@{{ npq_version }}
   changed_when: true
   when:
     - npm_for_npq.rc == 0
