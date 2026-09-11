@@ -96,3 +96,41 @@ skip_if_npm_ge_12() {
     skip "${1:-npm >=12 blocks lifecycle scripts natively (allowScripts); this assertion is no longer about the role (ECH-194)}"
   fi
 }
+
+# Validate that a file parses as TOML, portably across Python versions.
+# `tomllib` is stdlib only on Python 3.11+; Ubuntu 22.04 ships 3.10, where these
+# tests otherwise erupt in ModuleNotFoundError (20+ false failures — invisible in
+# CI, which runs the suite only on 24.04/py3.12). Prefer tomllib, fall back to
+# the `tomli` backport, and if neither exists SKIP with a clear reason rather
+# than error: a missing parser is a harness gap, not a role failure (the file is
+# still deployed; we just can't validate its TOML on this host). Must be called
+# directly from a @test body so bats's exit-based `skip` takes effect.
+assert_valid_toml() {
+  local f="$1" rc
+  # NB: the python call is wrapped in `if`, not run bare with `rc=$?`. bats runs
+  # test bodies under errexit, so a bare non-zero exit (e.g. no parser -> 3) would
+  # kill the test at this line before rc/`skip` are reached. errexit is suppressed
+  # inside an `if` condition, so this captures the code and lets `skip` fire.
+  if python3 - "$f" <<'PY'
+import sys
+try:
+    import tomllib as t
+except ModuleNotFoundError:
+    try:
+        import tomli as t          # backport for Python < 3.11
+    except ModuleNotFoundError:
+        sys.exit(3)                # no parser available
+try:
+    with open(sys.argv[1], "rb") as fh:
+        t.load(fh)
+except Exception as e:             # any parse failure is a real fail
+    print("TOML parse error: %s" % e, file=sys.stderr)
+    sys.exit(1)
+PY
+  then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) return 0 ;;
+    3) skip "no TOML parser on this host (need Python 3.11+ tomllib or the tomli backport); cannot validate $f" ;;
+    *) echo "FAIL: $f is not valid TOML" >&2; cat "$f" >&2; return 1 ;;
+  esac
+}
