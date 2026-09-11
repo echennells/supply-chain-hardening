@@ -146,7 +146,10 @@
   # npm), unwritable by a non-root apply, so the install silently failed on
   # every non-root host (recorded as a gap). sfw/npq install the same way.
   become: true
-  ansible.builtin.command: npm install -g lockfile-lint@{{ lockfile_lint_version }}
+  # --ignore-scripts: the role blocks lifecycle scripts for user installs; do the
+  # same for its own tools. lockfile-lint is a pure-JS CLI with no required
+  # postinstall. Universal npm CLI flag across versions. See tasks/socket.yml.
+  ansible.builtin.command: npm install -g --ignore-scripts lockfile-lint@{{ lockfile_lint_version }}
   changed_when: true
   when:
     - npm_check.rc == 0

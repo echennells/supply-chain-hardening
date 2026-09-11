@@ -56,7 +56,12 @@
   # 11 downstream includes, including the entire env-var layer. The failure is
   # recorded below instead, so it is reported rather than fatal or silent.
   become: true
-  ansible.builtin.command: npm install -g sfw@{{ sfw_version }}
+  # --ignore-scripts: dogfood the script-block on the role's own install. Safe for
+  # sfw despite it fetching a firewall binary: that fetch is lazy at first runtime,
+  # not a postinstall — if it WERE a postinstall it would already be blocked on
+  # every npm >=12 host by native allowScripts (which the role supports), so sfw
+  # cannot depend on an install-time script. Universal CLI flag across npm versions.
+  ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
   when:
     - sfw_check.rc != 0
     - npm_for_socket.rc == 0
