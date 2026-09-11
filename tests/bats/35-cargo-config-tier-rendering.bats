@@ -70,6 +70,6 @@ teardown_file() {
 }
 
 @test "cargo-render: both renderings parse as valid TOML" {
-  python3 -c "import tomllib; tomllib.loads(open('$CARGO_DIR/empty.toml').read())"
-  python3 -c "import tomllib; tomllib.loads(open('$CARGO_DIR/set.toml').read())"
+  assert_valid_toml "$CARGO_DIR/empty.toml"
+  assert_valid_toml "$CARGO_DIR/set.toml"
 }

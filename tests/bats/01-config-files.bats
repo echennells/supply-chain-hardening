@@ -35,7 +35,7 @@ load setup
 }
 
 @test "uv.toml: parses as valid TOML (regression catcher for syntax errors)" {
-  python3 -c "import tomllib; tomllib.loads(open('$HOME/.config/uv/uv.toml').read())"
+  assert_valid_toml "$HOME/.config/uv/uv.toml"
 }
 
 @test "uv.toml: index-strategy first-index (anti-dep-confusion)" {

@@ -66,10 +66,9 @@ teardown_file() {
   rm -rf "$TIER_DIR"
 }
 
-assert_valid_toml() {
-  python3 -c "import tomllib; tomllib.loads(open('$1').read())" \
-    || { echo "FAIL: $1 is not valid TOML" >&2; cat "$1" >&2; return 1; }
-}
+# assert_valid_toml now lives in setup.bash (portable across Python versions:
+# tomllib 3.11+ -> tomli backport -> skip; was tomllib-only and false-failed on
+# Ubuntu 22.04's Python 3.10).
 
 # The keys with NO version threshold: measured universal 1.1.38 → 1.4.0.
 # ignoreScripts and minimumReleaseAge are deliberately NOT in this list —
