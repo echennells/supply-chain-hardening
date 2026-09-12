@@ -1,31 +1,28 @@
 # supply-chain-hardening
 
-Ansible role that sets safe defaults for 14 package managers. Designed for hosts running AI agents that install packages.
+[![Tests](https://github.com/echennells/supply-chain-hardening/actions/workflows/test.yml/badge.svg)](https://github.com/echennells/supply-chain-hardening/actions/workflows/test.yml)
+[![Verify matrix](https://github.com/echennells/supply-chain-hardening/actions/workflows/verify-matrix.yml/badge.svg)](https://github.com/echennells/supply-chain-hardening/actions/workflows/verify-matrix.yml)
+[![Ansible Galaxy](https://img.shields.io/badge/Ansible%20Galaxy-echennells.supply__chain__hardening-blue?logo=ansible)](https://galaxy.ansible.com/ui/standalone/roles/echennells/supply_chain_hardening/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Deploys hardened config files and system-wide environment variables (`/etc/profile.d/`, `/etc/environment`) so a naive `npm install` or `pip install` gets age-gated and script-blocked without the caller knowing about it. Reputation checks (npq) are an additional layer for humans typing in an interactive shell.
+**Safe defaults for 14 package managers, so a careless `npm install` or `pip install` gets age-gated and script-blocked without the caller knowing about it.**
 
-Apply it to a bare host, inside a sandbox, or to a container image — anywhere a package manager runs. The role configures the package managers you already have — it doesn't install them (podman is the opt-in exception). This raises the default posture; it isn't a sandbox. Process-level isolation is a separate, complementary concern: a sandbox controls what can run, this controls how package managers behave when they do.
+Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use.
 
-> ### Hardening CI instead of a host? Use the action, not the role.
->
-> The same defences ship as a GitHub Action (and a CI-generic `harden.sh` with
-> adapters for GitLab, CircleCI, Azure, Buildkite and plain shells). It is the
-> CI-shaped subset of this role — no PAM layer, no podman, no interactive npq —
-> and it applies to every step after it in the job:
->
-> ```yaml
->       - uses: actions/setup-node@v4          # toolchains first
->         with: { node-version: '24' }
->       - uses: echennells/supply-chain-hardening/action@v2
->       - run: npm ci                          # protected
->       - uses: echennells/supply-chain-hardening/action/verify@v2
-> ```
->
-> Order matters more than any input — see **[action/README.md](action/README.md)**.
-> Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo`
-> prints the exceptions your project needs before the first build breaks.
+Then it **proves the policy is in effect.** Writing a config file is not the same as a protection being on: every real failure this project has shipped was a file that was exactly right and a tool that quietly ignored it. So the role asks the tools what they ended up believing, on the real host, against the real installed versions:
 
-## What it does
+```
+$ supply-chain-verify
+STATUS EVIDENCE    PROTECTION                       DETAIL
+OK     PARSED      npm lifecycle scripts blocked    npm reports ignore-scripts=true
+GAP    PARSED      yarn age gate                    yarn reports non-integer npmMinimalAgeGate='NaN'
+GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on Node v18.19.1
+WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
+```
+
+Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a **GitHub Action** (with adapters for GitLab, CircleCI, Azure, Buildkite and plain shells).
+
+## What it protects
 
 | Protection | npm | pnpm | Yarn | Bun | Deno | pip/uv | Cargo | Go | Composer | Bundler | Maven | Gradle | NuGet |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -38,59 +35,35 @@ Apply it to a bare host, inside a sandbox, or to a container image — anywhere 
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
 | **Lockfile enforcement** | | | | | | | x | x | | x | | | |
 
-`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH
-wrapper. See "Cargo" under Limitations for its coverage map.
+`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
 
-### Scope (and what is deliberately out of it)
+Each protection is delivered in up to three overlapping layers — system-wide env vars, on-disk config files, `/usr/local/bin` PATH wrappers — so one covers another's gaps. What each layer reaches, and what it doesn't, is in [docs/how-it-works.md](docs/how-it-works.md).
 
-This role hardens **language package managers** — the ecosystems in the table
-above. It does **not** harden the OS package layer (`pacman`, `apt`, and
-especially the AUR) or the browser: those have their own trust mechanisms
-(distro signature verification; for the AUR, reading the `PKGBUILD` before you
-build), and no env var or package-manager config can stand in for them. Judging
-this role against distro/AUR risk measures it against a threat it never claimed.
+## Install
 
-Each protection is delivered in up to **three overlapping layers** — system-wide
-environment variables, on-disk config files, and `/usr/local/bin` PATH wrappers
-(see *How it works*). The layers overlap on purpose, so one covers another's
-gaps — and the most effective layer is often not the most visible one (e.g. on a
-host where `pip` redirects to `uv`, Python's source-build block is enforced by
-`uv`'s `no-build`, not by `/etc/pip.conf` alone). Because of that, **no single
-deployed file shows the whole posture.** `supply-chain-verify` is the single
-source of truth for what is actually enforcing on a host (OK / WEAK / GAP per
-protection) — read it, not any one config file, to judge coverage.
+### On a host (Ansible role)
 
-### Container image hardening (Podman)
-
-**Opt-in — off by default.** When enabled, installs podman and deploys `/etc/containers/policy.json` with a registry allowlist. Unlike Docker's `DOCKER_CONTENT_TRUST` env var, podman's policy.json is enforced by the runtime — it can't be bypassed by unsetting a variable or passing a CLI flag.
-
-Two **independent** gates, both `false` by default — enabling the first does **not** touch Docker:
-
-```yaml
-podman_enabled: false         # install podman + deploy policy.json
-podman_disable_docker: false  # stop and disable the Docker daemon
-podman_docker_compat: false   # symlink docker.sock -> podman
-```
+The role hardens the package managers a host **already has** — it does not install them. Install the toolchains you want protected first, then apply.
 
 ```bash
-ansible-playbook site.yml -e podman_enabled=true -e podman_disable_docker=true
-```
+# 1. Prerequisites: Ansible >= 2.14, plus the package managers you want hardened
+sudo apt-get install -y ansible nodejs npm            # example
 
-- Default policy: reject all registries, allowlist docker.io, ghcr.io, quay.io, mcr.microsoft.com, gcr.io
-- Docker CLI compatibility via socket symlink (survives reboot)
-- Rootless by default — no root container runtime
-- cosign installed for manual signature verification
-- Configurable: override `podman_allowed_registries` to change the allowlist
-
-## Quick start
-
-### Install from Ansible Galaxy
-
-```bash
+# 2. Get the role — from Galaxy...
 ansible-galaxy role install echennells.supply_chain_hardening
+#    ...or straight from the repo
+git clone https://github.com/echennells/supply-chain-hardening.git
+cd supply-chain-hardening
+
+# 3. Apply to this host. Run as your normal user with sudo rights; tasks
+#    escalate themselves. Add -K if sudo asks for a password.
+ansible-playbook site.yml --limit localhost
+
+# 4. See what is actually enforcing (OK / WEAK / GAP per protection)
+supply-chain-verify
 ```
 
-Then reference it in your playbook:
+From your own playbook:
 
 ```yaml
 - hosts: all
@@ -98,342 +71,61 @@ Then reference it in your playbook:
     - echennells.supply_chain_hardening
 ```
 
-### Or clone and run directly
+Remote hosts, one ecosystem at a time, and every tunable: [docs/configuration.md](docs/configuration.md).
 
-```bash
-# Install Ansible if you don't have it
-sudo apt-get install -y ansible        # or: pip install ansible
-
-# Clone (HTTPS — no SSH key needed)
-git clone https://github.com/echennells/supply-chain-hardening.git
-cd supply-chain-hardening
-
-# Apply to this host
-ansible-playbook site.yml --limit localhost
-
-# See what is actually enforcing (OK / WEAK / GAP per protection)
-/usr/local/bin/supply-chain-verify
-
-# Run against a remote server, or just one ecosystem
-ansible-playbook site.yml --limit servers
-ansible-playbook site.yml --tags npm,pip,uv
-```
-
-**This role hardens the package managers a host already has; it does not install them** (podman is the opt-in exception). So on a bare host most rows in `supply-chain-verify` read `N/A — not installed`, which is correct, not a failure — there is simply nothing to harden yet. To see the role work, install the managers you intend to harden first, then apply:
-
-```bash
-# example: exercise the npm and cargo layers
-sudo apt-get install -y nodejs npm cargo rustc
-```
-
-Note the cargo publish-age gate additionally needs **rustc >= 1.91.1** to build its backend; distro cargo meets this on Ubuntu 26.04 (1.93) but not 24.04 (1.75), where the gate reports a gap and falls back to `--locked`. See Limitations → Cargo.
-
-## How it works
-
-### System-wide environment variables
-
-Deployed to `/etc/profile.d/supply-chain-hardening.sh` (sourced by login shells) and `/etc/environment` (read by PAM via `pam_env.so`). Coverage by caller type:
-
-| Caller | Sees these env vars? |
-|---|---|
-| Login shell (ssh, sudo -i, su -, getty) | ✓ (PAM loads /etc/environment + shell sources profile.d) |
-| Cron job, ssh session, any process inherited from a PAM-launched parent | ✓ (env propagation through fork/exec) |
-| `bash -c "..."` from inside a PAM-launched shell | ✓ (inherited) |
-| Container `CMD ["python", "app.py"]` started by Docker | ✗ (no PAM, no shell sourcing) |
-| systemd service without `Environment=` directives | ✗ |
-| `env -i bash -c "..."` (deliberately clean env) | ✗ |
-
-For the `✗` rows — most notably long-lived agent processes started as container CMDs or systemd services — the **config files layer** below is what actually protects them. The env vars are a redundancy layer that helps when an agent runs inside a PAM-launched shell.
-
-Covers: npm (`NPM_CONFIG_IGNORE_SCRIPTS`, `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_MIN_RELEASE_AGE`; `NPM_CONFIG_AUDIT=true` is also set but is **observability, not a control** — an install-time report that blocks nothing and POSTs your dependency tree to the registry, so it is not counted among the protections here), Python (`PYTHONDONTWRITEBYTECODE`, `PIP_DISABLE_PIP_VERSION_CHECK`, `UV_LINK_MODE`), Go (`GOSUMDB`, `GOPROXY`, `GOFLAGS`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOTOOLCHAIN`), PHP (`COMPOSER_SKIP_SCRIPTS`, Composer 2.8.0+ (measured: ignored on 2.2.6 and 2.7.1, honoured on 2.8.12+) — a belt-and-suspenders backup for `php composer.phar` callers; the PATH wrapper is the primary layer), .NET (`DOTNET_NUGET_SIGNATURE_VERIFICATION=true`) — this variable **overrides** `signatureValidationMode` in `NuGet.Config` in both directions on every SDK (measured on 6.0.428, 8.0.424, 9.0.317, 10.0.400), so it is pinned to the safe side; on the 6.x tier, where the config key is parsed but not enforced, it is the only thing that actually refuses an unsigned package (6.0.428 then fails with NU3004). The older `COMPOSER_NO_SCRIPTS` is not a real Composer variable — see Limitations.
-
-> **Release-age units differ by package manager** (a recurring source of confusion): npm's `min-release-age` is in **days**, integer only — a value like `48h` fails installs with `Invalid time value`, and `2880` means ~8 years (silently resolving ancient versions, e.g. `dotenv@6.0.0` instead of current). pnpm's `minimumReleaseAge` is in **minutes**; bun's is **seconds**; yarn's `npmMinimalAgeGate` is **integer minutes** (a `"2d"`-style suffix parses to NaN and disables the gate). The role derives all of them from `release_age_hours`, so the default 48h gate is **npm `2`, pnpm `2880`, bun `172800`, yarn `2880`**. npm reads the env form as `NPM_CONFIG_MIN_RELEASE_AGE` (matching the `min-release-age` config key) — not `…MINIMUM…` — and the key requires **npm 11.10.0+**. Stock distro npm usually predates that; [**docs/npm-cooldown-by-distro.md**](docs/npm-cooldown-by-distro.md) is the behaviourally-tested, per-distro way to get a cooldown-capable npm (or use pnpm instead).
-
-**Go has one env-var-only protection** — `GOTOOLCHAIN=local` (prevents `go install` from auto-fetching a newer toolchain than the host has, which an attacker could use to ship malicious build constraints). Go has no config-file equivalent, so this protection vanishes for systemd services and Docker `CMD`-style direct-exec callers. If you run Go-touching agents under systemd, add `Environment=GOTOOLCHAIN=local` to the unit file; for Docker, set it via `ENV` in the image or `-e` on `docker run`. `DOTNET_NUGET_SIGNATURE_VERIFICATION=true` is a second, partial case: the NuGet.Config backstop is real from SDK 8.0.424 up, but on the 6.x tier the config key is inert, so for 6.x-only hosts this protection too vanishes in non-PAM contexts — same remedy (`Environment=` / `ENV` / `-e`). Every other env-var protection has a config-file backstop and is unaffected.
-
-### Config files deployed unconditionally
-
-Package manager config files are written to their expected paths before the tools are even installed. When an agent installs npm, pnpm, yarn, bun, uv, cargo, composer, or bundler at any point in the future, the hardened config is already waiting.
-
-**Config files are the load-bearing defense layer.** Each package manager reads its config file unconditionally when invoked — regardless of process tree, PAM state, or shell context. That makes the config files the universal coverage layer for direct-exec callers (Docker CMD, systemd services, agents running as long-lived processes) where the env-var layer above doesn't apply.
-
-Files deployed: `~/.npmrc`, `~/.config/pnpm/rc`, `~/.config/pnpm/config.yaml`, `~/.yarnrc.yml`, bun's global bunfig (`$XDG_CONFIG_HOME/.bunfig.toml` — dot-prefixed — when `XDG_CONFIG_HOME` is set, `~/.bunfig.toml` only when it is unset; bun has no fallback between the two), `~/.config/uv/uv.toml`, `~/.config/pip/pip.conf`, `$CARGO_HOME/config.toml` and `$CARGO_HOME/cooldown.toml` (`$CARGO_HOME` defaults to `~/.cargo` but is resolved, not assumed), `~/.config/composer/config.json`, `~/.bundle/config`.
-
-**pnpm needs two files for version compatibility.** pnpm 11 stopped reading `~/.npmrc`, `~/.config/pnpm/rc` (the old ini-format file), `/etc/npmrc`, and `NPM_CONFIG_*` environment variables for non-auth settings — verified empirically against pnpm 11.1.3. Only `~/.config/pnpm/config.yaml` (YAML, camelCase) works on pnpm 11+. pnpm 10 still reads the ini-format `rc` file. Both files are written so the host stays protected across pnpm version upgrades in either direction.
-
-**System-wide fallback for sudo and other users.** Per-user config files only protect the user the role was applied as. A `sudo npm install` flips `$HOME` to `/root` and reads `/root/.npmrc` (which doesn't exist); same for any second account on the host. To close that gap, the role also deploys the equivalent system-wide config files, which every user — including root — reads regardless of `$HOME`:
-
-- `/etc/npmrc` — read by npm and by pnpm 10 (pnpm 11 ignores it; pnpm 11's system protection has to come from per-user config.yaml until pnpm adds a system path)
-- `/etc/yarnrc.yml` — Yarn Berry's system fallback
-- `/etc/pip.conf` — pip's global config
-- `/etc/uv/uv.toml` — uv's documented system config path on Linux/macOS
-
-User-level configs override these **per-key**: a setting *present* in the user file wins, but a setting *omitted* from the user file falls through to the system value. Most settings are absent from both files until the role sets them, so this rarely matters — but it does mean the user file must explicitly set any value it wants to override, not rely on omission. (Example: the pnpm rc deliberately sets `ignore-scripts=false` when the build-script allowlist is configured, to prevent `/etc/npmrc`'s `ignore-scripts=true` from silently winning.) Ecosystems without a true system config path (Bun, Cargo, Bundler) remain user-home-only. Composer also writes to `/root/.config/composer/config.json` to cover `sudo composer …` invocations (which land with `HOME=/root`), but other non-root users on the host still see only upstream defaults — see Limitations.
-
-**Pre-flight check protects pre-existing `/etc/*` files.** Before any system file is deployed, the role looks at `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf`, and `/etc/uv/uv.toml`. If any of those exist *without* the role's `Managed by ansible-supply-chain-security` marker — meaning a sysadmin, corporate config management, or distribution package put them there — the playbook fails loudly with the list of conflicting paths. This catches the worst-case scenario: silently clobbering a corporate `/etc/npmrc` with `registry=https://npm.internal.corp/` and reverting npm to the public registry (a dependency-confusion exposure). To accept the overwrite explicitly: `-e accept_etc_overwrite=true`.
-
-### pip-to-uv redirect
-
-Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement, hash verification) applies even when an agent or script calls `pip install` directly.
-
-### Pre-install reputation checks (npq)
-
-Shell aliases in `/etc/profile.d/npq-aliases.sh` route `npm`, `yarn`, and `pnpm` through [npq](https://github.com/lirantal/npq), which runs 14 checks before each install: typosquatting detection, provenance regression, dormant maintainer flagging, install script warnings, and more. Auto-continue is disabled — the user must acknowledge warnings before the install proceeds.
-
-**Scope:** shell aliases only expand in interactive shells. They do **not** fire for scripts, CI runners, `sh -c`, sudo, `package.json` lifecycle hooks, or AI agents invoking npm via subprocess. For those (non-interactive) contexts — which is most automated traffic — the `.npmrc` and env-var layers above are what actually catch the install. npq is a complement for humans, not the primary defense.
-
-**`npm_path_wrapper` (default `true`):** deploys `/usr/local/bin/npm` as a wrapper that intercepts every npm invocation at the PATH level. The wrapper routes registry-touching subcommands (`install`, `ci`, `update`, `audit`, etc.) through Socket Firewall for threat-intel blocking; read-only subcommands (`config`, `version`, `ls`, `run`, etc.) pass through unchanged so their output isn't corrupted. This is the protection layer that actually applies to non-interactive callers — scripts, AI agents via `subprocess.run`, CI runners — none of which see the alias-only npq integration. Set to `false` to disable if you can't tolerate ~50–200 ms per npm call or the hard dependency on `sfw` being reachable.
-
-### Install-time malware blocking (Socket Firewall)
-
-[Socket Firewall Free](https://github.com/SocketDev/sfw-free) blocks packages flagged by Socket's threat intelligence in real time, with no API key required. Upstream it supports npm, pip and cargo; **this role wires it to npm (via `npm_path_wrapper`) and to cargo (via `cargo_socket_firewall`)**. It requires Node >= 20 in both cases. sfw is a shim that downloads its firewall binary on first use; the role warms it at apply time, and if it cannot run it is moved aside so both wrappers fall through to an unfiltered pass-through with a warning (recorded in the run summary) rather than breaking the tool. When sfw is runnable, its runtime posture is fail-open: if it cannot reach Socket it warns, exits 0, and the install proceeds unfiltered. See the Cargo coverage map under Limitations for exactly which paths it does and does not reach.
-
-### Deno age gate
-
-Deno has no global config file (`deno.json` is per-project), so the only way to enforce a minimum dependency age across all invocations is to inject the `--minimum-dependency-age` flag on every call.
-
-By default, the role deploys a shell alias at `/etc/profile.d/deno-cooldown.sh` that adds the flag. **Like all shell aliases, this only fires in interactive shells** — scripts, agents, and CI never see it, so their `deno run` calls bypass the age gate entirely.
-
-**`deno_path_wrapper` (default `true`):** installs a wrapper **in-place at the discovered deno location** (typically `~/.deno/bin/deno`, where Deno's official installer puts it). The wrapper injects `--minimum-dependency-age` into every dep-fetching invocation (`run`, `cache`, `install`, `test`, `compile`, `eval`, `info`, `doc`, `bench`, `publish`). Non-fetching subcommands (`fmt`, `lint`, `repl`, `--version`, `--help`) pass through unchanged. The original deno binary is preserved as `<path>-real` in the same directory. The shell alias mechanism is removed when the wrapper is active (the two would otherwise double-inject the flag). Setting `deno_path_wrapper: false` restores the original binary and re-deploys the alias.
-
-**Why in-place rather than `/usr/local/bin/deno`:** Deno's installer prepends `~/.deno/bin` to `PATH`, so a wrapper at `/usr/local/bin/deno` is silently bypassed. Installing in-place defeats PATH ordering by being upstream of it. **Caveat:** re-running Deno's installer overwrites the wrapper — re-apply the role after a Deno upgrade.
-
-## Configuration
-
-All age gates are controlled by a single variable in `defaults/main.yml`:
+### In CI (GitHub Action)
 
 ```yaml
-release_age_hours: 48
+      - uses: actions/setup-node@v4                                # 1. toolchains FIRST
+        with: { node-version: '24' }
+      - uses: echennells/supply-chain-hardening/action@v2          # 2. harden what exists
+      - run: npm ci                                                # 3. protected from here on
+      - uses: echennells/supply-chain-hardening/action/verify@v2   # 4. prove it held
 ```
 
-Change it once, all package managers update. Individual settings are also tuneable — see `defaults/main.yml` for the full list.
+The order is the one thing you have to get right. Hardening wraps the binaries that exist *when it runs*; a `setup-*` step afterwards installs an unwrapped one ahead of it on `PATH`, and nothing fails — which is what step 4 is for. Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo` prints the exceptions your project needs before the first build breaks. Full inputs, outputs, adapters and limitations: [action/README.md](action/README.md).
 
-### Refreshing auditing tools
+### Before you apply
 
-The role installs auditing tools (`govulncheck`, `cargo-audit`, `pip-audit`, `zizmor`, `pinact`, etc.) on first run and skips re-installs on subsequent runs for idempotency. After a toolchain upgrade (new Go, new Rust) or when you want the latest `@latest`-pinned versions of these tools, force a refresh:
+- **Do not run with `sudo ansible-playbook` or global `--become`.** Facts get gathered as root, `HOME` becomes `/root`, and every per-user config lands in the wrong home while the recap reports success. The preflight refuses this.
+- **`N/A — not installed` rows are correct, not failures.** There is nothing to harden yet. Install the manager, re-apply.
+- **A pre-existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or `/etc/uv/uv.toml` stops the play.** It may be a corporate registry setting. Read it, then pass `-e accept_etc_overwrite=true` if overwriting is what you want.
+- **Stock distro toolchains often predate the age gates.** npm's `min-release-age` needs npm ≥ 11.10.0 ([docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) has the per-distro fix); cargo's gate needs rustc ≥ 1.91.1 and falls back to `--locked` below that (Ubuntu 24.04 ships 1.75). The verifier reports both as a GAP rather than staying quiet.
+- **On agent hosts and CI images, make a GAP fatal:** `-e verify_fail_on_gap=true`. `supply-chain-verify --json` exits non-zero on any GAP, so it drops into a health check directly.
+- **Re-apply after toolchain upgrades.** `rustup update`, Deno's installer and a new Node all replace wrapped binaries. The verifier reports the drift; re-applying fixes it.
 
-```bash
-ansible-playbook site.yml -e refresh_tools=true
-```
+## What it is not
 
-This re-installs every auditing tool regardless of whether the binary already exists. Slow (10–30 s per tool) but always produces fresh builds against the current toolchain.
+- **Not a sandbox.** Anything running as the same user can override env vars and config files. This raises the default posture against naive installs; process isolation is a separate, complementary concern.
+- **Not OS-package hardening.** `apt`, `pacman` and the AUR have their own trust mechanisms. This role covers language package managers only.
+- **Not a substitute for reading the verifier.** No single deployed file shows the whole posture; `supply-chain-verify` does.
 
-## Inventory
+Every known boundary, each one measured on a real host: [docs/limitations.md](docs/limitations.md).
 
-Edit `inventories/hosts.yml` to add your servers:
+## Documentation
 
-```yaml
-all:
-  hosts:
-    localhost:
-      ansible_connection: local
-    my-server.example.com:
-      ansible_user: ubuntu
-      ansible_ssh_private_key_file: ~/.ssh/id_ed25519
-```
-
-## Tags
-
-Run specific ecosystems only:
-
-```bash
-ansible-playbook site.yml --tags npm          # npm only
-ansible-playbook site.yml --tags pip,uv       # Python only
-ansible-playbook site.yml --tags cargo        # Rust only
-ansible-playbook site.yml --tags go           # Go only
-ansible-playbook site.yml --tags java         # Maven + Gradle
-ansible-playbook site.yml --tags github       # zizmor + pinact
-```
-
-> **GitHub Actions hardening is detection-only, and opt-in by nature.** Unlike every
-> other ecosystem in this role — where deployed config changes behavior whether or not
-> the caller knows about it — the `github` tag only *installs* two tools: `zizmor`
-> (workflow auditor) and `pinact` (Actions SHA-pinner). The role does not run them,
-> does not scan your workflows, and does not pin anything. You must invoke them
-> yourself (e.g. `zizmor .github/workflows/`, `pinact run`). Both are skipped when
-> their prerequisite is missing (`uv` for zizmor, Go for pinact) and are reported in
-> the end-of-run "protections NOT applied" summary.
-
-```bash
-ansible-playbook site.yml --tags shell        # env vars only
-```
-
-## Verifying what actually enforces
-
-Writing a config file is not the same as a protection being in effect. Every
-protection failure this project has shipped had the same shape — the file was
-exactly what we intended, the tool ignored it, and the run reported success:
-
-| | |
+| | Read this when… |
 |---|---|
-| yarn `npmMinimalAgeGate: "2d"` | parsed to NaN; no gate, no warning |
-| npm `MINIMUM_RELEASE_AGE` | a key npm does not read |
-| pnpm 11 | stopped reading `rc` / `npmrc` entirely |
-| pnpm 10 `block-exotic-subdeps` | accepted the key, ignored it |
-| bun `ignoreScripts` | bunfig not loaded for `bun run`; and inert in ANY bunfig below bun 1.2.0 |
-| bun `minimumReleaseAge` | key does not exist below bun 1.3.0 — accepted and ignored |
-| bun's whole bunfig | one bad value (a quoted `minimumReleaseAge`) makes bun reject the entire file, exit 1 |
-| npq on Node < 20.13 | passes through to npm and exits 0 |
+| [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
+| [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
+| [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
+| [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
+| [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
+| [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |
+| [docs/version-tiering-audit.md](docs/version-tiering-audit.md) | you want to know which config keys each uv / yarn / bun version actually honours |
+| [action/README.md](action/README.md) | you're using the GitHub Action, or `harden.sh` on another CI system |
+| [TESTS.md](TESTS.md) | you want to run or extend the test suite |
+| [SOURCES.md](SOURCES.md) | you want the incidents and research this is built on |
 
-Grepping our own files catches none of these. So the role ships a verifier that
-asks the **tools** what they ended up believing, on the real host, against the
-real installed versions:
+## Tests
 
 ```bash
-supply-chain-verify           # what is actually enforcing right now (scannable, one line per row)
-supply-chain-verify --verbose # the full rationale behind each row
-supply-chain-verify --strict  # also fail on unverifiable (PRESENT-only) rows
-supply-chain-verify --json    # machine-readable; exit is non-zero on any GAP, so it doubles as a CI pre-install gate
+make test        # build the test container and run the full bats suite
+make test-ci     # unit tests for action/harden.sh — no docker, seconds
 ```
 
-```
-STATUS EVIDENCE    PROTECTION                       DETAIL
-OK     PARSED      npm lifecycle scripts blocked    npm reports ignore-scripts=true
-GAP    PARSED      yarn age gate                    yarn reports non-integer npmMinimalAgeGate='NaN'
-GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on Node v18.19.1
-WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
-```
+See [TESTS.md](TESTS.md) for the adversarial fixtures, the matrix, and known coverage gaps.
 
-Every row states **how** it was established, because that is the whole point:
+## License
 
-- **FUNCTIONAL** — we ran the protection and observed its behavior. Strongest.
-- **PARSED** — the tool reported the setting back to us. Proves it read the file,
-  recognized the key, and accepted the value — which is what all six failures
-  above violated.
-- **PRESENT** — a file or binary exists and nothing more. This is the evidence
-  level that produced every bug in the table, so these rows are reported as
-  `WEAK` rather than counted as coverage.
-
-It runs at the end of every apply and is installed as a standalone command, so
-you can re-check at any time — including long after the apply, when tool
-versions have drifted underneath the config. That drift is how several of these
-bugs arrived. Set `verify_fail_on_gap=true` to make a gap fail the play; use it
-on CI images and any host where agents run untrusted installs. Exit status is 0
-when there are no gaps, 1 otherwise, so it drops into a health check directly.
-
-This is a different question from the end-of-run coverage summary, which reports
-which *tasks skipped*. Five of the six failures above happened in tasks that
-completed successfully.
-
-## Why this exists
-
-AI agents install packages unpredictably. You can't control what package manager an agent reaches for, what shell it uses, or when it decides to `npm install` something. This playbook sets safe defaults at the system level so that a careless install hits age gates and script blocking automatically — both deployed via config files and env vars that apply universally, including the non-interactive shells AI agents typically use.
-
-## Limitations
-
-- **Not a sandbox.** Env vars and config files can be overridden by any process running as the same user. This protects against naive installs, not determined bypass.
-- **A file in the working directory can shadow a Python stdlib module, and the role does not stop it by default.** MEASURED on cpython 3.13.12: a hostile `struct.py` beside a script executes on `import base64`, because stdlib `base64` does `import struct` internally — the caller never names the shadowed module. `python app.py`, `python -m base64` and `python -c "import base64"` all execute it; 273 of Python's 290 stdlib module names are shadowable (the 17 that are not are already imported at interpreter startup: `os`, `sys`, `io`, `codecs`…). **Already safe without any setting:** an installed console-script (`ruff`, `pytest`, anything pip-installed) is immune even in a hostile directory, because its `sys.path[0]` is its own bin directory rather than the cwd. The exposed case is specifically *writing a script into an untrusted directory and running it* — an agent unpacking an archive, or CI running a checked-out script. Set `python_safe_path: true` to export `PYTHONSAFEPATH=1`, which closes all three forms. **It is off by default because it breaks legitimate code at runtime:** `python script.py` importing a sibling module, and `python -m` against a local uninstalled package, both start raising `ModuleNotFoundError` — with an error naming neither this role nor the protection, which is the [attribution test](docs/design-principles.md) failing. Installed tooling is unaffected. Requires Python 3.11+; below that the variable is inert and the role records the gap in `skipped_protections` rather than implying coverage. Turn it on where "a script imports a file sitting next to it" is closer to the threat than to the workflow — a dedicated agent host — and not where people run their own code from checkouts. `python -I` (isolated mode) is the stronger per-invocation equivalent and predates 3.11; `python -E` does **not** help, as it only ignores `PYTHON*` env vars and never touches `sys.path`.
-- **CLI flags beat config files in pip.** `python3 -m pip install --no-binary :all: --break-system-packages malicious-pkg` bypasses both the `/usr/local/bin/pip` wrapper (because `python3 -m pip` invokes the module directly, not the binary) and the `/etc/pip.conf` `only-binary=:all:` setting (because pip's CLI flags outrank config). There is no clean interception for `python3 -m pip` — the standard library exposes the module independently of the binary. Recommend `uv pip install` for callers that need pip's interface; uv applies the role's age gate and `no-build` settings regardless of how it's invoked. Don't expose hosts to untrusted `pip` callers and expect the wrapper alone to save you.
-- **uv's `no-build` blocks source builds** — `uv pip install .` from a local project, `uv pip install --no-binary :all: …`, and any install that must compile a wheel from an sdist (MEASURED, uv 0.12.7). A pure-Python *editable* install (`uv pip install -e .`) is a PEP 660 install and is not blocked; an editable install that has to compile is. When you need to build something you trust, use the deployed helper `supply-chain-allow-build -- uv pip install .` rather than uv's built-in overrides: `--no-config` drops *all* config and `--config-file` / `UV_CONFIG_FILE` *replace* discovery, both silently dropping the other four hardened settings (index-strategy, exclude-newer, verify-hashes, allow-insecure-host). The helper mirrors the current hardened `uv.toml`, flips only `no-build`, scopes it to the one command, and logs what actually built. Honest residual: uv cannot scope build permission per package, so the build engine is open for that whole command — trust the source you point it at. See [design-principles.md](docs/design-principles.md) ("Safe-by-construction overrides").
-- **uv's `exclude-newer` freezes the dependency window at apply time.** The role pins `exclude-newer` to roughly *(apply time − `release_age_hours`)* — that is how the uv age gate works: uv refuses any distribution *published* after that instant. The window does not advance on its own, so a legitimate release published since the last apply (or a large upgrade that pulls one in) is refused until you **re-apply the role**, which moves the freeze to the new apply time. Re-apply on a cadence that matches how fresh your dependencies must be — and right before an intentional major upgrade — rather than lowering `release_age_hours`, which weakens the gate for everyone and every ecosystem. For a single trusted command, `uv pip install --exclude-newer <ISO-8601-date>` overrides only that one setting (unlike `--config-file` / `UV_CONFIG_FILE`, which *replace* config discovery and silently drop the other hardened keys); it widens the window for that invocation alone.
-- **CLI flags beat env+config in npm too.** `npm install --ignore-scripts=false <pkg>` re-enables lifecycle scripts regardless of `/etc/npmrc`, `~/.npmrc`, or the `NPM_CONFIG_IGNORE_SCRIPTS` env var — npm's precedence puts CLI flags first. There is no clean interception (the wrapper at `/usr/local/bin/npm` passes args through; routing them through sfw doesn't help because sfw is a network-layer filter, not a lifecycle interceptor). Same broad-strokes situation as the pip bypass above. Don't expose hosts where untrusted callers can pass arbitrary npm flags and expect ignore-scripts to save you.
-- **npm ≥12 blocks dependency lifecycle scripts by default (native `allowScripts`).** On npm 12+, a dependency's `postinstall`/`preinstall`/`install` does not run unless explicitly approved (`npm install-scripts approve <pkg>`), independent of the role's config — MEASURED (npm 12.0.2): even `npm install --ignore-scripts=false` leaves it blocked (`npm warn install-scripts … not covered by allowScripts`). So the role's `ignore-scripts=true` is **redundant on npm ≥12** (npm blocks natively) yet stays **load-bearing on npm <12** and for any package a developer later approves via `allowScripts` (where `ignore-scripts=true` still refuses it). New friction to plan for: a *legitimate* dependency postinstall now needs `npm install-scripts approve` on npm 12+. The adversarial script-blocking tests are version-guarded to skip on npm ≥12 rather than pass tautologically (ECH-194).
-- **Non-PAM contexts (Docker CMD, systemd units without `EnvironmentFile`, agent processes) lose the env-var layer.** That makes the config files the only protection — and a user who controls their own home directory can write `ignore-scripts=false` to `~/.npmrc`, which beats `/etc/npmrc` per npm's `user > global` precedence. With the env var absent (because no PAM), the user override wins and the role's `/etc/npmrc` value is moot. In PAM-launched contexts (login, ssh, sudo -i, cron), the env var IS present and DOES beat `~/.npmrc` (env > user > global). Translation: trust the env-var layer for human workflows; trust the config-file layer for unattended workflows; if a user can modify their own dotfiles AND runs outside PAM, neither layer is fully protective.
-- **Repo-local configuration can outrank the role's user + system config.** Most package managers read a config file from the *current directory* at higher precedence than the `~` and `/etc` files the role deploys, so a hostile repository — or an agent unpacking an archive into a working directory — can weaken hardening without touching anything the role wrote. This is analysed in depth for cargo below; MEASURED for two more on Ubuntu 26.04:
-  - **npm** — a repo-local `./.npmrc` with `ignore-scripts=false` re-enabled a dependency postinstall **in non-PAM contexts** (agent / CI / Docker `CMD`). In PAM contexts the `NPM_CONFIG_IGNORE_SCRIPTS` env var still wins (env outranks a project `.npmrc`), so this is the same shape as the "Non-PAM contexts" bullet above — bounded to where the env layer is absent.
-  - **uv** — a repo-local `./uv.toml` (or `pyproject.toml` `[tool.uv]`) with `no-build = false` re-enabled source builds in **every** context, PAM included. uv's project config outranks the user and system `uv.toml` the role writes, and there is no uv env layer to override it: the role deliberately does not export `UV_CONFIG_FILE` (it would *replace* config discovery — the same footgun `supply-chain-allow-build` exists to avoid — and break legitimate project settings). So a `uv.toml` committed to an untrusted repo is a complete bypass of the uv layer for anyone running uv inside that directory.
-
-  The same class applies to the other ecosystems that read repo-local config (bun `bunfig.toml`, pnpm / yarn repo `.npmrc` / `.yarnrc.yml`); those were not individually measured here. It is **not closable from a host-hardening role** — a repo config file is an open delivery surface and the tools read it by design. The mitigation is procedural, exactly as for cargo: do not run package managers inside a repository you do not trust, or do it in a container. See [design-principles.md](docs/design-principles.md).
-- **sudo clears the environment**, but config-file hardening still applies for the ecosystems with a system path (npm, pnpm 10, yarn, pip, uv) via `/etc/*` deployment. Composer additionally writes to `/root/.config/composer/config.json` to cover the common case where `sudo composer …` lands with `HOME=/root`. Bundler has no system or /root coverage — `sudo bundle …` bypasses the per-user config and falls back to upstream defaults. Cargo's publish-age gate does write `/root/.cargo/cooldown.toml` so `sudo cargo build` stays gated, but `~/.cargo/config.toml` remains per-user. Note that cargo reads config from `$CARGO_HOME`, which is **not** always `~/.cargo` (the official rust images set it to `/usr/local/cargo`); the role resolves it rather than assuming. Bun's install-time hardening (lifecycle scripts, age gate, frozen lockfile, scanner) is per-user only for the same reason; its runtime auto-install blocking is covered by the PATH wrapper at `/usr/local/bin/bun` regardless of caller UID.
-- **Bun's runtime auto-install gap is closed by a wrapper, not the config file.** `bun run script.ts` (the runtime entry point) silently downloads missing imports from npm — typosquat risk in CI/agent contexts. The `[install].auto = "disable"` knob in `~/.bunfig.toml` does NOT block this code path: per [bun's docs](https://bun.sh/docs/runtime/bunfig) verbatim, "Currently, bunfig.toml is only automatically loaded for `bun run` in a local project (it doesn't check for a global .bunfig.toml)." The role instead deploys `/usr/local/bin/bun` as a wrapper that injects `--no-install` on every non-package-management invocation. Real bun preserved at `/usr/local/bin/bun-real`. Package-mgmt subcommands (install/add/remove/update/upgrade/link/unlink/pm/outdated/why/audit/publish/patch/init/create) skip injection so they consult bunfig as normal. Bypass per-invocation: `bun -i script.ts` (explicit opt-in to fallback auto-install) or `/usr/local/bin/bun-real script.ts` (around the wrapper). Disable globally with `bun_path_wrapper=false`. Self-update caveat: `bun upgrade` writes a fresh binary to `~/.bun/bin/bun`; re-apply the role after upgrading to refresh wrapping.
-- **On mise / asdf / volta hosts the PATH wrapper is shadowed by the shim.** A per-user version manager puts its shims directory (e.g. `~/.local/share/mise/shims`) ahead of `/usr/local/bin` on `PATH`, so a command like `npm` resolves to the shim, not the role's wrapper — MEASURED on an Omarchy/Arch host with a mise-shimmed npm. This splits coverage cleanly: the **config-layer** protections still apply (the shim runs a real tool that reads `~/.npmrc` / `/etc/npmrc` — `ignore-scripts` and the age gate work; verified behaviorally that a malicious postinstall was blocked), but the **wrapper-layer** protections that *only* the PATH wrapper provides are bypassed — for npm that is Socket Firewall routing and npq reputation checks; for cargo/deno/bun it is the flag injection (`--locked`, `--minimum-dependency-age`, `--no-install`). It is per-tool: only the tools the version manager shims are affected (a tool at a plain path like `/usr/bin/deno` is still wrapped). A system role cannot reliably win the PATH race against a per-user shim manager. `supply-chain-verify` reports the shadowed wrapper honestly (`GAP … npm resolves to a mise shim`). Where wrapper-layer coverage matters on such a host, wrap at the version-manager layer, or order `/usr/local/bin` ahead of the shims directory for the accounts that need it.
-- **pnpm 11 has no system-wide config path.** pnpm 11 only reads `~/.config/pnpm/config.yaml` per-user. `sudo pnpm install` runs as root, which has its own (empty) config — meaning sudo'd pnpm 11 invocations are unprotected by this role. Workaround for hosts where this matters: also write the file to `/root/.config/pnpm/config.yaml`.
-- **pnpm `pnpm_built_dependencies` allowlist works on pnpm 10 only.** pnpm 11 explicitly rejects `onlyBuiltDependencies` in the global config file ("Move it to a project-level `pnpm-workspace.yaml`"). On pnpm 11+, the role keeps the safe global default (`ignoreScripts: true`) and allowlist behavior must be configured per-project. Setting `pnpm_built_dependencies` in role vars has no effect on pnpm 11 callers.
-- **pnpm allowlist is per-user, not system-wide.** Even on pnpm 10, the role's allowlist (`pnpm_built_dependencies`) only lands in the deploying user's `~/.config/pnpm/rc`. `sudo pnpm install` or invocations from a second user account see only the strict `/etc/npmrc` default. This fails closed (more restrictive), not open.
-- **Yarn 1.x (classic) receives no yarn hardening at all.** Every yarn setting this role deploys lives in `~/.yarnrc.yml` (and `/etc/yarnrc.yml`), which is the Yarn 2+ "berry" format. Yarn classic does not read that file — it uses the unrelated ini-style `~/.yarnrc` — so on a host whose active yarn is 1.x, `npmMinimalAgeGate`, `enableScripts: false`, `checksumBehavior`, `enableImmutableInstalls`, and `enableHardenedMode` are all inert. There is no warning; `yarn install` simply behaves as an unhardened yarn. This bites by default on distros that ship yarn 1.22 from apt. Either activate a berry version (`corepack enable && yarn set version stable`, or pin `packageManager` in each project's `package.json`) or treat yarn as unprotected on that host and rely on the npm/pnpm layers. The adversarial test suite pins itself to a berry version so it measures the role's config rather than an unhardened classic yarn — so a green test run is not evidence that a yarn-1.x host is protected.
-- **`block-exotic-subdeps` requires pnpm 11.** This control blocks a *transitive* dependency from resolving to a git / http(s) / tarball-URL source — per pnpm's docs, "only direct dependencies ... may use exotic sources." It governs SUBdeps, not the direct deps you list yourself, and it defaults to `true` in pnpm 11. The role writes `blockExoticSubdeps: true` to `~/.config/pnpm/config.yaml` so the setting is explicit and survives a config-precedence surprise. On pnpm 10 (the only option on Node < 22) the key does nothing — the control did not exist yet — so on those hosts a transitive exotic dependency is unblocked at the pnpm layer, and lockfile review plus the age gate are the remaining controls. Note that `pnpm add <tarball-url>` proceeding to a network fetch is **correct** on every version: a direct exotic dep is allowed by design, and is not evidence for or against this control.
-- **Docker containers have their own env.** Hardening the host doesn't harden containers running on it. Apply the role inside containers separately.
-- **Ruby and Cargo have no install-script blocking.** `extconf.rb` and `build.rs` execute unconditionally, at *build* time, with the building user's full privileges and before any of your code is called. No config can prevent this — it's an ecosystem-level gap, and cargo has no `--ignore-scripts` equivalent.
-
-  Because execution cannot be blocked, the role attacks the step before it: **refusing to resolve the malicious version at all.** The cargo PATH wrapper routes `build`/`check`/`test`/`run`/`update` through `cargo cooldown` (publish-age gate, default 48h from `release_age_hours`) and injects `--locked` whenever a `Cargo.lock` is present, so a build can never silently change dependency resolution.
-
-  **Why an age gate works on this threat.** Registry compromises of this class are caught and yanked within hours — in the 2026-08-20 crates.io incident, `arrayref`, `internment` and `append-only-vec` were poisoned for 86, 90 and 107 minutes respectively. A window of 24h or more makes that class unresolvable.
-
-  **Why transitive dependencies matter more than direct ones.** A caret requirement resolves to the newest match: `blake3` required `arrayref ^0.3.5`, i.e. `>=0.3.5, <0.4.0`, which the malicious `0.3.10` satisfied. Projects picked it up without naming arrayref anywhere in their own manifest.
-
-  **What `--locked` does and does not cover.** Cargo respects an existing pin by default, so `--locked` does not protect an unchanged lockfile — it constrains the case where cargo *would* change the graph, turning a silently added dependency into `error: cannot update the lock file`. Anything that re-resolves — no lockfile, `cargo update`, CI without a committed lock, a manifest change — takes the newest published version. Rust **libraries conventionally do not commit `Cargo.lock`**, so they re-resolve on every build.
-
-  Neither control helps a project that has no lockfile *and* no cooldown backend installed; `supply-chain-verify` reports that state as `WEAK`, not `OK`.
-
-  **Cargo coverage map.** Each row verified by execution. "Gated" means the publish-age gate evaluates the version before any `build.rs` can run.
-
-  | How a crate version reaches your build | Covered? | By what |
-  |---|---|---|
-  | Fresh resolution (`build`/`check`/`test`/`run`/`update`) | Yes | age gate via `cargo cooldown` |
-  | `cargo update` | Yes | routed through `cargo cooldown` — the one resolution path `--locked` cannot cover |
-  | `add` / `generate-lockfile` / `vendor` | **No** | warned, not gated — see below |
-  | `cargo install <crate>` | **No** | `--locked` only; warned, not age-gated |
-  | A `Cargo.lock` **this host** wrote | Yes | gated when it was written |
-  | A `Cargo.lock` from a clone/PR, crate **known-malicious** | Yes | Socket Firewall blocks the download |
-  | A `Cargo.lock` from a clone/PR, crate **fresh and unflagged** | **No** | needs a lockfile-age check in CI (not built) |
-  | `cargo install --git` / `--path` | **No** | no registry publish date exists to gate on |
-  | git / path dependencies, `[patch]`, `[replace]` | **No** | same; needs a `cargo-deny` source allowlist |
-  | Vendored crates committed to the repo | **No** | nothing is downloaded or resolved |
-  | `build.rs` network egress once any build runs | **No** | structural; needs build-time network isolation |
-
-  The last four are not oversights, they are the shape of the problem. The age gate rests on crates.io recording a publish timestamp server-side; a git ref has no publish event, and a commit date is attacker-controlled via `GIT_COMMITTER_DATE`. `[patch]`/`[replace]` redirect a dependency to such a source, and can be set from a repo-local `.cargo/config.toml`. The countermeasure is a source allowlist — `cargo-deny`'s `[sources]` with `unknown-git = "deny"` — run in your own project's CI. The role does not ship or run it: it operates on a resolved dependency graph (a Rust project), which a host-hardening role has none of, and `cargo deny` is itself unsafe to run on an untrusted repo because it invokes cargo. It is defence-in-depth against git/alt-registry sources, not against the version-compromise the age gate handles.
-
-  And the age gate is admission control, not a sandbox. Once any build script runs it is arbitrary code with your privileges: proc-macro1's `build.rs` connected directly to an IP with certificate validation disabled and executed what it downloaded, with no package manager involved. So the gate counters the attacker who publishes malware and is caught within hours — which is most registry attacks, because scanning is fast — and does nothing against one who publishes benign code and waits out the window. Build-time network isolation (`cargo fetch` online, then `cargo build --offline` with no egress) is the control for that, and cargo cannot provide it.
-
-  **Version floor — the gate is unavailable on stock LTS.** `cargo-cooldown 0.3.4` requires **rustc >= 1.91.1**. Ubuntu 24.04's apt cargo is 1.75.0 and Debian 12's is older still, so on a host using distro cargo the backend cannot be installed and the age gate does not apply — the wrapper degrades to `--locked` and warns on every invocation, and the run summary records the gap. Measured on `ubuntu:24.04`: `error: cannot install package cargo-cooldown 0.3.4, it requires rustc 1.91.1 or newer`. Hosts using rustup (the common case for Rust development) are unaffected. This is the same shape as the npm age gate needing npm >= 11.10.0 against noble's 9.2.0.
-
-  **Socket Firewall for cargo** (`cargo_socket_firewall`, default on) covers the axis the age gate cannot: it filters the *download* rather than the resolution, so it applies to a lockfile written anywhere, and it never participates in version selection — your lockfile is still authoritative. Two measured caveats: it needs **Node >= 20** like the npm path, and **it fails open** — with no network it warns, exits 0, and the build proceeds unfiltered. A *corrupt* sfw binary instead fails closed and would break every build, so the role runs it at apply time and moves it aside if it cannot execute, degrading to unfiltered rather than leaving cargo unusable. `supply-chain-verify` reports that state as `GAP`, never `OK`.
-
-  **The wrapper is a first-invocation control, not an enforcement boundary.** Three mechanisms route around it and none can be closed from a PATH shim: cargo overwrites `$CARGO` with its own resolved toolchain path, so build scripts and third-party subcommands that re-enter cargo do so unwrapped; a repo-local `rust-toolchain.toml` with `path =` supplies its own cargo; and `RUSTC_WRAPPER` or a repo-local `.cargo/config.toml` execute code with no registry involvement at all. It raises the floor for ordinary invocations. Containment of `build.rs` is a separate concern this role does not address: no config-level control exists for it, and constraining what an admitted build script can *do* requires process isolation (a seccomp/Landlock sandbox, a container with no egress, or an ephemeral builder), which is outside what a package-manager hardening role can provide.
-
-  **Unknown subcommands are warned about, not gated.** The set of cargo subcommands is open (any `cargo-*` on `PATH`, plus repo-local `[alias]`), so enumerating it cannot converge. `cargo nextest run`, `cargo watch -x check` and the like pass through with a note on stderr and receive no injected flags — injecting `--locked` into a subcommand that does not accept it would break the build.
-
-  **Opening an untrusted Rust repo can execute its code before you build anything.** A repo-local `.cargo/config.toml` can set `[build] rustc-wrapper`, `[build] runner`, `[target.*] linker` or `[alias]`, and a `rust-toolchain.toml` can point `path =` at a cargo the repo ships. MEASURED: with a repo-local `rustc-wrapper` set, `cargo metadata` executed it — and `cargo metadata` is what rust-analyzer and every Rust IDE run on folder open. `cargo tree` executes it too. So this is not "you accepted the risk when you ran `cargo build`"; cloning and opening in an editor is sufficient.
-
-  Nothing in this role closes it, and a detector would not: `RUSTC_WRAPPER` works as an environment variable with no file to grep, `cargo --config` accepts a file path so a key denylist does not cover it, and `rust-toolchain.toml path=` bypasses the PATH wrapper before it can act. The mitigation is procedural — **inspect `.cargo/config.toml` and `rust-toolchain.toml` before opening a Rust repo you do not trust, or open it inside a container.**
-
-  **A shared cargo cache is a code-injection path that every control here misses.** Cargo verifies a `.crate` checksum when it downloads, but **not** when it reads one already in `~/.cargo/registry/cache` — a repacked tarball whose SHA-256 matches nothing compiles silently under `--locked`, online and offline (reproduced twice). `--locked`, the lockfile checksum, the publish-age gate and Socket Firewall all miss it simultaneously, because none of them re-hash bytes on disk.
-
-  This is not an initial-access vector — writing to the cache requires code execution already. It is a **trust-boundary crossing**: an untrusted build poisons the cache, and a later privileged build compiles the result. Two concrete routes:
-
-  - **Self-hosted runners with a persistent `~/.cargo`** — a malicious PR's `build.rs` runs in a low-privilege job and the next job inherits the cache.
-  - **GitHub-hosted runners using `actions/cache`** — cache scoping normally isolates branches, but `pull_request_target` runs in the *default branch* context and can therefore write the default-branch cache scope. Job `permissions` blocks do not apply to cache writes at all. This is not theoretical: it is how Angular (2024) and TanStack (2026) were compromised.
-
-  **This role cannot close it.** It runs at provision time; the poisoning happens between builds. A verify-time check would report coverage it does not have. The fix is topological — do not share a cargo cache across trust boundaries, and do not restore an untrusted cache into a privileged job. If you must, purge `~/.cargo/registry/cache` rather than trusting it, or verify cached `.crate` files against a committed `Cargo.lock` or `index.crates.io` (both independent of the local sparse index, which an attacker with cache write access also controls).
-
-  **Known boundaries of the cargo gate**, each verified by execution:
-
-  - **A `Cargo.lock` you did not generate is trusted.** `lockfile-baseline = "floor"` accepts versions an existing lockfile already pins, so a branch or PR that ships its own lockfile pinning a fresh crate will build. This is not a regression — stock cargo trusts lockfiles unconditionally and applies no age check at all — but it means **reviewing lockfile diffs in PRs is load-bearing**, exactly as the crates.io advisory recommends. `cargo update` is routed through the gate; the other lockfile-writing commands (`add`, `generate-lockfile`, `vendor`) are warned about rather than gated. An earlier version reverted them by copying `Cargo.toml`/`Cargo.lock` aside and restoring on refusal — that was removed as an unacceptable shape for a hardening role to impose on a user's source tree.
-  - **`SUPPLY_CHAIN_CARGO_WRAPPED=1` disables the wrapper** for that invocation. It exists to break the cooldown→cargo→cooldown recursion and cannot simply be removed. It is also inherited by build scripts, so a nested `cargo` call from a `build.rs` is unguarded — though a build script already has arbitrary execution by then.
-  - **Only the discovered cargo path is wrapped.** The rustup toolchain binary (`~/.rustup/toolchains/*/bin/cargo`) and `cargo-real` remain directly callable, as with every other wrapper in this role. `supply-chain-verify` reports `not deployed` when `command -v cargo` resolves somewhere unwrapped.
-
-  See [TESTS.md](TESTS.md) for details.
-- **Matrix coverage caveats.** The cross-version test matrix at `tests/matrix/` verifies the role against 12 (PHP × composer) combinations × 3 distros (Ubuntu 22.04, Ubuntu 24.04, Debian 12) — all of the role's declared platform support. Use `tests/matrix/run-docker.sh` for the full cross-distro run; `tests/matrix/run.sh` covers the same composer cells but only on the host's distro. Remaining gaps the matrix doesn't verify: other ecosystems (npm × node, pip × python — same bug class likely), composer self-update interaction, multi-user / non-root caller paths, `php composer.phar` invocation, and pam_env/systemd-unit behaviors that need a real systemd host rather than a container. See [tests/matrix/README.md](tests/matrix/README.md) → "Coverage gaps" for the full list.
-- **Composer script blocking is layered.** Composer has no host-wide config-file or env-var mechanism for disabling scripts — `COMPOSER_NO_SCRIPTS` and `"scripts-are-disabled": true` are not real composer concepts (composer ignores them). The role ships two layers: (1) `/usr/local/bin/composer` is a wrapper that injects `--no-plugins` on every invocation and `--no-scripts` wherever composer accepts it (real binary preserved at `/usr/local/bin/composer-real`); (2) `COMPOSER_SKIP_SCRIPTS=<full event enumeration>` in `/etc/profile.d/` and `/etc/environment` catches `php composer.phar` callers and `composer-real` callers in PAM-loaded shells on composer ≥ 2.8.0 (measured: silently ignored on 2.2.6 and 2.7.1, honoured on 2.8.12+). Below composer 2.2.0 `--no-scripts` is not an application-level option — only `install`, `update`, `require`, `remove` and `dump-autoload` accept it there, and injecting it anywhere else makes `composer show`/`config`/`diagnose` fail — so on those hosts the wrapper gates the injection to those subcommands and the run summary records the gap. The documented per-invocation bypass for both layers is `COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install` — clearing the env var and going around the wrapper. On composer ≥ 2.8 `composer-real install` alone is still blocked by the env-var layer, which is intentional; on 2.2-2.7 that layer is inert and going around the wrapper is by itself enough. Disable the wrapper layer entirely with `composer_path_wrapper=false` (restores the real binary at the wrap location on next apply; env-var layer remains active).
-- **Composer audit blocking is version-tiered.** The role detects the installed Composer version and renders the strictest config that version supports. `audit.block-insecure` and `audit.block-abandoned` (which actively refuse updates to packages with known advisories) require Composer ≥ 2.9 (released 2025-11). `audit.abandoned: fail` requires ≥ 2.7. Distro-shipped versions hit different tiers: Ubuntu 24.04 noble ships 2.7.1 (gets `abandoned` but not `block-*`), Ubuntu 22.04 jammy ships 2.2.6 and Debian 12 bookworm ships 2.5.5 (neither gets the `audit` block at all). When Composer isn't installed at apply time, the safe baseline is written — re-run the role after `apt install composer` (or the upstream installer) to upgrade the config to the version-appropriate tier. The baseline hardening (`secure-http`, `allow-plugins`, `preferred-install: dist`) applies on every tier and every supported platform, with one version-tiered detail: `"allow-plugins": false` is a hard fatal on composer < 2.2.15 (`array_merge(): Argument #1 must be of type array, false given`, exit 255 on every command but `--version`), which is exactly the composer Ubuntu 22.04 ships, so below 2.2.15 — and whenever the version can't be detected — the role writes the empty allowlist `{}` instead, which older composer accepts and which blocks every plugin just the same.
-- **Socket Firewall requires Node >= 20.** On older Node versions, sfw is not installed.
-- **npq requires Node >= 20.13.0, and fails OPEN below it.** npq is the reputation layer — the one that addresses slopsquatting, where an attacker pre-registers a plausible package name an agent might guess. An age gate does nothing against a squat registered months ago; reputation is what catches it. On Node < 20.13.0 npq prints `npq suppressed due to old node version` to stderr, passes the command through to the real package manager, and **exits 0** — so it is on `$PATH`, returns success, and checks nothing. Note this floor is *not* the one in npq's `package.json` (`engines.node >= 24.0.0`); the runtime gate in `lib/helpers/cliSupportHandler.js` is `>=20.13.0`, and it is identical in 3.19.6 and 3.23.3, so pinning an older npq does not rescue an older Node. The role therefore gates the install on the runtime threshold, verifies after installing that npq is not suppressed, removes the `/etc/profile.d/npq-aliases.sh` aliases when it is, and reports the gap in the end-of-run coverage summary. Combined with sfw's Node >= 20 floor, a host below Node 20 keeps the config-file hardening but has **no reputation layer at all** — see "What this does not do" about which threats that leaves open.
-- **Container image hardening requires podman, and is opt-in.** Docker has no daemon-level policy enforcement. When `podman_enabled=true`, the playbook installs podman with `policy.json` registry restrictions; disabling the Docker daemon is a **separate** gate (`podman_disable_docker=true`). Both default to `false`, so a default run neither installs podman nor touches Docker.
-
-- **`--check` (dry run) is supported, and its detection probes really run.** Ansible does not execute `command`/`shell` tasks under `--check`, so every read-only probe in this role carries `check_mode: false`. Without it the registrations came back empty, every downstream `when:` gate evaluated against nothing, and a dry run both hard-aborted at the pre-flight GNU-date probe *and* reported deployed protections (npm/pip wrappers, npq, the bun/deno/composer wrappers) as skipped — while printing a coverage summary built from the same empty values, e.g. `found Node .` with no version. A dry run that misreports coverage is worse than no dry run, since vetting a hardening role before production is exactly what `--check` is for. The probes are all `changed_when: false`, so forcing them to run changes nothing on the host. Residual caveat: `--check` still cannot show the *contents* a template would render on a host where the tool is absent, so treat a check-mode diff as a plan, not a byte-level preview.
-
-- **Do not run the role with global `--become` / `sudo ansible-playbook`.** Facts are gathered under the play's become settings, so escalating from a non-root account sets `ansible_env.HOME=/root` and every per-user config lands in root's home instead of the intended user's. The role escalates per task where root is required, so plain `ansible-playbook site.yml` still applies all system-wide hardening. Pre-flight refuses this invocation; override with `-e accept_root_home_targeting=true` if you really do mean to harden root's home.
-
-## Complementary hardening (outside this role)
-
-Some defenses against supply-chain attacks live at the application or runtime layer, not the package-manager layer. The role doesn't ship these because the safe configuration is application-specific — defaults that would block real attacks also break legitimate workflows.
-
-### PHP runtime: php.ini `disable_functions`
-
-Composer's `autoload.files` mechanism executes helper code on every PHP request that includes `vendor/autoload.php`. This path is **independent of install scripts** and **unaffected by `--no-scripts`, `COMPOSER_SKIP_SCRIPTS`, or `audit.block-insecure`**. The Laravel-Lang compromise (May 2026, 700+ retagged versions) used this exact path: the malicious `src/helpers.php` ran on every request and called `exec()` to fetch a second-stage payload from a C2 server.
-
-The runtime mitigation is `disable_functions` in `php.ini`:
-
-```
-disable_functions = system,passthru,shell_exec,pcntl_exec
-```
-
-This neuters the most common subprocess-execution paths.
-
-**This role doesn't ship this** because there is no host-wide safe default. Disabling `proc_open` breaks Composer itself (Composer uses `proc_open` to invoke git, gpg, and gh). Disabling `exec` breaks many composer plugins and Symfony Process. The "safe" subset is application-specific: a host running a Symfony app may need `shell_exec`; a host running only API workers usually doesn't. This decision belongs in the user's php.ini deployment, not a default-applied Ansible role.
-
-**Recommendation:** if you control the PHP applications on the host, add a conservative `disable_functions` set to your own php.ini management. Start with the four functions above, run your normal application workflows, and expand the list only after confirming each addition is actually unused.
-
-## Sources
-
-See [SOURCES.md](SOURCES.md) for the full list of research, references, and credits.
+[MIT](LICENSE)
