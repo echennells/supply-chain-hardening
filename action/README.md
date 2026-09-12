@@ -586,11 +586,11 @@ complete at that tag, moves `v2` onto it, and opens the GitHub Release.
 Pre-release tags (`v2.1.0-rc.1`) get a Release but deliberately do **not** move
 `v2`.
 
-One thing the workflow cannot do for you: the
-`action-consumed-as-a-published-ref` job in `action-smoke.yml` is pinned to a
-branch (`@feat/ci-hardening`) because `uses:` cannot interpolate `${{ }}`. Its
-whole purpose is to exercise the ref real consumers write, so **retarget it to
-`@v2` once the tag exists** — until then it is testing a branch nobody uses.
+One thing the workflow cannot do for you: the `action-external-reference` job
+in `action-smoke.yml` is hardcoded to `@v2` because `uses:` cannot interpolate
+`${{ }}`. Its whole purpose is to exercise the ref real consumers write, so
+**when the major bumps, retarget it to the new floating tag** — otherwise it
+keeps proving the previous major still works while nothing checks the new one.
 
 ## License
 
