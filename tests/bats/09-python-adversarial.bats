@@ -74,6 +74,15 @@ setup() {
   sdist=$(find_fixture_sdist python-setup-exfil)
   [ -n "$sdist" ] || skip "exfil sdist fixture not found"
 
+  # --break-system-packages arrived in pip 23.0 (with PEP 668). Older pip (e.g.
+  # Ubuntu 22.04 ships ~22.0) lacks the flag, so the command below errors on the
+  # unknown option for a reason unrelated to the bypass, red-failing this test.
+  # Probe the capability (not a version) and skip if absent — the bypass this
+  # test documents simply can't be exercised without the flag. The `|| skip`
+  # keeps it errexit-safe under bats.
+  python3 -m pip install --help 2>/dev/null | grep -q -- '--break-system-packages' \
+    || skip "pip lacks --break-system-packages (pre-23.0 / no PEP 668); cannot exercise this documented bypass here"
+
   rm -f /tmp/marker-python-setup-exfil
   run python3 -m pip install --no-binary :all: --break-system-packages "$sdist"
 
