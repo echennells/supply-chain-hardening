@@ -918,21 +918,24 @@ jobs:
           echo "✓ tool-versions output structure validated; npm=$npm_v"
 
   action-external-reference:
-    name: 'Action: works when consumed by external ref (uses owner/repo/path@branch)'
+    name: 'Action: works when consumed by external ref (uses owner/repo/path@v2)'
     runs-on: ubuntu-24.04
     steps:
       # Deliberately NO `actions/checkout` of this repo — proves the action
       # resolves and runs purely via GitHub Actions runtime, which is what a
       # consumer in a separate repo experiences.
       #
-      # NOTE: `uses:` cannot interpolate ${{ }}, so this ref is hardcoded. Point
-      # it at `main` — the one branch guaranteed to exist and carry the action —
-      # so the fixture resolves on every event instead of tracking an ephemeral
-      # feature branch (it previously pointed at feat/ci-hardening, which was
-      # deleted during branch cleanup, breaking this job). This validates that
-      # external-ref CONSUMPTION works; per-branch code is covered by every
+      # NOTE: `uses:` cannot interpolate ${{ }}, so this ref is hardcoded. It is
+      # pinned to `@v2` — the floating major tag that README.md and
+      # action/README.md tell every consumer to write — so this job fails the
+      # moment that ref stops resolving or stops working, which is the failure
+      # release.yml exists to prevent (the docs said @v2 for months while no
+      # such tag existed). It previously pointed at `main`, which proved
+      # consumption worked but never exercised the ref anyone uses. Retarget
+      # when the major bumps (v3). This validates external-ref CONSUMPTION of
+      # the published release; per-branch code is covered by every
       # local-checkout job above.
-      - uses: echennells/supply-chain-hardening/action@main
+      - uses: echennells/supply-chain-hardening/action@v2
         id: harden
 
       - name: Outputs are populated (same as local-checkout test)
@@ -950,6 +953,15 @@ jobs:
         run: |
           grep -q "ignore-scripts=true" "$HOME/.npmrc"
           grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
+
+      # The second ref consumers write. `fail-on: config` because this is a
+      # stock ubuntu-24.04 runner (npm 10.9.8, no min-release-age) — the npm
+      # age-gate GAP is a toolchain limit, not a hardening defect, and the
+      # inverse job below asserts that GAP is reported. What this step proves
+      # is that verify@v2 resolves, runs, and reads harden@v2's output.
+      - uses: echennells/supply-chain-hardening/action/verify@v2
+        with:
+          fail-on: config
 
   action-npm-age-gate-env-key:
     name: 'Action: npm age-gate env key is the one npm reads (regression catcher)'
