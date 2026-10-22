@@ -197,6 +197,73 @@ exec_sub() {
   run_real "${out[@]}"
 }
 
+# --- occupy cargo-cooldown's top precedence level -------------------------
+#
+# cargo-cooldown resolves policy in this order:
+#   1. environment  (COOLDOWN_*, CARGO_REGISTRY_*_MIN_PUBLISH_AGE)
+#   2. member cooldown.toml
+#   3. workspace cooldown.toml
+#   4. $CARGO_HOME/cooldown.toml   <-- the only level this role writes
+#
+# so a caller could replace the entire policy with one exported variable, and
+# nothing said so. MEASURED (cargo-cooldown 0.3.5, deployed 48h/deny window,
+# dependency published 7 minutes before the test): `cargo build` refuses with
+#   `incompatible-publish-age = "deny"` blocked fresh versions
+# while EACH of COOLDOWN_MINUTES=0, COOLDOWN_ENFORCEMENT=off,
+# COOLDOWN_ENFORCEMENT=cargo_compatible, COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=allow
+# (and =fallback), COOLDOWN_NOW=2050-01-01T00:00:00Z,
+# COOLDOWN_SKIP_REGISTRIES=crates-io, CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE=0 and
+# CARGO_REGISTRY_MIN_PUBLISH_AGE=0 builds it instead, exit 0 -- while
+# supply-chain-verify still reported "window 48 hours" and "deny". Same class as
+# ECH-197 on the npm side: caller input routing around the control the wrapper
+# exists to apply.
+#
+# CLEARING level 1 is not sufficient. It hands the decision back to a file whose
+# LOCATION the caller still controls, and CARGO_HOME is an eleventh bypass
+# (MEASURED: relocate it to a directory with no cooldown.toml and the gate is
+# gone). SETTING level 1 makes this wrapper's policy win against every level
+# below it. The wrapper is rendered from the same variables as
+# templates/cargo-cooldown.toml.j2, so writer and wrapper cannot drift.
+#
+# This therefore also overrides a repo-local or workspace cooldown.toml, which
+# is a deliberate strengthening: a committed cooldown.toml used to be a
+# hardening bypass and no longer is (see docs/limitations.md). The cost is that
+# a repo legitimately shipping a WIDER window is narrowed to this host's
+# release_age_hours. Per-crate exceptions are unaffected -- `[[allow.exact]]`
+# lives in the file, which pinning does not touch (MEASURED).
+#
+# Presence is tested against one captured `env` rather than ${!var} indirection
+# or eval. This script is #!/bin/bash so indirection would work; the reason is
+# hygiene, not portability -- a security-relevant function in a wrapper that
+# runs on every `cargo build` should not do dynamic name resolution or dynamic
+# execution when a static list reads the same.
+sanitize_cooldown_env() {
+  _sc_env=$(env)
+  _sc_had=''
+  for _sc_v in COOLDOWN_MINUTES COOLDOWN_ENFORCEMENT COOLDOWN_INCOMPATIBLE_PUBLISH_AGE \
+               COOLDOWN_FALLBACK_ACCEPT COOLDOWN_CARGO_COMPATIBLE_ACCEPT \
+               COOLDOWN_LOCKFILE_BASELINE COOLDOWN_NOW COOLDOWN_SKIP_REGISTRIES \
+               CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE CARGO_REGISTRY_MIN_PUBLISH_AGE; do
+    if printf '%s\n' "$_sc_env" | grep -q "^$_sc_v="; then
+      _sc_had="$_sc_had $_sc_v"
+    fi
+    unset "$_sc_v"
+  done
+  if [ -n "$_sc_had" ]; then
+    echo "[supply-chain-hardening] note: overriding caller publish-age setting(s):$_sc_had - this host's {{ release_age_hours }}h/{{ cargo_cooldown_violation_action }} policy applies instead. For a per-crate exception use cargo_cooldown_allow_exact, which writes an [[allow.exact]] rule this override does not touch." >&2
+  fi
+  export COOLDOWN_MINUTES={{ release_age_hours | int * 60 }}
+  export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE={{ cargo_cooldown_violation_action }}
+  export COOLDOWN_LOCKFILE_BASELINE=floor
+  export COOLDOWN_ENFORCEMENT=strict
+  # Diagnostic only, deliberately not a refusal: relocating CARGO_HOME for cache
+  # keying is a supported CI shape, and with level 1 pinned above the gate holds
+  # there anyway (MEASURED).
+  _sc_ch="${CARGO_HOME:-$HOME/.cargo}"
+  [ -f "$_sc_ch/cooldown.toml" ] || \
+    echo "[supply-chain-hardening] note: no cooldown.toml at $_sc_ch - the window above is in force from the environment; allow.exact rules from that file are not." >&2
+}
+
 # --- classify the subcommand ---
 #
 # RESOLVING  compiles or resolves, and accepts --locked
@@ -257,6 +324,7 @@ case "$KIND" in
     # which is why the age gate matters most here.
 {% if cargo_cooldown_enforce | bool %}
     if command -v cargo-cooldown >/dev/null 2>&1; then
+      sanitize_cooldown_env
       case "$subcmd" in
         update)
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
@@ -283,6 +351,7 @@ case "$KIND" in
   RESOLVING)
 {% if cargo_cooldown_enforce | bool %}
     if command -v cargo-cooldown >/dev/null 2>&1; then
+      sanitize_cooldown_env
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;

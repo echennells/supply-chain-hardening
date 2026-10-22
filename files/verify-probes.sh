@@ -1185,8 +1185,30 @@ if have uv; then
         row GAP PARSED "uv age gate" \
           "uv reports exclude-newer=$uvcut, in the FUTURE (now $uvnow) - the gate admits everything"
       else
-        row OK PARSED "uv age gate" \
-          "uv reports exclude-newer cutoff $uvcut - anything published after it is refused"
+        # STALENESS. exclude-newer is an ABSOLUTE instant frozen at apply time
+        # (ECH-193), so on a host nobody re-applies, a "48h cooldown" silently
+        # becomes a months-deep FREEZE. External review 2026-10-22 reported real
+        # hosts sitting at 2026-08-29 and 2026-08-25 -- eight weeks back -- and an
+        # emergency certifi fix that needed a manual override because of it. The
+        # row said OK throughout. That is design-principles.md Axis 4 again:
+        # absent signal read as a passing signal. So age it.
+        #
+        # Only uv and pip freeze: npm, pnpm, bun, deno and cargo all take a
+        # RELATIVE window and refresh themselves. The threshold is 7 days rather
+        # than release_age_hours because this file is shared by both surfaces and
+        # does not know that variable -- 7 days is already 3.5x the default
+        # window, so anything past it is unambiguously drift, not tuning.
+        _scn=$(date -u +%s 2>/dev/null || echo 0)
+        _scc=$(date -u -d "$uvcut" +%s 2>/dev/null || echo 0)
+        _scd=0
+        [ "$_scc" -gt 0 ] && [ "$_scn" -gt 0 ] && _scd=$(( (_scn - _scc) / 86400 ))
+        if [ "$_scd" -gt 7 ]; then
+          row WEAK PARSED "uv age gate" \
+            "uv reports exclude-newer cutoff $uvcut, which is $_scd days old - that is a FREEZE, not a rolling cooldown: the instant is fixed at apply time, so every release since then is refused and a security fix cannot be installed without an override. Re-apply the role to advance it"
+        else
+          row OK PARSED "uv age gate" \
+            "uv reports exclude-newer cutoff $uvcut ($_scd day(s) old) - anything published after it is refused"
+        fi
       fi
 
 # --- uv dependency-confusion gate  [PARSED] ---
@@ -1318,8 +1340,22 @@ if have python3 && python3 -m pip --version >/dev/null 2>&1; then
         row WEAK PARSED "pip native age gate" \
           "pip $pipver reports a RELATIVE uploaded-prior-to='$pipcut' - the P<n>D form needs pip 26.1+ and is a hard error on 26.0; the role deploys an absolute instant for that reason" ;;
       *Z)
-        row OK PARSED "pip native age gate" \
-          "pip $pipver reports uploaded-prior-to=$pipcut - anything published after it is refused, pinned or not (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)" ;;
+        # Same freeze as uv above, and for the same reason: pip's
+        # uploaded-prior-to takes an absolute instant. The relative P<n>D form
+        # would self-refresh but is pip 26.1+ and a HARD rc=2 ERROR on 26.0
+        # (MEASURED), and /etc/pip.conf is read by EVERY interpreter on the
+        # host -- so emitting it would brick any 26.0 interpreter present.
+        _spn=$(date -u +%s 2>/dev/null || echo 0)
+        _spc=$(date -u -d "$pipcut" +%s 2>/dev/null || echo 0)
+        _spd=0
+        [ "$_spc" -gt 0 ] && [ "$_spn" -gt 0 ] && _spd=$(( (_spn - _spc) / 86400 ))
+        if [ "$_spd" -gt 7 ]; then
+          row WEAK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to=$pipcut, which is $_spd days old - a FREEZE, not a rolling cooldown, so a security fix published since then cannot be installed without --uploaded-prior-to on the command line. Re-apply the role to advance it"
+        else
+          row OK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to=$pipcut ($_spd day(s) old) - anything published after it is refused, pinned or not (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)"
+        fi ;;
       *)
         row WEAK PARSED "pip native age gate" \
           "pip $pipver reports uploaded-prior-to='$pipcut' with no trailing Z - pip reads a naive value in the HOST's LOCAL time, so the real cutoff moves with \$TZ" ;;
@@ -2098,7 +2134,7 @@ else
         "cargo-cooldown is installed ($cool) but CANNOT EXECUTE - usually a prebuilt binary needing newer glibc than this image ships. The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated"
     elif [ -n "$coverride" ]; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
-        "routing verified, but $coverride sits ABOVE $ch/cooldown.toml in cargo-cooldown's precedence chain (env > member > workspace > CARGO_HOME, per harden.sh's own comment), so our ${cage:-<unset>} window is not the one in force. harden.sh calls a committed cooldown.toml in an untrusted repo a hardening bypass"
+        "routing verified; $coverride sits above $ch/cooldown.toml in cargo-cooldown's file precedence (member > workspace > CARGO_HOME), but the wrapper now PINS the environment layer, which outranks all three — so this host's ${cage:-<unset>} window is the one in force and a committed cooldown.toml is no longer the hardening bypass it used to be. WEAK not OK because the repo file still supplies [[allow.exact]] rules the pin does not touch, and because a caller reaching cargo WITHOUT the wrapper (see the cargo PATH wrapper row) gets the file's window instead"
     elif [ ! -f "$ch/cooldown.toml" ]; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper routes through a working cargo-cooldown, but there is no cooldown.toml at the CARGO_HOME THIS step resolves ($ch). harden.sh wrote it to whatever CARGO_HOME was set in its own step; a later toolchain or cache step moved it"

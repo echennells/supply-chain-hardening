@@ -51,10 +51,21 @@
   # ignore it entirely, so a readback alone is a false-OK trap.
   ansible.builtin.shell:
     cmd: |
-      set -o pipefail
-      python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to' \
-        && python3 -m pip --version 2>/dev/null | awk '{print $2}' \
-        || { python3 -m pip --version 2>/dev/null | awk '{print "UNSUPPORTED:"$2}'; }
+      # NO PIPELINE. An external reviewer flagged that
+      #   pip install --help | grep -q -- '--uploaded-prior-to'
+      # under `set -o pipefail` could report a SUPPORTED pip as UNSUPPORTED:
+      # grep -q exits on first match, pip takes SIGPIPE, pipefail surfaces 141.
+      # MEASURED on pip 26.2 it does NOT reproduce — the help text fits the 64K
+      # pipe buffer, so pip writes and exits 0 before grep closes (PIPESTATUS
+      # 0 0). But the hazard is real if that output ever grows, the cost of
+      # removing it is nil, and the failure direction is a false UNSUPPORTED on
+      # exactly the hosts where the gate works. So: capture, then match.
+      ver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
+      help=$(python3 -m pip install --help 2>/dev/null)
+      case "$help" in
+        *--uploaded-prior-to*) printf '%s\n' "$ver" ;;
+        *)                     printf 'UNSUPPORTED:%s\n' "$ver" ;;
+      esac
     executable: /bin/bash
   register: pip_age_gate_support
   changed_when: false

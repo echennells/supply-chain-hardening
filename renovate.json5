@@ -20,6 +20,25 @@
   ],
   timezone: 'Etc/UTC',
   schedule: ['before 6am on monday'],
+
+  // THIS REPO'S OWN COOLDOWN. Flagged by external review, and it was a plain
+  // dogfooding failure: the whole project exists to stop a package manager
+  // resolving a release published minutes ago, and the first cut of this config
+  // let the repo's own bot do exactly that for its enforcement tooling. That is
+  // the window the October 2026 litellm compromise lived in (malicious wheels
+  // live ~1h43m) and the one Shai-Hulud used.
+  //
+  // minimumReleaseAge is deliberately LONGER than the role's own
+  // release_age_hours default of 48h: these are the repo's own tool pins, there
+  // is no urgency to any of them, and the conservative direction is free here
+  // in a way it is not for a consumer's build.
+  //
+  // internalChecksFilter: 'strict' is what makes it bite. Without it Renovate
+  // still opens the PR and merely marks the age check pending, so a reviewer
+  // can merge inside the window; 'strict' withholds the PR until the age is
+  // satisfied.
+  minimumReleaseAge: '3 days',
+  internalChecksFilter: 'strict',
   prConcurrentLimit: 6,
   labels: ['dependencies'],
 

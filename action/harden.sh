@@ -1595,6 +1595,10 @@ EOF
   # cargo-cooldown's precedence chain (env > member > workspace > CARGO_HOME)
   # and the only one that applies to every project without per-repo opt-in.
   # Corollary: a repo shipping its own cooldown.toml overrides this. That is
+  # cargo-cooldown's design. NOTE: the ROLE's wrapper now pins the environment
+  # layer, which outranks every file level, so a committed cooldown.toml is no
+  # longer a bypass there. THIS surface does not pin yet — see the TODO at the
+  # cargo wrapper heredoc below — so the warning still holds for the action.
   # cargo-cooldown's design — treat a committed cooldown.toml in an untrusted
   # repo as a hardening bypass.
   #
