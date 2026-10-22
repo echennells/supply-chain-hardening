@@ -12,6 +12,66 @@
 
 
 # ======================================================================
+# HOST TOOL DISCOVERY  (ECH-189, generalised)
+# ======================================================================
+#
+# `have <tool>` resolves against the VERIFIER's PATH, not the host's.
+# tasks/verify.yml invokes the verifier through `ansible.builtin.command`, a
+# NON-LOGIN shell whose PATH is only
+#     /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# so every tool whose official installer targets a per-user directory is
+# invisible to the audit, and the N/A branch then reports "<tool> not
+# installed" about a host that has it installed AND hardened.
+#
+# MEASURED 2026-10-22 on an applied Ubuntu 24.04 host. uv exists only at
+# ~/.local/bin/uv, which ~/.profile:25-26 adds for LOGIN shells only. The
+# apply's own final audit emitted a single
+#     N/A  -  uv  "uv not installed"
+# while a login shell on the same host emitted five real uv verdicts, the age
+# gate among them. The protections were live the whole time: the pip wrapper
+# resolves uv by its baked-in absolute path (ECH-191) and worked correctly in
+# that same non-login shell. So this is the AUDITOR going blind, not the host
+# regressing — design-principles.md Axis 4, "absent signal read as a passing
+# signal". A green that comes from blindness is the failure this role exists
+# to prevent, one level up.
+#
+# ECH-189 fixed precisely this for cargo. A survey on 2026-10-22 found cargo
+# was the ONLY tool that had it: there was no discovery for uv, bun, bunx,
+# deno, go, pnpm or composer, every one of which has a documented default
+# install directory outside the non-login PATH. This block is that fix for the
+# whole class, resolved ONCE here so every probe below inherits it.
+#
+# DELIBERATELY NOT A LOGIN SHELL. Running the audit under `bash -lc` would
+# source ~/.profile and ~/.bashrc, making a security verification depend on
+# user-editable files and vary between hosts for reasons unrelated to
+# hardening. Discovery stays hermetic: a fixed list of documented locations,
+# each honouring its tool's own override variable.
+discover() { # discover <tool> <dir>... -> prepend the first dir that holds it
+  _d_tool="$1"; shift
+  have "$_d_tool" && return 0
+  for _d_dir in "$@"; do
+    [ -n "$_d_dir" ] || continue
+    if [ -x "$_d_dir/$_d_tool" ]; then
+      case ":$PATH:" in
+        *":$_d_dir:"*) ;;
+        *) PATH="$_d_dir:$PATH"; export PATH ;;
+      esac
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Each list is the tool's own override var first, then its documented default.
+discover uv       "${XDG_BIN_HOME:-}" "$HOME/.local/bin" "$HOME/.cargo/bin" || true
+discover bun      "${BUN_INSTALL:+$BUN_INSTALL/bin}" "$HOME/.bun/bin"       || true
+discover bunx     "${BUN_INSTALL:+$BUN_INSTALL/bin}" "$HOME/.bun/bin"       || true
+discover deno     "${DENO_INSTALL:+$DENO_INSTALL/bin}" "$HOME/.deno/bin"    || true
+discover go       /usr/local/go/bin "$HOME/go/bin"                          || true
+discover pnpm     "${PNPM_HOME:-}" "$HOME/.local/share/pnpm"                || true
+discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bin" || true
+
+# ======================================================================
 # bun
 # ======================================================================
 
@@ -992,10 +1052,39 @@ if have uv; then
       # protection named "uv config in effect" while no config was in effect.
       # That is the Axis-4 "absent signal read as a passing signal" pattern.
       uvnb=$(printf '%s\n' "$uvdump" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
-      uvwin=$(printf '%s\n' "$uvdump" | grep -A6 'exclude_newer:' | head -7)
+      # uv 0.12 turned exclude_newer.global into an ENUM: Absolute(<ts>) or
+      # Relative(ExcludeNewerSpan(<span>)). MEASURED on the real release
+      # binaries: 0.10.x resolved a relative span into a concrete `timestamp:`
+      # field inside this dump, and 0.12+ does NOT — so a LIVE relative gate
+      # parses as absent unless the span is matched too, and the row below
+      # under-reported it as GAP. The window is 11 lines, not 7, because
+      # ExcludeNewerSpan( sits deeper in the pretty-printed enum than the
+      # absolute timestamp did.
+      uvwin=$(printf '%s\n' "$uvdump" | grep -A10 'exclude_newer:' | head -11)
       case "$uvwin" in
         *Some*) uvcut=$(printf '%s\n' "$uvwin" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]*Z' | head -1) ;;
         *)      uvcut="" ;;
+      esac
+      # On 0.10.x a relative span yields BOTH a timestamp and a span, so uvcut
+      # still wins there and the absolute path stays correct.
+      case "$uvwin" in
+        *ExcludeNewerSpan\(*)
+          # uv's pretty-printer puts the span VALUE on the line AFTER the
+          # `ExcludeNewerSpan(` opener:
+          #     ExcludeNewerSpan(
+          #         48h,
+          #     ),
+          # so a same-line sed returns the empty string and the span row below
+          # becomes unreachable (MEASURED: the first cut of this fix did exactly
+          # that and still reported GAP on a live relative gate). Take the next
+          # line, with a same-line fallback in case the shape ever tightens.
+          uvspan=$(printf '%s\n' "$uvwin" \
+                   | sed -n 's/.*ExcludeNewerSpan([[:space:]]*\([^[:space:],)][^,)]*\).*/\1/p' | head -1)
+          if [ -z "$uvspan" ]; then
+            uvspan=$(printf '%s\n' "$uvwin" \
+                     | sed -n '/ExcludeNewerSpan(/{n;s/^[[:space:]]*//;s/[[:space:],)]*$//;p;}' | head -1)
+          fi ;;
+        *) uvspan="" ;;
       esac
       uvnow=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -1059,6 +1148,13 @@ if have uv; then
       elif [ "$uvmode" = badcfg ]; then
         row GAP FUNCTIONAL "uv age gate" \
           "uv rejects its own config, so exclude-newer is not in effect"
+      elif [ -z "$uvcut" ] && [ -n "$uvspan" ]; then
+        # WEAK, deliberately not OK. The verifier cannot resolve a span to an
+        # instant, so it cannot tell a live 48h gate from a zero-width
+        # `exclude-newer = "0 seconds"` one — MEASURED, both render identically
+        # here. Reporting OK on this would be a false OK on a disabled gate.
+        row WEAK PARSED "uv age gate" \
+          "uv reports a RELATIVE exclude-newer span of $uvspan - a gate is set, but the verifier cannot resolve a span to an instant and so cannot confirm the window (a '0 seconds' span is indistinguishable here). The role deploys an absolute RFC 3339 instant for this reason"
       elif [ -z "$uvcut" ]; then
         row GAP PARSED "uv age gate" \
           "uv reports no exclude-newer - a release published minutes ago is installable"
@@ -1158,6 +1254,56 @@ if have uv; then
   fi
 else
   row "N/A" - "uv" "uv not installed"
+fi
+
+# ======================================================================
+# pip (native age gate)
+# ======================================================================
+
+# --- pip native age gate  [PARSED] ---
+# A DIFFERENT AXIS from the five uv rows above, and deliberately NOT nested
+# inside any `have pip || have pip3` gate: the whole point of this row is the
+# `python3 -m pip` caller, which invokes the MODULE directly and so bypasses
+# both /usr/local/bin/pip and uv's exclude-newer. That caller exists on hosts
+# with no pip BINARY at all. See docs/limitations.md.
+#
+# The support discriminator is the HELP TEXT and it runs BEFORE any readback,
+# because `pip config list` echoes the key back on EVERY pip version -- including
+# the ten pre-26 pips measured to ignore it entirely. A readback alone is a
+# false-OK trap of exactly the shape npm_implements() exists to prevent.
+#
+# There is deliberately NO behavioural probe here. pip's age-gate refusal text
+# ("Could not find a version that satisfies the requirement") is BYTE-IDENTICAL
+# to a dead index, an empty mirror and PIP_NO_INDEX, so grepping it would report
+# OK on a host that simply cannot reach an index. OK PARSED is the honest ceiling.
+if have python3 && python3 -m pip --version >/dev/null 2>&1; then
+  pipver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
+  if ! python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
+    row GAP PARSED "pip native age gate" \
+      "pip $pipver does NOT implement --uploaded-prior-to (added in pip 26.0) - the key is deployed but inert, so \`python3 -m pip install\` is not age-gated on this interpreter"
+  else
+    # pip prints `config list` in override-order groups, so the LAST match is
+    # the effective value (env beats file). Strip optional surrounding quotes.
+    pipcut=$(python3 -m pip config list 2>/dev/null \
+      | sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" \
+      | tail -1)
+    case "$pipcut" in
+      '')
+        row GAP PARSED "pip native age gate" \
+          "pip $pipver implements --uploaded-prior-to but reports no value - a release published minutes ago is installable via \`python3 -m pip\`" ;;
+      P*D|P*)
+        row WEAK PARSED "pip native age gate" \
+          "pip $pipver reports a RELATIVE uploaded-prior-to='$pipcut' - the P<n>D form needs pip 26.1+ and is a hard error on 26.0; the role deploys an absolute instant for that reason" ;;
+      *Z)
+        row OK PARSED "pip native age gate" \
+          "pip $pipver reports uploaded-prior-to=$pipcut - anything published after it is refused, pinned or not (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)" ;;
+      *)
+        row WEAK PARSED "pip native age gate" \
+          "pip $pipver reports uploaded-prior-to='$pipcut' with no trailing Z - pip reads a naive value in the HOST's LOCAL time, so the real cutoff moves with \$TZ" ;;
+    esac
+  fi
+else
+  row "N/A" - "pip native age gate" "no python3 with an importable pip module"
 fi
 
 # ======================================================================

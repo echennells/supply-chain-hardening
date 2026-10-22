@@ -84,7 +84,20 @@ fi
 # untouched so `bunx --version` / `--help` behave normally.
 case "${1:-}" in
   --version|-v|--help|-h|--revision)
-    exec -a bunx "$REAL_BUN" "$@"
+    # ONLY when the flag is the WHOLE command line. MEASURED on bun 1.4.3:
+    # with a package name after it, bunx ignores the flag's metadata meaning
+    # and fetch-and-executes the package anyway -- `bunx --version cowsay hi`
+    # downloaded cowsay from npm and ran it, rc 0, with NO cache involved. So
+    # this arm was a complete bypass of the --no-install injection below,
+    # independent of cache state, reachable by prepending one flag.
+    #
+    # `$# -eq 1` is the shape to use rather than dropping the arm or injecting
+    # --no-install into it: tests/ci/04-wrappers.bats:142 runs `bunx --version`
+    # and asserts the output carries no --no-install, and that stays green
+    # here. Every other argv shape falls through to the hardened path.
+    if [ "$#" -eq 1 ]; then
+      exec -a bunx "$REAL_BUN" "$@"
+    fi
     ;;
 esac
 

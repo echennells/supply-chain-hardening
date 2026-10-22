@@ -29,13 +29,15 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | **48h release age gate** | x | x | x | x | x | x | * | | | | | | |
 | **Install script blocking** | x | x | x | x | x | x | | | x | | | | x |
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
-| **Socket Firewall** | x | | | | | x | x | | | | | | |
+| **Socket Firewall** | x | | | | | † | x | | | | | | |
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
 | **Hash/integrity verification** | x | | | | | x | | x | | | x | | x |
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
 | **Lockfile enforcement** | | | | | | | x | x | | x | | | |
 
 `*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
+
+`†` = **not implemented for Python.** Socket Firewall is wired only into the npm/npx and cargo PATH wrappers. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
 
 Each protection is delivered in up to three overlapping layers — system-wide env vars, on-disk config files, `/usr/local/bin` PATH wrappers — so one covers another's gaps. What each layer reaches, and what it doesn't, is in [docs/how-it-works.md](docs/how-it-works.md).
 

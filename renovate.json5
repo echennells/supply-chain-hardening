@@ -1,0 +1,215 @@
+// Renovate configuration — supply-chain-hardening
+//
+// WHY RENOVATE AND NOT DEPENDABOT
+// The ten tool pins live as Ansible variables in defaults/main.yml, which is
+// not a manifest any native package manager parses. Updating them requires a
+// custom regex manager. Dependabot has none: its config schema declares
+// `additionalProperties: false` on each `updates` entry and the allowed key
+// set is fixed (allow, assignees, commit-message, cooldown, directories,
+// directory, exclude-paths, groups, ignore, insecure-external-code-execution,
+// labels, milestone, multi-ecosystem-group, name, open-pull-requests-limit,
+// package-ecosystem, patterns, pull-request-branch-name, rebase-strategy,
+// registries, schedule, target-branch, vendor, versioning-strategy) — the
+// strings "regex", "customManager", "matchStrings" and "datasource" do not
+// occur anywhere in the schema. So Dependabot cannot see these pins at all.
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    ':dependencyDashboard',
+  ],
+  timezone: 'Etc/UTC',
+  schedule: ['before 6am on monday'],
+  prConcurrentLimit: 6,
+  labels: ['dependencies'],
+
+  // tests/fixtures/ holds DELIBERATELY MALICIOUS manifests (postinstall
+  // credential harvesters, build.rs payloads) that the bats suite asserts
+  // against. Renovate must never rewrite them: a bumped fixture version is a
+  // silently invalidated security test.
+  ignorePaths: [
+    'tests/fixtures/**',
+  ],
+
+  customManagers: [
+    // ---------------------------------------------------------- GitHub release
+    {
+      customType: 'regex',
+      description: 'cosign — pinned GitHub release tag (see cosign packageRule: checksums are NOT auto-updated)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^cosign_version: "(?<currentValue>v[0-9][^"]*)"'],
+      datasourceTemplate: 'github-releases',
+      depNameTemplate: 'sigstore/cosign',
+      versioningTemplate: 'semver',
+    },
+
+    // ------------------------------------------------------------- Go modules
+    {
+      customType: 'regex',
+      description: 'govulncheck — installed as golang.org/x/vuln/cmd/govulncheck (tasks/go.yml:75). x/vuln is still v1, so no /vN path hazard.',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^govulncheck_version: "(?<currentValue>v[0-9][^"]*)"'],
+      datasourceTemplate: 'go',
+      depNameTemplate: 'golang.org/x/vuln',
+    },
+    {
+      customType: 'regex',
+      // HAZARD — MODULE PATH, NOT JUST VERSION.
+      // tasks/github.yml:86 installs
+      //   github.com/suzuki-shunsuke/pinact/cmd/pinact@{{ pinact_version }}
+      // i.e. the UNSUFFIXED (v1) module path. Go requires the major in the
+      // path from v2 on, so a version-only bump is a hard 404 on the module
+      // proxy and the install degrades silently.
+      //   GET .../pinact/@v/v1.6.0.info   -> 200
+      //   GET .../pinact/@v/v2.2.1.info   -> 404
+      //   GET .../pinact/@v/v5.0.0.info   -> 404
+      // Using datasource `go` against the UNSUFFIXED path is the safe choice:
+      // that path's version list tops out at v1.6.0 (already pinned), so
+      // Renovate is structurally incapable of proposing a version that 404s.
+      // The cost is that major upgrades are invisible here — upstream latest is
+      // v5.0.0. Bumping a major is a TWO-FILE human change: edit the module
+      // path in tasks/github.yml:86 to .../pinact/v5/cmd/pinact AND the pin
+      // below, then update depNameTemplate here to match.
+      // Do NOT switch this to github-releases/github-tags: that would happily
+      // write "v5.0.0" into a v1 module path.
+      description: 'pinact — tracked on the /v5 module path; Go semantic import versioning puts the major IN the path, so a v6 needs tasks/github.yml edited in the same commit',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^pinact_version: "(?<currentValue>v[0-9][^"]*)"'],
+      datasourceTemplate: 'go',
+      depNameTemplate: 'github.com/suzuki-shunsuke/pinact/v5',
+    },
+
+    // ------------------------------------------------------------ npm (global)
+    {
+      customType: 'regex',
+      description: 'npq — npm install -g --ignore-scripts (tasks/npq.yml:109)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^npq_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'npm',
+      depNameTemplate: 'npq',
+    },
+    {
+      customType: 'regex',
+      description: 'lockfile-lint — npm install -g --ignore-scripts (tasks/npm.yml:152)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^lockfile_lint_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'npm',
+      depNameTemplate: 'lockfile-lint',
+    },
+    {
+      customType: 'regex',
+      // The sfw npm package is a shim that downloads a firewall binary at
+      // RUNTIME. This pin covers the shim only; the binary it fetches is
+      // outside anything Renovate can see.
+      description: 'sfw (socket-firewall) — npm shim only; the runtime-downloaded binary is unpinned and unmanaged',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^sfw_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'npm',
+      depNameTemplate: 'sfw',
+    },
+
+    // ------------------------------------------------------------------- PyPI
+    {
+      customType: 'regex',
+      description: 'zizmor — uv tool install zizmor==<v> (tasks/github.yml:35)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^zizmor_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'pypi',
+      depNameTemplate: 'zizmor',
+    },
+    {
+      customType: 'regex',
+      description: 'uv-secure — uv tool install (tasks/uv.yml:231)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^uv_secure_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'pypi',
+      depNameTemplate: 'uv-secure',
+    },
+    {
+      customType: 'regex',
+      description: 'pip-audit — uv tool install (tasks/uv.yml:232)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^pip_audit_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'pypi',
+      depNameTemplate: 'pip-audit',
+    },
+
+    // -------------------------------------------------------------- crates.io
+    {
+      customType: 'regex',
+      description: 'cargo-cooldown — the publish-age gate backend, built with cargo install --locked (tasks/cargo.yml:207)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^cargo_cooldown_version: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'crate',
+      depNameTemplate: 'cargo-cooldown',
+    },
+    {
+      customType: 'regex',
+      // cargo_audit_versions is a NESTED map; these two match the indented
+      // child keys, not a top-level `<tool>_version` line.
+      description: 'cargo-audit — nested under cargo_audit_versions (opt-in, cargo_audit_tools: false)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^  cargo-audit: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'crate',
+      depNameTemplate: 'cargo-audit',
+    },
+    {
+      customType: 'regex',
+      description: 'cargo-vet — nested under cargo_audit_versions (opt-in, cargo_audit_tools: false)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^  cargo-vet: "(?<currentValue>[0-9][^"]*)"'],
+      datasourceTemplate: 'crate',
+      depNameTemplate: 'cargo-vet',
+    },
+  ],
+
+  packageRules: [
+    {
+      // HAZARD — COSIGN DIGESTS ARE NOT DERIVABLE BY RENOVATE.
+      // tasks/podman.yml:72-73 feeds cosign_checksums[arch] to get_url's
+      // `checksum:`. Renovate can bump cosign_version but cannot compute the
+      // per-arch sha256 map, and the download task is `failed_when: false`:
+      // a mismatch is recorded as a *skipped protection*, not an error, so a
+      // version-only PR turns image signature verification off quietly.
+      // Therefore: never open a PR unattended. This parks cosign on the
+      // Dependency Dashboard and waits for a human to tick the box.
+      // Regenerating the map (both lines, even if you only run one arch):
+      //   curl -sSL https://github.com/sigstore/cosign/releases/download/<TAG>/cosign_checksums.txt \
+      //     | grep -E 'cosign-linux-(amd64|arm64)$'
+      // then write each digest as "sha256:<hex>" at defaults/main.yml:472-473.
+      description: 'cosign: manual approval required — cosign_checksums (defaults/main.yml:472-473) must be regenerated in the same commit',
+      matchDatasources: ['github-releases'],
+      matchPackageNames: ['sigstore/cosign'],
+      dependencyDashboardApproval: true,
+      labels: ['dependencies', 'needs-manual-checksums', 'security'],
+      commitMessageTopic: 'cosign (REGENERATE cosign_checksums)',
+    },
+    {
+      description: 'pinact: a major bump needs the /vN module path edited at tasks/github.yml:86 in the same commit — a version-only bump 404s at the Go proxy and the role records it as a skipped protection, silently. Park for a human.',
+      matchDatasources: ['go'],
+      matchPackageNames: ['github.com/suzuki-shunsuke/pinact/v5'],
+      matchUpdateTypes: ['major'],
+      dependencyDashboardApproval: true,
+      labels: ['dependencies', 'needs-module-path-edit'],
+    },
+    {
+      description: 'cargo-audit / cargo-vet are detection tools nothing in this role invokes (cargo_audit_tools defaults false) — group them, low noise',
+      matchDatasources: ['crate'],
+      matchPackageNames: ['cargo-audit', 'cargo-vet'],
+      groupName: 'opt-in cargo audit tools',
+      schedule: ['before 6am on the first day of the month'],
+    },
+    {
+      description: 'Group the routine audit-tool pins so the ten hand-pins do not become ten PRs a week',
+      matchFileNames: ['defaults/main.yml'],
+      matchDatasources: ['npm', 'pypi'],
+      matchUpdateTypes: ['minor', 'patch'],
+      groupName: 'tool pins (npm + pypi)',
+    },
+    {
+      description: 'This role exists to pin third-party actions; keep its own workflows pinned to SHAs',
+      matchManagers: ['github-actions'],
+      pinDigests: true,
+    },
+  ],
+}

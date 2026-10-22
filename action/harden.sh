@@ -970,23 +970,36 @@ harden_pip() {
   section "pip"
   write_env PIP_DISABLE_PIP_VERSION_CHECK 1
   write_env PYTHONDONTWRITEBYTECODE       1
+  # pip 26.0+ native age gate. Shares uv's cutoff deliberately: one clock for
+  # both Python gates. Accepted and inert on every pre-26 pip (MEASURED across
+  # ten versions), so it ships unconditionally. UV_EXCLUDE_NEWER is guaranteed
+  # non-empty and Z-suffixed here -- the computation above hard-exits on failure,
+  # which matters because a MALFORMED value makes pip >= 26 exit 2 on every
+  # install for every user on the host.
+  write_env PIP_UPLOADED_PRIOR_TO         "$UV_EXCLUDE_NEWER"
 
   mkdir -p "$HOME/.config/pip"
-  cat > "$HOME/.config/pip/pip.conf" <<'EOF'
+  cat > "$HOME/.config/pip/pip.conf" <<EOF
 ; Managed by supply-chain-harden action
 [global]
 disable-pip-version-check = true
+; pip's native age gate (pip 26.0+; accepted and inert below that). MUST be
+; under [global]: under [install] it does not cover \`pip download\`,
+; \`pip wheel\` or \`pip index\`.
+uploaded-prior-to = $UV_EXCLUDE_NEWER
 
 [install]
-; Refuse sdists — blocks the LiteLLM/BufferZoneCorp-class attack
+; Refuse sdists — blocks the March-2026 LiteLLM / BufferZoneCorp-class attack
+; (NOT the October-2026 LiteLLM wheel-startup-hook compromise)
 ; where setup.py executes arbitrary code at install time.
 only-binary = :all:
 EOF
 
-  cat <<'EOF' | write_etc /etc/pip.conf
+  cat <<EOF | write_etc /etc/pip.conf
 ; Managed by supply-chain-harden action
 [global]
 disable-pip-version-check = true
+uploaded-prior-to = $UV_EXCLUDE_NEWER
 
 [install]
 only-binary = :all:
@@ -994,7 +1007,7 @@ EOF
 
   HARDENED+=("pip")
   set_tool_version "pip" "$(detect_version pip "pip --version")"
-  log "pip: only-binary=:all: (refuses sdist setup.py execution)"
+  log "pip: only-binary=:all: (refuses sdist setup.py execution), uploaded-prior-to=$UV_EXCLUDE_NEWER (pip 26.0+ age gate)"
   end_section
 }
 
@@ -1534,7 +1547,20 @@ fi
 # Metadata flags don't resolve or execute a package — pass them through.
 case "\${1:-}" in
   --version|-v|--help|-h|--revision)
-    exec -a bunx "\$REAL_BUN" "\$@"
+    # ONLY when the flag is the WHOLE command line. MEASURED on bun 1.4.3:
+    # with a package name after it, bunx ignores the flag's metadata meaning
+    # and fetch-and-executes the package anyway -- `bunx --version cowsay hi`
+    # downloaded cowsay from npm and ran it, rc 0, with NO cache involved. So
+    # this arm was a complete bypass of the --no-install injection below,
+    # independent of cache state, reachable by prepending one flag.
+    #
+    # `\$# -eq 1` is the shape to use rather than dropping the arm or injecting
+    # --no-install into it: tests/ci/04-wrappers.bats:142 runs `bunx --version`
+    # and asserts the output carries no --no-install, and that stays green
+    # here. Every other argv shape falls through to the hardened path.
+    if [ "\$#" -eq 1 ]; then
+      exec -a bunx "\$REAL_BUN" "\$@"
+    fi
     ;;
 esac
 exec -a bunx "\$REAL_BUN" --no-install "\$@"
