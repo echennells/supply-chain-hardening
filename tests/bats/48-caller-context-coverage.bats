@@ -216,17 +216,79 @@ EOF
 
 # ------------------------------------------ the audit context is itself one ---
 
-@test "caller: an N/A row is a statement about PATH, not about the host" {
-  # The apply runs the verifier in its own non-login shell. A tool installed
-  # somewhere that shell cannot see is reported 'not installed' — true of that
-  # PATH, misleading about the machine. Asserting the property so nobody reads
-  # N/A as 'this host does not have it'.
+@test "caller: the verifier ignores tool-override env vars (the audit cannot be forged)" {
+  # REGRESSION GUARD. The first cut of the host-tool discovery block led each
+  # tool's search list with that tool's own override variable (XDG_BIN_HOME,
+  # BUN_INSTALL, DENO_INSTALL, PNPM_HOME). Because discovery PREPENDS the match
+  # to PATH, that let a caller choose which binary the AUDIT executes. MEASURED
+  # before the fix, with PATH byte-identical to an honest run and only
+  # XDG_BIN_HOME set: the verifier reported `uv 99.9.9 started`, `no_build=All`
+  # and a forged exclude-newer cutoff as OK. A forged clean audit, plus code
+  # execution in a context that is root whenever the verifier runs under become.
+  #
+  # sudo's secure_path protects PATH; it does NOT protect these variables, and
+  # sudoers env_keep or `sudo -E` can carry them through. So this must stay a
+  # test rather than a comment.
+  [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
+
+  evil="$BATS_TEST_TMPDIR/evil"; mkdir -p "$evil"
+  for tool in uv bun bunx deno pnpm composer; do
+    cat > "$evil/$tool" <<'EOF'
+#!/bin/sh
+echo "SCH-FORGED-99.9.9"
+printf '    no_build: All,\n    index_strategy: FirstIndex,\n'
+EOF
+    chmod +x "$evil/$tool"
+  done
+
+  XDG_BIN_HOME="$evil" BUN_INSTALL="$evil" DENO_INSTALL="$evil" PNPM_HOME="$evil" \
+    run "$VERIFY" --verbose
+
+  # The planted binaries must never have been executed as evidence.
+  [[ "$output" != *"SCH-FORGED-99.9.9"* ]]
+}
+
+@test "caller: discovery finds a tool in a documented location that PATH hides" {
+  # This test previously asserted the OPPOSITE — that an N/A row was a statement
+  # about PATH rather than about the host — and it was RIGHT until the host-tool
+  # discovery block landed. That block exists because the apply runs the verifier
+  # through ansible.builtin.command, a non-login shell, so a tool installed to a
+  # per-user directory was reported "not installed" on a host that had it
+  # installed and hardened: a green that came from blindness.
+  #
+  # It now asserts the post-fix contract. Keeping the test and inverting it, rather
+  # than deleting it, is the point — the behaviour changed deliberately and a
+  # future regression should fail here.
   [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
   command -v uv >/dev/null 2>&1 || skip "uv not on PATH; nothing to hide from the verifier"
 
   uvdir=$(dirname "$(command -v uv)")
+  # Only meaningful when uv lives in a location discovery knows about.
+  case "$uvdir" in
+    "$HOME/.local/bin"|"$HOME/.cargo/bin") ;;
+    *) skip "uv at $uvdir is outside the documented locations discovery searches" ;;
+  esac
   stripped=$(printf '%s' "$PATH" | sed "s#$uvdir:##; s#:$uvdir##")
 
+  # PATH can no longer hide it: the audit reports real uv verdicts, not N/A.
   PATH="$stripped" run "$VERIFY" --verbose
-  echo "$output" | grep -q "uv not installed"
+  echo "$output" | grep -q "uv age gate"
+  [[ "$output" != *"uv not installed"* ]]
+}
+
+@test "caller: a tool outside every documented location is still invisible" {
+  # The honest residual of the fix. Discovery is a fixed list, deliberately — it
+  # does not source the user's dotfiles, so a tool installed somewhere nobody
+  # documents is still reported as absent. Asserting the limitation so it is a
+  # known boundary rather than a surprise, and so nobody "fixes" it by running
+  # the audit under a login shell.
+  [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
+
+  odd="$BATS_TEST_TMPDIR/nowhere/bin"; mkdir -p "$odd"
+  printf '#!/bin/sh\nexit 0\n' > "$odd/deno"; chmod +x "$odd/deno"
+  command -v deno >/dev/null 2>&1 && skip "a real deno is on PATH; cannot assert absence"
+
+  run "$VERIFY" --verbose
+  echo "$output" | grep -qi "deno"
+  echo "$output" | grep -i "deno" | grep -qiE "not installed|N/A"
 }

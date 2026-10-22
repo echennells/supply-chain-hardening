@@ -62,13 +62,36 @@ discover() { # discover <tool> <dir>... -> prepend the first dir that holds it
   return 1
 }
 
-# Each list is the tool's own override var first, then its documented default.
-discover uv       "${XDG_BIN_HOME:-}" "$HOME/.local/bin" "$HOME/.cargo/bin" || true
-discover bun      "${BUN_INSTALL:+$BUN_INSTALL/bin}" "$HOME/.bun/bin"       || true
-discover bunx     "${BUN_INSTALL:+$BUN_INSTALL/bin}" "$HOME/.bun/bin"       || true
-discover deno     "${DENO_INSTALL:+$DENO_INSTALL/bin}" "$HOME/.deno/bin"    || true
-discover go       /usr/local/go/bin "$HOME/go/bin"                          || true
-discover pnpm     "${PNPM_HOME:-}" "$HOME/.local/share/pnpm"                || true
+# FIXED PATHS ONLY. An earlier cut of this block led each list with the tool's
+# own override variable -- XDG_BIN_HOME, BUN_INSTALL, DENO_INSTALL, PNPM_HOME --
+# which let a caller choose which binary the AUDIT executes. MEASURED and
+# removed for that reason:
+#
+#   $ mkdir -p /tmp/evil && cat > /tmp/evil/uv   # prints forged --show-settings
+#   $ env -i PATH=$STOCK_NONLOGIN_PATH HOME=$HOME \
+#         XDG_BIN_HOME=/tmp/evil supply-chain-verify
+#     OK  FUNCTIONAL  uv config in effect        uv 99.9.9 started ...
+#     OK  PARSED      uv sdist builds blocked    uv reports no_build=All ...
+#     OK  PARSED      uv age gate                uv reports exclude-newer cutoff ...
+#
+# PATH was byte-identical to the honest run; only the env var differed. So the
+# variable turned "control PATH" into the strictly weaker "control one env
+# var", in the one component whose entire job is to be trustworthy evidence --
+# and sudoers env_keep or `sudo -E` can preserve those vars where secure_path
+# already protects PATH. The convenience was not worth it: a tool installed to
+# a custom prefix is one its own installer tells you to put on PATH anyway, so
+# these lists lose almost nothing by ignoring the overrides.
+#
+# $HOME is still honoured, deliberately: the audit is ABOUT this user's config
+# and reads $HOME pervasively already, and tasks/preflight.yml's become-guard
+# is what refuses a mis-targeted HOME. That is the pre-existing trust model,
+# not new surface. Do NOT "improve" this by adding the override vars back.
+discover uv       "$HOME/.local/bin" "$HOME/.cargo/bin"                           || true
+discover bun      "$HOME/.bun/bin"                                               || true
+discover bunx     "$HOME/.bun/bin"                                               || true
+discover deno     "$HOME/.deno/bin"                                              || true
+discover go       /usr/local/go/bin "$HOME/go/bin"                                || true
+discover pnpm     "$HOME/.local/share/pnpm"                                      || true
 discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bin" || true
 
 # ======================================================================
