@@ -1270,6 +1270,18 @@ jobs:
           npm install -g npm@latest
           echo "npm now $(npm --version)"
 
+      # Same for pip. The runner's stock python3 has pip 24.0, where
+      # uploaded-prior-to is deployed and inert, so a job that hardens pip there
+      # is NOT clean and the verifier is right to say so. See the pip job below.
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Ensure pip implements the age gate (>= 26.0)
+        run: |
+          python3 -m pip install --upgrade 'pip>=26'
+          echo "pip now $(python3 -m pip --version)"
+
       - uses: ./action
         with:
           ecosystems: npm,pip
@@ -1310,3 +1322,40 @@ jobs:
             exit 1
           fi
           echo "verifier correctly reported the inert npm age gate"
+
+  action-verify-reports-inert-pip-gate:
+    name: 'Verify: reports the pip age gate as a GAP on a pip that lacks it'
+    runs-on: ubuntu-24.04
+    # The pip half of the pair above. ubuntu-24.04's stock python3 has pip 24.0,
+    # which accepts uploaded-prior-to in pip.conf and ignores it, so
+    # `python3 -m pip install` is not age-gated there. The verifier must say so
+    # from pip's own help text, not by reading our config back -- and must say
+    # it on THIS row, not fail for some other reason.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Record the stock pip version
+        run: python3 -m pip --version
+
+      - uses: ./action
+        with:
+          ecosystems: pip
+
+      - name: Assert the verifier names the inert pip gate
+        run: |
+          if python3 -m pip install --help | grep -q -- '--uploaded-prior-to'; then
+            echo "runner pip now implements uploaded-prior-to; nothing to detect"
+            exit 0
+          fi
+          out=$(bash action/verify.sh --emit=plain 2>&1) && rc=0 || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::$(python3 -m pip --version) does not implement uploaded-prior-to, but the verifier reported no gap"
+            exit 1
+          fi
+          if ! printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g' \
+               | grep -qE '^GAP +PARSED +pip native age gate +pip [0-9.]+ does NOT implement'; then
+            echo "::error::the verifier failed, but not on the pip native age gate row"
+            exit 1
+          fi
+          echo "verifier correctly reported the inert pip age gate"
