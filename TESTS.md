@@ -1,6 +1,6 @@
 # Tests
 
-361 automated tests verify the supply chain hardening works. Run with `make test`.
+433 container tests verify the supply chain hardening works (`make test`), plus 189 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -48,6 +48,7 @@
 | 31-nuget-behavioral.bats | 5 | NuGet.Config — signed-package policy, source pinning |
 | 32-yarn-tier-rendering.bats | 6 | yarn tier authority (enableHardenedMode conditional on >= 4.0, baseline keys unconditional, approvedGitRepositories deliberately absent) |
 | 33-bun-tier-rendering.bats | 9 | bun tier authority (saveTextLockfile conditional on 1.2+, scanner opt-in, baseline bunfig keys unconditional) |
+| 48-caller-context-coverage.bats | 10 | Caller-context coverage: what the BARE command resolves to, not what an absolute path does. Every other wrapper test in the suite invokes the tool by absolute path, which guarantees the wrapper runs — the one thing a real caller never does. Asserts the verifier's per-context verdicts via the SCH_WRAPPER_PROBE run-probe: an activated `python3 -m venv` and `python3 -m pip` bypass the pip wrapper (and `--system-site-packages` is not a mitigation), `only-binary` survives the shadow for an index-resolved sdist but NOT for a direct-path one, a non-delegating shadow of any wrapped tool reads GAP while a delegating mise/asdf-shaped shim still runs the wrapper, and an N/A row is a statement about PATH rather than about the host |
 
 ## Adversarial tests
 
@@ -60,7 +61,7 @@ No actual malware is used. All fixtures are local packages with scripts that wri
 | Test | Attack pattern | Real-world source | Defense |
 |---|---|---|---|
 | SSH key exfiltration | postinstall reads `~/.ssh/id_rsa` and `~/.ssh/id_ed25519` | BufferZoneCorp (Apr 2026) | `ignore-scripts=true` blocks postinstall |
-| Env var harvesting | postinstall dumps vars matching token/key/secret/pass | BufferZoneCorp, LiteLLM | `ignore-scripts=true` blocks postinstall |
+| Env var harvesting | postinstall dumps vars matching token/key/secret/pass | BufferZoneCorp, LiteLLM (Mar 2026) | `ignore-scripts=true` blocks postinstall |
 | SSH persistence | postinstall appends attacker key to `~/.ssh/authorized_keys` | BufferZoneCorp Go modules | `ignore-scripts=true` blocks postinstall |
 | Preinstall hook | preinstall writes marker (runs before code is unpacked) | Shai-Hulud npm worm | `ignore-scripts=true` blocks preinstall |
 | Install lifecycle hook | install hook writes marker (distinct from pre/post) | event-stream (2018) | `ignore-scripts=true` blocks install |
@@ -107,25 +108,30 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 361 tests
+make test          # build container + run all 433 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```
 
 Tests that re-run the full playbook (preflight tests in `25-integration-regressions.bats`, idempotency check) are slow. To skip the idempotency double-apply specifically: `SKIP_SLOW=1 make test` (the idempotency test honors that env var; others run regardless).
 
+## Measurement hazards when writing tests
+
+- **`npm config` answers for the directory you are in.** npm reads a project `.npmrc` from its *local prefix*: the nearest ancestor holding a `package.json` **or a `node_modules`**, and — when no ancestor has either — the current directory itself. That file outranks both `~/.npmrc` and `/etc/npmrc`, so any `.npmrc` in or above the working directory can invert a test. MEASURED on npm 10.9.8 in a clean `/tmp` tree with `~/.npmrc` saying `true`: a bare directory holding only `.npmrc` (`false`) read `false`, as did a directory with a `node_modules` and its subdirectory. An earlier version of this note said a bare directory was safe; that measurement was confounded by a `node_modules` higher up the scratch path, which is exactly this hazard. An `NPM_CONFIG_*` env var still wins over the project file. Read npm config from a fresh `mktemp -d` under a path with no `package.json` / `node_modules` ancestors (and strip `NPM_CONFIG_*` when testing a file layer), as `npm_implements` in `templates/verify.sh.j2` does; ECH-187 was a false OK from exactly this.
+
 ## Known coverage gaps
 
 These are scenarios the test suite does **not** cover. They're tracked here so a bug fitting one of these patterns doesn't come as a surprise:
 
 - **Stock-go matrix.** Tests run against the Go installed by tarball in `tests/Dockerfile` (currently `GO_VERSION=1.24.2`). They don't exercise the role against Ubuntu 24.04's stock `apt golang-go` (1.22), which is what triggered H3 in the May 2026 review. The structural regression catcher in `25-integration-regressions.bats` covers the *fix* but a future "the toolchain requirement crept up again" wouldn't fail. Adding a `GO_FROM_APT=1` Docker build mode and a matrix entry would close this.
-- **Fresh-host PATH simulation.** The current Docker image prepends `~/.local/bin` to `PATH`, masking the bare-`uv` failure mode (H1/H2). `25-integration-regressions.bats` simulates the stripped-PATH case with `env -i` for direct binary calls, but doesn't re-run `ansible-playbook` itself under that condition. A full re-apply test would be more robust.
+- **Fresh-host PATH simulation — partially closed.** The Docker image prepends `~/.local/bin` to `PATH`, masking the bare-`uv` failure mode (H1/H2). `25-integration-regressions.bats` simulates the stripped-PATH case with `env -i` for direct binary calls, and `48-caller-context-coverage.bats` now asserts the general class — that coverage depends on what the bare command resolves to in the caller's shell, measured with the run-probe rather than inferred from PATH position. **This gap was scoped to one tool and should have been read as a class:** the same failure mode let an activated virtualenv bypass the pip wrapper undetected until 2026-10-21, and `docs/limitations.md` had already described it for mise/asdf/volta shims. What is still NOT covered: re-running `ansible-playbook` itself under a stripped PATH, and the caller contexts 48-* skips when their toolchain is absent — notably rustup's `~/.cargo/bin` (its default install dir, which the role's own wrapper discovery depends on), the bun/deno official installer prefixes, a tool installed *after* the apply (the role can only wrap what it found), and the login-vs-non-login split in which the apply's own final verify runs.
 - **pnpm 10 vs pnpm 11 matrix — partially closed.** The CI Node matrix now exercises both: Node 20 pins pnpm@10 (pnpm 11 requires Node >= 22), Node 22/24 get pnpm 11. That split is what surfaced `block-exotic-subdeps` being inert on pnpm 10. Remaining gap: the pnpm version is a side effect of the Node version rather than an independent axis, so "pnpm 11 on Node 24" and "pnpm 10 on Node 24" are not both tested. Version-sensitive behavioral tests should gate on `pnpm --version` (see the `block-exotic-subdeps` test in `13-pnpm-adversarial.bats`) rather than assume the container's pnpm.
 - **Non-corepack environments.** pnpm/yarn are installed via corepack; on hosts without corepack (apt npm 9 on Node 18 — common on stock Ubuntu 20.04/22.04), the role's pnpm/yarn tasks would behave differently. Not currently tested.
 - **Cache-time bypass under adversarial conditions.** `27-cache-and-time.bats` documents the gap (pre-poisoned `~/.npm/_cacache` may bypass the age gate) but doesn't actually populate a malicious cache and demonstrate the bypass. Would require a fixture with a known-recent publish timestamp; brittle in CI.
 - **Clock-skew bypass.** `27-cache-and-time.bats` notes the gap but skips the actual exploit without `faketime` installed. Adding `faketime` to the Dockerfile and writing the test would lock in the documented behavior.
 - **`python3 -m pip --no-binary :all:` defense.** Tested as a documented bypass that succeeds (test #4 in `09-python-adversarial.bats`). No defense is in place; the test pins this so a future "fix" that breaks legitimate `pip -m` callers without closing the bypass is caught.
 - **Determined operator overrides.** Role-deployed files at user-home paths can be overwritten by the user (`echo > ~/.npmrc`). The role isn't a sandbox. Tested implicitly via the precedence tests, but no test asserts "user can clobber if they want to."
+- **The age-gate refresh timer.** The test image runs no systemd, so `49-age-gate-refresh.bats` drives `supply-chain-age-gate-refresh` directly and asserts the timer is absent. The service/timer units (the `User=` + `+ExecStart` split, `OnCalendar`, `Persistent=`) and the apply-time enable/disable tasks are only exercised on a real systemd host.
 - **Container CMD callers (no PAM).** `12-cross-ecosystem.bats` proves `/etc/environment` doesn't propagate; the config-file layer is the documented protection. Not separately re-tested for every ecosystem.
 
 ## Issues found by testing

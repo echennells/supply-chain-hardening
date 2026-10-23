@@ -1,11 +1,23 @@
 ; Managed by ansible-supply-chain-security
 [global]
 disable-pip-version-check = {{ pip_disable_version_check | bool | lower }}
+{% if pip_age_gate | bool %}
+; pip's native age gate (pip 26.0+; accepted and inert below that -- MEASURED on
+; ten pre-26 pips). MUST live under [global]: under [install] it does not cover
+; `pip download`, `pip wheel` or `pip index`. Silently OPEN for --find-links,
+; direct path/URL installs, and any simple index without PEP 700 upload-time
+; metadata -- which is why supply-chain-verify never reports a parsed value as
+; proof of enforcement on its own.
+uploaded-prior-to = {{ sch_pip_cutoff }}
+{% endif %}
 {% if pip_only_binary | bool %}
 
 [install]
-; Refuses sdists (source distributions). Blocks the LiteLLM/BufferZoneCorp-class
-; attack where setup.py executes arbitrary code at install time. Trade-off:
+; Refuses sdists (source distributions). Blocks the March-2026 LiteLLM /
+; BufferZoneCorp-class attack where setup.py executes arbitrary code at
+; install time. NOTE: this does NOT cover the October-2026 LiteLLM
+; compromise, which shipped its payload inside the WHEEL (.pth +
+; sitecustomize.py startup hooks) and was unaffected by only-binary. Trade-off:
 ; sdist-only packages (rare for popular libs, common for niche/old/pre-release)
 ; will fail to install. Set pip_only_binary: false to disable.
 only-binary = :all:

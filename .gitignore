@@ -38,3 +38,12 @@ sbe/
 # and pinned a byte-identical third-party copy with no upstream update path.
 # Kept local, untracked. Re-clone the upstream devcontainer if you want it back.
 .devcontainer/
+
+# Local-only security tooling (shellcheck-security skill); not for upstream.
+.claude/skills/
+
+# Local credentials (e.g. the Azure service-principal secret in
+# .claude/azcred.env used for VM test runs). Already covered by a global
+# ignore on the dev box, but that is per-machine; this keeps it out of the
+# repo on any clone.
+/.claude/*.env

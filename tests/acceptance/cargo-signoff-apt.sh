@@ -116,39 +116,52 @@ if [ -x "$COOLDOWN" ]; then
     eviden "env -i PATH=... command -v cargo-cooldown -> not found (this is the BUG-1 layout)"
   fi
 
-  CFG="$CH/cooldown.toml"
-  cp "$CFG" /tmp/cooldown.bak
-  sed -i 's/^global-min-publish-age = .*/global-min-publish-age = "99999 days"/' "$CFG"
-  mkproj; rm -f Cargo.lock
-  out=$(timeout 900 cargo build 2>&1); rc=$?
-  if printf '%s' "$out" | grep -qiE 'GLIBC|error while loading shared|unknown proxy name|No such file|syntax error|command not found'; then
-    bad "build failed for INFRASTRUCTURE reasons, not the gate"
-    eviden "$(printf '%s' "$out" | grep -iE 'GLIBC|loading shared|unknown proxy|not found' | head -1)"
-  elif [ "$rc" -eq 0 ]; then
-    bad "build SUCCEEDED under a 99999-day window — the gate is DEAD on this apt-cargo host (BUG 1 regressed)"
-    eviden "exit 0; the wrapper is not making cargo-cooldown reachable"
-  elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
-    ok "fresh resolution REFUSED by the gate on an apt-cargo host (exit $rc)"
-    eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh versions|publish.?age' | head -1 | cut -c1-150)"
+  # Widen the window IN THE WRAPPER, not in $CARGO_HOME/cooldown.toml. The
+  # wrapper exports cargo-cooldown's environment layer itself, and that outranks
+  # every cooldown.toml (it has to: a repo-committed one could otherwise zero the
+  # window). A cooldown.toml edit therefore changes nothing here, and the build
+  # runs under the role's real 48h window, which a long-published crate passes --
+  # a false "gate is DEAD". If the wrapper no longer carries both pins, say so
+  # rather than measure the wrong window.
+  cp "$CARGO_BIN" /tmp/cargo-wrapper.bak
+  sed -i -e 's/^\([[:space:]]*export COOLDOWN_MINUTES=\).*/\1143998560/' \
+         -e 's/^\([[:space:]]*export CARGO_REGISTRY_MIN_PUBLISH_AGE=\).*/\1"2399976 hours"/' "$CARGO_BIN"
+  npins=$(grep -cE '^[[:space:]]*export (COOLDOWN_MINUTES=143998560|CARGO_REGISTRY_MIN_PUBLISH_AGE="2399976 hours")$' "$CARGO_BIN")
+  if [ "$npins" -ne 2 ]; then
+    bad "could not widen the window: found $npins of the 2 window pins in the wrapper at $CARGO_BIN"
+    eviden "update this script together with templates/cargo-wrapper.sh.j2"
   else
-    bad "build failed, but not with a gate message (exit $rc)"
-    eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
-  fi
+    mkproj; rm -f Cargo.lock
+    out=$(timeout 900 cargo build 2>&1); rc=$?
+    if printf '%s' "$out" | grep -qiE 'GLIBC|error while loading shared|unknown proxy name|No such file|syntax error|command not found'; then
+      bad "build failed for INFRASTRUCTURE reasons, not the gate"
+      eviden "$(printf '%s' "$out" | grep -iE 'GLIBC|loading shared|unknown proxy|not found' | head -1)"
+    elif [ "$rc" -eq 0 ]; then
+      bad "build SUCCEEDED under a 99999-day window — the gate is DEAD on this apt-cargo host (BUG 1 regressed)"
+      eviden "exit 0; the wrapper is not making cargo-cooldown reachable"
+    elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
+      ok "fresh resolution REFUSED by the gate on an apt-cargo host (exit $rc)"
+      eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh versions|publish.?age' | head -1 | cut -c1-150)"
+    else
+      bad "build failed, but not with a gate message (exit $rc)"
+      eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
+    fi
 
-  # A leading global flag must not bypass the gate (the argv[1] parse bug).
-  mkproj; rm -f Cargo.lock; rm -rf target
-  out=$(timeout 900 cargo -q build 2>&1); rc=$?
-  if [ "$rc" -eq 0 ]; then
-    bad "'cargo -q build' SUCCEEDED under a 99999-day window — a leading flag bypasses the gate"
-    eviden "exit 0 while bare 'cargo build' was refused"
-  elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
-    ok "'cargo -q build' is gated identically to 'cargo build'"
-    eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh|publish.?age' | head -1 | cut -c1-130)"
-  else
-    bad "'cargo -q build' failed, but not with a gate message (exit $rc)"
-    eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
+    # A leading global flag must not bypass the gate (the argv[1] parse bug).
+    mkproj; rm -f Cargo.lock; rm -rf target
+    out=$(timeout 900 cargo -q build 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then
+      bad "'cargo -q build' SUCCEEDED under a 99999-day window — a leading flag bypasses the gate"
+      eviden "exit 0 while bare 'cargo build' was refused"
+    elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
+      ok "'cargo -q build' is gated identically to 'cargo build'"
+      eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh|publish.?age' | head -1 | cut -c1-130)"
+    else
+      bad "'cargo -q build' failed, but not with a gate message (exit $rc)"
+      eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
+    fi
   fi
-  cp /tmp/cooldown.bak "$CFG"
+  cp /tmp/cargo-wrapper.bak "$CARGO_BIN"
 
   # The gate gated a fresh version above (behaviour). The VERIFIER must agree.
   # A verifier that probes the backend by bare name reports a working gate as

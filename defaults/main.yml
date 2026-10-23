@@ -33,9 +33,16 @@ pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" #
 # with a quoted "2d"), which disarms every other key AND breaks bun.
 # tasks/bun.yml asserts this is ^[0-9]+$ before the template renders.
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
-# uv requires an absolute RFC 3339 datetime here — "48 hours" or similar
-# relative-duration strings fail with "failed to parse year in date '48 hours'"
-# and break every uv invocation. Compute the cutoff via lookup('pipe', ...)
+# uv requires an absolute RFC 3339 datetime here. MEASURED 2026-10-21 on the
+# real release binaries: a relative-duration string such as "48 hours" in a
+# config file is REJECTED on every uv <= 0.9.9 (rc=2, "failed to parse year in
+# date '48 hours'") — which breaks every uv invocation, and this template is
+# also written to /etc/uv/uv.toml for every user on the host. uv 0.10.0+ does
+# accept it (as Relative(ExcludeNewerSpan(..))), and 0.13.4 still rejects
+# calendar forms like "P1Y". The role pins an absolute instant because it does
+# not control the host's uv version — do NOT override this with a span unless
+# you control every uv on every target. supply-chain-verify reports a span as
+# WEAK, never OK, because it cannot resolve one to an instant. Compute the cutoff via lookup('pipe', ...)
 # shelling out to GNU date because Ansible's strftime filter's `utc` arg
 # was only added in Ansible 2.13 — Ubuntu 22.04's apt ansible (2.12) rejects
 # the 3-arg form with "strftime() takes from 1 to 2 positional arguments
@@ -48,14 +55,41 @@ bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}" 
 # GNU date on the controller (Linux yes; macOS controllers need
 # `brew install coreutils` for `date -u -d @...` syntax).
 #
-# Cutoff freezes at apply time — re-apply to advance. For "always exactly
-# N hours back" semantics, schedule periodic re-applies.
+# The cutoff is computed at apply time. On systemd hosts a timer advances it
+# afterwards (age_gate_refresh, below); elsewhere it stays frozen until the
+# role is re-applied.
 # Rounded DOWN to midnight UTC on purpose. A per-second timestamp changes on
 # every apply, so the rendered uv.toml differs every run and the role is never
 # idempotent (re-apply always reports changed). Truncating to the day makes
 # same-day re-applies a no-op. Rounding down also only ever makes the gate
 # MORE restrictive (cutoff moves further into the past), so it fails safe.
-uv_exclude_newer: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') }}"
+#
+# `rolling` (the default) means "this formula, kept current by the refresh
+# timer". Any other value is a PIN: rendered as given and never advanced. The
+# pin is the explicit value, not a comparison with today's cutoff, so pinning
+# the gate exactly where it stands today still holds it there.
+uv_exclude_newer: rolling
+# Internal: the instants actually rendered. Do not override these; set
+# uv_exclude_newer / pip_uploaded_prior_to. The lookup runs on the controller
+# only when the cutoff is rolling, so a pinned host never needs GNU date there.
+# `rolling` always means this formula -- for pip too, even when uv is pinned,
+# because that is what the refresh timer will advance it to.
+sch_rolling_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') }}"
+sch_uv_cutoff: "{{ sch_rolling_cutoff if uv_exclude_newer == 'rolling' else uv_exclude_newer }}"
+sch_pip_cutoff: "{{ sch_rolling_cutoff if pip_uploaded_prior_to == 'rolling' else pip_uploaded_prior_to }}"
+
+# Keep the uv and pip cutoffs ROLLING instead of frozen at apply time.
+# Both are absolute instants: an unattended host drifts into a months-deep
+# freeze that refuses every release since the apply, security fixes included
+# (an external review found hosts eight weeks behind, and an emergency
+# certifi fix that needed a manual override). A relative form would roll on
+# its own but is a hard error on the older tools this role must not break
+# (MEASURED: pip 26.0 exits 2 on `P2D`, uv <= 0.9.9 rejects "48 hours"), and
+# /etc/pip.conf + /etc/uv/uv.toml are read by EVERY interpreter on the host.
+# So a systemd timer re-runs the apply-time formula every 6 hours and
+# rewrites only the role's own cutoff lines. Linux + systemd only; elsewhere
+# it is recorded in the run's skipped-protections summary.
+age_gate_refresh: true
 # Yarn's npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES. A duration-suffix
 # string ("2d", "7d") hits a parser bug that yields NaN and silently disables
 # the gate entirely — and yarn has no second age-gate layer to fall back on.
@@ -93,6 +127,36 @@ npm_update_notifier: false
 # pip/python settings
 pip_only_binary: true
 pip_disable_version_check: true
+
+# pip's NATIVE age gate (pip 26.0+: --uploaded-prior-to / PIP_UPLOADED_PRIOR_TO).
+# This is the ONLY Python age gate that reaches `python3 -m pip`, which bypasses
+# the /usr/local/bin/pip wrapper (the module is invoked directly, not the binary)
+# and therefore uv's exclude-newer entirely. See docs/limitations.md.
+#
+# MEASURED 2026-10-21 across ten pre-26 pips (20.0.2, 21.3.1, 22.0.4, 23.0.1,
+# 23.3.2, 24.0, 24.3.1, 25.0, 25.2, 25.3): the key is accepted and SILENTLY
+# IGNORED -- rc=0 with ZERO bytes on stderr for --version / list / freeze /
+# install / download / wheel / config list, and likewise for the env form. The
+# reason is structural, not luck: pip's ConfigOptionParser._update_defaults does
+#   option = self.get_option("--" + key); if option is None: continue
+# so an unknown config key is skipped. That is why this ships UNCONDITIONALLY
+# rather than behind a pip-version predicate -- suppressing it because the
+# host's SYSTEM pip is old would also leave every uv / pipx / venv python on
+# that host ungated, and any of those can run pip 26. tasks/pip.yml records the
+# gap in skipped_protections instead: report the gap, do not create it.
+#
+# The value is `rolling` (follow uv's rolling cutoff; the default inherits it
+# from uv_exclude_newer) or a PIN, which MUST be an absolute RFC 3339 instant
+# with a literal Z:
+#   - the relative `P<n>D` duration form is pip 26.1+, and is a hard rc=2 on 26.0;
+#   - a value with no Z is read in the HOST's LOCAL time (26h of spread measured
+#     across TZ=UTC / Pacific/Kiritimati / Etc/GMT+12).
+# A MALFORMED value makes pip >= 26 exit 2 on every install / download / list and
+# even `pip install --help`, host-wide -- so tasks/preflight.yml asserts the shape.
+#
+# It shares uv's clock deliberately: one cutoff for both Python gates.
+pip_age_gate: true
+pip_uploaded_prior_to: "{{ uv_exclude_newer }}"
 python_dont_write_bytecode: true
 
 # Remove the script's directory (and CWD for -c / -m) from sys.path, so a file
@@ -476,13 +540,13 @@ cosign_checksums:
 # GOSUMDB this role sets for users) already provides integrity; the version
 # pin is what stops `@latest` silently taking a newly published release.
 govulncheck_version: "v1.7.0"
-pinact_version: "v1.6.0"
+pinact_version: "v5.0.0"
 
 # npm tools. npm verifies tarball integrity against the registry, so again the
 # pin is the missing half. Note sfw's npm package is a shim that downloads a
 # firewall binary at runtime, which this pin does NOT cover.
-npq_version: "3.26.0"
-lockfile_lint_version: "5.0.1"
+npq_version: "3.27.2"
+lockfile_lint_version: "5.1.0"
 sfw_version: "2.0.6"
 
 # zizmor, installed via `uv tool install`.
@@ -497,7 +561,7 @@ pip_audit_version: "2.10.1"
 # commands). Built from source with --locked: measured 1m53s, against ~15min
 # for the old four-tool set, so the prebuilt-binary bootstrap it used to need
 # no longer pays for itself.
-cargo_cooldown_version: "0.3.4"
+cargo_cooldown_version: "0.3.5"
 
 # The other three cargo tools are DETECTION tools that nothing in this role
 # runs — grep for cargo-audit/cargo-vet across tasks/ and templates/ returns

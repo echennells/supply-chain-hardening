@@ -38,6 +38,65 @@
     - python_safe_path | bool
     - python_version_check.rc | default(1) != 0
 
+# --- pip native age-gate tier ---------------------------------------------
+# `--uploaded-prior-to` landed in pip 26.0 (2026-01-30). We deploy the key
+# UNCONDITIONALLY (see the long note in defaults/main.yml: it is accepted and
+# silently ignored on every pre-26 pip, MEASURED across ten versions), so this
+# probe exists only to REPORT the gap, never to create it by suppressing the
+# key. Suppressing on an old system pip would also strand every uv / pipx /
+# venv python on the host, any of which can run pip 26.
+- name: Detect whether this python3's pip implements --uploaded-prior-to
+  # The support discriminator is the HELP TEXT, not a config readback:
+  # `pip config list` echoes the key back on EVERY version, including pips that
+  # ignore it entirely, so a readback alone is a false-OK trap.
+  ansible.builtin.shell:
+    cmd: |
+      # NO PIPELINE. An external reviewer flagged that
+      #   pip install --help | grep -q -- '--uploaded-prior-to'
+      # under `set -o pipefail` could report a SUPPORTED pip as UNSUPPORTED:
+      # grep -q exits on first match, pip takes SIGPIPE, pipefail surfaces 141.
+      # MEASURED on pip 26.2 it does NOT reproduce — the help text fits the 64K
+      # pipe buffer, so pip writes and exits 0 before grep closes (PIPESTATUS
+      # 0 0). But the hazard is real if that output ever grows, the cost of
+      # removing it is nil, and the failure direction is a false UNSUPPORTED on
+      # exactly the hosts where the gate works. So: capture, then match.
+      ver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
+      # No pip (python3 absent, or a minimal image without python3-pip) is not
+      # an old pip. MEASURED: this used to print a bare `UNSUPPORTED:` and the
+      # summary told the operator "python3 -m pip is , which does not
+      # implement" the flag. Nothing is skipped here: there is no `python3 -m
+      # pip install` to gate, and a pip installed later reads the deployed key.
+      if [ -z "$ver" ]; then printf 'NOPIP\n'; exit 0; fi
+      help=$(python3 -m pip install --help 2>/dev/null)
+      case "$help" in
+        *--uploaded-prior-to*) printf '%s\n' "$ver" ;;
+        *)                     printf 'UNSUPPORTED:%s\n' "$ver" ;;
+      esac
+    executable: /bin/bash
+  register: pip_age_gate_support
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: pip_age_gate | bool
+
+- name: Record skipped protection — pip native age gate not implemented by this pip
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pip native age gate — python3 -m pip is ' ~
+         (pip_age_gate_support.stdout | default('') | trim | regex_replace('^UNSUPPORTED:', '')) ~
+         ', which does not implement --uploaded-prior-to (added in pip 26.0). The key is
+         deployed and inert on this interpreter, so `python3 -m pip install` is NOT
+         age-gated here; uv-routed installs still are. NOTE: no apt-shipped pip carries
+         this flag (MEASURED: Ubuntu 22.04=22.0.2, 24.04=24.0, 26.04=25.1.1,
+         Debian 12=23.0.1), so upgrading the distro will not close it. What does: route
+         installs through uv (the deployed /usr/local/bin/pip already does), or use a
+         uv-managed interpreter or a python:3.13+ image, whose pip is 26.x and reads
+         this same /etc/pip.conf.'] }}
+  when:
+    - pip_age_gate | bool
+    - pip_age_gate_support is defined
+    - (pip_age_gate_support.stdout | default('') | trim) is match('^UNSUPPORTED:')
+
 - name: Create pip config directory
   ansible.builtin.file:
     path: "{{ ansible_env.HOME }}/.config/pip"

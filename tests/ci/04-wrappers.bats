@@ -52,6 +52,17 @@ setup() {
   [[ "$output" != *"--no-install"* ]]
 }
 
+@test "bun: a metadata flag in FRONT of more arguments still gets --no-install" {
+  # MEASURED on bun 1.4.4: `bun --version x cowsay hi` ignores the flag and
+  # fetch-and-executes cowsay. Only the bare flag may skip --no-install.
+  stub_bin bun
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run "$TEST_BIN/bun" --version x cowsay hi
+  [[ "$output" == *"--no-install --version x cowsay hi"* ]]
+  run "$TEST_BIN/bun" --version
+  [[ "$output" != *"--no-install"* ]]
+}
+
 @test "bun: re-running the action does not wrap the wrapper" {
   stub_bin bun
   harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
@@ -148,6 +159,18 @@ setup() {
   [[ "$output" != *"--no-install"* ]]
 }
 
+@test "bunx: a metadata flag in FRONT of a package still gets --no-install" {
+  # MEASURED on bun 1.4.3 and 1.4.4: `bunx --version cowsay hi` ignores the
+  # flag and fetch-and-executes cowsay. Passing a leading metadata flag through
+  # untouched made that a one-flag bypass; only the bare flag may skip it.
+  stub_bin bun
+  stub_bin bunx
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run "$TEST_BIN/bunx" --version cowsay hi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--no-install --version cowsay hi"* ]]
+}
+
 @test "bunx: refuses to recurse when the real bun is gone" {
   stub_bin bun
   stub_bin bunx
@@ -156,6 +179,44 @@ setup() {
   run -127 "$TEST_BIN/bunx" cowsay
   [ "$status" -eq 127 ]
   [[ "$output" == *"refusing to recurse"* ]]
+}
+
+@test "bunx: writing the wrapper executes nothing its comments mention" {
+  # The wrapper body is an unquoted heredoc. A backticked `bunx --version
+  # cowsay hi` in its comments once ran at harden time against whatever bunx
+  # was next on PATH, and an unwrapped one fetch-and-executes cowsay.
+  stub_bin bun
+  stub_bin bunx
+  mkdir -p "$BATS_TEST_TMPDIR/later"
+  printf '#!/bin/bash\necho "$*" >> "%s/ran"\n' "$BATS_TEST_TMPDIR" > "$BATS_TEST_TMPDIR/later/bunx"
+  chmod +x "$BATS_TEST_TMPDIR/later/bunx"
+  harden PATH="${TEST_BIN}:${BATS_TEST_TMPDIR}/later:${PATH}" ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  [ ! -e "$BATS_TEST_TMPDIR/ran" ]
+}
+
+@test "no wrapper heredoc expands a command while harden writes it" {
+  run python3 "${BATS_TEST_DIRNAME}/heredoc-scan.py" "$HARDEN_SH"
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "the heredoc scan actually catches a command in an unquoted body" {
+  # A checker that cannot fail is worse than none — it reads as coverage.
+  cat > "$BATS_TEST_TMPDIR/h.sh" <<'FIXTURE'
+cat <<EOF
+# runs: `date`
+EOF
+cat <<'EOF'
+# quoted delimiter, stays text: `date` $(date)
+EOF
+cat <<EOF
+# escaped, stays text: \`date\` \$(date)
+EOF
+FIXTURE
+  run python3 "${BATS_TEST_DIRNAME}/heredoc-scan.py" "$BATS_TEST_TMPDIR/h.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"h.sh:2:"* ]]
+  [ "$(printf '%s\n' "$output" | grep -c 'expands at write time')" -eq 1 ]
 }
 
 @test "bunx-as-symlink: wrapping it does not clobber the bun wrapper" {
@@ -283,6 +344,54 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
   run bash -c "cd '$(lockdir)' && SUPPLY_CHAIN_CARGO_WRAPPED=1 '$TEST_BIN/cargo' build"
   [[ "$output" == *"ARGS=[build]"* ]]
+}
+
+# A stub cargo that reports the cooldown environment it was handed, plus a
+# cargo-cooldown where harden.sh looks for one, so builds route through it.
+cooldown_stubs() {
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+}
+
+@test "cargo-cooldown: the crates.io window, clock and skip list are pinned over the caller's" {
+  # Each has a cooldown.toml form a committed repo file can set
+  # ([registry] min-publish-age, now, skip_registries), and MEASURED on
+  # cargo-cooldown 0.3.5 each built a fresh crate until the environment, which
+  # outranks every file, was pinned.
+  cooldown_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && CARGO_REGISTRY_MIN_PUBLISH_AGE=0 COOLDOWN_NOW=2099-01-01T00:00:00Z COOLDOWN_SKIP_REGISTRIES=crates-io '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" == *"MIN=2880 "* ]]
+  [[ "$output" == *"CRATES=48 hours "* ]]
+  [[ "$output" == *"SKIP=[]"* ]]
+  [[ "$output" != *"NOW=2099"* ]]
+}
+
+@test "cargo-cooldown: a per-registry window under a name bash cannot unset is refused" {
+  cooldown_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && env 'CARGO_REGISTRIES_my-reg_MIN_PUBLISH_AGE=0' '$TEST_BIN/cargo' build"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"non-identifier name"* ]]
+  [[ "$output" != *"STUB:cargo"* ]]
+}
+
+@test "cargo: a HARDLINKED rustup proxy gets an argv[0] shim, not a plain rename" {
+  # RUSTUP_HARDLINK_PROXIES (and older rustup) make cargo a hardlink to rustup,
+  # not a symlink. A plain rename leaves a file named cargo-real that rustup
+  # rejects as an unknown proxy (MEASURED: every routed build failed).
+  stub_bin rustup 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:rustup ARGS=[$*]";; esac'
+  ln "$TEST_BIN/rustup" "$TEST_BIN/cargo"
+  cp "$TEST_BIN/rustup" "$BATS_TEST_TMPDIR/rustup.orig"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  # The shim names the RESOLVED path. On macOS $TMPDIR is under /var, a symlink
+  # to /private/var, so the unresolved $TEST_BIN never matches there.
+  assert_file_contains "$TEST_BIN/cargo-real" "exec -a cargo \"$(cd "$TEST_BIN" && pwd -P)/rustup\""
+  # And nothing was written into the shared inode.
+  cmp -s "$TEST_BIN/rustup" "$BATS_TEST_TMPDIR/rustup.orig"
 }
 
 @test "cargo: refuses to recurse when the real binary is gone" {

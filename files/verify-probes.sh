@@ -12,6 +12,89 @@
 
 
 # ======================================================================
+# HOST TOOL DISCOVERY  (ECH-189, generalised)
+# ======================================================================
+#
+# `have <tool>` resolves against the VERIFIER's PATH, not the host's.
+# tasks/verify.yml invokes the verifier through `ansible.builtin.command`, a
+# NON-LOGIN shell whose PATH is only
+#     /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# so every tool whose official installer targets a per-user directory is
+# invisible to the audit, and the N/A branch then reports "<tool> not
+# installed" about a host that has it installed AND hardened.
+#
+# MEASURED 2026-10-22 on an applied Ubuntu 24.04 host. uv exists only at
+# ~/.local/bin/uv, which ~/.profile:25-26 adds for LOGIN shells only. The
+# apply's own final audit emitted a single
+#     N/A  -  uv  "uv not installed"
+# while a login shell on the same host emitted five real uv verdicts, the age
+# gate among them. The protections were live the whole time: the pip wrapper
+# resolves uv by its baked-in absolute path (ECH-191) and worked correctly in
+# that same non-login shell. So this is the AUDITOR going blind, not the host
+# regressing — design-principles.md Axis 4, "absent signal read as a passing
+# signal". A green that comes from blindness is the failure this role exists
+# to prevent, one level up.
+#
+# ECH-189 fixed precisely this for cargo. A survey on 2026-10-22 found cargo
+# was the ONLY tool that had it: there was no discovery for uv, bun, bunx,
+# deno, go, pnpm or composer, every one of which has a documented default
+# install directory outside the non-login PATH. This block is that fix for the
+# whole class, resolved ONCE here so every probe below inherits it.
+#
+# DELIBERATELY NOT A LOGIN SHELL. Running the audit under `bash -lc` would
+# source ~/.profile and ~/.bashrc, making a security verification depend on
+# user-editable files and vary between hosts for reasons unrelated to
+# hardening. Discovery stays hermetic: a fixed list of documented locations,
+# each honouring its tool's own override variable.
+discover() { # discover <tool> <dir>... -> prepend the first dir that holds it
+  _d_tool="$1"; shift
+  have "$_d_tool" && return 0
+  for _d_dir in "$@"; do
+    [ -n "$_d_dir" ] || continue
+    if [ -x "$_d_dir/$_d_tool" ]; then
+      case ":$PATH:" in
+        *":$_d_dir:"*) ;;
+        *) PATH="$_d_dir:$PATH"; export PATH ;;
+      esac
+      return 0
+    fi
+  done
+  return 1
+}
+
+# FIXED PATHS ONLY. An earlier cut of this block led each list with the tool's
+# own override variable -- XDG_BIN_HOME, BUN_INSTALL, DENO_INSTALL, PNPM_HOME --
+# which let a caller choose which binary the AUDIT executes. MEASURED and
+# removed for that reason:
+#
+#   $ mkdir -p /tmp/evil && cat > /tmp/evil/uv   # prints forged --show-settings
+#   $ env -i PATH=$STOCK_NONLOGIN_PATH HOME=$HOME \
+#         XDG_BIN_HOME=/tmp/evil supply-chain-verify
+#     OK  FUNCTIONAL  uv config in effect        uv 99.9.9 started ...
+#     OK  PARSED      uv sdist builds blocked    uv reports no_build=All ...
+#     OK  PARSED      uv age gate                uv reports exclude-newer cutoff ...
+#
+# PATH was byte-identical to the honest run; only the env var differed. So the
+# variable turned "control PATH" into the strictly weaker "control one env
+# var", in the one component whose entire job is to be trustworthy evidence --
+# and sudoers env_keep or `sudo -E` can preserve those vars where secure_path
+# already protects PATH. The convenience was not worth it: a tool installed to
+# a custom prefix is one its own installer tells you to put on PATH anyway, so
+# these lists lose almost nothing by ignoring the overrides.
+#
+# $HOME is still honoured, deliberately: the audit is ABOUT this user's config
+# and reads $HOME pervasively already, and tasks/preflight.yml's become-guard
+# is what refuses a mis-targeted HOME. That is the pre-existing trust model,
+# not new surface. Do NOT "improve" this by adding the override vars back.
+discover uv       "$HOME/.local/bin" "$HOME/.cargo/bin"                           || true
+discover bun      "$HOME/.bun/bin"                                               || true
+discover bunx     "$HOME/.bun/bin"                                               || true
+discover deno     "$HOME/.deno/bin"                                              || true
+discover go       /usr/local/go/bin "$HOME/go/bin"                                || true
+discover pnpm     "$HOME/.local/share/pnpm"                                      || true
+discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bin" || true
+
+# ======================================================================
 # bun
 # ======================================================================
 
@@ -82,6 +165,16 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
   fi
   [ -n "$scv__wh" ] || return 1
   printf '%s\n' "$scv__wh"
+}
+
+scv_epoch() { # $1 = RFC 3339 UTC instant; prints epoch seconds, or nothing
+  # GNU date parses with -d. BSD date (macOS, which both surfaces support)
+  # has no -d and needs -j -f, and its %S takes no fraction, so drop one.
+  # Both failing is reported as an EMPTY result, never as 0: the staleness
+  # rows used to fall back to 0 and print "0 day(s) old" for any age.
+  scv__ei=$(printf '%s' "$1" | sed 's/\.[0-9]*Z$/Z/')
+  date -u -d "$scv__ei" +%s 2>/dev/null \
+    || date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$scv__ei" +%s 2>/dev/null
 }
 
 bun_global_bunfig() {
@@ -393,6 +486,18 @@ bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
   rm -rf "$tmp"
 }
 
+# `bun --version x <pkg>`: MEASURED on bun 1.4.4, real bun ignores a leading
+# metadata flag when more follows and fetch-and-executes the package. A bun
+# wrapper that passes any leading metadata flag through (the Action's did,
+# keying off $1 alone) hands it over without --no-install.
+bmeta_bad=""
+if have bun && bmw=$(scv_our_wrapper bun 2>/dev/null); then
+  bmo=$(bun_wrapper_dispatch bun --version x some-cli)
+  if [ -n "$bmo" ] && [ "$(printf '%s\n' "$bmo" | head -1)" != "--no-install" ]; then
+    bmeta_bad="the bun wrapper at $bmw hands \`bun --version x some-cli\` to real bun WITHOUT --no-install first (observed argv began '$(printf '%s\n' "$bmo" | head -1)'); bun ignores the metadata flag when more follows and fetch-and-executes the package"
+  fi
+fi
+
 if ! have bun && ! have bunx; then
   row "N/A" - "bunx fetch-and-execute blocked" "bun not installed"
 elif ! have bunx; then
@@ -409,6 +514,8 @@ elif ! have bunx; then
     row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is not on PATH and the bun entry point at $bpath does not run in bun mode (\`bun --help\` reported '$(bun_entrypoint_mode "$bpath")') — the surviving fetch-and-execute path cannot be exercised; see the runtime row"
   elif [ "$(printf '%s\n' "$bxo" | head -1)" != "--no-install" ]; then
     row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is not on PATH and the bun wrapper at $bpath does not put --no-install first for \`bun x some-cli\` (observed argv began '$(printf '%s\n' "$bxo" | head -1)') — the remaining fetch-and-execute entry point is live"
+  elif [ -n "$bmeta_bad" ]; then
+    row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is not on PATH, and $bmeta_bad"
   else
     row OK  FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is not on PATH; the deployed bun wrapper hands real bun \`--no-install x some-cli\` (observed argv), so the surviving fetch-and-execute entry point is covered"
   fi
@@ -421,12 +528,24 @@ else
     row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "the wrapper at $bxpath does not reach a working bun in bunx mode (\`bunx --help\` reported '$bxmode') — argv[0] is lost, or the embedded REAL_BUN is missing and the guard exits 127; either way every bunx call has changed meaning"
   else
     bxout=$(bun_wrapper_dispatch bunx some-cli)
+    # A metadata flag IN FRONT of a package is its own argv shape. MEASURED on
+    # bun 1.4.3 and 1.4.4: unwrapped, `bunx --version cowsay hi` ignores the
+    # flag's metadata meaning and fetch-and-executes cowsay. The wrapper once
+    # passed any leading metadata flag through untouched, so prepending one flag
+    # was a complete bypass while `bunx some-cli` above still looked hardened.
+    # The bun entry point has the same shape one token later (`bun --version x
+    # <pkg>`), which is why bmeta is checked below as well.
+    bxmeta=$(bun_wrapper_dispatch bunx --version some-cli)
     if [ -z "$bxout" ]; then
       row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "the wrapper at $bxpath produced no argv for \`bunx some-cli\` — it refuses to run, or its REAL_BUN assignment is no longer at the start of a line for the probe to rewrite"
     elif [ "$(printf '%s\n' "$bxout" | head -1)" != "--no-install" ]; then
       row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "the wrapper at $bxpath does not put --no-install FIRST for \`bunx some-cli\` (observed argv began '$(printf '%s\n' "$bxout" | head -1)'); anywhere else bun hands the flag to the fetched CLI instead of consuming it, and a typosquatted name is still fetched and executed"
+    elif [ "$(printf '%s\n' "$bxmeta" | head -1)" != "--no-install" ]; then
+      row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "the wrapper at $bxpath hands \`bunx --version some-cli\` to real bun WITHOUT --no-install first (observed argv began '$(printf '%s\n' "$bxmeta" | head -1)'); with a package name after it bunx ignores the metadata flag and fetch-and-executes the package, so prepending one flag bypasses the wrapper"
+    elif [ -n "$bmeta_bad" ]; then
+      row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is wrapped, but $bmeta_bad"
     else
-      row OK  FUNCTIONAL "bunx fetch-and-execute blocked" "the deployed wrapper hands real bun \`--no-install some-cli\` as the FIRST argument and keeps bunx mode (observed argv, and \`bunx --help\` still prints bunx usage)"
+      row OK  FUNCTIONAL "bunx fetch-and-execute blocked" "the deployed wrapper hands real bun \`--no-install\` as the FIRST argument for both \`bunx some-cli\` and \`bunx --version some-cli\`, and keeps bunx mode (observed argv, and \`bunx --help\` still prints bunx usage)"
     fi
   fi
 fi
@@ -992,10 +1111,39 @@ if have uv; then
       # protection named "uv config in effect" while no config was in effect.
       # That is the Axis-4 "absent signal read as a passing signal" pattern.
       uvnb=$(printf '%s\n' "$uvdump" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
-      uvwin=$(printf '%s\n' "$uvdump" | grep -A6 'exclude_newer:' | head -7)
+      # uv 0.12 turned exclude_newer.global into an ENUM: Absolute(<ts>) or
+      # Relative(ExcludeNewerSpan(<span>)). MEASURED on the real release
+      # binaries: 0.10.x resolved a relative span into a concrete `timestamp:`
+      # field inside this dump, and 0.12+ does NOT — so a LIVE relative gate
+      # parses as absent unless the span is matched too, and the row below
+      # under-reported it as GAP. The window is 11 lines, not 7, because
+      # ExcludeNewerSpan( sits deeper in the pretty-printed enum than the
+      # absolute timestamp did.
+      uvwin=$(printf '%s\n' "$uvdump" | grep -A10 'exclude_newer:' | head -11)
       case "$uvwin" in
         *Some*) uvcut=$(printf '%s\n' "$uvwin" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]*Z' | head -1) ;;
         *)      uvcut="" ;;
+      esac
+      # On 0.10.x a relative span yields BOTH a timestamp and a span, so uvcut
+      # still wins there and the absolute path stays correct.
+      case "$uvwin" in
+        *ExcludeNewerSpan\(*)
+          # uv's pretty-printer puts the span VALUE on the line AFTER the
+          # `ExcludeNewerSpan(` opener:
+          #     ExcludeNewerSpan(
+          #         48h,
+          #     ),
+          # so a same-line sed returns the empty string and the span row below
+          # becomes unreachable (MEASURED: the first cut of this fix did exactly
+          # that and still reported GAP on a live relative gate). Take the next
+          # line, with a same-line fallback in case the shape ever tightens.
+          uvspan=$(printf '%s\n' "$uvwin" \
+                   | sed -n 's/.*ExcludeNewerSpan([[:space:]]*\([^[:space:],)][^,)]*\).*/\1/p' | head -1)
+          if [ -z "$uvspan" ]; then
+            uvspan=$(printf '%s\n' "$uvwin" \
+                     | sed -n '/ExcludeNewerSpan(/{n;s/^[[:space:]]*//;s/[[:space:],)]*$//;p;}' | head -1)
+          fi ;;
+        *) uvspan="" ;;
       esac
       uvnow=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -1059,6 +1207,13 @@ if have uv; then
       elif [ "$uvmode" = badcfg ]; then
         row GAP FUNCTIONAL "uv age gate" \
           "uv rejects its own config, so exclude-newer is not in effect"
+      elif [ -z "$uvcut" ] && [ -n "$uvspan" ]; then
+        # WEAK, deliberately not OK. The verifier cannot resolve a span to an
+        # instant, so it cannot tell a live 48h gate from a zero-width
+        # `exclude-newer = "0 seconds"` one — MEASURED, both render identically
+        # here. Reporting OK on this would be a false OK on a disabled gate.
+        row WEAK PARSED "uv age gate" \
+          "uv reports a RELATIVE exclude-newer span of $uvspan - a gate is set, but the verifier cannot resolve a span to an instant and so cannot confirm the window (a '0 seconds' span is indistinguishable here). The role deploys an absolute RFC 3339 instant for this reason"
       elif [ -z "$uvcut" ]; then
         row GAP PARSED "uv age gate" \
           "uv reports no exclude-newer - a release published minutes ago is installable"
@@ -1066,8 +1221,35 @@ if have uv; then
         row GAP PARSED "uv age gate" \
           "uv reports exclude-newer=$uvcut, in the FUTURE (now $uvnow) - the gate admits everything"
       else
-        row OK PARSED "uv age gate" \
-          "uv reports exclude-newer cutoff $uvcut - anything published after it is refused"
+        # STALENESS. exclude-newer is an ABSOLUTE instant frozen at apply time
+        # (ECH-193), so on a host nobody re-applies, a "48h cooldown" silently
+        # becomes a months-deep FREEZE. External review 2026-10-22 reported real
+        # hosts sitting at 2026-08-29 and 2026-08-25 -- eight weeks back -- and an
+        # emergency certifi fix that needed a manual override because of it. The
+        # row said OK throughout. That is design-principles.md Axis 4 again:
+        # absent signal read as a passing signal. So age it. The role now
+        # advances the instant with supply-chain-age-gate-refresh.timer on
+        # systemd hosts; this row is what notices when that is not happening.
+        #
+        # Only uv and pip freeze: npm, pnpm, bun, deno and cargo all take a
+        # RELATIVE window and refresh themselves. The threshold is 7 days rather
+        # than release_age_hours because this file is shared by both surfaces and
+        # does not know that variable -- 7 days is already 3.5x the default
+        # window, so anything past it is unambiguously drift, not tuning.
+        _scn=$(date -u +%s 2>/dev/null)
+        _scc=$(scv_epoch "$uvcut")
+        _scd=""
+        [ -n "$_scc" ] && [ -n "$_scn" ] && _scd=$(( (_scn - _scc) / 86400 ))
+        if [ -z "$_scd" ]; then
+          row WEAK PARSED "uv age gate" \
+            "uv reports exclude-newer cutoff $uvcut, but this host's date cannot parse it, so its age is unknown - the instant is fixed at apply time, and a months-old freeze cannot be told from a fresh 48h gate here"
+        elif [ "$_scd" -gt 7 ]; then
+          row WEAK PARSED "uv age gate" \
+            "uv reports exclude-newer cutoff $uvcut, which is $_scd days old - that is a FREEZE, not a rolling cooldown: the instant is fixed at apply time, so every release since then is refused and a security fix cannot be installed without an override. Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal"
+        else
+          row OK PARSED "uv age gate" \
+            "uv reports exclude-newer cutoff $uvcut ($_scd day(s) old) - anything published after it is refused"
+        fi
       fi
 
 # --- uv dependency-confusion gate  [PARSED] ---
@@ -1158,6 +1340,86 @@ if have uv; then
   fi
 else
   row "N/A" - "uv" "uv not installed"
+fi
+
+# ======================================================================
+# pip (native age gate)
+# ======================================================================
+
+# --- pip native age gate  [PARSED] ---
+# A DIFFERENT AXIS from the five uv rows above, and deliberately NOT nested
+# inside any `have pip || have pip3` gate: the whole point of this row is the
+# `python3 -m pip` caller, which invokes the MODULE directly and so bypasses
+# both /usr/local/bin/pip and uv's exclude-newer. That caller exists on hosts
+# with no pip BINARY at all. See docs/limitations.md.
+#
+# The support discriminator is the HELP TEXT and it runs BEFORE any readback,
+# because `pip config list` echoes the key back on EVERY pip version -- including
+# the ten pre-26 pips measured to ignore it entirely. A readback alone is a
+# false-OK trap of exactly the shape npm_implements() exists to prevent.
+#
+# There is deliberately NO behavioural probe here. pip's age-gate refusal text
+# ("Could not find a version that satisfies the requirement") is BYTE-IDENTICAL
+# to a dead index, an empty mirror and PIP_NO_INDEX, so grepping it would report
+# OK on a host that simply cannot reach an index. OK PARSED is the honest ceiling.
+#
+# Scoped like every other shared row. Without it, an action job that hardened
+# only npm on a stock runner (pip 24.0) failed verify on a pip GAP it never
+# asked about.
+if have python3 && python3 -m pip --version >/dev/null 2>&1 \
+   && command -v requested >/dev/null 2>&1 && ! requested pip; then
+  row "N/A" - "pip native age gate" "python3 -m pip present but pip is not in the requested ecosystems"
+elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
+  pipver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
+  if ! python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
+    row GAP PARSED "pip native age gate" \
+      "pip $pipver does NOT implement --uploaded-prior-to (added in pip 26.0) - the key is deployed but inert, so \`python3 -m pip install\` is not age-gated on this interpreter"
+  else
+    # pip prints `config list` in override-order groups, so the LAST match is
+    # the effective value (env beats file). Strip optional surrounding quotes.
+    pipcut=$(python3 -m pip config list 2>/dev/null \
+      | sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" \
+      | tail -1)
+    case "$pipcut" in
+      '')
+        row GAP PARSED "pip native age gate" \
+          "pip $pipver implements --uploaded-prior-to but reports no value - a release published minutes ago is installable via \`python3 -m pip\`" ;;
+      P*D|P*)
+        row WEAK PARSED "pip native age gate" \
+          "pip $pipver reports a RELATIVE uploaded-prior-to='$pipcut' - the P<n>D form needs pip 26.1+ and is a hard error on 26.0; the role deploys an absolute instant for that reason" ;;
+      *Z)
+        # Same freeze as uv above, and for the same reason: pip's
+        # uploaded-prior-to takes an absolute instant. The relative P<n>D form
+        # would self-refresh but is pip 26.1+ and a HARD rc=2 ERROR on 26.0
+        # (MEASURED), and /etc/pip.conf is read by EVERY interpreter on the
+        # host -- so emitting it would brick any 26.0 interpreter present.
+        _spn=$(date -u +%s 2>/dev/null)
+        _spc=$(scv_epoch "$pipcut")
+        _spd=""
+        [ -n "$_spc" ] && [ -n "$_spn" ] && _spd=$(( (_spn - _spc) / 86400 ))
+        if [ -n "$_spc" ] && [ -n "$_spn" ] && [ "$_spc" -gt "$_spn" ]; then
+          # Same guard as the uv row: a cutoff in the future admits everything
+          # published up to it. Compared in seconds, not days, because a cutoff
+          # an hour ahead truncates to "0 days old".
+          row GAP PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to=$pipcut, in the FUTURE - the gate admits everything published before then, which is everything so far"
+        elif [ -z "$_spd" ]; then
+          row WEAK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to=$pipcut, but this host's date cannot parse it, so its age is unknown - the instant is fixed at apply time, and a months-old freeze cannot be told from a fresh 48h gate here"
+        elif [ "$_spd" -gt 7 ]; then
+          row WEAK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to=$pipcut, which is $_spd days old - a FREEZE, not a rolling cooldown, so a security fix published since then cannot be installed without --uploaded-prior-to on the command line. Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal"
+        else
+          row OK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to=$pipcut ($_spd day(s) old) - anything published after it is refused, pinned or not (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)"
+        fi ;;
+      *)
+        row WEAK PARSED "pip native age gate" \
+          "pip $pipver reports uploaded-prior-to='$pipcut' with no trailing Z - pip reads a naive value in the HOST's LOCAL time, so the real cutoff moves with \$TZ" ;;
+    esac
+  fi
+else
+  row "N/A" - "pip native age gate" "no python3 with an importable pip module"
 fi
 
 # ======================================================================
@@ -1560,14 +1822,23 @@ fi
 # capped at WEAK for the same reason the pnpm age gate is.
 
 cargo_wrapper_path() {
-  local w
-  w=$(command -v cargo 2>/dev/null) || return 1
-  [ -n "$w" ] || return 1
-  # Marker PREFIX, not the full string: harden.sh writes "supply-chain-harden",
-  # the Ansible role writes "supply-chain-hardening", and a self-hosted runner
-  # can carry either. MEASURED against both rendered wrappers.
-  grep -q 'supply-chain-harden' "$w" 2>/dev/null || return 1
-  printf '%s\n' "$w"
+  # ASK THE WRAPPER; DO NOT INFER FROM PATH POSITION. This was `command -v cargo`
+  # plus a marker grep -- "what runs FIRST", which is exactly the inference the
+  # SCH_WRAPPER_PROBE run-probe exists to replace and which scv_our_wrapper()
+  # already replaced for bun, bunx, deno and composer. cargo was never migrated,
+  # so with a DELEGATING shim first on PATH (the mise/asdf/volta shape) one run
+  # reported both of these about the same fact:
+  #   OK   FUNCTIONAL  cargo PATH wrapper       observed running ... chained behind
+  #   GAP  PRESENT     cargo publish-age gate   cargo is not wrapped
+  # Not a weakening: scv_our_wrapper falls back to `command -v` + the same
+  # marker grep (prefix "supply-chain-harden", which matches both the action's
+  # "supply-chain-harden" and the role's "supply-chain-hardening"), so a
+  # genuinely unwrapped cargo still returns 1 and the GAP branch still fires.
+  #
+  # RUSTUP_AUTO_INSTALL=0: the probe runs `cargo --version`, and through a rustup
+  # proxy in a directory whose rust-toolchain.toml names a toolchain that is not
+  # installed, rustup would otherwise go and download it inside an audit.
+  RUSTUP_AUTO_INSTALL=0 scv_our_wrapper cargo
 }
 
 # Prints the argv the deployed wrapper hands the real cargo for the invocation
@@ -1584,7 +1855,18 @@ cargo_wrapper_dispatch() { # <lock|nolock> <args...>
   # sed delimiter safety: a temp path containing | or \ or & would corrupt the
   # substitution below and leave REAL_CARGO pointing at the REAL cargo.
   case "$tmp" in *[\|\\\&]*) rm -rf "$tmp"; return 1 ;; esac
-  printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$tmp/real"
+  # With SCV_STUB_ENV set (cargo_wrapper_env_pin only) the stub ALSO reports the
+  # two policy variables it was handed, prefixed with "=" so they can never be
+  # mistaken for an argv line. Unset, its output is byte-identical to before, so
+  # no other consumer of this function changes.
+  cat > "$tmp/real" <<'SCVSTUB'
+#!/bin/sh
+if [ -n "${SCV_STUB_ENV:-}" ]; then
+  printf '=COOLDOWN_MINUTES=%s\n' "${COOLDOWN_MINUTES-<unset>}"
+  printf '=COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=%s\n' "${COOLDOWN_INCOMPATIBLE_PUBLISH_AGE-<unset>}"
+fi
+for a in "$@"; do printf '%s\n' "$a"; done
+SCVSTUB
   # Neutralise sfw for THIS probe with a pass-through stub first on PATH. The
   # role's wrapper prefixes network commands with sfw, and sfw execs the child
   # itself, so a broken or absent sfw would swallow the probe's output and make
@@ -1596,7 +1878,7 @@ cargo_wrapper_dispatch() { # <lock|nolock> <args...>
   # dispatch empty, which the caller would otherwise read as "the wrapper never
   # reaches cargo" and label FUNCTIONAL. An observation that could not run is
   # not evidence of anything.
-  [ "$("$tmp/real" canary 2>/dev/null)" = "canary" ] || { rm -rf "$tmp"; return 2; }
+  [ "$(SCV_STUB_ENV='' "$tmp/real" canary 2>/dev/null)" = "canary" ] || { rm -rf "$tmp"; return 2; }
   sed "s|^REAL_CARGO=.*|REAL_CARGO='$tmp/real'|" "$w" > "$tmp/cargo" 2>/dev/null
   # NEVER run the copy unless the substitution demonstrably took. If a future
   # wrapper shape has no REAL_CARGO line the sed no-ops, and running it would
@@ -1629,6 +1911,31 @@ cargo_wrapper_dispatch() { # <lock|nolock> <args...>
   fi
   ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo "$@" 2>/dev/null )
   rm -rf "$tmp"
+}
+
+# WHAT DOES THE BACKEND ACTUALLY RECEIVE WHEN THE CALLER TRIES TO TURN IT OFF?
+#
+# cargo-cooldown ranks the environment above every cooldown.toml, so the
+# window and violation action in force are whatever reaches it in COOLDOWN_*,
+# not what our file says. MEASURED before the wrapper pinned that layer: any of
+# ten caller-exported variables, or relocating CARGO_HOME, switched the gate off
+# while these rows still read "window 48 hours" and "deny". This observation
+# replaces the old decline ("guessing cargo-cooldown's variable name would be
+# the made-up-key bug") -- the names are no longer guesses, they are read from
+# the shipped source (src/config.rs, apply_env).
+#
+# Runs the REAL deployed wrapper through the same stub harness as
+# cargo_wrapper_dispatch, with the caller exporting COOLDOWN_MINUTES=0 and
+# COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=allow. Prints two lines, minutes then
+# action, exactly as the backend would receive them:
+#   0 / allow                      the caller wins: no environment pin
+#   <positive> / deny|fallback     the wrapper pins it: the values are ours
+#   <unset>                        cleared without pinning: the FILE decides
+#   (nothing)                      not observed (noexec tmp, unsubstitutable)
+cargo_wrapper_env_pin() {
+  ( export SCV_STUB_ENV=1 COOLDOWN_MINUTES=0 COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=allow
+    cargo_wrapper_dispatch lock build ) 2>/dev/null \
+    | sed -n 's/^=COOLDOWN_MINUTES=//p; s/^=COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=//p'
 }
 
 # Probe a FLAG-PREFIXED invocation as well as the bare one. An earlier wrapper
@@ -1799,6 +2106,17 @@ else
     cdisp=$(cargo_wrapper_dispatch lock build); crc=$?
     cdisp_nolock=$(cargo_wrapper_dispatch nolock build) || cdisp_nolock="<unprobed>"
   fi
+  # Environment-layer observation; only meaningful when builds route to cooldown.
+  cpin=""; cpact=""
+  if [ -n "$cw" ] && printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
+    cpinraw=$(cargo_wrapper_env_pin)
+    cpin=$(printf '%s\n' "$cpinraw" | sed -n '1p')
+    cpact=$(printf '%s\n' "$cpinraw" | sed -n '2p')
+  fi
+  # Pinned = the wrapper overwrote the caller's 0 with a positive window. Only
+  # then is the window in force independent of which cooldown.toml is found.
+  cpinned=0
+  cargo_positive_int "${cpin:-x}" && cpinned=1
 
   # RESOLVE THE CONFIG HOME FROM THE ENVIRONMENT, NEVER ~/.cargo. The official
   # rust images set CARGO_HOME=/usr/local/cargo and runners point it at a cache
@@ -1866,9 +2184,16 @@ else
       "CANNOT VERIFY: ${TMPDIR:-/tmp} will not execute the probe's own stub (a noexec mount, or a filesystem that drops the exec bit), so the wrapper-dispatch probe could not run at all. Nothing was observed here, so nothing is claimed - this is not evidence of a gap either"
   elif [ -z "$cw" ]; then
     cshadow=""
-    if type find_wrapper_on_path >/dev/null 2>&1; then
-      cshadow=$(find_wrapper_on_path cargo 2>/dev/null) || cshadow=""
-    fi
+    # BOTH SURFACES' NAME FOR THE SAME HELPER: action/verify.sh calls it
+    # find_wrapper_on_path, templates/verify.sh.j2 calls it locate_wrapper.
+    # Guarding on one name meant the role surface never named a shadow and
+    # printed "cargo is not wrapped" -- the wrong diagnosis with the wrong fix --
+    # about a wrapper that was deployed but bypassed.
+    for scv__lw in find_wrapper_on_path locate_wrapper; do
+      type "$scv__lw" >/dev/null 2>&1 || continue
+      cshadow=$("$scv__lw" cargo 2>/dev/null) || cshadow=""
+      [ -n "$cshadow" ] && break
+    done
     if [ -n "$cshadow" ]; then
       row GAP PRESENT "cargo publish-age gate" \
         "the cargo wrapper is deployed at $cshadow but SHADOWED - PATH resolves cargo to $(command -v cargo 2>/dev/null) first, so no caller reaches it. The fix is PATH order, not redeploying the wrapper"
@@ -1927,21 +2252,49 @@ else
     elif ! cargo_run_ok "$cool" --version; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "cargo-cooldown is installed ($cool) but CANNOT EXECUTE - usually a prebuilt binary needing newer glibc than this image ships. The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated"
+    elif [ "$cpin" = "0" ] || [ "$cpact" = "allow" ]; then
+      row GAP FUNCTIONAL "cargo publish-age gate" \
+        "routing verified, but the caller's environment reaches cargo-cooldown UNCHANGED: with COOLDOWN_MINUTES=0 and COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=allow exported, the backend received window=${cpin:-?} action=${cpact:-?}. cargo-cooldown ranks the environment above every cooldown.toml, so one exported variable switches this gate off - ten different variables do, and so does relocating CARGO_HOME. This wrapper predates environment pinning: re-apply"
+    elif [ -n "$coverride" ] && [ "$cpinned" = 1 ]; then
+      # GAP, not WEAK, even though the pin is OBSERVED. The pin beats a repo file
+      # only for settings that have an environment form; [allow.global] minutes,
+      # [[allow.package]], [[allow.exact]] and [registries.<alt>] windows have
+      # none, and MEASURED (cargo-cooldown 0.3.5) `[allow.global] minutes = 0`
+      # in a repo cooldown.toml built a crate published hours earlier through a
+      # pinned wrapper. This row reads presence, not content, so it cannot tell
+      # a harmless file from that one.
+      row GAP FUNCTIONAL "cargo publish-age gate" \
+        "routing verified and the wrapper pins the environment (OBSERVED handing the backend COOLDOWN_MINUTES=$cpin over a caller's 0), which beats $coverride for the global and crates.io windows, now and skip_registries. It does NOT beat that file's [allow.global] minutes, [[allow.package]], [[allow.exact]] or [registries.<alt>] windows, which have no environment form, so a cooldown.toml committed to an untrusted repo can still loosen this gate"
     elif [ -n "$coverride" ]; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
-        "routing verified, but $coverride sits ABOVE $ch/cooldown.toml in cargo-cooldown's precedence chain (env > member > workspace > CARGO_HOME, per harden.sh's own comment), so our ${cage:-<unset>} window is not the one in force. harden.sh calls a committed cooldown.toml in an untrusted repo a hardening bypass"
+        "routing verified, but $coverride sits ABOVE $ch/cooldown.toml in cargo-cooldown's precedence chain (env > member > workspace > CARGO_HOME) and this wrapper does not pin the environment, so our ${cage:-<unset>} window is not the one in force. A committed cooldown.toml in an untrusted repo is a hardening bypass on this wrapper"
+    elif [ ! -f "$ch/cooldown.toml" ] && [ "$cpinned" = 1 ]; then
+      row WEAK FUNCTIONAL "cargo publish-age gate" \
+        "no cooldown.toml at the CARGO_HOME this step resolves ($ch), but the window does not depend on it: the wrapper pins the environment layer - OBSERVED handing the backend COOLDOWN_MINUTES=$cpin ($(( cpin / 60 ))h) over a caller's 0. Only per-crate [[allow.exact]] exceptions from that file are missing here"
     elif [ ! -f "$ch/cooldown.toml" ]; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
-        "the wrapper routes through a working cargo-cooldown, but there is no cooldown.toml at the CARGO_HOME THIS step resolves ($ch). harden.sh wrote it to whatever CARGO_HOME was set in its own step; a later toolchain or cache step moved it"
+        "the wrapper routes through a working cargo-cooldown, but there is no cooldown.toml at the CARGO_HOME THIS step resolves ($ch), and the wrapper does not pin the environment. harden.sh wrote it to whatever CARGO_HOME was set in its own step; a later toolchain or cache step moved it"
     elif ! cargo_positive_int "$cagen"; then
+      # Kept even when the environment is pinned: cargo-cooldown still PARSES this
+      # file, and a value it cannot parse aborts every routed build. A value that
+      # parses but is not positive (e.g. "0 hours") would be overridden by the pin
+      # and this is then conservative - reachable only by editing our file.
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the route works but $ch/cooldown.toml carries global-min-publish-age='${cage:-<unset>}' - not a positive number of hours, so no window is in force"
-    elif [ -n "$cwant" ] && [ "$cagen" != "$cwant" ]; then
-      row GAP FUNCTIONAL "cargo publish-age gate" \
-        "routing verified, but the window in force is ${cage} while this job's harden step recorded release_age_hours=$cwant. The cooldown.toml at $ch was written by a DIFFERENT run - a restored CARGO_HOME cache, or CARGO_HOME moved between steps. Something may be gating; it is not what this job asked for"
     else
-      row WEAK FUNCTIONAL "cargo publish-age gate" \
-        "\`cargo build\` is ROUTED through \`cargo cooldown\` and the backend at $cool answers --version; window ${cage} at $ch/cooldown.toml (what it does on a violation is its own row). CAPPED AT WEAK ON PURPOSE: every fact about the window comes from re-reading the file we wrote. cargo has no config readback (\`cargo config get\` is nightly-only) and cargo-cooldown never reported the value back, so nothing here observed the gate refusing anything - the same honest cap as the pnpm age-gate row"
+      # The window in force: the pinned environment value when observed, else the
+      # file. Compared against what this job's harden step asked for.
+      if [ "$cpinned" = 1 ]; then cwin=$(( cpin / 60 )); else cwin="$cagen"; fi
+      if [ -n "$cwant" ] && [ "$cwin" != "$cwant" ]; then
+        row GAP FUNCTIONAL "cargo publish-age gate" \
+          "routing verified, but the window in force is ${cwin}h while this job's harden step recorded release_age_hours=$cwant. Written by a DIFFERENT run - a restored CARGO_HOME cache, or CARGO_HOME moved between steps. Something may be gating; it is not what this job asked for"
+      elif [ "$cpinned" = 1 ]; then
+        row WEAK FUNCTIONAL "cargo publish-age gate" \
+          "\`cargo build\` is ROUTED through \`cargo cooldown\`, the backend at $cool answers --version, and the wrapper pins the window in the environment - OBSERVED handing it COOLDOWN_MINUTES=$cpin (${cwin}h) when the caller had exported 0, so no cooldown.toml anywhere can widen it. CAPPED AT WEAK ON PURPOSE: these are observations of OUR wrapper; cargo-cooldown never reported the window back and nothing here watched it refuse a crate - the same honest cap as the pnpm age-gate row"
+      else
+        row WEAK FUNCTIONAL "cargo publish-age gate" \
+          "\`cargo build\` is ROUTED through \`cargo cooldown\` and the backend at $cool answers --version; window ${cage} at $ch/cooldown.toml (what it does on a violation is its own row). CAPPED AT WEAK ON PURPOSE: every fact about the window comes from re-reading the file we wrote. cargo has no config readback (\`cargo config get\` is nightly-only) and cargo-cooldown never reported the value back, so nothing here observed the gate refusing anything - the same honest cap as the pnpm age-gate row"
+      fi
     fi
   elif printf '%s\n' "$cdisp" | grep -qx -- '--locked'; then
     # THE LOCKFILE IS THE PRECONDITION, SO REPORT IT AS ONE. MEASURED: with no
@@ -1992,6 +2345,18 @@ else
   elif ! printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
     row "N/A" - "cargo age-gate refuses" \
       "no publish-age backend is routed, so there is no violation action to take - see the publish-age gate row"
+  elif [ "$cpact" = "allow" ]; then
+    row GAP FUNCTIONAL "cargo age-gate refuses" \
+      "a caller-exported COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=allow reaches cargo-cooldown unchanged, so any caller turns a refusal into a silent accept, whatever any cooldown.toml says - see the publish-age gate row"
+  elif [ "$cpinned" = 1 ] && [ "$cpact" = "deny" ]; then
+    # FUNCTIONAL now, not PRESENT: this is the value OBSERVED being handed to the
+    # backend over a caller's "allow", not a re-read of our file. Still WEAK:
+    # cargo-cooldown never reported it back and nothing here watched a refusal.
+    row WEAK FUNCTIONAL "cargo age-gate refuses" \
+      "the wrapper pins incompatible-publish-age='deny' in the environment - OBSERVED handed to cargo-cooldown over a caller's 'allow' - which outranks every cooldown.toml, a repo's own included. deny is documented (harden.sh, the role's cooldown.toml) as failing the command and restoring the original Cargo.lock; that semantic is quoted, not measured here"
+  elif [ "$cpinned" = 1 ]; then
+    row GAP FUNCTIONAL "cargo age-gate refuses" \
+      "the wrapper pins incompatible-publish-age='${cpact:-<unset>}', not 'deny' (OBSERVED in the environment it hands cargo-cooldown). The action writes 'fallback' when strict=false and its own comment calls that 'a fail-open posture - only downgrades and warns'; on the role it is cargo_cooldown_violation_action. So the gate is configured NOT to refuse"
   elif [ ! -f "$ch/cooldown.toml" ]; then
     row "N/A" - "cargo age-gate refuses" \
       "no cooldown.toml at $ch - see the publish-age gate row"

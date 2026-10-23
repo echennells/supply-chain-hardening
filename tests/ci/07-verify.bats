@@ -167,6 +167,162 @@ EOF
   [[ "$output" == *"refuse to run"* ]]
 }
 
+@test "the bunx row catches a wrapper that lets a leading metadata flag skip --no-install" {
+  # `bunx some-cli` alone cannot see this: the plain shape is hardened while
+  # `bunx --version some-cli` reaches real bun without --no-install, which
+  # fetch-and-executes. The stub answers --help in bunx mode so the row gets
+  # past its entry-point check to the dispatch it is testing.
+  local body='case "${1:-}" in --version|-v) echo "1.4.4";; --help) echo "Usage: bunx [flags] <package>";; *) echo STUB;; esac'
+  stub_bin bun "$body"
+  stub_bin bunx "$body"
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  # Put the bypass back: pass ANY leading metadata flag through, as the
+  # wrapper did before the `$# -eq 1` guard. Assert the mutation landed, or a
+  # wrapper rewrite would turn this into a test of nothing.
+  # Not `sed -i`: BSD sed (the macOS job) needs `-i ''`. cp keeps the mode.
+  sed 's/if \[ "\$#" -eq 1 \]; then/if true; then/' "$TEST_BIN/bunx" > "$BATS_TEST_TMPDIR/bunx"
+  sudo cp "$BATS_TEST_TMPDIR/bunx" "$TEST_BIN/bunx"
+  grep -q 'if true; then' "$TEST_BIN/bunx"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  [[ "$output" == *'`bunx --version some-cli`'* ]]
+}
+
+@test "the bunx row catches a BUN wrapper that lets a leading metadata flag skip --no-install" {
+  # Same bypass one token later: `bun --version x <pkg>` fetch-and-executes on
+  # bun 1.4.4, and the Action's bun wrapper passed any leading metadata flag
+  # through. No bunx here, so the row's bun-only branch is the one under test.
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.4.4";; --help) echo "Usage: bun <command> [...flags]";; *) echo STUB;; esac'
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  # Put the bypass back, portably (BSD sed has no bare -i), and prove it landed.
+  sed 's/if \[ "\$#" -eq 1 \]; then/if true; then/' "$TEST_BIN/bun" > "$BATS_TEST_TMPDIR/bun"
+  sudo cp "$BATS_TEST_TMPDIR/bun" "$TEST_BIN/bun"
+  grep -q 'if true; then' "$TEST_BIN/bun"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  [[ "$output" == *'`bun --version x some-cli`'* ]]
+}
+
+@test "pip age gate: a cutoff in the future is a GAP, not OK" {
+  # A future uploaded-prior-to admits everything published before it. The row
+  # used to compute a negative age, miss the > 7 day test and print OK.
+  local realpy; realpy=$(command -v python3)
+  stub_bin python3 'if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
+  case "${3:-}" in
+    --version) echo "pip 26.1 from /x/pip (python 3.13)" ;;
+    install) echo "  --uploaded-prior-to <datetime>" ;;
+    config) echo "global.uploaded-prior-to='"'"'2099-01-01T00:00:00Z'"'"'" ;;
+  esac
+  exit 0
+fi
+exec '"$realpy"' "$@"'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"*"FUTURE"* ]]
+}
+
+@test "pip age gate: a pip without the flag fails only the jobs that hardened pip" {
+  # Stock ubuntu-24.04 runners have pip 24.0. That is a real GAP for a job that
+  # asked for pip -- and none of the business of a job that did not.
+  local realpy; realpy=$(command -v python3)
+  stub_bin python3 'if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
+  case "${3:-}" in
+    --version) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)" ;;
+    install) echo "  --only-binary <format_control>" ;;
+  esac
+  exit 0
+fi
+exec '"$realpy"' "$@"'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
+
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"N/A    BYDESIGN    pip native age gate"*"not in the requested ecosystems"* ]]
+  [[ "$output" != *"GAP    PARSED      pip native age gate"* ]]
+}
+
+@test "cargo publish-age gate: a repo cooldown.toml is a GAP even with the environment pinned" {
+  # The pin beats a repo file only for settings that have an environment form.
+  # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` in a repo
+  # cooldown.toml still built a crate published hours earlier through a pinned
+  # wrapper. The row used to downgrade this to WEAK.
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  mkdir -p "$BATS_TEST_TMPDIR/repo"
+  printf '[allow.global]\nminutes = 0\n' > "$BATS_TEST_TMPDIR/repo/cooldown.toml"
+  cd "$BATS_TEST_TMPDIR/repo"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"[allow.global]"* ]]
+}
+
+# uv_reporting <cutoff>: a uv that reports an absolute exclude-newer instant in
+# the Debug shape `uv pip list --show-settings` prints, so the age-gate row
+# can be driven without a real uv or a frozen clock.
+uv_reporting() {
+  stub_bin uv 'case "$*" in
+  --version*|-V*) echo "uv 0.13.5" ;;
+  "pip list --show-settings") printf "%s\n" "PipSettings {" "    no_build: true," "    exclude_newer: ExcludeNewer {" "        global: Some(" "            Absolute(" "                '"$1"'," "            )," "        )," "    }," "}" ;;
+  *) echo /tmp ;;
+esac'
+}
+
+# A BSD date stand-in, macOS shape: no -d at all, -j -f to parse.
+bsd_date() {
+  cat > "${TEST_BIN}/date" <<'SHIM'
+#!/usr/bin/env python3
+import sys, calendar, time
+a = sys.argv[1:]
+if "-d" in a:
+    sys.stderr.write("date: illegal option -- d\n"); sys.exit(1)
+if "-j" in a and "-f" in a:
+    i = a.index("-f")
+    try:
+        print(calendar.timegm(time.strptime(a[i + 2], a[i + 1]))); sys.exit(0)
+    except ValueError:
+        sys.exit(1)
+if a and a[-1].startswith("+"):
+    print(int(time.time()) if a[-1] == "+%s" else time.strftime(a[-1][1:], time.gmtime())); sys.exit(0)
+sys.exit(1)
+SHIM
+  chmod +x "${TEST_BIN}/date"
+}
+
+@test "uv age gate: a cutoff weeks old reads as a freeze, not as OK" {
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      uv age gate"*"FREEZE"* ]]
+}
+
+@test "uv age gate: a cutoff two days old reads as OK with its age" {
+  # GNU `-d` or BSD `-v`: this suite also runs on macOS.
+  uv_reporting "$(date -u -d '2 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-2d '+%Y-%m-%dT%H:%M:%SZ')"
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      uv age gate"*"(2 day(s) old)"* ]]
+}
+
+@test "uv age gate: BSD date still sees the freeze (it used to read 0 days old)" {
+  # macOS date has no -d. The age used to fall back to 0, so a months-old
+  # freeze read OK "(0 day(s) old)" on exactly the hosts least likely to
+  # have GNU date.
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  bsd_date
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      uv age gate"*"FREEZE"* ]]
+  [[ "$output" != *"0 day(s) old"* ]]
+}
+
 @test "an active wrapper reads as OK at FUNCTIONAL strength" {
   stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
   harden ECOSYSTEMS=bun -- --emit=plain >/dev/null

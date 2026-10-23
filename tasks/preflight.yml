@@ -194,3 +194,32 @@
   when:
     - etc_preflight.rc == 42
     - not (accept_etc_overwrite | default(false) | bool)
+
+- name: Assert the pip age-gate cutoff is an absolute Z-suffixed RFC 3339 instant
+  # A MALFORMED value makes pip >= 26 exit 2 on every install / download / list
+  # and even `pip install --help` -- host-wide and for every account, because
+  # this lands in /etc/pip.conf and /etc/environment. Two shapes are rejected
+  # deliberately: the relative `P<n>D` form (pip 26.1+, hard error on 26.0) and
+  # any value without a literal Z (read in the host's LOCAL time -- 26h of
+  # spread measured across TZ=UTC / Pacific/Kiritimati / Etc/GMT+12).
+  #
+  # This lives in preflight, not pip.yml, because preflight carries
+  # `tags: always` -- so `--tags npm` or `--skip-tags pip` cannot deploy the
+  # higher-precedence env layer without this check having run.
+  ansible.builtin.assert:
+    that:
+      - sch_pip_cutoff is string
+      - sch_pip_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$')
+    fail_msg: >-
+      pip_uploaded_prior_to must be `rolling` or an absolute RFC 3339 instant
+      ending in a literal Z (e.g. 2026-10-19T00:00:00Z); it resolved to
+      '{{ sch_pip_cutoff | default("<undefined>") }}'. A malformed value
+      makes pip >= 26 exit 2 on every install for every user on this host. The
+      relative P<n>D form needs pip 26.1+ and is a hard error on 26.0.
+    quiet: true
+  # `default(false)`, not a bare reference: tests/bats/38-preflight-become-guard.bats
+  # imports THIS FILE into a bare playbook that supplies only release_age_hours,
+  # so defaults/main.yml is never loaded and a bare `pip_age_gate | bool` raises
+  # an undefined-variable error that fails the play. Preflight has to stand on
+  # its own. In a real apply the role's defaults make this true.
+  when: pip_age_gate | default(false) | bool

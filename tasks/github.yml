@@ -83,7 +83,7 @@
   # only, keeping the global hardening intact for user-driven go calls.
   # Also use the absolute go path so bare `go` isn't required on PATH.
   ansible.builtin.command:
-    cmd: "{{ go_for_github.stdout }} install github.com/suzuki-shunsuke/pinact/cmd/pinact@{{ pinact_version }}"
+    cmd: "{{ go_for_github.stdout }} install github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@{{ pinact_version }}"
     creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/pinact' }}"
   environment:
     GOTOOLCHAIN: auto

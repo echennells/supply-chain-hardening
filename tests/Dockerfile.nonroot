@@ -30,6 +30,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     util-linux procps \
     && rm -rf /var/lib/apt/lists/*
 
+# pip >= 26 behind `python3 -m pip`, so the native age gate is IMPLEMENTED, not
+# just deployed -- the same reason npm is floated to latest below. 24.04's apt
+# pip is 24.0, which ignores uploaded-prior-to, and the verifier (correctly)
+# reports that as a GAP; the stock case is asserted in action-smoke.yml. It lands
+# in /usr/local/lib/python3.12/dist-packages, ahead of the apt copy on sys.path.
+# Its console scripts are removed so pip/pip3 on PATH stay what a stock host has
+# and the role wraps exactly what it would wrap there (it writes
+# /usr/local/bin/pip and pip3; a leftover pip3.12 would sit beside them unwrapped).
+# --ignore-installed because the apt pip has no RECORD file, so pip cannot
+# uninstall it ("Cannot uninstall pip 24.0, RECORD file not found"); this
+# installs beside it instead. The last line fails the build here, by name, if
+# the shadowing did not take.
+RUN python3 -m pip install --break-system-packages --ignore-installed --no-cache-dir 'pip>=26' \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 \
+    && python3 -m pip --version \
+    && python3 -m pip install --help | grep -q -- '--uploaded-prior-to'
+
 # Node 24 so npm is >= 11.10 (min-release-age), then float npm to latest so the
 # age gate is genuinely IMPLEMENTED, not just echoed back. This mirrors the
 # NodeSource path we hardened Eric's real Ubuntu 26 box with.

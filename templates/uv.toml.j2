@@ -21,11 +21,13 @@ allow-insecure-host = [
 allow-insecure-host = []
 {% endif %}
 
-# Reject packages published after {{ uv_exclude_newer }}
-# (release_age_hours = {{ release_age_hours }} subtracted from apply-time clock).
+# Reject packages published after this instant
+# (release_age_hours = {{ release_age_hours }} back from the clock, rounded down to midnight UTC).
 # uv's exclude-newer requires an absolute RFC 3339 timestamp — NOT a relative
-# duration. The cutoff is frozen at apply time; re-apply the role to advance.
-exclude-newer = "{{ uv_exclude_newer }}"
+# duration. It is set at apply time; where systemd runs
+# supply-chain-age-gate-refresh.timer it is advanced in place, otherwise
+# re-apply the role to advance it.
+exclude-newer = "{{ sch_uv_cutoff }}"
 
 {% if uv_no_build %}
 # Force wheels only — blocks setup.py execution from source distributions.
