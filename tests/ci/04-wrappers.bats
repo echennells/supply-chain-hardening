@@ -387,7 +387,9 @@ cooldown_stubs() {
   ln "$TEST_BIN/rustup" "$TEST_BIN/cargo"
   cp "$TEST_BIN/rustup" "$BATS_TEST_TMPDIR/rustup.orig"
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
-  assert_file_contains "$TEST_BIN/cargo-real" "exec -a cargo \"$TEST_BIN/rustup\""
+  # The shim names the RESOLVED path. On macOS $TMPDIR is under /var, a symlink
+  # to /private/var, so the unresolved $TEST_BIN never matches there.
+  assert_file_contains "$TEST_BIN/cargo-real" "exec -a cargo \"$(cd "$TEST_BIN" && pwd -P)/rustup\""
   # And nothing was written into the shared inode.
   cmp -s "$TEST_BIN/rustup" "$BATS_TEST_TMPDIR/rustup.orig"
 }

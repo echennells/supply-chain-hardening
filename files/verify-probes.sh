@@ -1362,7 +1362,14 @@ fi
 # ("Could not find a version that satisfies the requirement") is BYTE-IDENTICAL
 # to a dead index, an empty mirror and PIP_NO_INDEX, so grepping it would report
 # OK on a host that simply cannot reach an index. OK PARSED is the honest ceiling.
-if have python3 && python3 -m pip --version >/dev/null 2>&1; then
+#
+# Scoped like every other shared row. Without it, an action job that hardened
+# only npm on a stock runner (pip 24.0) failed verify on a pip GAP it never
+# asked about.
+if have python3 && python3 -m pip --version >/dev/null 2>&1 \
+   && command -v requested >/dev/null 2>&1 && ! requested pip; then
+  row "N/A" - "pip native age gate" "python3 -m pip present but pip is not in the requested ecosystems"
+elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
   pipver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
   if ! python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
     row GAP PARSED "pip native age gate" \

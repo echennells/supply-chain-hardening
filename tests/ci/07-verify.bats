@@ -225,6 +225,28 @@ exec '"$realpy"' "$@"'
   [[ "$output" == *"GAP    PARSED      pip native age gate"*"FUTURE"* ]]
 }
 
+@test "pip age gate: a pip without the flag fails only the jobs that hardened pip" {
+  # Stock ubuntu-24.04 runners have pip 24.0. That is a real GAP for a job that
+  # asked for pip -- and none of the business of a job that did not.
+  local realpy; realpy=$(command -v python3)
+  stub_bin python3 'if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
+  case "${3:-}" in
+    --version) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)" ;;
+    install) echo "  --only-binary <format_control>" ;;
+  esac
+  exit 0
+fi
+exec '"$realpy"' "$@"'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
+
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"N/A    BYDESIGN    pip native age gate"*"not in the requested ecosystems"* ]]
+  [[ "$output" != *"GAP    PARSED      pip native age gate"* ]]
+}
+
 @test "cargo publish-age gate: a repo cooldown.toml is a GAP even with the environment pinned" {
   # The pin beats a repo file only for settings that have an environment form.
   # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` in a repo
