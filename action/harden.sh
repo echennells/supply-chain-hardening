@@ -449,6 +449,11 @@ if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   err "release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
   exit 2
 fi
+# Normalise to base 10. Bash arithmetic reads a leading zero as OCTAL, so '072'
+# passed the check above and then became 58 hours in every $(( )) below (the
+# pnpm, yarn, bun and cargo windows) while cooldown.toml and the summary said 72;
+# '08' and '09' were arithmetic errors outright.
+RELEASE_AGE_HOURS=$((10#$RELEASE_AGE_HOURS))
 if [[ "$RELEASE_AGE_HOURS" -lt 1 ]]; then
   err "release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
   exit 2
@@ -1457,10 +1462,20 @@ if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "$wrapper_ta
   echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
   exit 127
 fi
-# Package-mgmt + metadata subcommands consult bunfig as normal.
+# Package-mgmt subcommands consult bunfig as normal.
 case "\${1:-}" in
-  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision)
+  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create)
     exec "\$REAL_BUN" "\$@"
+    ;;
+  --version|-v|--help|-h|--revision)
+    # Only as the WHOLE command line. MEASURED on bun 1.4.4: with more after
+    # it, bun ignores the flag -- \`bun --version x cowsay hi\` downloaded and
+    # ran cowsay -- so passing any leading metadata flag through was a
+    # one-flag bypass. With --no-install in front bun refuses it.
+    if [ "\$#" -eq 1 ]; then
+      exec "\$REAL_BUN" "\$@"
+    fi
+    exec "\$REAL_BUN" --no-install "\$@"
     ;;
   *)
     exec "\$REAL_BUN" --no-install "\$@"
@@ -1549,13 +1564,13 @@ case "\${1:-}" in
   --version|-v|--help|-h|--revision)
     # ONLY when the flag is the WHOLE command line. MEASURED on bun 1.4.3:
     # with a package name after it, bunx ignores the flag's metadata meaning
-    # and fetch-and-executes the package anyway -- `bunx --version cowsay hi`
+    # and fetch-and-executes the package anyway -- \`bunx --version cowsay hi\`
     # downloaded cowsay from npm and ran it, rc 0, with NO cache involved. So
     # this arm was a complete bypass of the --no-install injection below,
     # independent of cache state, reachable by prepending one flag.
     #
-    # `\$# -eq 1` is the shape to use rather than dropping the arm or injecting
-    # --no-install into it: tests/ci/04-wrappers.bats:142 runs `bunx --version`
+    # \`\$# -eq 1\` is the shape to use rather than dropping the arm or injecting
+    # --no-install into it: tests/ci/04-wrappers.bats:142 runs \`bunx --version\`
     # and asserts the output carries no --no-install, and that stays green
     # here. Every other argv shape falls through to the hardened path.
     if [ "\$#" -eq 1 ]; then
@@ -1594,13 +1609,12 @@ EOF
   # Deployed at $CARGO_HOME/cooldown.toml, the weakest level of
   # cargo-cooldown's precedence chain (env > member > workspace > CARGO_HOME)
   # and the only one that applies to every project without per-repo opt-in.
-  # Corollary: a repo shipping its own cooldown.toml overrides this. That is
-  # cargo-cooldown's design. NOTE: the ROLE's wrapper now pins the environment
-  # layer, which outranks every file level, so a committed cooldown.toml is no
-  # longer a bypass there. THIS surface does not pin yet — see the TODO at the
-  # cargo wrapper heredoc below — so the warning still holds for the action.
-  # cargo-cooldown's design — treat a committed cooldown.toml in an untrusted
-  # repo as a hardening bypass.
+  # On its own, the weakest level would let a repo's committed cooldown.toml
+  # override this file. It does not, because the wrapper below exports the same
+  # policy into the ENVIRONMENT, which outranks every file level — see
+  # sanitize_cooldown_env in the WRAPPER heredoc. Residuals: a repo file still
+  # supplies [[allow.exact]] rules (the env pin does not touch those), and a
+  # caller who reaches cargo WITHOUT the wrapper is back to file precedence.
   #
   # Writing this costs nothing and is harmless when the cargo-cooldown binary
   # is absent, so it is unconditional; the binary itself is opt-in below.
@@ -1674,8 +1688,50 @@ EOF
       return 0
     fi
   else
+    # Moved FIRST, before anything else touches this path: the wrapper is later
+    # written with `cp`, and `cp` onto a symlink writes THROUGH it — into the
+    # shared rustup binary, replacing rustc, rustfmt and every other proxy.
     $SUDO mv "$real_cargo" "${real_cargo}-real"
     real_cargo="${real_cargo}-real"
+  fi
+
+  # ARGV[0]-SAFE BACKUP — parity with tasks/cargo.yml "Prepare cargo-real".
+  # rustup's cargo is a symlink to the rustup binary, which dispatches on the
+  # name it is invoked as, so a backup called cargo-real is rejected:
+  #   error: unknown proxy name: 'cargo-real'
+  # The wrapper's own `exec -a cargo` covers ITS call, but cargo hands
+  # subcommands its own path via $CARGO, so cargo-cooldown re-enters as
+  # cargo-real and dies; so does the `sfw` branch of run_real, which cannot set
+  # argv[0] at all. This surface did a plain rename while run_real's comment
+  # already claimed "cargo-real is an argv[0] shim on rustup hosts". MEASURED
+  # before this change, rustup cargo + cargo-cooldown: every routed
+  # `cargo check` failed with exactly the error above. So on rustup the backup
+  # becomes a two-line shim restoring argv[0]=cargo. Applied on the re-wrap
+  # path too, because a runner that ran an older action already has the broken
+  # symlink and the branch above would otherwise reuse it.
+  #
+  # Three proxy layouts, all one multicall binary that dispatches on argv[0]:
+  # a symlink to `rustup` (rustup's default), a symlink to `rustup-init`
+  # (Homebrew's rustup formula), and a HARDLINK to rustup (RUSTUP_HARDLINK_PROXIES,
+  # and the default on older rustup) -- the last is no symlink at all, so it is
+  # recognised by sharing an inode with the sibling `rustup`.
+  local cargo_target="" tmp_shim cargo_sib
+  if [[ -L "$real_cargo" ]]; then
+    cargo_target=$(readlink -f "$real_cargo" 2>/dev/null || true)
+    case "$(basename "${cargo_target:-none}")" in rustup|rustup-init) ;; *) cargo_target="" ;; esac
+  fi
+  cargo_sib="$(dirname "$real_cargo")/rustup"
+  if [[ -z "$cargo_target" && ! -L "$real_cargo" && -f "$cargo_sib" && "$real_cargo" -ef "$cargo_sib" ]]; then
+    cargo_target=$(readlink -f "$cargo_sib" 2>/dev/null || true)
+  fi
+  if [[ -n "$cargo_target" ]]; then
+    tmp_shim=$(mktemp)
+    printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$cargo_target" > "$tmp_shim"
+    chmod 0755 "$tmp_shim"
+    # mv replaces the directory entry; it neither follows a symlink nor
+    # writes into a hardlink's shared inode (the rustup binary).
+    $SUDO mv -f "$tmp_shim" "$real_cargo"
+    log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
   # Written via placeholders + sed rather than an interpolating heredoc: the
@@ -1846,6 +1902,72 @@ exec_sub() {
   run_real "${out[@]}"
 }
 
+# Occupy cargo-cooldown's TOP precedence level (environment) with this run's
+# policy, instead of leaving it to the caller. Parity with the role's
+# templates/cargo-wrapper.sh.j2, which carries the full measurement record:
+# cargo-cooldown ranks env > member > workspace > $CARGO_HOME/cooldown.toml, so
+# any of ten exported variables, or simply relocating CARGO_HOME, switched the
+# gate off while the rows still read healthy.
+#
+# ONE SPELLING PER SETTING. COOLDOWN_ENFORCEMENT is a compat alias of
+# COOLDOWN_INCOMPATIBLE_PUBLISH_AGE (likewise *_CARGO_COMPATIBLE_ACCEPT of
+# *_FALLBACK_ACCEPT), and cargo-cooldown ABORTS when both are set and disagree.
+# This surface writes "fallback" whenever strict=false, so exporting
+# ENFORCEMENT=strict here would have failed every non-strict CI build. MEASURED:
+#   Error: environment defines incompatible `COOLDOWN_ENFORCEMENT` and
+#   `COOLDOWN_INCOMPATIBLE_PUBLISH_AGE` values
+# Aliases are cleared; only canonical names are pinned, to the values the
+# cooldown.toml above was written with.
+#
+# NOT A FIX FOR A COMMITTED cooldown.toml. The pins win for every setting that
+# has an environment form (global and crates.io windows, now, skip_registries,
+# the violation action, the lockfile baseline), but `[allow.global] minutes`,
+# `[[allow.package]]`, `[[allow.exact]]` and `[registries.<alt>]` windows have
+# none, and a repo's cooldown.toml can still use them to loosen the gate.
+# MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` committed next
+# to Cargo.toml still admits a crate published hours ago. Treat a cooldown.toml
+# in an untrusted repo as a bypass.
+sanitize_cooldown_env() {
+  _sc_env=$(env)
+  _sc_had=''
+  for _sc_v in COOLDOWN_MINUTES COOLDOWN_ENFORCEMENT COOLDOWN_INCOMPATIBLE_PUBLISH_AGE \
+               COOLDOWN_FALLBACK_ACCEPT COOLDOWN_CARGO_COMPATIBLE_ACCEPT \
+               COOLDOWN_LOCKFILE_BASELINE COOLDOWN_NOW COOLDOWN_SKIP_REGISTRIES \
+               CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE CARGO_REGISTRY_MIN_PUBLISH_AGE; do
+    if printf '%s\n' "$_sc_env" | grep -q "^$_sc_v="; then
+      _sc_had="$_sc_had $_sc_v"
+    fi
+    unset "$_sc_v"
+  done
+  # Per-registry windows (CARGO_REGISTRIES_<NAME>_MIN_PUBLISH_AGE): names match a
+  # fixed [A-Za-z0-9_] pattern, so the word-split cannot carry anything else.
+  for _sc_v in $(printf '%s\n' "$_sc_env" | sed -n 's/^\(CARGO_REGISTRIES_[A-Za-z0-9_]*_MIN_PUBLISH_AGE\)=.*/\1/p'); do
+    _sc_had="$_sc_had $_sc_v"
+    unset "$_sc_v"
+  done
+  # A dashed name (CARGO_REGISTRIES_my-reg_MIN_PUBLISH_AGE) is a valid registry
+  # name to cargo-cooldown but not an identifier to bash, so it cannot be unset.
+  if printf '%s\n' "$_sc_env" | grep -q '^CARGO_REGISTRIES_[^=]*[^A-Za-z0-9_=][^=]*_MIN_PUBLISH_AGE='; then
+    echo "[supply-chain-harden] error: a CARGO_REGISTRIES_*_MIN_PUBLISH_AGE variable with a non-identifier name is set; this wrapper cannot clear it and it would override this run's publish-age window. Unset it and retry." >&2
+    exit 2
+  fi
+  if [ -n "$_sc_had" ]; then
+    echo "[supply-chain-harden] note: overriding caller publish-age setting(s):$_sc_had - this run's __RELEASE_AGE_HOURS__h/__VIOLATION_ACTION__ policy applies instead." >&2
+  fi
+  export COOLDOWN_MINUTES=__MIN_AGE_MIN__
+  # The crates.io window, which a repo cooldown.toml's `[registry]
+  # min-publish-age` otherwise sets. Cargo also reads this name (its unstable
+  # registry.min-publish-age) and warns that it is ignoring it; harmless.
+  export CARGO_REGISTRY_MIN_PUBLISH_AGE="__RELEASE_AGE_HOURS__ hours"
+  export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=__VIOLATION_ACTION__
+  export COOLDOWN_LOCKFILE_BASELINE=floor
+  export COOLDOWN_FALLBACK_ACCEPT=auto
+  # The real clock and an empty skip list replace a repo cooldown.toml's
+  # `now` / `skip_registries`.
+  export COOLDOWN_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export COOLDOWN_SKIP_REGISTRIES=
+}
+
 case "$subcmd" in
   build|b|check|c|test|t|run|r|bench|doc|d|rustc|rustdoc|tree|fetch|package|publish|clippy)
     KIND=RESOLVING ;;
@@ -1893,6 +2015,7 @@ case "$KIND" in
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
     if command -v cargo-cooldown >/dev/null 2>&1; then
+      sanitize_cooldown_env
       case "$subcmd" in
         update)
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
@@ -1912,6 +2035,7 @@ case "$KIND" in
 
   RESOLVING)
     if command -v cargo-cooldown >/dev/null 2>&1; then
+      sanitize_cooldown_env
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -1939,7 +2063,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|; s|__CARGO_SFW__|$CARGO_SOCKET_FIREWALL|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|; s|__CARGO_SFW__|$CARGO_SOCKET_FIREWALL|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$violation_action|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
   $SUDO cp "$tmp_wrapper" "$wrapper_target"
   $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo
@@ -2551,7 +2675,7 @@ done
 case "\$subcmd" in
   # Parity with the role wrapper (templates/npm-wrapper.sh.j2): rebuild/exec/x/
   # link/view/info/show/search/outdated also touch the registry and were routed
-  # there but not here, so `npm exec`/`npx`-style fetch-and-run went unfiltered.
+  # there but not here, so \`npm exec\`/\`npx\`-style fetch-and-run went unfiltered.
   install|i|add|ci|update|up|rebuild|exec|x|dedupe|link|audit|view|info|show|search|outdated)
     if command -v sfw >/dev/null 2>&1; then
       exec sfw "\$REAL_NPM" "\$@"

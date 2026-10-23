@@ -322,9 +322,20 @@
       set -e
       CARGO_PATH='{{ cargo_check.stdout }}'
       REAL="${CARGO_PATH}-real"
+      # Three rustup proxy layouts: a symlink to rustup (default), a symlink to
+      # rustup-init (Homebrew), and a HARDLINK to rustup (RUSTUP_HARDLINK_PROXIES,
+      # older rustup), recognised by sharing an inode with the sibling rustup.
       TARGET=$(readlink -f "$CARGO_PATH")
-      if [ "$(basename "$TARGET")" = "rustup" ]; then
-        printf '#!/bin/bash\n# supply-chain-hardening: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$TARGET" > "$REAL"
+      SIB="$(dirname "$CARGO_PATH")/rustup"
+      case "$(basename "$TARGET")" in
+        rustup|rustup-init) PROXY=$TARGET ;;
+        *) PROXY="" ;;
+      esac
+      if [ -z "$PROXY" ] && [ ! -L "$CARGO_PATH" ] && [ -f "$SIB" ] && [ "$CARGO_PATH" -ef "$SIB" ]; then
+        PROXY=$(readlink -f "$SIB")
+      fi
+      if [ -n "$PROXY" ]; then
+        printf '#!/bin/bash\n# supply-chain-hardening: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$PROXY" > "$REAL"
         chmod 0755 "$REAL"
         echo shim
       else

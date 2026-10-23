@@ -32,6 +32,18 @@
 # So after this wrapper, bunx will only run tools that are already
 # installed; it refuses to silently fetch-and-execute a new one.
 #
+# "Already installed" includes bunx's OWN cache of packages that an earlier
+# unwrapped bunx call fetched. --no-install runs that copy (it fetches
+# nothing). MEASURED: on bun 1.4.4 the cache is
+# $BUN_INSTALL_CACHE_DIR/.bunx-<uid>/<pkg>@<tag> (default
+# ~/.bun/install/cache/.bunx-<uid>/), and on 1.4.3 it was
+# $TMPDIR/bunx-<uid>-<pkg>@<tag>, so redirecting TMPDIR is not a fix that
+# survives a bun upgrade. It is also not a boundary this wrapper defends:
+# bun ignores the whole cache unless .bunx-<uid> is owned by the current
+# user and not group/other-writable (MEASURED on 1.4.4), so only code
+# already running as you can seed an entry, and a repo can get the same
+# effect by committing node_modules/.bin/<name>, which bunx runs by design.
+#
 # TWO IMPLEMENTATION SUBTLETIES
 #
 #  1. bun decides it is in "bunx mode" from argv[0]. We therefore invoke
@@ -46,8 +58,11 @@
 #
 # BYPASS (per-invocation, for users who know what they need)
 #
-#   bun x <pkg>                       # explicit, still goes through bun wrapper
 #   {{ bun_real_path }} x <pkg>       # go around the wrapper entirely
+#
+# `bun x <pkg>` is NOT a bypass: it goes through the bun wrapper, which
+# injects --no-install in front of `x` (MEASURED on bun 1.4.4: blocked, and
+# a metadata flag after `x` does not change that).
 #
 # DISABLE GLOBALLY
 #

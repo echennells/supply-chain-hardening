@@ -23,7 +23,7 @@ export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
 # when a caller passes --isolated or repoints PIP_CONFIG_FILE. pip 26.0+;
 # accepted and inert below that (MEASURED). Absolute Z-suffixed instant only --
 # see defaults/main.yml and the preflight assert.
-export PIP_UPLOADED_PRIOR_TO={{ pip_uploaded_prior_to }}
+export PIP_UPLOADED_PRIOR_TO={{ sch_pip_cutoff }}
 {% endif %}
 export UV_LINK_MODE=copy
 # Note: we deliberately do NOT set UV_NO_SYSTEM_CONFIG=1 here, even though

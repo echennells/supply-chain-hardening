@@ -79,6 +79,14 @@
       tags: [uv, python, pip]
   tags: [uv, python, pip]
 
+- name: Include the age-gate refresh (keeps the uv/pip cutoff rolling)
+  # After uv.yml, which sets the uv_config_dir fact the refresher targets.
+  ansible.builtin.include_tasks:
+    file: age_gate_refresh.yml
+    apply:
+      tags: [uv, python, pip]
+  tags: [uv, python, pip]
+
 - name: Include deno hardening
   ansible.builtin.include_tasks:
     file: deno.yml

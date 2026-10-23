@@ -8,7 +8,7 @@ disable-pip-version-check = {{ pip_disable_version_check | bool | lower }}
 ; direct path/URL installs, and any simple index without PEP 700 upload-time
 ; metadata -- which is why supply-chain-verify never reports a parsed value as
 ; proof of enforcement on its own.
-uploaded-prior-to = {{ pip_uploaded_prior_to }}
+uploaded-prior-to = {{ sch_pip_cutoff }}
 {% endif %}
 {% if pip_only_binary | bool %}
 

@@ -208,12 +208,12 @@
   # higher-precedence env layer without this check having run.
   ansible.builtin.assert:
     that:
-      - pip_uploaded_prior_to is string
-      - pip_uploaded_prior_to is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$')
+      - sch_pip_cutoff is string
+      - sch_pip_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$')
     fail_msg: >-
-      pip_uploaded_prior_to must be an absolute RFC 3339 instant ending in a
-      literal Z (e.g. 2026-10-19T00:00:00Z); got
-      '{{ pip_uploaded_prior_to | default("<undefined>") }}'. A malformed value
+      pip_uploaded_prior_to must be `rolling` or an absolute RFC 3339 instant
+      ending in a literal Z (e.g. 2026-10-19T00:00:00Z); it resolved to
+      '{{ sch_pip_cutoff | default("<undefined>") }}'. A malformed value
       makes pip >= 26 exit 2 on every install for every user on this host. The
       relative P<n>D form needs pip 26.1+ and is a hard error on 26.0.
     quiet: true

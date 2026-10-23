@@ -1,0 +1,12 @@
+# Managed by ansible-supply-chain-security.
+[Unit]
+Description=Advance the supply-chain age-gate cutoff (uv exclude-newer, pip uploaded-prior-to)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# The user step runs as the user whose files it rewrites; the "+" step is
+# exempt from User= and runs as root for the /etc files.
+User={{ ansible_user_id }}
+ExecStart=+/usr/local/sbin/supply-chain-age-gate-refresh --system
+ExecStart=/usr/local/sbin/supply-chain-age-gate-refresh --user

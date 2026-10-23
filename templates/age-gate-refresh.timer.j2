@@ -1,0 +1,14 @@
+# Managed by ansible-supply-chain-security.
+[Unit]
+Description=Keep the supply-chain age-gate cutoff rolling
+
+[Timer]
+# Every 6 hours rather than daily at midnight: the cutoff advances at
+# midnight UTC, and a 6-hourly run lands within 6h of that whatever the
+# host's timezone. Persistent= catches up after downtime. A run that finds
+# the cutoff current rewrites nothing.
+OnCalendar=*-*-* 00/6:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

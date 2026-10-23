@@ -61,6 +61,12 @@
       # removing it is nil, and the failure direction is a false UNSUPPORTED on
       # exactly the hosts where the gate works. So: capture, then match.
       ver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
+      # No pip (python3 absent, or a minimal image without python3-pip) is not
+      # an old pip. MEASURED: this used to print a bare `UNSUPPORTED:` and the
+      # summary told the operator "python3 -m pip is , which does not
+      # implement" the flag. Nothing is skipped here: there is no `python3 -m
+      # pip install` to gate, and a pip installed later reads the deployed key.
+      if [ -z "$ver" ]; then printf 'NOPIP\n'; exit 0; fi
       help=$(python3 -m pip install --help 2>/dev/null)
       case "$help" in
         *--uploaded-prior-to*) printf '%s\n' "$ver" ;;

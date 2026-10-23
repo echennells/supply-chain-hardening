@@ -1,6 +1,6 @@
 # Tests
 
-361 automated tests verify the supply chain hardening works. Run with `make test`.
+433 container tests verify the supply chain hardening works (`make test`), plus 188 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -108,12 +108,16 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 361 tests
+make test          # build container + run all 433 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```
 
 Tests that re-run the full playbook (preflight tests in `25-integration-regressions.bats`, idempotency check) are slow. To skip the idempotency double-apply specifically: `SKIP_SLOW=1 make test` (the idempotency test honors that env var; others run regardless).
+
+## Measurement hazards when writing tests
+
+- **`npm config` answers for the directory you are in.** npm reads a project `.npmrc` from its *local prefix*: the nearest ancestor holding a `package.json` **or a `node_modules`**, and — when no ancestor has either — the current directory itself. That file outranks both `~/.npmrc` and `/etc/npmrc`, so any `.npmrc` in or above the working directory can invert a test. MEASURED on npm 10.9.8 in a clean `/tmp` tree with `~/.npmrc` saying `true`: a bare directory holding only `.npmrc` (`false`) read `false`, as did a directory with a `node_modules` and its subdirectory. An earlier version of this note said a bare directory was safe; that measurement was confounded by a `node_modules` higher up the scratch path, which is exactly this hazard. An `NPM_CONFIG_*` env var still wins over the project file. Read npm config from a fresh `mktemp -d` under a path with no `package.json` / `node_modules` ancestors (and strip `NPM_CONFIG_*` when testing a file layer), as `npm_implements` in `templates/verify.sh.j2` does; ECH-187 was a false OK from exactly this.
 
 ## Known coverage gaps
 
@@ -127,6 +131,7 @@ These are scenarios the test suite does **not** cover. They're tracked here so a
 - **Clock-skew bypass.** `27-cache-and-time.bats` notes the gap but skips the actual exploit without `faketime` installed. Adding `faketime` to the Dockerfile and writing the test would lock in the documented behavior.
 - **`python3 -m pip --no-binary :all:` defense.** Tested as a documented bypass that succeeds (test #4 in `09-python-adversarial.bats`). No defense is in place; the test pins this so a future "fix" that breaks legitimate `pip -m` callers without closing the bypass is caught.
 - **Determined operator overrides.** Role-deployed files at user-home paths can be overwritten by the user (`echo > ~/.npmrc`). The role isn't a sandbox. Tested implicitly via the precedence tests, but no test asserts "user can clobber if they want to."
+- **The age-gate refresh timer.** The test image runs no systemd, so `49-age-gate-refresh.bats` drives `supply-chain-age-gate-refresh` directly and asserts the timer is absent. The service/timer units (the `User=` + `+ExecStart` split, `OnCalendar`, `Persistent=`) and the apply-time enable/disable tasks are only exercised on a real systemd host.
 - **Container CMD callers (no PAM).** `12-cross-ecosystem.bats` proves `/etc/environment` doesn't propagate; the config-file layer is the documented protection. Not separately re-tested for every ecosystem.
 
 ## Issues found by testing
