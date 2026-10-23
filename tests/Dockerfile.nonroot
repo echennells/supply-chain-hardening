@@ -38,9 +38,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Its console scripts are removed so pip/pip3 on PATH stay what a stock host has
 # and the role wraps exactly what it would wrap there (it writes
 # /usr/local/bin/pip and pip3; a leftover pip3.12 would sit beside them unwrapped).
-RUN python3 -m pip install --break-system-packages --no-cache-dir --upgrade 'pip>=26' \
+# --ignore-installed because the apt pip has no RECORD file, so pip cannot
+# uninstall it ("Cannot uninstall pip 24.0, RECORD file not found"); this
+# installs beside it instead. The last line fails the build here, by name, if
+# the shadowing did not take.
+RUN python3 -m pip install --break-system-packages --ignore-installed --no-cache-dir 'pip>=26' \
     && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.12 \
-    && python3 -m pip --version
+    && python3 -m pip --version \
+    && python3 -m pip install --help | grep -q -- '--uploaded-prior-to'
 
 # Node 24 so npm is >= 11.10 (min-release-age), then float npm to latest so the
 # age gate is genuinely IMPLEMENTED, not just echoed back. This mirrors the
