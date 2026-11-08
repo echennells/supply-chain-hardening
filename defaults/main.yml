@@ -72,11 +72,18 @@ uv_exclude_newer: rolling
 # Internal: the instants actually rendered. Do not override these; set
 # uv_exclude_newer / pip_uploaded_prior_to. The lookup runs on the controller
 # only when the cutoff is rolling, so a pinned host never needs GNU date there.
+#
+# That only holds because the lookup is written out inside each branch. Jinja
+# resolves every NAME in a template before evaluating it, and ansible-core 2.18
+# and older render a variable's value when its name is resolved, so the earlier
+# `sch_rolling_cutoff if ... else ...` ran the lookup on a pinned host anyway and
+# a BSD-date controller (macOS) failed even after following the preflight's
+# advice to pin (MEASURED on 2.16.3; 2.19+ templates lazily). A CALL in the branch
+# not taken never runs, on any version. Keep the two copies identical.
 # `rolling` always means this formula -- for pip too, even when uv is pinned,
 # because that is what the refresh timer will advance it to.
-sch_rolling_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') }}"
-sch_uv_cutoff: "{{ sch_rolling_cutoff if uv_exclude_newer == 'rolling' else uv_exclude_newer }}"
-sch_pip_cutoff: "{{ sch_rolling_cutoff if pip_uploaded_prior_to == 'rolling' else pip_uploaded_prior_to }}"
+sch_uv_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') if uv_exclude_newer == 'rolling' else uv_exclude_newer }}"
+sch_pip_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') if pip_uploaded_prior_to == 'rolling' else pip_uploaded_prior_to }}"
 
 # Keep the uv and pip cutoffs ROLLING instead of frozen at apply time.
 # Both are absolute instants: an unattended host drifts into a months-deep
