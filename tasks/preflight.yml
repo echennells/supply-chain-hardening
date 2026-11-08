@@ -228,3 +228,33 @@
   # an undefined-variable error that fails the play. Preflight has to stand on
   # its own. In a real apply the role's defaults make this true.
   when: pip_age_gate | default(false) | bool
+
+- name: Validate the uv cutoff shape (a malformed value breaks every uv on the host)
+  # sch_uv_cutoff lands in /etc/uv/uv.toml, which every interpreter on the host
+  # reads, and uv refuses to start on a value it cannot parse. The pip check above
+  # only covers uv incidentally (pip inherits uv's value by default), so a bad
+  # uv-only pin got through with no preflight catch.
+  #
+  # Deliberately LOOSER than the pip check: uv accepts forms pip does not. It
+  # accepts every form defaults/main.yml documents for uv_exclude_newer: an
+  # absolute RFC 3339 instant, a local date, and the span forms uv 0.10+ accepts
+  # (which supply-chain-verify grades WEAK). This catches empty, garbage and
+  # malformed values; it does NOT prove the host's uv is new enough for a span.
+  # `is defined` keeps it skipped when preflight.yml is imported on its own
+  # (tests/bats/38), where the role defaults are not loaded.
+  ansible.builtin.assert:
+    that:
+      - sch_uv_cutoff is string
+      - >-
+        sch_uv_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$')
+        or sch_uv_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        or sch_uv_cutoff is match('^[0-9]+ ?(second|minute|hour|day|week)s?$')
+        or sch_uv_cutoff is match('^P(T[0-9]+[HMS]|[0-9]+[DW])$')
+    fail_msg: >-
+      uv_exclude_newer must be `rolling`, an absolute RFC 3339 instant
+      (e.g. 2026-10-19T00:00:00Z), a date (2026-10-19), or a span uv 0.10+
+      accepts (e.g. "2 days", P2D); it resolved to
+      '{{ sch_uv_cutoff | default("<undefined>") }}'. A value uv cannot parse
+      is written to /etc/uv/uv.toml and stops uv from starting for every user.
+    quiet: true
+  when: sch_uv_cutoff is defined

@@ -1,54 +1,56 @@
 # Tests
 
-433 container tests verify the supply chain hardening works (`make test`), plus 189 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+456 container tests verify the supply chain hardening works (`make test`), plus 218 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
 | File | Tests | What it covers |
 |---|---|---|
-| 01-config-files.bats | 49 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
-| 02-env-vars.bats | 17 | System-wide env vars in /etc/profile.d/ and /etc/environment |
-| 03-npm.bats | 4 | npm ignore-scripts behavioral test + config readback |
-| 04-python.bats | 5 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check) |
+| 01-config-files.bats | 52 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
+| 02-env-vars.bats | 21 | System-wide env vars in /etc/profile.d/ and /etc/environment |
+| 03-npm.bats | 6 | npm ignore-scripts behavioral test + config readback |
+| 04-python.bats | 8 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check) |
 | 05-go.bats | 6 | Go env vars verified via `go env` |
 | 06-js-ecosystem.bats | 7 | pnpm, yarn, bun config verification |
 | 07-other-configs.bats | 8 | Composer, bundler, cargo, npq alias checks |
-| 08-npm-adversarial.bats | 7 | Simulated npm supply chain attacks (incl. CLI-flag + user-config bypass attempts) |
+| 08-npm-adversarial.bats | 8 | Simulated npm supply chain attacks (incl. CLI-flag + user-config bypass attempts) |
 | 09-python-adversarial.bats | 4 | Simulated Python supply chain attacks (incl. M1 documented bypass) |
-| 10-go-adversarial.bats | 9 | Simulated Go environment poisoning |
-| 11-composer-adversarial.bats | 14 | Composer script blocking verification |
+| 10-go-adversarial.bats | 11 | Simulated Go environment poisoning |
+| 11-composer-adversarial.bats | 15 | Composer script blocking verification |
 | 12-cross-ecosystem.bats | 13 | File permissions, non-interactive shell coverage |
 | 13-pnpm-adversarial.bats | 5 | Simulated pnpm lifecycle-script attacks (incl. pnpm 11 config.yaml regression catcher, block-exotic-subdeps behavioral) |
 | 14-yarn-adversarial.bats | 3 | Simulated yarn lifecycle-script attacks |
 | 15-bun-adversarial.bats | 5 | Simulated bun lifecycle-script attacks + bun PATH wrapper end-to-end blocks runtime auto-install + FIXTURE CONTROL (bun-real does auto-install when not wrapped) |
-| 16-composer-behavioral.bats | 4 | Composer end-to-end blocking |
-| 17-bundler-behavioral.bats | 2 | Bundler frozen-mode end-to-end |
+| 16-composer-behavioral.bats | 7 | Composer end-to-end blocking |
+| 17-bundler-behavioral.bats | 4 | Bundler frozen-mode end-to-end |
 | 18-cargo-behavioral.bats | 5 | Cargo config (git-fetch-with-cli, retry), build.rs gap + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
 | 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
 | 21-podman.bats | 14 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign |
-| 22-pip-wrapper-safety.bats | 4 | Defensive guards in the pip→uv wrapper |
+| 22-pip-wrapper-safety.bats | 5 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
-| 24-deno-path-wrapper.bats | 11 | Deno in-place PATH wrapper plumbing + end-to-end |
+| 24-deno-path-wrapper.bats | 12 | Deno in-place PATH wrapper plumbing + end-to-end |
 | 25-integration-regressions.bats | 15 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
-| 34-composer-wrapper-tier-rendering.bats | 4 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
+| 34-composer-wrapper-tier-rendering.bats | 5 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |
 | 35-cargo-config-tier-rendering.bats | 5 | cargo_install_root authority (renders cargo-config.toml.j2 with empty/set, asserts [install] block conditional, baseline keys unconditional, TOML-valid both ways) |
 | 36-bun-wrapper-tier-rendering.bats | 7 | bun wrapper subcommand-routing (--no-install injected on runtime paths, skipped for package-mgmt subcommands and --version/--help, recursion guard present, catch-all wires to the inject branch) |
 | 37-pnpm-allowlist-hardening.bats | 13 | pnpm build-script allowlist + doubly-exempt guard |
 | 38-preflight-become-guard.bats | 7 | Refuses invocations where escalation would mis-target per-user config; escalation-method agnostic (sudo/su/doas), covers sudo -i |
-| 39-verify-behavioral.bats | 11 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers) and asserts each is caught |
-| 40-upgrade-convergence.bats | 4 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again |
-| 41-tty-interactive.bats | 5 | The npm wrapper's interactive branch under a real pty (script -qec): TTY routes through npq, non-TTY skips it, sfw-absent still reaches npq, read-only subcommands bypass both |
-| 42-cargo-path-wrapper.bats | 28 | The cargo PATH wrapper: subcommand parsing (global flags before the subcommand must not bypass the controls — the argv[1] regression), +toolchain ordering, --locked placement before `--`, unknown subcommands warned not gated, unprotected builds warned not silent, install/writer handling, re-entrancy and recursion guards, and `bash -n` on the deployed artifact |
-| 28-composer-tier-rendering.bats | 6 | Composer audit-tier authority (renders composer-config.json.j2 across 2.2 / 2.7 / 2.9 and asserts each tier's keys) |
+| 39-verify-behavioral.bats | 16 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers) and asserts each is caught |
+| 40-upgrade-convergence.bats | 5 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again |
+| 41-tty-interactive.bats | 6 | The npm wrapper's interactive branch under a real pty (script -qec): TTY routes through npq, non-TTY skips it, sfw-absent still reaches npq, read-only subcommands bypass both |
+| 42-cargo-path-wrapper.bats | 29 | The cargo PATH wrapper: subcommand parsing (global flags before the subcommand must not bypass the controls — the argv[1] regression), +toolchain ordering, --locked placement before `--`, unknown subcommands warned not gated, unprotected builds warned not silent, install/writer handling, re-entrancy and recursion guards, and `bash -n` on the deployed artifact |
+| 28-composer-tier-rendering.bats | 8 | Composer audit-tier authority (renders composer-config.json.j2 across 2.2 / 2.7 / 2.9 and asserts each tier's keys) |
 | 29-maven-behavioral.bats | 4 | Maven settings.xml — HTTPS-only mirror, checksum policy |
-| 30-gradle-behavioral.bats | 4 | Gradle init script — repository pinning, verification metadata |
+| 30-gradle-behavioral.bats | 6 | Gradle init script — repository pinning, verification metadata |
 | 31-nuget-behavioral.bats | 5 | NuGet.Config — signed-package policy, source pinning |
 | 32-yarn-tier-rendering.bats | 6 | yarn tier authority (enableHardenedMode conditional on >= 4.0, baseline keys unconditional, approvedGitRepositories deliberately absent) |
-| 33-bun-tier-rendering.bats | 9 | bun tier authority (saveTextLockfile conditional on 1.2+, scanner opt-in, baseline bunfig keys unconditional) |
-| 48-caller-context-coverage.bats | 10 | Caller-context coverage: what the BARE command resolves to, not what an absolute path does. Every other wrapper test in the suite invokes the tool by absolute path, which guarantees the wrapper runs — the one thing a real caller never does. Asserts the verifier's per-context verdicts via the SCH_WRAPPER_PROBE run-probe: an activated `python3 -m venv` and `python3 -m pip` bypass the pip wrapper (and `--system-site-packages` is not a mitigation), `only-binary` survives the shadow for an index-resolved sdist but NOT for a direct-path one, a non-delegating shadow of any wrapped tool reads GAP while a delegating mise/asdf-shaped shim still runs the wrapper, and an N/A row is a statement about PATH rather than about the host |
+| 33-bun-tier-rendering.bats | 19 | bun tier authority (saveTextLockfile conditional on 1.2+, scanner opt-in, baseline bunfig keys unconditional) |
+| 48-caller-context-coverage.bats | 12 | Caller-context coverage: what the BARE command resolves to, not what an absolute path does. Every other wrapper test in the suite invokes the tool by absolute path, which guarantees the wrapper runs — the one thing a real caller never does. Asserts the verifier's per-context verdicts via the SCH_WRAPPER_PROBE run-probe: an activated `python3 -m venv` and `python3 -m pip` bypass the pip wrapper (and `--system-site-packages` is not a mitigation), `only-binary` survives the shadow for an index-resolved sdist but NOT for a direct-path one, a non-delegating shadow of any wrapped tool reads GAP while a delegating mise/asdf-shaped shim still runs the wrapper, and an N/A row is a statement about PATH rather than about the host |
+| 50-preflight-gnu-date.bats | 4 | The GNU date preflight probes the CONTROLLER, where the rolling uv/pip cutoff lookup runs, not the target: a non-GNU target is not refused, a non-GNU controller fails at preflight with the fix instead of a bare lookup error at render, and pinning the cutoff skips the probe |
+| 51-verifier-composer-plugin-safety.bats | 1 | The verifier reads a checkout's effective composer config with --no-plugins, so a hostile repo's committed plugin cannot run code during a posture check. |
 
 ## Adversarial tests
 
@@ -108,7 +110,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 433 tests
+make test          # build container + run all 456 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

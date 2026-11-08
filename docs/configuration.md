@@ -102,13 +102,17 @@ ansible-playbook site.yml --tags github       # zizmor + pinact
 > the end-of-run "protections NOT applied" summary.
 
 ```bash
-ansible-playbook site.yml --tags shell        # env vars only
+ansible-playbook site.yml --tags npm          # just the npm ecosystem
 ```
 
-The full tag list, from [`tasks/main.yml`](../tasks/main.yml): `npm`, `npq`,
+The system-wide env layer (`/etc/environment`, `/etc/profile.d`) is `tags: always`,
+so it runs on every invocation regardless of `--tags` and cannot be selected or
+skipped with a tag.
+
+The full ecosystem tag list, from [`tasks/main.yml`](../tasks/main.yml): `npm`, `npq`,
 `socket`, `pnpm`, `yarn`, `bun`, `deno`, `pip`, `uv`, `python`, `go`, `cargo`,
 `rust`, `composer`, `php`, `bundler`, `ruby`, `maven`, `gradle`, `java`,
-`nuget`, `dotnet`, `github`, `podman`, `container`, `shell`, `verify`.
+`nuget`, `dotnet`, `github`, `podman`, `container`, `verify`.
 
 ## Related
 

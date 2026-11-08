@@ -928,7 +928,7 @@ else
           "the wrapper injects into non-fetching subcommands (fmt -> '$dfmt', task -> '$dtask') — deno ERRORS on --minimum-dependency-age there, so this breaks \`deno task\`, the way most Deno projects invoke everything"
       elif [ "$dage" = "P0D" ] || [ "$dage" = "PT0S" ] || [ "$dage" = "P0Y" ]; then
         row GAP FUNCTIONAL "deno publish-age gate" \
-          "the flag is injected correctly but the window is $dage — a zero-length age gate admits a package published one second ago. release_age_hours < 24 truncates to P0D (the role has no floor; the action floors to P1D)"
+          "the flag is injected correctly but the window is $dage — a zero-length age gate admits a package published one second ago. neither writer produces P0D (both floor a sub-24h release_age_hours to P1D), so this came from a manual deno_minimum_dependency_age override"
       elif [ "$dlive" = 0 ]; then
         row GAP FUNCTIONAL "deno publish-age gate" \
           "the wrapper at $dp injects --minimum-dependency-age=$dage correctly, but the binary it execs does not run: \`$dtarget --version\` exited $dvrc (${dvout:-<no output>}). Present but not runnable — every deno call on this host fails, nothing is gated because nothing executes, and the dispatch probe looks perfect only because it substitutes a stub"
@@ -1618,8 +1618,8 @@ if have composer; then
   # authoritative - composer resolves its own home - but the verifier has to
   # know the writer's path in order to report the two disagreeing.
   cwrote="$HOME/.config/composer/config.json"
-  CDUMP=$(composer config --global --list --source --no-ansi 2>&1); crc=$?
-  if [ "$crc" -ne 0 ] && composer config --global --list --no-ansi >/dev/null 2>&1; then
+  CDUMP=$(composer config --global --list --source --no-ansi --no-plugins 2>&1); crc=$?
+  if [ "$crc" -ne 0 ] && composer config --global --list --no-ansi --no-plugins >/dev/null 2>&1; then
     # --list works, --list --source does not: composer < 2.2 has no --source.
     row WEAK PARSED "composer config in effect" \
       "composer ${cv:-?} has no 'config --list --source' (needs >= 2.2); it reports values but not which file they came from, so nothing here proves our file is the one being read"
@@ -1671,7 +1671,16 @@ if have composer; then
   EDUMP="$CDUMP"; escope="global config"; prc=0; phas=0; PDUMP=""
   if [ -f composer.json ]; then
     phas=1
-    PDUMP=$(composer config --list --source --no-ansi 2>/dev/null); prc=$?
+    # --no-plugins is REQUIRED here, not cosmetic: this reads the EFFECTIVE
+    # config of an untrusted checkout, and `composer config` activates any
+    # plugin the merged allow-plugins permits (plugin activate() = arbitrary
+    # PHP) unless --no-plugins is passed. A posture check must never run a
+    # checkout's code. MEASURED (composer 2.11.1): without this flag a committed
+    # vendor/ plugin runs; with it the identical config is reported and nothing
+    # runs. --no-plugins is a global option on every composer 2.x (unlike
+    # --no-scripts, which `composer config` rejects on 2.0/2.1). See
+    # tests/bats/51-verifier-composer-plugin-safety.bats.
+    PDUMP=$(composer config --list --source --no-ansi --no-plugins 2>/dev/null); prc=$?
     if [ "$prc" -eq 0 ]; then EDUMP="$PDUMP"; escope="effective config for $(cq "$PWD")"; fi
   fi
   # A checkout we could not read is a checkout that may be overriding us; that

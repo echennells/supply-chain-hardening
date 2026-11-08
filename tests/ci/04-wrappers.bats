@@ -542,6 +542,22 @@ cargo_sfw_stubs() {
   [[ "$output" == *"--minimum-dependency-age=P2D"* ]]
 }
 
+@test "deno: a value-taking global flag before the subcommand does not hide it" {
+  # MEASURED on deno 2.9.8: `deno --log-level debug run app.ts` (and `-L debug`)
+  # are accepted by deno. Before the value-flag skip, the scanner read "debug" as
+  # the subcommand, missed the run case, and exec'd deno UNGATED. The space-
+  # separated value is the hazard; `--log-level=debug` is one `-*` token and was
+  # always fine.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" --log-level debug run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P2D"* ]] || {
+    echo "no age gate injected for 'deno --log-level debug run': $output"; return 1
+  }
+  run "$TEST_BIN/deno" -L debug run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P2D"* ]]
+}
+
 @test "deno: the flag lands after the subcommand, not after the script" {
   # Everything after the script path belongs to the script.
   stub_bin deno

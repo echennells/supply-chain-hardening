@@ -129,7 +129,7 @@ yarn_minimal_age_gate: "{{ (release_age_hours | int * 60) | int }}"            #
 # became no policy. yarn was fixed by deriving in a finer unit; whether deno
 # accepts a sub-day duration (PT12H) is NOT measured, so do what the other
 # surface already does instead of diverging: floor to P1D, as
-# action/harden.sh:275-276 does. Flooring only ever makes the gate MORE
+# action/harden.sh does (the DENO_AGE_ISO P0D->P1D floor). Flooring only ever makes the gate MORE
 # restrictive, so it fails safe.
 deno_minimum_dependency_age: "P{{ (release_age_hours | int // 24) if (release_age_hours | int) >= 24 else 1 }}D"  # "P2D"
 

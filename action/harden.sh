@@ -663,6 +663,16 @@ subst_inplace() {
   sed "$script" "$file" > "${file}.new" && mv "${file}.new" "$file"
 }
 
+# Escape a value for safe use as the REPLACEMENT half of `sed "s|__X__|VALUE|"`.
+# Drops newlines (a wrapper value — a path, flag, or bool — is never multiline)
+# and escapes the sed metacharacters `\ & |`, so a value cannot close the `s|||`
+# delimiter to inject a sed command (e.g. the `e <cmd>` command) or splice a line
+# into a wrapper body that is then $SUDO-written to a root-owned path. These
+# inputs are operator/CI config, not attacker-controlled, so this is robustness
+# parity with the npm/bun/composer wrappers (which interpolate via single-quoted
+# heredocs), not a fix for a reachable vulnerability.
+sed_repl() { printf '%s' "$1" | tr -d '\n\r' | sed 's/[\\&|]/\\&/g'; }
+
 # detect_version <key> <command>: returns the version string the command
 # prints (typically major.minor.patch), or empty if the binary isn't
 # installed OR if the version command fails for any reason. Used for
@@ -871,6 +881,15 @@ harden_pnpm() {
   # pnpm 11+ format (YAML, camelCase). This is the load-bearing file
   # for pnpm 11 — it ignores ~/.npmrc, ~/.config/pnpm/rc (the older
   # ini-format file), and /etc/npmrc for non-auth settings.
+  # NOTE (MEASURED pnpm 10.34 / 11.28 / 12.18, 2026-11-08): pnpm 11+ IGNORES
+  # onlyBuiltDependencies in this global config.yaml (it warns and tells you to
+  # move it to a project pnpm-workspace.yaml), so the allowlist written here is
+  # inert on pnpm 11+ — an allowlisted package is NOT built from this file; use
+  # pnpm-workspace.yaml per project. The pnpm-10 rc written below is where the
+  # allowlist actually takes effect. `ignoreScripts: false` here is NOT a
+  # fail-open: pnpm 10+ default-denies dependency build scripts regardless, so a
+  # non-allowlisted script stays blocked (the role keeps ignoreScripts: true as
+  # the stricter, clearer signal).
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
@@ -2118,7 +2137,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|; s|__CARGO_SFW__|$CARGO_SOCKET_FIREWALL|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$violation_action|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_BIN__|$(sed_repl "$cooldown_bin")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
   $SUDO cp "$tmp_wrapper" "$wrapper_target"
   $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo
@@ -2385,8 +2404,19 @@ if [ -z "$REAL_DENO" ] || [ ! -x "$REAL_DENO" ] || [ "$REAL_DENO" = "__WRAPPER_P
 fi
 
 subcmd=""
+skip_value=0
 for arg in "$@"; do
+  # Skip the VALUE of a value-taking global flag before the subcommand, or the
+  # scan reads that value as the subcommand and misses the gate. MEASURED on
+  # deno 2.9.8: `deno --log-level debug run app.ts` (and `-L debug`) are accepted
+  # by deno, and without this the scan picked "debug" as the subcommand and
+  # exec'd deno with NO --minimum-dependency-age. `--flag=value` is one token
+  # starting with `-`, so `-*` already covers it; only separate-word values
+  # matter. This mirrors the role wrapper (templates/deno-wrapper.sh.j2).
+  if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
   case "$arg" in
+    --config|-c|--import-map|--lock|--cert|--log-level|-L|--v8-flags|--seed)
+      skip_value=1 ;;
     -*) ;;
     *) subcmd="$arg"; break ;;
   esac
@@ -2420,7 +2450,7 @@ case "$subcmd" in
     ;;
 esac
 DENOWRAP
-  subst_inplace "$tmp_deno" "s|__REAL_DENO__|$real_deno|; s|__WRAPPER_PATH__|$wrapper_path|; s|__MIN_AGE__|$DENO_AGE_ISO|"
+  subst_inplace "$tmp_deno" "s|__REAL_DENO__|$(sed_repl "$real_deno")|; s|__WRAPPER_PATH__|$(sed_repl "$wrapper_path")|; s|__MIN_AGE__|$DENO_AGE_ISO|"
   $SUDO cp "$tmp_deno" "$wrapper_path"
   rm -f "$tmp_deno"
   $SUDO chmod 755 "$wrapper_path"
@@ -2447,12 +2477,32 @@ harden_maven() {
       <blocked>true</blocked>
     </mirror>
   </mirrors>
-  <profiles/>
+  <!-- Integrity: refuse an artifact whose content does not match its published
+       checksum (Maven's default is 'warn', which installs anyway). This covers
+       Central-sourced artifacts; the role additionally routes ALL repos through
+       Central (mirrorOf=*), which the action does not, to avoid breaking a
+       project's own HTTPS repositories. -->
+  <profiles>
+    <profile>
+      <id>strict-checksums</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><checksumPolicy>fail</checksumPolicy></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>strict-checksums</activeProfile>
+  </activeProfiles>
 </settings>
 EOF
   HARDENED+=("maven")
   set_tool_version "maven" "$(detect_version maven "mvn --version")"
-  log "maven: HTTPS-only mirror enforced; HTTP repos blocked"
+  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central"
   end_section
 }
 

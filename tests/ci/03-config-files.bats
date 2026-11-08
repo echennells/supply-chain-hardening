@@ -249,6 +249,18 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "IvyArtifactRepository"
 }
 
+@test "maven: settings.xml enforces strict checksums (fail), matching the role" {
+  # Maven's default checksum policy is 'warn' — a mismatch installs anyway. The
+  # role sets checksumPolicy=fail via an active profile; the action lacked it.
+  run harden ECOSYSTEMS=maven -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.m2/settings.xml" "<checksumPolicy>fail</checksumPolicy>"
+  assert_file_contains "$TEST_HOME/.m2/settings.xml" "<activeProfile>strict-checksums</activeProfile>"
+  # Still valid XML (python's parser is in the CI image).
+  run python3 -c "import xml.etree.ElementTree as E,sys; E.parse(sys.argv[1])" "$TEST_HOME/.m2/settings.xml"
+  [ "$status" -eq 0 ]
+}
+
 @test "nuget: single trusted source with signature validation" {
   # The path is the assertion. This test used to grep the same
   # $HOME/.config/NuGet path harden.sh wrote to, so it passed for months while

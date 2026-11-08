@@ -18,11 +18,15 @@
 # pnpm-workspace.yaml"). The role's `pnpm_built_dependencies`
 # variable therefore takes effect on pnpm 10 only (via the rc file).
 # On pnpm 11, allowlisting must be done per-project in
-# pnpm-workspace.yaml. The role intentionally keeps the global
-# default strict (ignoreScripts: true) and does not attempt to
-# disable it when the allowlist is configured, because flipping it
-# to false globally would run ALL build scripts (not just the
-# allowlisted ones — the allowlist directive being ignored).
+# pnpm-workspace.yaml. The role keeps ignoreScripts: true here.
+#
+# Correction (MEASURED on pnpm 10.34 / 11.28 / 12.18, 2026-11-08): pnpm 10+
+# default-DENIES every dependency build script independently of ignoreScripts
+# (the approve-builds gate), so `ignoreScripts: false` would NOT "run all
+# scripts" — a non-allowlisted dependency's build script stays blocked. That was
+# only true on pnpm <10. ignoreScripts: true is kept anyway because it is
+# strictly stronger (it also blocks a script the user later approves) and is the
+# unambiguous signal, not because false fails open.
 
 ignoreScripts: true
 minimumReleaseAge: {{ pnpm_minimum_release_age_minutes }}
