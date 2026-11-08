@@ -463,6 +463,7 @@ describe_binary() {
   case "$f" in
     */.asdf/shims/*)                      echo "an asdf shim" ;;
     */mise/shims/*|*/.local/share/mise/*) echo "a mise shim" ;;
+    */fnm_multishells/*|*/.fnm/*|*/fnm/node-versions/*|*/fnm/aliases/*) echo "an fnm shim" ;;
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     */hostedtoolcache/*)                  echo "a toolcache binary — a setup-* step ran AFTER hardening" ;;
@@ -638,9 +639,33 @@ else
       ''|null|undefined) gap npm.age-gate PARSED "npm age gate" "npm implements min-release-age but reports no value" ;;
       *[!0-9]*)          gap npm.age-gate PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
       0)                 gap npm.age-gate PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
-      *)                 row OK  PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)" ;;
+      *)
+        # The env var outranks both npmrc files, so a healthy-looking number can
+        # still be shorter than the window this job declared.
+        nwanth=$(_rec release_age_hours); nwant=""
+        case "$nwanth" in
+          ''|*[!0-9]*) ;;
+          *) nwant=$((nwanth / 24)); [ "$nwant" -lt 1 ] && nwant=1 ;;
+        esac
+        if [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
+          row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this job declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
+        else
+          row OK PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)"
+        fi ;;
     esac
   fi
+fi
+
+# ===================================================== id-token exposure ======
+# GitHub sets this only in a job granted `id-token: write`, and it is granted per
+# job, so anything executing in this job can mint an OIDC token. That is how the
+# TanStack compromise (May 2026) published without stealing a single npm token: a
+# poisoned cache ran in the release job, read the token out of Runner.Worker and
+# posted straight to the registry. WEAK, not GAP: the permission can be legitimate,
+# and no setting here changes it. No row when it is absent, which is the good case.
+if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+  row WEAK PARSED "ci id-token exposure" \
+    "this job can mint OIDC tokens (id-token: write), so any package that executes here can too. If it publishes, install in one job and publish from a separate, gated one"
 fi
 
 # ============================================================ pip ============

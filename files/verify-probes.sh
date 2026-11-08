@@ -1440,6 +1440,25 @@ else
   row "N/A" - "pip native age gate" "no python3 with an importable pip module"
 fi
 
+# --- pip venv age gate  [PARSED] ---
+# The row above judges python3's own pip. A venv does not inherit that: it gets the
+# pip bundled in ensurepip, which can be older. MEASURED on uv-managed CPython
+# 3.13.12: `python3 -m pip` is 26.0.1, `python3 -m venv` seeds 25.3, and 25.3 took
+# the newest release under a cutoff 26.3 honoured. WEAK, not GAP: the host's pip is
+# fine and upgrading pip inside the venv closes it, but an activated venv also
+# shadows the pip wrapper, so nothing else gates it.
+if have python3 && { ! command -v requested >/dev/null 2>&1 || requested pip; }; then
+  pvseed=$(python3 -I -c 'import ensurepip; print(ensurepip.version())' 2>/dev/null)
+  if [ -z "$pvseed" ]; then
+    row "N/A" - "pip venv age gate" "this python3 has no ensurepip, so python3 -m venv cannot seed a pip here"
+  elif [ "$(printf '26.0\n%s\n' "$pvseed" | sort -V | head -1)" = "26.0" ]; then
+    row OK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to"
+  else
+    row WEAK PARSED "pip venv age gate" \
+      "python3 -m venv seeds pip $pvseed from ensurepip, below the 26.0 that added uploaded-prior-to - a venv made that way is not age-gated until pip is upgraded inside it. uv venv --seed and uv pip are"
+  fi
+fi
+
 # --- poetry publish-age gate  [PARSED] ---
 # Poetry has its own resolver and reads neither pip.conf nor uv.toml, so the rows
 # above say nothing about it. solver.min-release-age landed in 2.4.0 (MEASURED:
@@ -1625,8 +1644,15 @@ if have composer; then
         row OK PARSED "composer config in effect" \
           "composer reports $(cq "$csrc") as the source of its config (home $(cq "${chome:-?}"))" ;;
       *)
-        row GAP PARSED "composer config in effect" \
-          "composer reads $(cq "$csrc") but this action wrote $(cq "$cwrote") (composer home $(cq "${chome:-?}")) — COMPOSER_HOME, XDG_CONFIG_HOME and a legacy ~/.composer all move it; our hardening is not the config in effect" ;;
+        # Both writers also deploy to the home composer really reads, so identical
+        # bytes there are ours. Anything else is a file we did not write.
+        if [ -f "$csrc" ] && cmp -s "$cwrote" "$csrc" 2>/dev/null; then
+          row OK PARSED "composer config in effect" \
+            "composer reports $(cq "$csrc") as the source of its config, identical to what we wrote"
+        else
+          row GAP PARSED "composer config in effect" \
+            "composer reads $(cq "$csrc") but this action wrote $(cq "$cwrote") (composer home $(cq "${chome:-?}")) — COMPOSER_HOME, XDG_CONFIG_HOME and a legacy ~/.composer all move it; our hardening is not the config in effect"
+        fi ;;
     esac
   fi
 

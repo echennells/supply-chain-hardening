@@ -11,6 +11,9 @@ on:
       - 'action/**'
       - '.github/workflows/action-smoke.yml'
 
+permissions:
+  contents: read
+
 jobs:
   action-defaults:
     name: 'Action: default invocation works'

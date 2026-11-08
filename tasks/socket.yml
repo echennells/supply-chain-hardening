@@ -23,7 +23,7 @@
           exit 0
         fi
       done
-      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm; do
+      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
         if [ -x "$p" ]; then
           echo "$p"
           exit 0
@@ -196,7 +196,7 @@
           exit 0
         fi
       done
-      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/sfw; do
+      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/sfw "$HOME"/.local/share/fnm/node-versions/*/installation/bin/sfw "$HOME"/.fnm/node-versions/*/installation/bin/sfw; do
         if [ -x "$p" ]; then
           echo "$p"
           exit 0

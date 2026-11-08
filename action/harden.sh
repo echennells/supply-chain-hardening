@@ -1159,6 +1159,21 @@ harden_composer() {
     echo "}"
   } > "$HOME/.config/composer/config.json"
 
+  # ~/.config/composer is not where composer reads on every host: with no XDG_*
+  # variable set it was ~/.composer (MEASURED), which left the file above unread
+  # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
+  local composer_home=""
+  if command -v composer >/dev/null 2>&1; then
+    composer_home=$(composer config --global home --no-ansi 2>/dev/null | tail -1)
+  fi
+  case "$composer_home" in
+    /*)
+      if [[ "$composer_home" != "$HOME/.config/composer" ]]; then
+        mkdir -p "$composer_home"
+        cp "$HOME/.config/composer/config.json" "$composer_home/config.json"
+      fi ;;
+  esac
+
   HARDENED+=("composer")
   set_tool_version "composer" "$composer_version"
 

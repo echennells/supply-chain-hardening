@@ -18,6 +18,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   nonroot-interactive:
     name: Applied by a non-root sudo user; interactive wrapper exercised

@@ -23,6 +23,9 @@ on:
       - '.github/workflows/ci-script.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   unit:
     name: "harden.sh (${{ matrix.os }})"

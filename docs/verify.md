@@ -55,6 +55,14 @@ This is a different question from the end-of-run coverage summary, which reports
 which *tasks skipped*. Five of the six failures above happened in tasks that
 completed successfully.
 
+## Don't run it on a host you suspect is compromised
+
+The verifier starts `python3` and `pip`, and a malicious wheel's `.pth` or
+`sitecustomize.py` hook runs on every interpreter start. Microsoft and JFrog both warn
+against starting Python in an environment suspected of the LiteLLM compromise. If you
+think a host is already affected, inspect it with tools that don't start that
+interpreter, from a known-clean machine where possible, and rebuild rather than verify.
+
 ## Related
 
 - [how-it-works.md](how-it-works.md) — the layers the verifier is checking.

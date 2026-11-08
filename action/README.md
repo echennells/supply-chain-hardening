@@ -514,7 +514,8 @@ Example consumption:
 
 ## What this action does NOT do
 
-- **Doesn't replace [step-security/harden-runner](https://github.com/step-security/harden-runner).** That action does *network* egress filtering. This action does *package manager* hardening. They're complementary — use both for layered defense.
+- **Doesn't replace [step-security/harden-runner](https://github.com/step-security/harden-runner).** That action does *network* egress filtering. This action does *package manager* hardening. They're complementary — use both for layered defense. Neither is a boundary against code that already runs in the job: on a hosted runner it has sudo, and the `strutil-core` worm (November 2026) disables harden-runner, adds a `NOPASSWD` sudoers entry and reads runner memory.
+- **Doesn't protect a job's OIDC token.** `id-token: write` is granted per job, so anything that executes there can mint a token, which is how TanStack (May 2026) was published from with no npm token stolen. Install in one job and publish from a separate, gated one. `action/verify.sh` prints a WEAK `ci id-token exposure` row when a job holds the permission.
 - **Doesn't scan your workflow files** the way [zizmor](https://github.com/woodruffw/zizmor) does. That's a static-analysis tool for the workflow YAML itself; this action is a runtime defense against package-manager attacks.
 - **Doesn't install language runtimes.** It assumes Node/Python/Ruby/PHP/etc. are already installed (typically via `actions/setup-node`, `actions/setup-python`, `ruby/setup-ruby`, etc.). The action configures whatever's there.
 - **Doesn't fix existing lockfiles.** If `package-lock.json` already pins to a known-malicious version, the install will still attempt it (and the age gate may reject; lifecycle scripts won't run). Combine with a dependency-audit step for full coverage.

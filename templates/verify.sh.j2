@@ -421,10 +421,20 @@ if have npm; then
       *[!0-9]*)          row GAP PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
       0)                 row GAP PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
       *)
+        # Below the declared window first: the env var outranks both npmrc files,
+        # so a healthy-looking number can still be shorter than this host promised.
+        # Compared in days the way the writers derive it, floored at 1.
+        nwant=""
+        case "$SCV_MIN_AGE_HOURS" in
+          ''|*[!0-9]*) ;;
+          *) nwant=$((SCV_MIN_AGE_HOURS / 24)); [ "$nwant" -lt 1 ] && nwant=1 ;;
+        esac
         # PARSED is a floor, not the ceiling. With SCV_BEHAVIORAL=1, prove
         # ENFORCEMENT: resolve an old package under a huge window; a working
         # gate refuses it, an inert one resolves it.
-        if [ "${SCV_BEHAVIORAL:-0}" = "1" ]; then
+        if [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
+          row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this host declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
+        elif [ "${SCV_BEHAVIORAL:-0}" = "1" ]; then
           if npm_age_gate_behaves; then
             row OK FUNCTIONAL "npm age gate" "npm $nv ENFORCES min-release-age (window ${v}d): an old package was refused under a huge window"
           else
@@ -459,7 +469,11 @@ if have yarn; then
         0)
           row GAP PARSED "yarn age gate" "npmMinimalAgeGate=0 disables the gate" ;;
         *)
-          row OK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes" ;;
+          if [ -n "$SCV_MIN_AGE_HOURS" ] && [ "$v" -lt "$((SCV_MIN_AGE_HOURS * 60))" ] 2>/dev/null; then
+            row WEAK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes, below the ${SCV_MIN_AGE_HOURS}h this host declared"
+          else
+            row OK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes"
+          fi ;;
       esac
       v=$(yarn config get enableScripts 2>/dev/null | tr -d '\r' | tr -d ' ')
       if [ "$v" = "false" ]; then
@@ -599,6 +613,7 @@ describe_binary() {
   case "$f" in
     */.asdf/shims/*)                      echo "an asdf shim" ;;
     */mise/shims/*|*/.local/share/mise/*) echo "a mise shim" ;;
+    */fnm_multishells/*|*/.fnm/*|*/fnm/node-versions/*|*/fnm/aliases/*) echo "an fnm shim" ;;
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     *)

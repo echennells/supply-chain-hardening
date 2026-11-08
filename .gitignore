@@ -47,3 +47,6 @@ sbe/
 # ignore on the dev box, but that is per-machine; this keeps it out of the
 # repo on any clone.
 /.claude/*.env
+# Agent config is the file class behind the LiteLLM compromise (opencode.json). The
+# global ignore above covers this on the dev box only.
+/.claude/settings.local.json

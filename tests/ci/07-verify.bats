@@ -515,6 +515,33 @@ esac"
   [[ "$output" == *"below the 2d"* ]]
 }
 
+@test "composer: our config in the home composer really reads is OK, anyone else's is a GAP" {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *'config --global home'*) echo '$TEST_HOME/.composer' ;;
+  *--list*) echo '[home] $TEST_HOME/.composer ($TEST_HOME/.composer/config.json)'
+            echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer config in effect"* ]]
+  echo '{"config":{}}' > "$TEST_HOME/.composer/config.json"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer config in effect"* ]]
+}
+
+@test "npm: a window shorter than the declared one is WEAK and names the env var" {
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  echo 'export NPM_CONFIG_MIN_RELEASE_AGE=1' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"does NOT implement min-release-age"* ]] && skip "this npm predates the gate"
+  [[ "$output" == *"WEAK   PARSED      npm age gate"* ]]
+  [[ "$output" == *"below the 2 day(s)"* ]]
+  [[ "$output" == *"NPM_CONFIG_MIN_RELEASE_AGE"* ]]
+}
+
 poetry_age_stub() { # version value [exclude]
   stub_bin poetry "case \"\$*\" in
   *--version*) echo 'Poetry (version $1)' ;;
@@ -560,3 +587,22 @@ esac"
   [[ "$output" == *"below the 2d"* ]]
 }
 
+@test "pip: a python whose ensurepip seeds an ungated pip is WEAK" {
+  stub_bin python3 'case "$*" in
+  *ensurepip*) echo 25.3 ;;
+  *) exit 1 ;;
+esac'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip venv age gate"* ]]
+  [[ "$output" == *"seeds pip 25.3"* ]]
+}
+
+@test "a job holding id-token: write is told so, and one without gets no row" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" != *"ci id-token exposure"* ]]
+  echo 'export ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/token' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      ci id-token exposure"* ]]
+}

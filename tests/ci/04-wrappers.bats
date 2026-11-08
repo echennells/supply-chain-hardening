@@ -433,6 +433,16 @@ esac'
   [[ "$output" == *"PERIOD=259200 BLOCK=1"* ]]
 }
 
+@test "composer: config also lands in the home composer really reads" {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *'config --global home'*) echo '$TEST_HOME/.composer' ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cmp "$TEST_HOME/.config/composer/config.json" "$TEST_HOME/.composer/config.json"
+}
+
 @test "composer: config.json stays valid JSON with the policy block on every audit tier" {
   # The audit block changes shape at 2.7 and 2.9, and the comma before "policy"
   # is written by a different branch on each side of that.
