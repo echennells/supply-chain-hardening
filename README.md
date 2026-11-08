@@ -110,6 +110,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 
 | | Read this when… |
 |---|---|
+| [AGENTS.md](AGENTS.md) | you're an AI agent applying this, or handing the repo to one |
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
 | [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
