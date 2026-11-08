@@ -401,3 +401,162 @@ SHIM
   # No RESULT line means no probe ran.
   [[ "$output" != *"RESULT:"* ]]
 }
+
+# --- publish-age gates: composer and bundler --------------------------------
+
+# Both tools echo a key they ignore (MEASURED: composer 2.7.1, bundler 2.4.20), so
+# these stubs report a healthy value at every version on purpose. A verdict that
+# came from the readback would call the old versions OK.
+composer_age_stub() { # version [extra line for the config dump]
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version $1 2026-01-01 00:00:00' ;;
+  *--list*) echo '[policy.cooldown.period] 172800 (/x/config.json)'
+            echo '[policy.cooldown.block] true (/x/config.json)'
+            echo '${2:-}' ;;
+  *) echo STUB ;;
+esac"
+}
+
+bundler_age_stub() { # version cooldown
+  stub_bin bundle "case \"\$*\" in
+  *--version*) echo '$1' ;;
+  *'config get cooldown --parseable'*) echo 'cooldown=$2' ;;
+  *) echo STUB ;;
+esac"
+}
+
+@test "composer below 2.11 is a toolchain GAP even though it echoes the key" {
+  composer_age_stub 2.10.3
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"does NOT implement config.policy.cooldown"* ]]
+  # Counted as toolchain, or --fail-on=config fails a job for what it was handed.
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+}
+
+@test "composer: every version-limited gap is toolchain, so fail-on=config can pass on a stock LTS" {
+  # noble's 2.7.1 lacks both block-insecure and the cooldown. Neither is closed by
+  # re-running the hardening, so neither may count as fixable.
+  composer_age_stub 2.7.1
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer audit blocking"* ]]
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+  [[ "$output" =~ [2-9]\ need\ a\ newer\ toolchain ]]
+}
+
+@test "composer 2.11 with the gate in effect reads OK" {
+  composer_age_stub 2.11.1
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer publish-age gate"* ]]
+}
+
+@test "composer: a window shorter than the declared one is WEAK, not OK" {
+  composer_age_stub 2.11.1
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  echo 'export COMPOSER_POLICY_COOLDOWN_PERIOD=3600' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"below the 48h"* ]]
+}
+
+@test "composer: a repo ignoring every package is a GAP, since no env var outranks it" {
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore] [*] (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"every package skips the gate"* ]]
+}
+
+@test "composer: a narrow repo ignore list is WEAK and named" {
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore] [acme/*, foo/bar] (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"acme/*"* ]]
+}
+
+@test "bundler below 4.0.13 is a toolchain GAP even though it echoes the key" {
+  bundler_age_stub 2.4.20 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"does NOT implement cooldown"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+}
+
+@test "bundler 4.0.13 is the first version the row accepts" {
+  bundler_age_stub 4.0.12 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
+  bundler_age_stub 4.0.13 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"is not age-gated"* ]]
+}
+
+@test "bundler: cooldown=0 is a GAP, because a repo's .bundle/config outranks the env var" {
+  bundler_age_stub 4.0.24 0
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"disables the gate"* ]]
+}
+
+@test "bundler: a window shorter than the declared one is WEAK, not OK" {
+  bundler_age_stub 4.0.24 1
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"below the 2d"* ]]
+}
+
+poetry_age_stub() { # version value [exclude]
+  stub_bin poetry "case \"\$*\" in
+  *--version*) echo 'Poetry (version $1)' ;;
+  'config solver.min-release-age') echo '$2' ;;
+  'config solver.min-release-age-exclude') echo '${3:-null}' ;;
+  *) echo STUB ;;
+esac"
+}
+
+@test "poetry below 2.4.0 is a toolchain GAP" {
+  poetry_age_stub 2.3.4 0
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
+  [[ "$output" == *"has no solver.min-release-age"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+}
+
+@test "poetry 2.4.0 is the first version the row accepts" {
+  poetry_age_stub 2.4.0 2
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      poetry publish-age gate"* ]]
+}
+
+@test "poetry: min-release-age=0 is a GAP" {
+  poetry_age_stub 2.5.1 0
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
+  [[ "$output" == *"disables the gate"* ]]
+}
+
+@test "poetry: a repo's exclude list and a short window are both WEAK" {
+  poetry_age_stub 2.5.1 2 '["six"]'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      poetry publish-age gate"* ]]
+  [[ "$output" == *"exempts"* ]]
+  poetry_age_stub 2.5.1 1
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"below the 2d"* ]]
+}
+

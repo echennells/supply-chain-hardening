@@ -22,6 +22,13 @@
 #   Composer < 2.7   : allow-plugins only (audit key added in 2.7.0)
 #   Not installed    : safe baseline; re-run role after install to upgrade tier
 #
+# The publish-age gate (config.policy.cooldown) is written on EVERY tier:
+#   Composer >= 2.11 : enforced
+#   Composer < 2.11  : ignored with exit 0 (MEASURED 2.0.9 → 2.10.3), recorded in
+#                      skipped_protections below, and activates on upgrade
+# No distro release this role declares ships 2.11, so on a stock host this gate
+# is a GAP until Composer is upgraded: docs/composer-bundler-cooldown-by-distro.md.
+#
 # Two further thresholds, both MEASURED across composer 2.0.14 → 2.10.3 and
 # both handled in the templates rather than here:
 #   < 2.2.15 : "allow-plugins": false is a HARD FATAL (array_merge TypeError,
@@ -89,6 +96,17 @@
   when:
     - composer_detected_version | length > 0
     - composer_detected_version is version('2.8.0', '<')
+
+- name: Record skipped protection — publish-age gate inert (Composer < 2.11)
+  # MEASURED (2.0.9 → 2.11.1): config.policy.cooldown is ignored with exit 0
+  # below 2.11.0, and `composer config --list` echoes it back on those versions
+  # too, so neither the file nor a readback shows the gap. Only this does.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Composer publish-age gate — Composer ' ~ composer_detected_version ~ ' ignores config.policy.cooldown (MEASURED: added in 2.11.0). The key is written and activates on upgrade; until then new releases resolve immediately. See docs/composer-bundler-cooldown-by-distro.md'] }}
+  when:
+    - composer_detected_version | length > 0
+    - composer_detected_version is version('2.11.0', '<')
 
 - name: Create composer config directory
   ansible.builtin.file:

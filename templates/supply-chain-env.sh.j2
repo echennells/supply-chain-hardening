@@ -84,6 +84,25 @@ export COMPOSER_SKIP_SCRIPTS='pre-install-cmd,post-install-cmd,pre-update-cmd,po
 # the wrapper but inherit the PAM-loaded environment. Removing either
 # leaves a coverage gap.
 export COMPOSER_ALLOW_SUPERUSER=1
+# Publish-age gate, composer >= 2.11.0 (ignored below that). The env form is here
+# because it outranks a checked-out composer.json: MEASURED on 2.11.1, a repo's
+# "period": null or "block": false turns off the config.json gate but not these.
+# A repo's "ignore" list still wins; see docs/limitations.md.
+export COMPOSER_POLICY_COOLDOWN_PERIOD={{ composer_cooldown_seconds }}
+export COMPOSER_POLICY_COOLDOWN_BLOCK=1
+
+# === Poetry ===
+# Publish-age gate, poetry >= 2.4.0 (ignored below that). Integer days. This is the
+# load-bearing layer: MEASURED on 2.5.1 it outranks a repo's poetry.toml, which
+# outranks ~/.config/pypoetry/config.toml. A repo's exclude list still wins.
+export POETRY_SOLVER_MIN_RELEASE_AGE={{ poetry_min_release_age_days }}
+
+# === Ruby (Bundler) ===
+# Publish-age gate, bundler >= 4.0.13 (ignored below that). Integer days. This
+# reaches accounts other than the deploying user, whose ~/.bundle/config is the
+# only file the role writes. MEASURED on 4.0.24: a repo's .bundle/config still
+# outranks it, and nothing gates `gem install`; see docs/limitations.md.
+export BUNDLE_COOLDOWN={{ bundler_cooldown_days }}
 
 # === .NET (NuGet) ===
 # This env var OVERRIDES signatureValidationMode in NuGet.Config in BOTH

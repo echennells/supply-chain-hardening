@@ -10,6 +10,23 @@
 # cosmetic. Do NOT dedupe with a brace-counting script — several probes embed
 # heredocs containing Groovy/XML and a naive parser corrupts them.
 
+# A gap no configuration can close: the installed tool cannot do this at any
+# setting. action/verify.sh classes these so --fail-on=config does not fail a job
+# for the toolchain it was handed; a plain row() there counts as a config gap.
+# The role preamble has no classes, so there it is an ordinary GAP. `unavail`
+# must stay behind this test: a bare call aborts the role verifier at line 1.
+scv_toolchain_gap() { # id evidence protection detail
+  if type unavail >/dev/null 2>&1; then unavail "$@"; else shift; row GAP "$@"; fi
+}
+
+# The window this surface promised, in hours; empty when nothing recorded one.
+# The role renders it into its preamble, the action records it in OUTPUT_FILE.
+scv_want_hours() {
+  if [ -n "${SCV_MIN_AGE_HOURS:-}" ]; then printf '%s' "$SCV_MIN_AGE_HOURS"; return 0; fi
+  [ -f "${OUTPUT_FILE:-}" ] && grep '^release_age_hours=' "${OUTPUT_FILE:-}" 2>/dev/null | head -1 | cut -d= -f2-
+  return 0
+}
+
 
 # ======================================================================
 # HOST TOOL DISCOVERY  (ECH-189, generalised)
@@ -93,6 +110,7 @@ discover deno     "$HOME/.deno/bin"                                             
 discover go       /usr/local/go/bin "$HOME/go/bin"                                || true
 discover pnpm     "$HOME/.local/share/pnpm"                                      || true
 discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bin" || true
+discover poetry  "$HOME/.local/bin" "${POETRY_HOME:-$HOME/.local/share/pypoetry}/venv/bin" || true
 
 # ======================================================================
 # bun
@@ -1422,6 +1440,48 @@ else
   row "N/A" - "pip native age gate" "no python3 with an importable pip module"
 fi
 
+# --- poetry publish-age gate  [PARSED] ---
+# Poetry has its own resolver and reads neither pip.conf nor uv.toml, so the rows
+# above say nothing about it. solver.min-release-age landed in 2.4.0 (MEASURED:
+# ignored on 2.3.4, enforced on 2.4.0 and 2.5.1). Unlike npm, composer and bundler,
+# poetry refuses to echo a key it does not know, and its readback includes the env
+# var and a repo's poetry.toml, so from 2.4.0 this one reading is the effective value.
+# Scoped to pip: the writers deploy this as part of it.
+if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; then
+  pov=$(poetry --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  powanth=$(scv_want_hours); powant=""
+  case "$powanth" in
+    ''|*[!0-9]*) ;;
+    *) powant=$((powanth / 24)); [ "$powant" -lt 1 ] && powant=1 ;;
+  esac
+  if [ -z "$pov" ]; then
+    row WEAK PRESENT "poetry publish-age gate" "could not read a version from poetry; the gate was not checked"
+  elif [ "$(printf '2.4.0\n%s\n' "$pov" | sort -V | head -1)" != "2.4.0" ]; then
+    scv_toolchain_gap pip.poetry-age-gate PARSED "poetry publish-age gate" \
+      "poetry $pov has no solver.min-release-age (added in 2.4.0), and it reads neither pip.conf nor uv.toml, so a release published minutes ago still resolves"
+  else
+    pod=$(poetry config solver.min-release-age 2>/dev/null | tail -1)
+    pox=$(poetry config solver.min-release-age-exclude 2>/dev/null | tail -1)
+    case "$pod" in
+      ''|*[!0-9]*)
+        row GAP PARSED "poetry publish-age gate" "poetry $pov reports min-release-age=$(cq "${pod:-<unset>}")" ;;
+      0)
+        row GAP PARSED "poetry publish-age gate" \
+          "poetry $pov reports min-release-age=0 in $(cq "$PWD"), which disables the gate - a repo's poetry.toml outranks the global config, though not POETRY_SOLVER_MIN_RELEASE_AGE" ;;
+      *)
+        if [ -n "$pox" ] && [ "$pox" != "null" ] && [ "$pox" != "[]" ]; then
+          row WEAK PARSED "poetry publish-age gate" \
+            "poetry $pov enforces ${pod}d but exempts $(cq "$pox") in $(cq "$PWD") - no env var outranks a repo's exclude list"
+        elif [ -n "$powant" ] && [ "$pod" -lt "$powant" ]; then
+          row WEAK PARSED "poetry publish-age gate" \
+            "poetry $pov reports ${pod}d, below the ${powant}d this host declared - something shortened the window"
+        else
+          row OK PARSED "poetry publish-age gate" "poetry $pov implements min-release-age and reports ${pod}d"
+        fi ;;
+    esac
+  fi
+fi
+
 # ======================================================================
 # composer
 # ======================================================================
@@ -1501,6 +1561,23 @@ composer_err() {
     | grep -v '^In .* line [0-9]*:' | grep -vi 'deprecated:' \
     | grep -v 'could not detect the root package' \
     | head -1 | cut -c1-90 | tr -d '%\\'
+}
+
+# config.policy.cooldown.period -> seconds; empty when it cannot be read. Composer
+# takes an integer of seconds or "<n> <unit>", units singular or plural, any case.
+composer_period_seconds() {
+  case "$1" in ''|*[!0-9]*) ;; *) printf '%s' "$1"; return 0 ;; esac
+  _cpl=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  _cpn=$(printf '%s' "$_cpl" | sed -nE 's/^ *([0-9]+) *(second|minute|hour|day|week)s? *$/\1/p')
+  _cpu=$(printf '%s' "$_cpl" | sed -nE 's/^ *([0-9]+) *(second|minute|hour|day|week)s? *$/\2/p')
+  [ -n "$_cpn" ] || return 0
+  case "$_cpu" in
+    second) printf '%s' "$_cpn" ;;
+    minute) printf '%s' "$((_cpn * 60))" ;;
+    hour)   printf '%s' "$((_cpn * 3600))" ;;
+    day)    printf '%s' "$((_cpn * 86400))" ;;
+    week)   printf '%s' "$((_cpn * 604800))" ;;
+  esac
 }
 
 if have composer; then
@@ -1633,10 +1710,10 @@ if have composer; then
   if [ -z "$cmaj" ] || [ -z "$cmin" ]; then
     row WEAK PRESENT "composer audit blocking" "could not parse a version out of 'composer --version'"
   elif [ "$cmaj" -lt 2 ] || { [ "$cmaj" -eq 2 ] && [ "$cmin" -lt 7 ]; }; then
-    row GAP PARSED "composer audit blocking" \
+    scv_toolchain_gap composer.audit-blocking PARSED "composer audit blocking" \
       "composer $cv is below 2.7 — no audit blocking of any kind is available"
   elif [ "$cmaj" -eq 2 ] && [ "$cmin" -lt 9 ]; then
-    row GAP PARSED "composer audit blocking" \
+    scv_toolchain_gap composer.audit-blocking PARSED "composer audit blocking" \
       "composer $cv supports audit.abandoned but NOT block-insecure/block-abandoned (needs >= 2.9); advisories do not refuse installs"
   elif [ "$crc" -ne 0 ]; then
     row GAP PARSED "composer audit blocking" \
@@ -1649,6 +1726,68 @@ if have composer; then
     else
       row GAP PARSED "composer audit blocking" \
         "composer $cv supports audit blocking but $escope reports block-insecure=$(cq "${bi:-<unset>}") block-abandoned=$(cq "${ba:-<unset>}")"
+    fi
+  fi
+
+# --- composer publish-age gate  [PARSED] ---
+  # config.policy.cooldown landed in 2.11.0. The version check has to come first:
+  # MEASURED, `composer config --list` echoes the key on 2.7.1, which ignores it,
+  # so a value coming back proves nothing. Composer's readback also does NOT show
+  # COMPOSER_POLICY_COOLDOWN_PERIOD, which outranks every file, so that is read
+  # from the environment here. PARSED is the ceiling: the gate only fires against
+  # a registry, and a read-only verifier must not exercise one.
+  cwanth=$(scv_want_hours); cwantsec=""
+  case "$cwanth" in ''|*[!0-9]*) ;; *) cwantsec=$((cwanth * 3600)) ;; esac
+  if [ -z "$cmaj" ] || [ -z "$cmin" ]; then
+    row WEAK PRESENT "composer publish-age gate" "could not parse a version out of 'composer --version'"
+  elif [ "$cmaj" -lt 2 ] || { [ "$cmaj" -eq 2 ] && [ "$cmin" -lt 11 ]; }; then
+    scv_toolchain_gap composer.age-gate PARSED "composer publish-age gate" \
+      "composer $cv does NOT implement config.policy.cooldown (added in 2.11.0) - the key is written and ignored, and composer echoes it back anyway, so a release published minutes ago still resolves. See docs/composer-bundler-cooldown-by-distro.md"
+  elif [ "$crc" -ne 0 ]; then
+    row GAP PARSED "composer publish-age gate" \
+      "composer $cv implements the cooldown but cannot report its config (see the composer config in effect row)"
+  else
+    cper=$(composer_val "$EDUMP" policy.cooldown.period)
+    cblk=$(composer_val "$EDUMP" policy.cooldown.block)
+    cign=$(composer_val "$EDUMP" policy.cooldown.ignore)
+    cpsrc=$(composer_src "$EDUMP" policy.cooldown.period)
+    if [ -n "${COMPOSER_POLICY_COOLDOWN_PERIOD:-}" ]; then
+      cper=$COMPOSER_POLICY_COOLDOWN_PERIOD; cpsrc="COMPOSER_POLICY_COOLDOWN_PERIOD"
+    fi
+    case "${COMPOSER_POLICY_COOLDOWN_BLOCK:-}" in
+      '') ;;
+      0|false|no|off) cblk=false ;;
+      *) cblk=true ;;
+    esac
+    csec=$(composer_period_seconds "$cper")
+    case " $(printf '%s' "$cign" | tr -d '[]' | tr ',' ' ') " in
+      *" * "*) cignall=1 ;;
+      *) cignall=0 ;;
+    esac
+    if [ -z "$cper" ] || [ "$cper" = "null" ]; then
+      row GAP PARSED "composer publish-age gate" \
+        "composer $cv implements the cooldown but $escope sets no period - new releases resolve immediately"
+    elif [ -z "$csec" ]; then
+      row WEAK PARSED "composer publish-age gate" \
+        "composer $cv reports a cooldown period of $(cq "$cper") from $(cq "$cpsrc"), which this verifier cannot read as a duration"
+    elif [ "$csec" -eq 0 ]; then
+      row GAP PARSED "composer publish-age gate" \
+        "$escope sets a cooldown period of 0 from $(cq "$cpsrc") - that disables the gate"
+    elif [ "$cblk" = "false" ]; then
+      row GAP PARSED "composer publish-age gate" \
+        "$escope sets policy.cooldown.block=false - versions inside the window install anyway"
+    elif [ "$cignall" -eq 1 ]; then
+      row GAP PARSED "composer publish-age gate" \
+        "$escope sets policy.cooldown.ignore=$(cq "$cign") from $(cq "$(composer_src "$EDUMP" policy.cooldown.ignore)") - every package skips the gate, and no env var outranks a repo's ignore list"
+    elif [ -n "$cign" ]; then
+      row WEAK PARSED "composer publish-age gate" \
+        "composer $cv enforces $(cq "$cper") but $escope exempts $(cq "$cign") from $(cq "$(composer_src "$EDUMP" policy.cooldown.ignore)")"
+    elif [ -n "$cwantsec" ] && [ "$csec" -lt "$cwantsec" ]; then
+      row WEAK PARSED "composer publish-age gate" \
+        "composer $cv enforces ${csec}s from $(cq "$cpsrc"), below the ${cwanth}h this host declared - something shortened the window"
+    else
+      row OK PARSED "composer publish-age gate" \
+        "composer $cv implements the cooldown and reports ${csec}s from $(cq "$cpsrc") - applies to update and require, not to installing an existing lockfile"
     fi
   fi
 
@@ -2461,11 +2600,6 @@ fi
 # already name, so a newly-published malicious version cannot enter through a
 # routine `bundle install`. That is what this row measures.
 #
-# BUNDLE_DISABLE_EXEC_LOAD is deployed alongside but gets NO row: it changes how
-# `bundle exec` loads an already-admitted gem, which is not install-time
-# admission (design-principles.md boundary test). Counting it would inflate the
-# matrix.
-#
 # frozen and deployment share ONE row because they are one protection. They are
 # NOT interchangeable, though: MEASURED, hardened file + BUNDLE_FROZEN=false in
 # the environment -> 2.4.19/4.0.19 stop refusing, 2.2.33 still refuses because
@@ -2692,6 +2826,45 @@ else
       esac
     fi
     rm -rf "$btmp" "$btmp2"
+  fi
+
+  # --- bundler publish-age gate  [PARSED] ---
+  # cooldown landed in 4.0.13, and needs ruby >= 3.2. The version check has to
+  # come first: MEASURED, `bundle config get cooldown` echoes the value on 2.4.20,
+  # which ignores it. Asked from $PWD on purpose, because a repo's .bundle/config
+  # outranks the environment and the global file (MEASURED on 4.0.24: "0" there
+  # disabled the gate with BUNDLE_COOLDOWN set), and this readback does show it.
+  # Compared in days the way both writers derive it, floored at 1.
+  bwanth=$(scv_want_hours); bwant=""
+  case "$bwanth" in
+    ''|*[!0-9]*) ;;
+    *) bwant=$((bwanth / 24)); [ "$bwant" -lt 1 ] && bwant=1 ;;
+  esac
+  if [ -z "$bver" ]; then
+    row WEAK PRESENT "bundler publish-age gate" "could not read a version from bundler; the gate was not checked"
+  elif [ "$(printf '4.0.13\n%s\n' "$bver" | sort -V | head -1)" != "4.0.13" ]; then
+    scv_toolchain_gap bundler.age-gate PARSED "bundler publish-age gate" \
+      "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See docs/composer-bundler-cooldown-by-distro.md"
+  else
+    bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
+    case "$bcd" in
+      '')
+        row GAP PARSED "bundler publish-age gate" \
+          "bundler $bver implements cooldown but none is set in $(cq "$PWD") - new releases resolve immediately" ;;
+      *[!0-9]*)
+        row GAP PARSED "bundler publish-age gate" "bundler $bver reports a non-numeric cooldown=$(cq "$bcd")" ;;
+      0)
+        row GAP PARSED "bundler publish-age gate" \
+          "bundler $bver reports cooldown=0 in $(cq "$PWD"), which disables the gate - a repo's .bundle/config outranks BUNDLE_COOLDOWN" ;;
+      *)
+        if [ -n "$bwant" ] && [ "$bcd" -lt "$bwant" ]; then
+          row WEAK PARSED "bundler publish-age gate" \
+            "bundler $bver reports cooldown=${bcd}d, below the ${bwant}d this host declared - something shortened the window"
+        else
+          row OK PARSED "bundler publish-age gate" \
+            "bundler $bver implements cooldown and reports ${bcd}d - bundler only: RubyGems has no equivalent, so \`gem install\` is not age-gated"
+        fi ;;
+    esac
   fi
 fi
 

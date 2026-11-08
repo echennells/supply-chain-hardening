@@ -12,6 +12,8 @@
 #   yarn hardening at all    yarn >= 2        (apt ships 1.22)
 #   pnpm exotic-dep blocking pnpm >= 11
 #   composer audit blocking  composer >= 2.9  (noble 2.7.1, bookworm 2.5.5)
+#   composer age gate        composer >= 2.11 (no release here ships it)
+#   bundler age gate         bundler >= 4.0.13, ruby >= 3.2 (no release here ships it)
 #   npq reputation           node >= 20.13
 #   sfw                      node >= 20
 #
@@ -43,7 +45,7 @@ apt-get update -qq >/dev/null 2>&1
 # and re-create the blind spot this script exists to remove.
 apt-get install -y -qq --no-install-recommends \
   ansible python3 python3-pip nodejs npm golang-go composer curl ca-certificates \
-  yarnpkg cargo rustc \
+  yarnpkg cargo rustc ruby bundler \
   >/dev/null 2>&1 || true
 
 echo
@@ -56,7 +58,7 @@ if command -v yarnpkg >/dev/null 2>&1 && ! command -v yarn >/dev/null 2>&1; then
 fi
 
 echo "--- tool versions this host actually has ---"
-for t in ansible node npm yarn pnpm bun composer python3 pip3 go cargo; do
+for t in ansible node npm yarn pnpm bun composer ruby bundle python3 pip3 go cargo; do
   if command -v "$t" >/dev/null 2>&1; then
     # `go` takes `go version`, not `--version` — the old form printed
     # "flag provided but not defined: -version" in every distro column.

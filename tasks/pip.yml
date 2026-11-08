@@ -122,3 +122,47 @@
     owner: root
     group: root
     mode: "0644"
+
+# --- Poetry -------------------------------------------------------------------
+# Poetry has its own resolver and reads neither pip.conf nor uv.toml (MEASURED on
+# 2.5.1: with both cutoffs set it still took the newest release), so nothing above
+# reaches it. solver.min-release-age is its native gate. The load-bearing layer is
+# POETRY_SOLVER_MIN_RELEASE_AGE in shell_env.yml; this file covers callers with no
+# env layer.
+
+- name: Create Poetry config directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.config/pypoetry"
+    state: directory
+    mode: "0755"
+
+- name: Deploy Poetry's publish-age gate (never over an existing config)
+  # force: false because this file is the user's whole Poetry config, and appending
+  # could create a second [solver] table, which is invalid TOML.
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.config/pypoetry/config.toml"
+    mode: "0644"
+    force: false
+    content: |
+      [solver]
+      min-release-age = {{ poetry_min_release_age_days }}
+
+- name: Detect installed Poetry version (empty if not installed)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      command -v poetry >/dev/null 2>&1 || exit 0
+      poetry --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+    executable: /bin/bash
+  register: poetry_version_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Record skipped protection — publish-age gate inert (Poetry < 2.4.0)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Poetry publish-age gate — Poetry ' ~ (poetry_version_check.stdout | trim) ~ ' has no solver.min-release-age (MEASURED: added in 2.4.0), and Poetry reads neither pip.conf nor uv.toml. Until it is upgraded, new releases resolve immediately.'] }}
+  when:
+    - poetry_version_check.stdout | default('') | trim | length > 0
+    - (poetry_version_check.stdout | trim) is version('2.4.0', '<')

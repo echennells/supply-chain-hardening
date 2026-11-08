@@ -555,6 +555,8 @@ NPM_AGE_DAYS=$(( RELEASE_AGE_HOURS / 24 ))
 [[ "$NPM_AGE_DAYS" -lt 1 ]] && NPM_AGE_DAYS=1     # npm wants integer days
 PNPM_AGE_MINUTES=$(( RELEASE_AGE_HOURS * 60 ))
 BUN_AGE_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
+COMPOSER_COOLDOWN_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
+POETRY_AGE_DAYS=$NPM_AGE_DAYS                     # integer days, floored at 1 like npm
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
 # INTEGER MINUTES, and rendered UNQUOTED. A duration-suffix string ("2d")
@@ -982,6 +984,21 @@ harden_pip() {
   # which matters because a MALFORMED value makes pip >= 26 exit 2 on every
   # install for every user on the host.
   write_env PIP_UPLOADED_PRIOR_TO         "$UV_EXCLUDE_NEWER"
+  # Poetry reads neither pip.conf nor uv.toml (MEASURED on 2.5.1), so it needs its
+  # own gate. The env var outranks a repo's poetry.toml. The file is only created,
+  # never edited: it is the user's whole Poetry config, and a second [solver] table
+  # would be invalid TOML.
+  write_env POETRY_SOLVER_MIN_RELEASE_AGE "$POETRY_AGE_DAYS"
+  local poetry_cfg="${POETRY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pypoetry}/config.toml"
+  if [[ ! -e "$poetry_cfg" ]]; then
+    mkdir -p "$(dirname "$poetry_cfg")"
+    printf '[solver]\nmin-release-age = %s\n' "$POETRY_AGE_DAYS" > "$poetry_cfg"
+  fi
+  local poetry_version
+  poetry_version=$(detect_version poetry "poetry --version")
+  if [[ -n "$poetry_version" ]] && ! version_ge "$poetry_version" "2.4.0"; then
+    notice "poetry $poetry_version has no solver.min-release-age (MEASURED: added in 2.4.0), and it reads neither pip.conf nor uv.toml, so it is not age-gated on this runner."
+  fi
 
   mkdir -p "$HOME/.config/pip"
   cat > "$HOME/.config/pip/pip.conf" <<EOF
@@ -1125,10 +1142,19 @@ harden_composer() {
       else
         echo "      \"abandoned\": \"fail\""
       fi
-      echo "    }"
+      echo "    },"
     else
-      echo "    \"allow-plugins\": $allow_plugins_json"
+      echo "    \"allow-plugins\": $allow_plugins_json,"
     fi
+    # The publish-age gate is written on every version: MEASURED 2.0.9 -> 2.10.3
+    # ignore it with exit 0, and it enforces from 2.11.0. It does not disturb the
+    # audit block above (MEASURED on 2.11.1, see templates/composer-config.json.j2).
+    echo "    \"policy\": {"
+    echo "      \"cooldown\": {"
+    echo "        \"period\": $COMPOSER_COOLDOWN_SECONDS,"
+    echo "        \"block\": true"
+    echo "      }"
+    echo "    }"
     echo "  }"
     echo "}"
   } > "$HOME/.config/composer/config.json"
@@ -1147,6 +1173,15 @@ harden_composer() {
   write_env COMPOSER_SKIP_SCRIPTS \
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
   write_env COMPOSER_ALLOW_SUPERUSER 1
+  # The env form outranks a checked-out composer.json (MEASURED on 2.11.1: a
+  # repo's "period": null or "block": false turns off the config.json gate and
+  # not these). A repo's "ignore" list still wins; verify.sh reports that.
+  write_env COMPOSER_POLICY_COOLDOWN_PERIOD "$COMPOSER_COOLDOWN_SECONDS"
+  write_env COMPOSER_POLICY_COOLDOWN_BLOCK  1
+
+  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.11.0"; then
+    notice "composer $composer_version ignores config.policy.cooldown (MEASURED: added in 2.11.0), so the publish-age gate is written and NOT enforced on this runner. Install a current composer before this step to activate it."
+  fi
 
   if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.0"; then
     notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.0). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
@@ -1238,6 +1273,11 @@ if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER"
   exit 127
 fi
 export COMPOSER_ALLOW_SUPERUSER=1
+# Publish-age gate (composer >= 2.11.0). Set unconditionally so a step's own env
+# cannot shorten the window; \`composer --no-cooldown\` still gets through, on
+# purpose, as composer's escape hatch for an urgent fix.
+export COMPOSER_POLICY_COOLDOWN_PERIOD=$COMPOSER_COOLDOWN_SECONDS
+export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 
 NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
 
@@ -2218,6 +2258,7 @@ harden_bundler() {
     # a default we do not state is a default someone else can flip.
     echo "BUNDLE_DISABLE_CHECKSUM_VALIDATION: \"false\""
   } > "$HOME/.bundle/config"
+  write_env BUNDLE_COOLDOWN "$bundle_age_days"
 
   HARDENED+=("bundler")
   local bundler_version

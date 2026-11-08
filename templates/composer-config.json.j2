@@ -27,6 +27,16 @@
      property. (allow-plugins itself only exists from 2.2.0; on 2.0/2.1 the
      key is inert either way and --no-plugins in the wrapper is the layer that
      blocks plugins.)
+
+   policy.cooldown is NOT tiered either, for the opposite reason: it is the
+   publish-age gate, it only exists from 2.11.0, and writing it everywhere is
+   safe. MEASURED (composer 2.0.9 → 2.11.1, 10 phars): every version below 2.11.0
+   ignores it with exit 0, so upgrading composer activates the gate with no
+   re-apply, the same pre-positioning as pip's uploaded-prior-to. It does not
+   disturb the audit block above: with policy.cooldown present, block-abandoned
+   still refused and block-insecure=false was still honoured on 2.11.1. The
+   version gap is reported by tasks/composer.yml and supply-chain-verify, never
+   by reading this file back: `composer config --list` echoes the key on 2.7.1.
    See README "Limitations" → "Composer audit blocking is version-tiered". #}
 {%- set v = composer_detected_version | default('', true) -%}
 {%- set has_audit = v != '' and v is version('2.7.0', '>=') -%}
@@ -41,6 +51,12 @@
       "abandoned": "{{ composer_audit_abandoned }}"{% if has_block %},
       "block-insecure": {{ composer_audit_block_insecure | bool | lower }},
       "block-abandoned": {{ composer_audit_block_abandoned | bool | lower }}{% endif %}
-    }{% endif %}
+    }{% endif %},
+    "policy": {
+      "cooldown": {
+        "period": {{ composer_cooldown_seconds | int }},
+        "block": true
+      }
+    }
   }
 }

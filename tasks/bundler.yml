@@ -2,6 +2,13 @@
 # Bundler/RubyGems supply chain hardening
 # Config deployed unconditionally
 # Note: Ruby has NO install script blocking — extconf.rb always runs
+#
+# BUNDLE_COOLDOWN is the publish-age gate, in integer days. It is written on every
+# host: bundler < 4.0.13 stores the key and ignores it (MEASURED 2.3.5 → 4.0.12),
+# so upgrading bundler activates it with no re-apply. Two limits it cannot fix:
+#   - frozen mode already refuses install-without-lockfile, update and add, so
+#     what the gate adds on top is `bundle lock` and any repo that turns frozen off
+#   - RubyGems has no cooldown at all, so `gem install` stays ungated on every OS
 
 - name: Create bundler config directory
   ansible.builtin.file:
@@ -10,11 +17,39 @@
     mode: "0755"
 
 - name: Deploy hardened bundler config
+  # Same keys as action/harden.sh. BUNDLE_DEPLOYMENT and BUNDLE_DISABLE_EXEC_LOAD
+  # are gone from both: DEPLOYMENT adds nothing over FROZEN and silently moves every
+  # install into ./vendor/bundle, and EXEC_LOAD is a process-model knob, not a control.
   ansible.builtin.copy:
     dest: "{{ ansible_env.HOME }}/.bundle/config"
     mode: "0644"
     content: |
       ---
       BUNDLE_FROZEN: "true"
-      BUNDLE_DEPLOYMENT: "true"
-      BUNDLE_DISABLE_EXEC_LOAD: "true"
+      BUNDLE_COOLDOWN: "{{ bundler_cooldown_days }}"
+      BUNDLE_DISABLE_CHECKSUM_VALIDATION: "false"
+
+- name: Detect installed Bundler version (empty if not installed)
+  # "Bundler version 2.4.20" through 2.x, a bare "4.0.24" from 4.0 (MEASURED), so
+  # this takes the first X.Y.Z rather than anchoring on either shape.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      command -v bundle >/dev/null 2>&1 || exit 0
+      bundle --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+    executable: /bin/bash
+  register: bundler_version_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Record skipped protection — publish-age gate inert (Bundler < 4.0.13)
+  # MEASURED: `bundle config get cooldown` echoes the value on 2.4.20, which does
+  # not implement it, so a readback cannot show this gap. Bundler 4 needs ruby
+  # >= 3.2, which Ubuntu 22.04 (3.0) and Debian 12 (3.1) do not ship.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Bundler publish-age gate — Bundler ' ~ (bundler_version_check.stdout | trim) ~ ' ignores cooldown (MEASURED: added in 4.0.13, which needs ruby >= 3.2). The key is written and activates on upgrade. See docs/composer-bundler-cooldown-by-distro.md'] }}
+  when:
+    - bundler_version_check.stdout | default('') | trim | length > 0
+    - (bundler_version_check.stdout | trim) is version('4.0.13', '<')

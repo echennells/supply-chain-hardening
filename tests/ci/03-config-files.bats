@@ -273,3 +273,55 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.yarnrc.yml"              "npmMinimalAgeGate: 2880"  # minutes
   assert_file_contains "$TEST_HOME/.bunfig.toml"             "minimumReleaseAge = 172800" # seconds
 }
+
+# --- publish-age gates: composer and bundler --------------------------------
+
+@test "composer: the publish-age gate is written in seconds, with no composer present" {
+  # No version predicate: every composer below 2.11.0 ignores the key with exit 0
+  # (MEASURED 2.0.9 -> 2.10.3), so upgrading activates it with no re-run.
+  run harden ECOSYSTEMS=composer -- --emit=plain
+  [ "$status" -eq 0 ]
+  run node -e '
+    const c = JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).config;
+    process.exit(c.policy.cooldown.period === 172800 && c.policy.cooldown.block === true ? 0 : 1);
+  ' "$TEST_HOME/.config/composer/config.json"
+  [ "$status" -eq 0 ]
+}
+
+@test "composer: the age window follows release_age_hours, in seconds" {
+  run harden ECOSYSTEMS=composer RELEASE_AGE_HOURS=72 -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.config/composer/config.json" '"period": 259200'
+}
+
+@test "composer: the env layer carries the gate, because it outranks composer.json" {
+  # MEASURED on 2.11.1: a repo's "period": null or "block": false turns off the
+  # config.json gate. With these set it does not.
+  run harden ECOSYSTEMS=composer -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$ENV_FILE" "COMPOSER_POLICY_COOLDOWN_PERIOD=172800"
+  assert_file_contains "$ENV_FILE" "COMPOSER_POLICY_COOLDOWN_BLOCK=1"
+}
+
+@test "bundler: the env layer carries the gate too" {
+  run harden ECOSYSTEMS=bundler -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$ENV_FILE" "BUNDLE_COOLDOWN=2"
+}
+
+@test "poetry: the env layer carries the gate, since poetry ignores pip.conf and uv.toml" {
+  run harden ECOSYSTEMS=pip -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$ENV_FILE" "POETRY_SOLVER_MIN_RELEASE_AGE=2"
+  assert_file_contains "$TEST_HOME/.config/pypoetry/config.toml" "min-release-age = 2"
+}
+
+@test "poetry: an existing config is never edited" {
+  # It is the user's whole Poetry config, and a second [solver] table is invalid TOML.
+  mkdir -p "$TEST_HOME/.config/pypoetry"
+  printf '[solver]\nlazy-wheel = false\n' > "$TEST_HOME/.config/pypoetry/config.toml"
+  run harden ECOSYSTEMS=pip -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$TEST_HOME/.config/pypoetry/config.toml" "min-release-age"
+  assert_file_contains "$ENV_FILE" "POETRY_SOLVER_MIN_RELEASE_AGE=2"
+}

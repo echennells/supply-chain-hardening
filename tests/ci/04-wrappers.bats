@@ -423,6 +423,31 @@ cooldown_stubs() {
   [[ "$output" != *"--no-plugins"* ]]
 }
 
+@test "composer: the wrapper pins the publish-age window against the caller's env" {
+  stub_bin composer 'case "${1:-}" in
+  --version) echo "Composer version 2.11.1 2026-10-01 00:00:00" ;;
+  *) echo "PERIOD=$COMPOSER_POLICY_COOLDOWN_PERIOD BLOCK=$COMPOSER_POLICY_COOLDOWN_BLOCK" ;;
+esac'
+  harden ECOSYSTEMS=composer RELEASE_AGE_HOURS=72 -- --emit=plain >/dev/null
+  COMPOSER_POLICY_COOLDOWN_PERIOD=60 COMPOSER_POLICY_COOLDOWN_BLOCK=0 run "$TEST_BIN/composer" install
+  [[ "$output" == *"PERIOD=259200 BLOCK=1"* ]]
+}
+
+@test "composer: config.json stays valid JSON with the policy block on every audit tier" {
+  # The audit block changes shape at 2.7 and 2.9, and the comma before "policy"
+  # is written by a different branch on each side of that.
+  local v
+  for v in 2.2.6 2.7.1 2.9.5 2.11.1; do
+    stub_bin composer "echo 'Composer version $v 2026-01-01 00:00:00'"
+    harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+    run node -e '
+      const c = JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).config;
+      process.exit(c.policy.cooldown.period === 172800 ? 0 : 1);
+    ' "$TEST_HOME/.config/composer/config.json"
+    [ "$status" -eq 0 ] || { echo "composer $v wrote invalid config" >&2; return 1; }
+  done
+}
+
 # --- cargo <-> socket firewall ---------------------------------------------
 
 cargo_sfw_stubs() {

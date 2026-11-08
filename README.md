@@ -26,7 +26,7 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 
 | Protection | npm | pnpm | Yarn | Bun | Deno | pip/uv | Cargo | Go | Composer | Bundler | Maven | Gradle | NuGet |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **48h release age gate** | x | x | x | x | x | x | * | | | | | | |
+| **48h release age gate** | x | x | x | x | x | x | * | | ‡ | ‡ | | | |
 | **Install script blocking** | x | x | x | x | x | x | | | x | | | | x |
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
 | **Socket Firewall** | x | | | | | † | x | | | | | | |
@@ -36,6 +36,8 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | **Lockfile enforcement** | | | | | | | x | x | | x | | | |
 
 `*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
+
+`‡` = **needs Composer ≥ 2.11.0 or Bundler ≥ 4.0.13, which no stock distro package ships.** The role writes both settings everywhere and the verifier reports a GAP until you upgrade; see [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md). Bundler's gate does not cover `gem install`, which has no age gate on any OS.
 
 `†` = **not implemented for Python.** Socket Firewall is wired only into the npm/npx and cargo PATH wrappers. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
 
@@ -92,7 +94,7 @@ The order is the one thing you have to get right. Hardening wraps the binaries t
 - **Do not run with `sudo ansible-playbook` or global `--become`.** Facts get gathered as root, `HOME` becomes `/root`, and every per-user config lands in the wrong home while the recap reports success. The preflight refuses this.
 - **`N/A — not installed` rows are correct, not failures.** There is nothing to harden yet. Install the manager, re-apply.
 - **A pre-existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or `/etc/uv/uv.toml` stops the play.** It may be a corporate registry setting. Read it, then pass `-e accept_etc_overwrite=true` if overwriting is what you want.
-- **Stock distro toolchains often predate the age gates.** npm's `min-release-age` needs npm ≥ 11.10.0 ([docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) has the per-distro fix); cargo's gate needs rustc ≥ 1.91.1 and falls back to `--locked` below that (Ubuntu 24.04 ships 1.75). The verifier reports both as a GAP rather than staying quiet.
+- **Stock distro toolchains often predate the age gates.** npm's `min-release-age` needs npm ≥ 11.10.0 ([docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) has the per-distro fix); Composer's needs ≥ 2.11.0 and Bundler's needs ≥ 4.0.13 ([docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md)); cargo's gate needs rustc ≥ 1.91.1 and falls back to `--locked` below that (Ubuntu 24.04 ships 1.75). The verifier reports both as a GAP rather than staying quiet.
 - **On agent hosts and CI images, make a GAP fatal:** `-e verify_fail_on_gap=true`. `supply-chain-verify --json` exits non-zero on any GAP, so it drops into a health check directly.
 - **Re-apply after toolchain upgrades.** `rustup update`, Deno's installer and a new Node all replace wrapped binaries. The verifier reports the drift; re-applying fixes it.
 
@@ -114,6 +116,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
 | [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
 | [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |
+| [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md) | you need a cooldown-capable Composer or Bundler, or want to know which distros ship one |
 | [docs/version-tiering-audit.md](docs/version-tiering-audit.md) | you want to know which config keys each uv / yarn / bun version actually honours |
 | [action/README.md](action/README.md) | you're using the GitHub Action, or `harden.sh` on another CI system |
 | [TESTS.md](TESTS.md) | you want to run or extend the test suite |

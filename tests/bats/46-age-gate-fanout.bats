@@ -2,7 +2,8 @@
 # ECH-180 — property test over the release_age_hours fan-out.
 #
 # One input, release_age_hours, fans out to a different unit for every
-# ecosystem: npm days, pnpm/yarn minutes, bun seconds, deno ISO-8601 duration.
+# ecosystem: npm and bundler days, pnpm/yarn minutes, bun and composer seconds,
+# deno ISO-8601 duration.
 # Each is derived INDEPENDENTLY in defaults/main.yml, and the "unit/threshold"
 # bug recurred four times — a derivation going degenerate (0, "P0D", NaN,
 # wrong unit) silently DISABLES that ecosystem's age gate with no error. The
@@ -35,16 +36,16 @@ setup_file() {
     # gather_facts + GNU date) is never evaluated.
     - ansible.builtin.include_vars: "{{ role_defaults }}"
     - ansible.builtin.debug:
-        msg: "FANOUT {{ release_age_hours }} {{ npm_minimum_release_age_days }} {{ pnpm_minimum_release_age_minutes }} {{ bun_minimum_release_age_seconds }} {{ yarn_minimal_age_gate }} {{ deno_minimum_dependency_age }}"
+        msg: "FANOUT {{ release_age_hours }} {{ npm_minimum_release_age_days }} {{ pnpm_minimum_release_age_minutes }} {{ bun_minimum_release_age_seconds }} {{ yarn_minimal_age_gate }} {{ deno_minimum_dependency_age }} {{ composer_cooldown_seconds }} {{ bundler_cooldown_days }} {{ poetry_min_release_age_days }}"
 YML
   local h line
   for h in $INPUTS; do
     # </dev/null so ansible cannot drain the loop's stdin; grep the marker line
-    # out of the debug output → "h npm pnpm bun yarn deno" (space-separated).
+    # out of the debug output → "h npm pnpm bun yarn deno composer bundler poetry" (space-separated).
     line=$(ansible-playbook -i 'localhost,' -c local "$pb" \
              -e "role_defaults=$ROLE_DIR/defaults/main.yml" \
              -e "release_age_hours=$h" </dev/null 2>/dev/null \
-           | grep -oE 'FANOUT [0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+ P[0-9]+D')
+           | grep -oE 'FANOUT [0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+ P[0-9]+D [0-9]+ [0-9]+ [0-9]+')
     [ -n "$line" ] && echo "${line#FANOUT }" >> "$FANOUT_FILE"
   done
   rm -f "$pb"
@@ -62,8 +63,8 @@ setup() {
 }
 
 @test "fan-out: npm min-release-age is an integer >= 1 for every release_age_hours" {
-  local h npm pnpm bun yarn deno
-  while read -r h npm pnpm bun yarn deno; do
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
     [ -n "$h" ] || continue
     if ! [[ "$npm" =~ ^[0-9]+$ ]] || [ "$npm" -lt 1 ]; then
       echo "DEGENERATE npm at release_age_hours=$h: '$npm' (gate would be disabled)" >&2; return 1
@@ -72,8 +73,8 @@ setup() {
 }
 
 @test "fan-out: pnpm minimumReleaseAge (minutes) is an integer >= 1 for every input" {
-  local h npm pnpm bun yarn deno
-  while read -r h npm pnpm bun yarn deno; do
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
     [ -n "$h" ] || continue
     if ! [[ "$pnpm" =~ ^[0-9]+$ ]] || [ "$pnpm" -lt 1 ]; then
       echo "DEGENERATE pnpm at release_age_hours=$h: '$pnpm'" >&2; return 1
@@ -82,8 +83,8 @@ setup() {
 }
 
 @test "fan-out: bun minimumReleaseAge (seconds) is an integer >= 1 for every input" {
-  local h npm pnpm bun yarn deno
-  while read -r h npm pnpm bun yarn deno; do
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
     [ -n "$h" ] || continue
     if ! [[ "$bun" =~ ^[0-9]+$ ]] || [ "$bun" -lt 1 ]; then
       echo "DEGENERATE bun at release_age_hours=$h: '$bun'" >&2; return 1
@@ -92,8 +93,8 @@ setup() {
 }
 
 @test "fan-out: yarn npmMinimalAgeGate (minutes) is an integer >= 1 for every input" {
-  local h npm pnpm bun yarn deno
-  while read -r h npm pnpm bun yarn deno; do
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
     [ -n "$h" ] || continue
     if ! [[ "$yarn" =~ ^[0-9]+$ ]] || [ "$yarn" -lt 1 ]; then
       echo "DEGENERATE yarn at release_age_hours=$h: '$yarn'" >&2; return 1
@@ -104,11 +105,44 @@ setup() {
 @test "fan-out: deno minimum-dependency-age is P<n>D with n >= 1 for every input" {
   # The historic failure was "P0D" below 24h — syntactically valid ISO-8601 that
   # disables the gate. Reject P0D, empty, and any non-P<n>D form.
-  local h npm pnpm bun yarn deno
-  while read -r h npm pnpm bun yarn deno; do
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
     [ -n "$h" ] || continue
     if ! [[ "$deno" =~ ^P[1-9][0-9]*D$ ]]; then
       echo "DEGENERATE deno at release_age_hours=$h: '$deno' (want P<n>D, n>=1)" >&2; return 1
+    fi
+  done < "$FANOUT_FILE"
+}
+
+@test "fan-out: composer cooldown is exactly release_age_hours in seconds" {
+  # 0 here is `period: 0`, which disables the gate on every composer >= 2.11.
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
+    [ -n "$h" ] || continue
+    if [ "$composer" -ne $((h * 3600)) ]; then
+      echo "WRONG composer at release_age_hours=$h: '$composer' (want $((h * 3600)))" >&2; return 1
+    fi
+  done < "$FANOUT_FILE"
+}
+
+@test "fan-out: bundler cooldown is an integer >= 1 for every release_age_hours" {
+  # bundler documents 0 as "disable", the same trap as npm.
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
+    [ -n "$h" ] || continue
+    if ! [[ "$bundler" =~ ^[0-9]+$ ]] || [ "$bundler" -lt 1 ]; then
+      echo "DEGENERATE bundler at release_age_hours=$h: '$bundler' (gate would be disabled)" >&2; return 1
+    fi
+  done < "$FANOUT_FILE"
+}
+
+@test "fan-out: poetry min-release-age is an integer >= 1 for every release_age_hours" {
+  # 0 is poetry's own default and means no gate.
+  local h npm pnpm bun yarn deno composer bundler poetry
+  while read -r h npm pnpm bun yarn deno composer bundler poetry; do
+    [ -n "$h" ] || continue
+    if ! [[ "$poetry" =~ ^[0-9]+$ ]] || [ "$poetry" -lt 1 ]; then
+      echo "DEGENERATE poetry at release_age_hours=$h: '$poetry' (gate would be disabled)" >&2; return 1
     fi
   done < "$FANOUT_FILE"
 }

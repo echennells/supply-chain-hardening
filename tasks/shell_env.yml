@@ -45,6 +45,10 @@
       - "GOTOOLCHAIN=local"
       - "COMPOSER_SKIP_SCRIPTS=pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create"
       - "COMPOSER_ALLOW_SUPERUSER=1"
+      - "COMPOSER_POLICY_COOLDOWN_PERIOD={{ composer_cooldown_seconds }}"
+      - "COMPOSER_POLICY_COOLDOWN_BLOCK=1"
+      - "BUNDLE_COOLDOWN={{ bundler_cooldown_days }}"
+      - "POETRY_SOLVER_MIN_RELEASE_AGE={{ poetry_min_release_age_days }}"
       - "DOTNET_NUGET_SIGNATURE_VERIFICATION=true"
   tags: [shell]
 - name: Deploy to /etc/environment for non-login shells

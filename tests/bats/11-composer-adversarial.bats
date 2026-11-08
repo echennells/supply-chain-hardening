@@ -34,6 +34,10 @@ setup() {
   assert_file_contains "$HOME/.config/composer/config.json" '"allow-plugins": {}'
 }
 
+@test "Composer publish-age gate is deployed (enforced from 2.11.0; harmless below)" {
+  assert_file_contains "$HOME/.config/composer/config.json" '"period": 172800'
+}
+
 @test "Composer audit.abandoned defaults to fail (Composer >=2.7; test env runs 2.9+)" {
   # Tier 2+ — matches Composer's own upstream default since 2.7.0.
   assert_file_contains "$HOME/.config/composer/config.json" '"abandoned": "fail"'

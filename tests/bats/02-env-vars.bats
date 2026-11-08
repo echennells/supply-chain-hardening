@@ -86,6 +86,24 @@ setup() {
   assert_file_contains /etc/environment "NPM_CONFIG_MIN_RELEASE_AGE=2"
 }
 
+@test "env: the composer publish-age gate is in seconds and blocks" {
+  assert_env_equals COMPOSER_POLICY_COOLDOWN_PERIOD 172800
+  assert_env_equals COMPOSER_POLICY_COOLDOWN_BLOCK 1
+}
+
+@test "env: the bundler publish-age gate is in days" {
+  assert_env_equals BUNDLE_COOLDOWN 2
+}
+
+@test "env: the poetry publish-age gate is in days" {
+  assert_env_equals POETRY_SOLVER_MIN_RELEASE_AGE 2
+}
+
+@test "/etc/environment has both publish-age gates" {
+  assert_file_contains /etc/environment "COMPOSER_POLICY_COOLDOWN_PERIOD=172800"
+  assert_file_contains /etc/environment "BUNDLE_COOLDOWN=2"
+}
+
 @test "/etc/environment has GOSUMDB" {
   assert_file_contains /etc/environment "GOSUMDB=sum.golang.org"
 }

@@ -33,6 +33,23 @@ pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" #
 # with a quoted "2d"), which disarms every other key AND breaks bun.
 # tasks/bun.yml asserts this is ^[0-9]+$ before the template renders.
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
+# Composer 2.11.0+ ONLY (MEASURED: config.policy.cooldown withholds versions on
+# 2.11.0 and 2.11.1, and is ignored with exit 0 on 2.0.9 through 2.10.3). Written
+# on every host anyway, like pip's uploaded-prior-to, so upgrading Composer
+# activates it with no re-apply. tasks/composer.yml records the gap below 2.11.
+# Integer seconds rather than "48 hours": the same value feeds
+# COMPOSER_POLICY_COOLDOWN_PERIOD, and a bare integer has no quoting to get wrong
+# in /etc/environment.
+composer_cooldown_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
+# Bundler 4.0.13+ ONLY (MEASURED: `cooldown` appears nowhere in 4.0.12 and
+# withholds versions from 4.0.13; older bundlers store the key and ignore it).
+# Integer days, and 0 means off, so this is FLOORED AT 1 for the same reason as
+# npm above. action/harden.sh derives it identically.
+bundler_cooldown_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  # 2 days at the 48h default
+# Poetry 2.4.0+ ONLY (MEASURED: ignored on 2.3.4, enforced on 2.4.0 and 2.5.1).
+# Integer days, and 0 means off, so floored at 1 like npm and bundler. Poetry reads
+# neither pip.conf nor uv.toml, so the Python gates above do not reach it.
+poetry_min_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  # 2 days at the 48h default
 # uv requires an absolute RFC 3339 datetime here. MEASURED 2026-10-21 on the
 # real release binaries: a relative-duration string such as "48 hours" in a
 # config file is REJECTED on every uv <= 0.9.9 (rc=2, "failed to parse year in
