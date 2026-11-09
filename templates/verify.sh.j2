@@ -375,6 +375,119 @@ npm_age_gate_behaves() {
   printf '%s' "$out" | grep -qiE 'date before|No matching version|notarget'
 }
 
+# >>> python startup hooks
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them). It sits
+# in both preambles instead of files/verify-probes.sh because it has to run before
+# the first probe that starts Python, and both preambles start pip before the
+# shared body is reached.
+#
+# A wheel's .data/purelib can drop a *.pth or a sitecustomize into the
+# site-packages root, and Python runs it on EVERY interpreter start: the October
+# 2026 litellm wheels did exactly that (docs/limitations.md). This script starts
+# python3 and pip below, so it would be one more thing that fires such a hook.
+# Read the site directories as plain files first, never starting an interpreter,
+# and say what is there before anything runs it.
+#
+# DETECTION, NOT A PROTECTION. Nothing is removed or blocked, and a clean result
+# says nothing about a directory this does not read. WEAK when something
+# unrecognised is found; no row otherwise, the same shape as id-token exposure.
+#
+# Where it reads: the prefixes of the interpreters this run starts (python3,
+# python, and pip/pip3 through their shebang), both as found on PATH and
+# resolved, so a venv and its base interpreter both count; plus /usr,
+# /usr/local, the user site and $VIRTUAL_ENV.
+#
+# What counts, matching CPython's site.py (MEASURED on 3.13.12): a *.pth line
+# starting with `import` and a space or tab runs, including after a UTF-8 BOM;
+# one with a leading space does not, and dotfiles are skipped. sitecustomize and
+# usercustomize run as a module, a compiled module or a package directory.
+#
+# Recognised by exact generated text, not by file name, so a payload cannot hide
+# behind a familiar name: setuptools' distutils-precedence.pth (the same bytes
+# from 60.0 through 84.2.1), the _virtualenv.pth that virtualenv and uv venvs
+# write, and setuptools' editable-install finder. Only the .pth line is checked,
+# not the module it imports. Anything else is listed with the installed
+# distribution whose RECORD claims it, because that is the first thing to check:
+# an application dependency shipping a startup hook is the red flag, and a hook
+# no distribution claims is worse.
+scv_site_dirs() {
+  local p c r pre d
+  {
+    for p in python3 python pip3 pip; do
+      c=$(command -v "$p" 2>/dev/null) || continue
+      case "$p" in
+        pip*)
+          r=$(sed -n '1s/^#![[:space:]]*\([^[:space:]]*\).*/\1/p' "$c" 2>/dev/null)
+          case "${r##*/}" in python*) c="$r" ;; *) continue ;; esac ;;
+      esac
+      printf '%s\n' "${c%/*/*}"
+      r=$(readlink -f "$c" 2>/dev/null) && printf '%s\n' "${r%/*/*}"
+    done
+    printf '%s\n' /usr /usr/local "$HOME/.local" ${VIRTUAL_ENV:+"$VIRTUAL_ENV"}
+  } | while IFS= read -r pre; do
+    for d in "$pre"/lib/python3*/site-packages "$pre"/lib/python3*/dist-packages \
+             "$pre"/lib/python3/dist-packages "$pre"/lib64/python3*/site-packages; do
+      [ -d "$d" ] && readlink -f "$d"
+    done
+  done | awk '!seen[$0]++'
+}
+
+# The lines CPython would execute from one .pth file.
+scv_pth_imports() {
+  local bom
+  bom=$(printf '\357\273\277')
+  LC_ALL=C sed -n "1s/^$bom//; /^import[[:blank:]]/p" "$1" 2>/dev/null
+}
+
+# True when every executing line in a .pth is a recognised tool's generated text.
+scv_hook_known() {
+  local pat
+  case "${1##*/}" in
+    distutils-precedence.pth)
+      pat="^import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os\.environ\.get\(var, '[a-z]+'\) == 'local'; enabled and __import__\('_distutils_hack'\)\.add_shim\(\);" ;;
+    _virtualenv.pth)
+      pat='^import _virtualenv' ;;
+    __editable__.*.pth)
+      pat='^import __editable___[A-Za-z0-9_]+_finder; __editable___[A-Za-z0-9_]+_finder\.install\(\)' ;;
+    *) return 1 ;;
+  esac
+  ! scv_pth_imports "$1" | grep -qvE "${pat}[[:space:]]*\$"
+}
+
+# One line per unrecognised hook: its path, then the distribution claiming it.
+scv_startup_hooks() {
+  local d f n o
+  scv_site_dirs | while IFS= read -r d; do
+    for f in "$d"/*.pth "$d"/sitecustomize "$d"/sitecustomize.* \
+             "$d"/usercustomize "$d"/usercustomize.*; do
+      [ -e "$f" ] || continue
+      n=${f##*/}
+      case "$n" in
+        *.pth)
+          [ -f "$f" ] && [ -n "$(scv_pth_imports "$f")" ] || continue
+          scv_hook_known "$f" && continue ;;
+      esac
+      o=$(awk -F, -v n="$n" '$1 == n || index($1, n "/") == 1 { print FILENAME; exit }' \
+            "$d"/*.dist-info/RECORD 2>/dev/null)
+      o=${o%.dist-info/RECORD}
+      o=${o##*/}
+      printf '%s (%s)\n' "$f" "${o:-claimed by no installed distribution}"
+    done
+  done | awk '!seen[$0]++'
+}
+
+scv_hooks=$(scv_startup_hooks)
+if [ -n "$scv_hooks" ]; then
+  scv_hook_n=$(printf '%s\n' "$scv_hooks" | wc -l | tr -d ' ')
+  scv_hook_list=$(printf '%s\n' "$scv_hooks" | head -n 5 | awk 'NR > 1 { printf "; " } { printf "%s", $0 }')
+  [ "$scv_hook_n" -gt 5 ] && scv_hook_list="$scv_hook_list; and $((scv_hook_n - 5)) more"
+  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) not from a recognised tool: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
+  row WEAK PRESENT "python startup hooks" \
+    "$scv_hook_n file(s) that run code on every Python start and are not setuptools, virtualenv/uv or an editable install: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
+fi
+# <<< python startup hooks
+
 # ---------------------------------------------------------------- npm --------
 if have npm; then
   # `npm config get` is npm's own view after merging every config source. If it

@@ -281,6 +281,21 @@ EOF
 # --verbose view (asserted throughout the correctness tests above), and a
 # --json machine contract that doubles as a CI pre-install gate.
 
+@test "verify: an unrecognised Python startup hook is WEAK and named, with a warning" {
+  # The verifier starts python3 and pip, and Python runs any .pth import line on
+  # every start. It reads the site directories as plain files first and says what it
+  # found. The block is shared with the CI surface; tests/ci/07-verify.bats covers
+  # recognition by content, ordering against the first Python start, and parity.
+  local h="$BATS_TEST_TMPDIR/hookhome" s
+  s="$h/.local/lib/python3.99/site-packages"
+  mkdir -p "$s"
+  echo 'import os' > "$s/cook.pth"
+  HOME="$h" run "$VERIFY" --verbose
+  echo "$output" | grep -q "warning: .*startup hook"
+  echo "$output" | grep "python startup hooks" | grep -q "WEAK"
+  echo "$output" | grep -q "cook.pth (claimed by no installed distribution)"
+}
+
 @test "output: the default is the compact one-line-per-row view" {
   run "$VERIFY"
   [ "$status" -eq 0 ] || [ "$status" -eq 1 ]     # gap or no gap, never a crash

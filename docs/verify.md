@@ -63,6 +63,12 @@ against starting Python in an environment suspected of the LiteLLM compromise. I
 think a host is already affected, inspect it with tools that don't start that
 interpreter, from a known-clean machine where possible, and rebuild rather than verify.
 
+Before its first Python check, the verifier reads the site-packages directories of
+the interpreters it is about to start, as plain files, and warns on stderr about any
+startup hook it doesn't recognise. The same finding is a WEAK `python startup hooks`
+row. That tells you a hook is there, not that the host is clean, and the checks after
+it still start Python.
+
 ## Related
 
 - [how-it-works.md](how-it-works.md) — the layers the verifier is checking.

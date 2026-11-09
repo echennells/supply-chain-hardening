@@ -606,3 +606,105 @@ esac'
   run verify_sourced --emit=plain
   [[ "$output" == *"WEAK   PARSED      ci id-token exposure"* ]]
 }
+
+# ------------------------------------------------------- python startup hooks
+# The probe reads a user site under the throwaway HOME whatever python3 is, so
+# these plant files there. python3.99 keeps the fixture independent of the real
+# interpreter's version. Assertions name the planted files rather than requiring
+# no row at all, so a runner whose own system site carries a hook cannot flip them.
+hook_site() {
+  HOOK_SITE="$TEST_HOME/.local/lib/python3.99/site-packages"
+  mkdir -p "$HOOK_SITE"
+}
+
+@test "startup hooks: the probe is byte-identical on both surfaces" {
+  local role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  block() { sed -n '/^# >>> python startup hooks$/,/^# <<< python startup hooks$/p' "$1"; }
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+}
+
+@test "startup hooks: an unrecognised import line is WEAK, named with its owner, and warned on stderr" {
+  hook_site
+  mkdir -p "$HOOK_SITE/litellm-1.107.0.dist-info"
+  echo 'import os' > "$HOOK_SITE/cook.pth"
+  printf 'cook.pth,sha256=x,1\nlitellm/__init__.py,sha256=y,2\n' > "$HOOK_SITE/litellm-1.107.0.dist-info/RECORD"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run --separate-stderr verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PRESENT     python startup hooks"* ]]
+  [[ "$output" == *"site-packages/cook.pth (litellm-1.107.0)"* ]]
+  [[ "$stderr" == *"warning: "*"startup hook"*"cook.pth (litellm-1.107.0)"* ]]
+}
+
+@test "startup hooks: the warning comes before anything starts Python, and the scan starts none" {
+  # Ground truth from Python itself, two ways, into ONE file: the planted hook logs
+  # whenever a real interpreter processes this user site (the verifier's pip runs
+  # one), and a stub python3 logs every start. The verifier silences python3's
+  # stderr, so its own stderr appends to the same file; O_APPEND keeps everything in
+  # the order it happened. If the scan started Python, or ran after anything that
+  # did, a start would be logged before the warning. A run where nothing started
+  # Python proves nothing, so that fails too.
+  local log="$BATS_TEST_TMPDIR/order.log" v
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  for v in 9 10 11 12 13 14 15 16; do
+    mkdir -p "$TEST_HOME/.local/lib/python3.$v/site-packages"
+    printf '%s\n' "import os; open('$log', 'a').write('PYTHON STARTED (hook)\\n')" \
+      > "$TEST_HOME/.local/lib/python3.$v/site-packages/cook.pth"
+  done
+  stub_bin python3 "echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
+  : > "$log"
+  verify_sourced --emit=plain >/dev/null 2>>"$log" || true
+  local warn py
+  warn=$(grep -n 'startup hook' "$log" | head -1 | cut -d: -f1)
+  py=$(grep -n 'PYTHON STARTED' "$log" | head -1 | cut -d: -f1)
+  [ -n "$warn" ]
+  [ -n "$py" ]
+  [ "$warn" -lt "$py" ]
+}
+
+@test "startup hooks: sitecustomize and usercustomize are reported in the forms Python imports" {
+  hook_site
+  mkdir "$HOOK_SITE/sitecustomize"
+  : > "$HOOK_SITE/sitecustomize/__init__.py"
+  : > "$HOOK_SITE/usercustomize.py"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"site-packages/sitecustomize (claimed by no installed distribution)"* ]]
+  [[ "$output" == *"site-packages/usercustomize.py (claimed by no installed distribution)"* ]]
+}
+
+@test "startup hooks: the tools' own hooks are recognised by content, not by name" {
+  hook_site
+  # Byte-for-byte what setuptools 60.0 through 84.2.1, uv venv and a setuptools
+  # editable install write (MEASURED), plus lines CPython never executes.
+  printf "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var, 'local') == 'local'; enabled and __import__('_distutils_hack').add_shim(); \n" \
+    > "$HOOK_SITE/distutils-precedence.pth"
+  printf 'import _virtualenv' > "$HOOK_SITE/_virtualenv.pth"
+  echo 'import __editable___my_pkg_0_1_finder; __editable___my_pkg_0_1_finder.install()' \
+    > "$HOOK_SITE/__editable__.my_pkg-0.1.pth"
+  echo '/opt/plain/path' > "$HOOK_SITE/plain.pth"
+  echo ' import os' > "$HOOK_SITE/leading-space.pth"
+  echo 'import os' > "$HOOK_SITE/.dotfile.pth"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local n
+  for n in distutils-precedence.pth _virtualenv.pth __editable__.my_pkg-0.1.pth \
+           plain.pth leading-space.pth .dotfile.pth; do
+    [[ "$output" != *"/$n ("* ]] || { echo "reported a hook CPython would not run, or a recognised one: $n"; false; }
+  done
+  # The familiar name with a payload appended is no longer the tool's file.
+  echo 'import os; os.system("true")' >> "$HOOK_SITE/distutils-precedence.pth"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"site-packages/distutils-precedence.pth (claimed by no installed distribution)"* ]]
+}
+
+@test "startup hooks: a BOM or a tab does not hide an import line" {
+  # CPython 3.13 decodes .pth as utf-8-sig and accepts `import\t` (MEASURED: both ran).
+  hook_site
+  printf '\357\273\277import os\n' > "$HOOK_SITE/bom.pth"
+  printf 'import\tos\n' > "$HOOK_SITE/tab.pth"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"site-packages/bom.pth (claimed by no installed distribution)"* ]]
+  [[ "$output" == *"site-packages/tab.pth (claimed by no installed distribution)"* ]]
+}

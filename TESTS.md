@@ -1,6 +1,6 @@
 # Tests
 
-456 container tests verify the supply chain hardening works (`make test`), plus 218 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+457 container tests verify the supply chain hardening works (`make test`), plus 224 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -38,7 +38,7 @@
 | 36-bun-wrapper-tier-rendering.bats | 7 | bun wrapper subcommand-routing (--no-install injected on runtime paths, skipped for package-mgmt subcommands and --version/--help, recursion guard present, catch-all wires to the inject branch) |
 | 37-pnpm-allowlist-hardening.bats | 13 | pnpm build-script allowlist + doubly-exempt guard |
 | 38-preflight-become-guard.bats | 7 | Refuses invocations where escalation would mis-target per-user config; escalation-method agnostic (sudo/su/doas), covers sudo -i |
-| 39-verify-behavioral.bats | 16 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers) and asserts each is caught |
+| 39-verify-behavioral.bats | 17 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers, an unrecognised Python startup hook) and asserts each is caught |
 | 40-upgrade-convergence.bats | 5 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again |
 | 41-tty-interactive.bats | 6 | The npm wrapper's interactive branch under a real pty (script -qec): TTY routes through npq, non-TTY skips it, sfw-absent still reaches npq, read-only subcommands bypass both |
 | 42-cargo-path-wrapper.bats | 29 | The cargo PATH wrapper: subcommand parsing (global flags before the subcommand must not bypass the controls — the argv[1] regression), +toolchain ordering, --locked placement before `--`, unknown subcommands warned not gated, unprotected builds warned not silent, install/writer handling, re-entrancy and recursion guards, and `bash -n` on the deployed artifact |
@@ -110,7 +110,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 456 tests
+make test          # build container + run all 457 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

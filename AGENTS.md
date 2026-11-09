@@ -136,6 +136,11 @@ every tool it finds. Then report honestly:
 `pip`, which can fire a malicious startup hook. Inspect that host with tools that don't
 start the interpreter, and tell the user to rebuild.
 
+**A `python startup hooks` row means stop and show the user.** It lists files that run
+code on every Python start, which the verifier didn't recognise, each with the
+distribution that installed it. Don't start Python on that host again until the user has
+looked: the verifier's own checks already started it once after the warning.
+
 Details: [docs/verify.md](docs/verify.md).
 
 ## If a tool is too old
