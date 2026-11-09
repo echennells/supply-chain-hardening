@@ -48,6 +48,27 @@
   failed_when: false
   when: npm_for_socket.rc == 0
 
+- name: Check that root can run npm (a per-user Node is invisible to become)
+  # The install below runs `npm install -g` as root, and root's PATH is sudo's
+  # secure_path, not the user's shell. On a host whose only Node is per-user
+  # (fnm, nvm, volta, asdf) the detection above finds the user's npm but root
+  # cannot run it (MEASURED on fnm: not found under sudo), so the install failed
+  # and was recorded as "install failed", which sends the reader after the wrong
+  # problem. Running the user's npm as root is not the fix: root would execute
+  # files the user can edit. Skip the install and say why instead.
+  become: true
+  ansible.builtin.shell:
+    cmd: command -v npm
+    executable: /bin/bash
+  register: npm_root_for_socket
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - sfw_check.rc != 0
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+
 - name: Install Socket Firewall Free via npm (requires Node >= 20)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and
@@ -66,6 +87,7 @@
     - sfw_check.rc != 0
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+    - npm_root_for_socket.rc | default(1) == 0
   changed_when: true
   register: sfw_install
   failed_when: false
@@ -126,6 +148,9 @@
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+    # No sfw to warm when root cannot run npm (install skipped above). Running
+    # anyway recorded a second wrong reason, "could not be fetched (exit 127)".
+    - npm_root_for_socket.rc | default(0) == 0
 
 - name: Record skipped protection — Socket Firewall binary could not be fetched
   ansible.builtin.set_fact:
@@ -142,6 +167,15 @@
   when:
     - sfw_install is defined
     - sfw_install.rc | default(0) != 0
+
+- name: Record skipped protection — Socket Firewall (npm is per-user)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — not installed: the only npm found is ' ~ (npm_for_socket.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf), and sfw installs system-wide. It needs a system-wide Node; while the version manager stays first on PATH the npm wrapper is shadowed anyway (docs/limitations.md). npm installs are not threat-intel filtered.'] }}
+  when:
+    - npm_root_for_socket is defined
+    - npm_root_for_socket.rc is defined
+    - npm_root_for_socket.rc != 0
 
 - name: Warn if Node too old for Socket Firewall
   ansible.builtin.debug:
@@ -230,6 +264,8 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
     - preflight_invoking_user.stdout | default('') | length > 0
+    # Otherwise this creates an empty root-owned sfw tree on a host with no sfw.
+    - npm_root_for_socket.rc | default(0) == 0
 
 # --- npm PATH wrapper (opt-in via npm_path_wrapper) ---
 # Without this, sfw is installed but never invoked except by callers who

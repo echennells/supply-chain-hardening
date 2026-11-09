@@ -1,6 +1,6 @@
 # Tests
 
-457 container tests verify the supply chain hardening works (`make test`), plus 224 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+458 container tests verify the supply chain hardening works (`make test`), plus 224 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -48,6 +48,7 @@
 | 31-nuget-behavioral.bats | 5 | NuGet.Config — signed-package policy, source pinning |
 | 32-yarn-tier-rendering.bats | 6 | yarn tier authority (enableHardenedMode conditional on >= 4.0, baseline keys unconditional, approvedGitRepositories deliberately absent) |
 | 33-bun-tier-rendering.bats | 19 | bun tier authority (saveTextLockfile conditional on 1.2+, scanner opt-in, baseline bunfig keys unconditional) |
+| 47-own-tool-install-hardening.bats | 2 | The role's own `npm install -g` calls (sfw, npq, lockfile-lint) pass `--ignore-scripts`, and each waits on a become-time check that root can run npm, so a host whose only Node is per-user records why instead of "install failed". Static, over tasks/ |
 | 48-caller-context-coverage.bats | 12 | Caller-context coverage: what the BARE command resolves to, not what an absolute path does. Every other wrapper test in the suite invokes the tool by absolute path, which guarantees the wrapper runs — the one thing a real caller never does. Asserts the verifier's per-context verdicts via the SCH_WRAPPER_PROBE run-probe: an activated `python3 -m venv` and `python3 -m pip` bypass the pip wrapper (and `--system-site-packages` is not a mitigation), `only-binary` survives the shadow for an index-resolved sdist but NOT for a direct-path one, a non-delegating shadow of any wrapped tool reads GAP while a delegating mise/asdf-shaped shim still runs the wrapper, and an N/A row is a statement about PATH rather than about the host |
 | 50-preflight-gnu-date.bats | 4 | The GNU date preflight probes the CONTROLLER, where the rolling uv/pip cutoff lookup runs, not the target: a non-GNU target is not refused, a non-GNU controller fails at preflight with the fix instead of a bare lookup error at render, and pinning the cutoff skips the probe |
 | 51-verifier-composer-plugin-safety.bats | 1 | The verifier reads a checkout's effective composer config with --no-plugins, so a hostile repo's committed plugin cannot run code during a posture check. |
@@ -110,7 +111,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 457 tests
+make test          # build container + run all 458 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

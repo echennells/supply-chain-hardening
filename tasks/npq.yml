@@ -85,6 +85,26 @@
   failed_when: false
   when: npm_for_npq.rc == 0
 
+- name: Check that root can run npm (a per-user Node is invisible to become)
+  # Same reason as tasks/socket.yml, repeated because `--tags socket` and this
+  # file run independently: the install runs as root, root's PATH is sudo's
+  # secure_path, and a per-user Node (fnm, nvm, volta, asdf) is not on it.
+  # Running the user's npm as root would let root execute files the user can
+  # edit, so skip and say why rather than record a bare "install failed".
+  become: true
+  ansible.builtin.shell:
+    cmd: command -v npm
+    executable: /bin/bash
+  register: npm_root_for_npq
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - npm_for_npq.rc == 0
+    - npq_check.rc != 0
+    - npq_node_version.stdout | trim | length > 0
+    - npq_node_version.stdout | trim is version('20.13.0', '>=')
+
 - name: Install npq globally
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and
@@ -113,6 +133,7 @@
     - npq_check.rc != 0
     - npq_node_version.stdout | trim | length > 0
     - npq_node_version.stdout | trim is version('20.13.0', '>=')
+    - npm_root_for_npq.rc | default(1) == 0
   register: npq_install
   failed_when: false
 
@@ -123,6 +144,15 @@
   when:
     - npq_install is defined
     - npq_install.rc | default(0) != 0
+
+- name: Record skipped protection — npq (npm is per-user)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['npq — not installed: the only npm found is ' ~ (npm_for_npq.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf), and npq installs system-wide. It needs a system-wide Node. Pre-install reputation checking is not set up.'] }}
+  when:
+    - npm_root_for_npq is defined
+    - npm_root_for_npq.rc is defined
+    - npm_root_for_npq.rc != 0
 
 - name: Verify npq actually functions (not merely present)
   # THE POINT OF THIS TASK. Runs the real binary and looks for npq's own
@@ -172,6 +202,13 @@
   when:
     - npm_for_npq.rc == 0
     - not npq_functional
+    # Only when Node really is the reason. A missing npq on a new enough Node
+    # (install failed, or a per-user npm root cannot run) has its own record
+    # above; this used to sit next to it calling Node 24.22.1 too old.
+    - >-
+      (npq_node_version.stdout | default('') | trim | length == 0)
+      or (npq_node_version.stdout | trim is version('20.13.0', '<'))
+      or (npq_functional_probe.stdout | default('') | trim == 'SUPPRESSED')
 
 - name: Deploy npq aliases and config system-wide
   # Only when npq actually works. Deploying `alias npm='npq-hero'` against a
