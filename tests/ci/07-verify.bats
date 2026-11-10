@@ -610,12 +610,31 @@ esac'
 # ------------------------------------------------------- python startup hooks
 # The probe reads a user site under the throwaway HOME whatever python3 is, so
 # these plant files there. python3.99 keeps the fixture independent of the real
-# interpreter's version. Assertions name the planted files rather than requiring
-# no row at all, so a runner whose own system site carries a hook cannot flip them.
+# interpreter's version. Assertions name the planted file by its FULL path, never
+# by a bare name: the scan also reads this host's own site directories, and a
+# fixture that reused a real file's name failed on the first runner that had it.
 hook_site() {
   HOOK_SITE="$TEST_HOME/.local/lib/python3.99/site-packages"
   mkdir -p "$HOOK_SITE"
+  HOOK_SITE=$(cd "$HOOK_SITE" && pwd -P)
 }
+
+# The classified scan on its own: one "U<TAB>path (who claims it)" line per hook
+# nothing vouches for, one "K<TAB>path (why)" line per recognised one. In the
+# verifier scv_dpkg_info is assigned unconditionally, so nothing in the environment
+# can move it; here it points at a fixture, or nowhere.
+hook_fns() { sed -n '/^scv_site_dirs() {$/,/^scv_dpkg_info=/p' "$VERIFY_SH" | sed '$d'; }
+hook_scan() { # [VAR=value ...]
+  env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" "$@" \
+    bash -c "$(hook_fns)"$'\n'"scv_dpkg_info='${HOOK_DPKG:-/nonexistent}'; scv_startup_hooks"
+}
+U() { printf 'U\t%s (%s)' "$1" "${2:-claimed by no installed distribution}"; }
+K() {
+  local why="${2:-}"
+  [ -n "$why" ] || why="a known tool's generated line"
+  printf 'K\t%s (%s)' "$1" "$why"
+}
+table_rows() { grep -cE '^(OK|GAP|WEAK|N/A) ' <<<"$1"; }
 
 @test "startup hooks: the probe is byte-identical on both surfaces" {
   local role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
@@ -624,7 +643,7 @@ hook_site() {
   diff <(block "$role") <(block "$VERIFY_SH")
 }
 
-@test "startup hooks: an unrecognised import line is WEAK, named with its owner, and warned on stderr" {
+@test "startup hooks: an unvouched import line is WEAK, named with its owner, and warned on stderr" {
   hook_site
   mkdir -p "$HOOK_SITE/litellm-1.107.0.dist-info"
   echo 'import os' > "$HOOK_SITE/cook.pth"
@@ -632,18 +651,19 @@ hook_site() {
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run --separate-stderr verify_sourced --emit=plain
   [[ "$output" == *"WEAK   PRESENT     python startup hooks"* ]]
-  [[ "$output" == *"site-packages/cook.pth (litellm-1.107.0)"* ]]
-  [[ "$stderr" == *"warning: "*"startup hook"*"cook.pth (litellm-1.107.0)"* ]]
+  [[ "$output" == *"$HOOK_SITE/cook.pth (litellm-1.107.0)"* ]]
+  [[ "$stderr" == *"warning: "*"startup hook"*"$HOOK_SITE/cook.pth (litellm-1.107.0)"* ]]
 }
 
-@test "startup hooks: the warning comes before anything starts Python, and the scan starts none" {
+@test "startup hooks: the warning comes before anything starts Python with site processing" {
   # Ground truth from Python itself, two ways, into ONE file: the planted hook logs
   # whenever a real interpreter processes this user site (the verifier's pip runs
-  # one), and a stub python3 logs every start. The verifier silences python3's
-  # stderr, so its own stderr appends to the same file; O_APPEND keeps everything in
-  # the order it happened. If the scan started Python, or ran after anything that
-  # did, a start would be logged before the warning. A run where nothing started
-  # Python proves nothing, so that fails too.
+  # one), and a stub python3 logs every start that would process site hooks. The
+  # scan's own question to the interpreter uses -I -S, which imports no site, so
+  # the stub stays quiet for that and the planted hook is what would catch it
+  # misbehaving. The verifier silences python3's stderr, so its own stderr appends
+  # to the same file; O_APPEND keeps everything in the order it happened. A run
+  # where nothing started Python proves nothing, so that fails too.
   local log="$BATS_TEST_TMPDIR/order.log" v
   harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
   for v in 9 10 11 12 13 14 15 16; do
@@ -651,7 +671,8 @@ hook_site() {
     printf '%s\n' "import os; open('$log', 'a').write('PYTHON STARTED (hook)\\n')" \
       > "$TEST_HOME/.local/lib/python3.$v/site-packages/cook.pth"
   done
-  stub_bin python3 "echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
+  stub_bin python3 "case \" \$* \" in *' -S '*) exit 1 ;; esac
+echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   : > "$log"
   verify_sourced --emit=plain >/dev/null 2>>"$log" || true
   local warn py
@@ -662,78 +683,150 @@ hook_site() {
   [ "$warn" -lt "$py" ]
 }
 
+@test "startup hooks: an interpreter behind a shim is found by asking it, and asking fires nothing" {
+  # The pyenv/asdf/mise shape: `python3` on PATH is a script, and the interpreter and
+  # its site-packages live somewhere the PATH entry does not reveal. MEASURED before
+  # the -I -S query existed: Python ran the hook and the scan reported nothing.
+  local real v="$BATS_TEST_TMPDIR/venv" site marker="$BATS_TEST_TMPDIR/fired"
+  real=$(command -v python3) || skip "python3 not installed"
+  "$real" -m venv --without-pip "$v" 2>/dev/null || skip "this python3 cannot create a venv"
+  site=$(cd "$v"/lib/python3*/site-packages && pwd -P)
+  echo "import os; open('$marker', 'w')" > "$site/cook.pth"
+  stub_bin python3 "exec '$v/bin/python' \"\$@\""
+  run hook_scan
+  [[ "$output" == *"$(U "$site/cook.pth")"* ]]
+  [ ! -e "$marker" ]                       # the scan, and its question, ran no hook
+  "$TEST_BIN/python3" -c pass
+  [ -e "$marker" ]                         # control: it is a live hook
+}
+
 @test "startup hooks: sitecustomize and usercustomize are reported in the forms Python imports" {
   hook_site
   mkdir "$HOOK_SITE/sitecustomize"
   : > "$HOOK_SITE/sitecustomize/__init__.py"
   : > "$HOOK_SITE/usercustomize.py"
-  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run verify_sourced --emit=plain
-  [[ "$output" == *"site-packages/sitecustomize (claimed by no installed distribution)"* ]]
-  [[ "$output" == *"site-packages/usercustomize.py (claimed by no installed distribution)"* ]]
+  run hook_scan
+  [[ "$output" == *"$(U "$HOOK_SITE/sitecustomize")"* ]]
+  [[ "$output" == *"$(U "$HOOK_SITE/usercustomize.py")"* ]]
 }
 
-@test "startup hooks: the tools' own hooks are recognised by content, not by name" {
+@test "startup hooks: a path line leads the scan to a sitecustomize outside the site root" {
+  # Python imports sitecustomize from anywhere on sys.path, and a .pth line that is
+  # not an import adds a directory to it. MEASURED: paths.pth + sub/sitecustomize.py
+  # ran and went unreported while only the site root was read.
+  hook_site
+  local abs="$BATS_TEST_TMPDIR/elsewhere" pp="$BATS_TEST_TMPDIR/onpythonpath" base="$BATS_TEST_TMPDIR/userbase"
+  mkdir -p "$HOOK_SITE/sub" "$abs" "$pp" "$base/lib/python3.99/site-packages"
+  printf 'sub  \n%s\n# a comment\n\n' "$abs" > "$HOOK_SITE/paths.pth"
+  : > "$HOOK_SITE/sub/sitecustomize.py"
+  : > "$abs/usercustomize.py"
+  : > "$pp/sitecustomize.py"
+  echo 'import os' > "$base/lib/python3.99/site-packages/moved.pth"
+  run hook_scan PYTHONPATH="/nonexistent:$pp" PYTHONUSERBASE="$base"
+  [[ "$output" == *"$(U "$HOOK_SITE/sub/sitecustomize.py")"* ]]
+  [[ "$output" == *"$(U "$abs/usercustomize.py")"* ]]
+  [[ "$output" == *"$(U "$pp/sitecustomize.py")"* ]]
+  [[ "$output" == *"$(U "$(cd "$base" && pwd -P)/lib/python3.99/site-packages/moved.pth")"* ]]
+  [[ "$output" != *"paths.pth"* ]]         # a path-only file is not itself a hook
+}
+
+@test "startup hooks: lines are split where CPython splits them, not on newline alone" {
+  # str.splitlines() ends a line at \r, \v, \f, \x1c-\x1e, U+0085, U+2028 and U+2029.
+  # MEASURED on 3.13.12: a payload after any of them, behind a `#`, ran unreported.
+  hook_site
+  local i=0 sep
+  for sep in '\r' '\013' '\014' '\034' '\035' '\036' '\302\205' '\342\200\250' '\342\200\251'; do
+    i=$((i + 1))
+    # shellcheck disable=SC2059  # the separator IS the escape sequence
+    printf "# harmless comment${sep}import os\n" > "$HOOK_SITE/sep$i.pth"
+  done
+  run hook_scan
+  for i in 1 2 3 4 5 6 7 8 9; do
+    [[ "$output" == *"$(U "$HOOK_SITE/sep$i.pth")"* ]] || { echo "separator $i hid the import line"; false; }
+  done
+}
+
+@test "startup hooks: a BOM or a tab does not hide an import line, and ignored lines are not hooks" {
+  # CPython 3.13 decodes .pth as utf-8-sig and accepts `import\t` (MEASURED: both
+  # ran). A leading space and a dotfile are not executed.
+  hook_site
+  printf '\357\273\277import os\n' > "$HOOK_SITE/bom.pth"
+  printf 'import\tos\n' > "$HOOK_SITE/tab.pth"
+  echo ' import os' > "$HOOK_SITE/leading-space.pth"
+  echo 'import os' > "$HOOK_SITE/.dotfile.pth"
+  run hook_scan
+  [[ "$output" == *"$(U "$HOOK_SITE/bom.pth")"* ]]
+  [[ "$output" == *"$(U "$HOOK_SITE/tab.pth")"* ]]
+  [[ "$output" != *"leading-space.pth"* ]]
+  [[ "$output" != *".dotfile.pth"* ]]
+}
+
+@test "startup hooks: a known tool's line is listed as recognised, never dropped" {
   hook_site
   # Byte-for-byte what setuptools 60.0 through 84.2.1, uv venv and a setuptools
-  # editable install write (MEASURED), plus lines CPython never executes.
+  # editable install write (MEASURED).
   printf "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var, 'local') == 'local'; enabled and __import__('_distutils_hack').add_shim(); \n" \
     > "$HOOK_SITE/distutils-precedence.pth"
   printf 'import _virtualenv' > "$HOOK_SITE/_virtualenv.pth"
   echo 'import __editable___my_pkg_0_1_finder; __editable___my_pkg_0_1_finder.install()' \
     > "$HOOK_SITE/__editable__.my_pkg-0.1.pth"
-  echo '/opt/plain/path' > "$HOOK_SITE/plain.pth"
-  echo ' import os' > "$HOOK_SITE/leading-space.pth"
-  echo 'import os' > "$HOOK_SITE/.dotfile.pth"
-  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run verify_sourced --emit=plain
+  run hook_scan
   local n
-  for n in distutils-precedence.pth _virtualenv.pth __editable__.my_pkg-0.1.pth \
-           plain.pth leading-space.pth .dotfile.pth; do
-    [[ "$output" != *"/$n ("* ]] || { echo "reported a hook CPython would not run, or a recognised one: $n"; false; }
+  for n in distutils-precedence.pth _virtualenv.pth __editable__.my_pkg-0.1.pth; do
+    [[ "$output" == *"$(K "$HOOK_SITE/$n")"* ]] || { echo "not listed as recognised: $n"; false; }
   done
-  # The familiar name with a payload appended is no longer the tool's file.
+  # In the report they are an OK row that says what it does not vouch for. Only
+  # checked where this host has no unvouched hook of its own to turn the row WEAK.
+  HOOK_DPKG=/var/lib/dpkg/info run hook_scan
+  if [[ "$output" != *$'U\t'* ]]; then
+    harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+    run verify_sourced --emit=plain
+    [[ "$output" == *"OK     PRESENT     python startup hooks"* ]]
+    [[ "$output" == *"$HOOK_SITE/_virtualenv.pth"* ]]
+    [[ "$output" == *"not the module it imports"* ]]
+  fi
+  # The familiar name with a payload appended is no longer the tool's text.
   echo 'import os; os.system("true")' >> "$HOOK_SITE/distutils-precedence.pth"
-  run verify_sourced --emit=plain
-  [[ "$output" == *"site-packages/distutils-precedence.pth (claimed by no installed distribution)"* ]]
+  run hook_scan
+  [[ "$output" == *"$(U "$HOOK_SITE/distutils-precedence.pth")"* ]]
 }
 
-@test "startup hooks: a BOM or a tab does not hide an import line" {
-  # CPython 3.13 decodes .pth as utf-8-sig and accepts `import\t` (MEASURED: both ran).
+@test "startup hooks: a recognised line with a planted module is still shown, because nothing vouches for the module" {
+  # The limit of recognising by text, kept visible on purpose. A wheel can ship the
+  # exact editable-finder line AND its own finder module. MEASURED: Python ran it,
+  # and while recognised hooks were dropped from the report it left no trace.
   hook_site
-  printf '\357\273\277import os\n' > "$HOOK_SITE/bom.pth"
-  printf 'import\tos\n' > "$HOOK_SITE/tab.pth"
-  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run verify_sourced --emit=plain
-  [[ "$output" == *"site-packages/bom.pth (claimed by no installed distribution)"* ]]
-  [[ "$output" == *"site-packages/tab.pth (claimed by no installed distribution)"* ]]
+  echo 'import __editable___evil_1_finder; __editable___evil_1_finder.install()' > "$HOOK_SITE/__editable__.evil-1.pth"
+  printf 'def install():\n    pass\n' > "$HOOK_SITE/__editable___evil_1_finder.py"
+  run hook_scan
+  [[ "$output" == *"$(K "$HOOK_SITE/__editable__.evil-1.pth")"* ]]
 }
-
-# The scan functions alone, so a test can point them at a fixture dpkg directory.
-# In the verifier scv_dpkg_info is assigned unconditionally; nothing in the
-# environment can move it.
-hook_fns() { sed -n '/^scv_site_dirs() {$/,/^scv_dpkg_info=/p' "$VERIFY_SH" | sed '$d'; }
 
 @test "startup hooks: a Debian-packaged hook counts only while it matches dpkg's checksum" {
   # MEASURED: stock ubuntu-24.04 runners ship python3-zope.interface's nspkg.pth, and
-  # its md5 is the one in the package's .md5sums. This stages the same shape.
+  # its md5 is the one in the package's .md5sums. This stages the same shape under a
+  # name no real host has.
+  command -v md5sum >/dev/null 2>&1 || skip "no md5sum here; dpkg hosts have it"
   hook_site
-  local info="$BATS_TEST_TMPDIR/dpkg-info" f
-  f="$(readlink -f "$HOOK_SITE")/zope.interface-6.1-nspkg.pth"
-  mkdir -p "$info"
+  local f="$HOOK_SITE/fixture-nspkg.pth" g="$HOOK_SITE/fixture-nosum.pth"
+  HOOK_DPKG="$BATS_TEST_TMPDIR/dpkg-info"
+  mkdir -p "$HOOK_DPKG"
   echo "import sys, types, os;p = os.path.join(sys._getframe(1).f_locals['sitedir'], *('zope',))" > "$f"
-  echo "$f" > "$info/python3-zope.interface.list"
-  printf '%s  %s\n' "$(md5sum "$f" | cut -d' ' -f1)" "${f#/}" > "$info/python3-zope.interface.md5sums"
-  scan() { env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "$(hook_fns)"$'\n'"scv_dpkg_info='$info'; scv_startup_hooks"; }
-  run scan
-  [[ "$output" != *"/zope.interface-6.1-nspkg.pth ("* ]]
+  echo 'import os' > "$g"
+  printf '%s\n%s\n' "$f" "$g" > "$HOOK_DPKG/python3-fixture.list"
+  printf '%s  %s\n' "$(md5sum "$f" | cut -d' ' -f1)" "${f#/}" > "$HOOK_DPKG/python3-fixture.md5sums"
+  run hook_scan
+  [[ "$output" == *"$(K "$f" "python3-fixture package, checksum matches")"* ]]
+  # Listed by the package with no checksum on record: not vouched for, and not
+  # called "changed", which is not known.
+  [[ "$output" == *"$(U "$g" "python3-fixture package, which records no checksum for it")"* ]]
   # A wheel that overwrote it: still listed by the package, no longer its bytes.
   echo 'import os; os.system("true")' >> "$f"
-  run scan
-  [[ "$output" == *"/zope.interface-6.1-nspkg.pth (python3-zope.interface package, changed since it was installed)"* ]]
+  run hook_scan
+  [[ "$output" == *"$(U "$f" "python3-fixture package, changed since it was installed")"* ]]
 }
 
-@test "startup hooks: an unmodified Debian-packaged hook on this host is not reported" {
+@test "startup hooks: an unmodified Debian-packaged hook on this host is recognised" {
   local f found=""
   for f in /usr/lib/python3/dist-packages/*.pth; do
     [ -f "$f" ] || continue
@@ -741,7 +834,55 @@ hook_fns() { sed -n '/^scv_site_dirs() {$/,/^scv_dpkg_info=/p' "$VERIFY_SH" | se
     grep -lqxF -- "$f" /var/lib/dpkg/info/*.list 2>/dev/null && { found=$f; break; }
   done
   [ -n "$found" ] || skip "no Debian-packaged .pth with an import line on this host"
+  HOOK_DPKG=/var/lib/dpkg/info run hook_scan
+  [[ "$output" == *$'K\t'"$found ("* ]]
+}
+
+# ------------------------------------------------------------ report integrity
+# The report prints its rows with printf '%b', which expands backslash escapes, and
+# row text carries strings this script does not choose.
+
+@test "report: a file name cannot erase or forge rows" {
+  # MEASURED before row() escaped its fields: `a\c.pth` cut a 42-row table to 1, and
+  # the second name below added an "OK ... none found, site-packages is clean" row.
+  hook_site
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  echo 'import os' > "$HOOK_SITE/plain.pth"
   run verify_sourced --emit=plain
-  [[ "$output" != *"$found ("* ]]
+  local base; base=$(table_rows "$output")
+  [ "$base" -gt 5 ]
+  mv "$HOOK_SITE/plain.pth" "$HOOK_SITE/"'a\c.pth'
+  run verify_sourced --emit=plain
+  [ "$(table_rows "$output")" -eq "$base" ]
+  [[ "$output" == *'a\c.pth'* ]]
+  mv "$HOOK_SITE/"'a\c.pth' "$HOOK_SITE/"'b\nOK\tFUNCTIONAL\tpython startup hooks\tnone found, site-packages is clean\nOK\tPARSED\tzz.pth'
+  run verify_sourced --emit=plain
+  [ "$(table_rows "$output")" -eq "$base" ]
+  [ "$(grep -c '^OK .*python startup hooks' <<<"$output")" -eq 0 ]
+}
+
+@test "report: a config value read from a hostile checkout cannot end the table" {
+  # The same renderer, reached without any package: a backslash-c in a checkout's
+  # .npmrc, with the verifier run from that checkout as AGENTS.md advises.
+  # MEASURED at d64ec46 with `min-release-age=1\c`: 41 rows from a clean directory,
+  # 10 from the checkout. ignore-scripts is used here because every npm echoes it.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  mkdir -p "$BATS_TEST_TMPDIR/clean" "$BATS_TEST_TMPDIR/checkout"
+  printf 'ignore-scripts=x\\c\n' > "$BATS_TEST_TMPDIR/checkout/.npmrc"
+  # Asked of npm directly, not read off the verifier's output: the bug this guards
+  # against eats that output, so a check that depended on it would skip, not fail.
+  cd "$BATS_TEST_TMPDIR/checkout"
+  [ "$(env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" npm config get ignore-scripts 2>/dev/null)" = 'x\c' ] \
+    || skip "this npm does not hand back the checkout's value"
+  # Not verify_sourced: with the env layer loaded, NPM_CONFIG_IGNORE_SCRIPTS
+  # outranks the checkout's .npmrc and the hostile value never reaches a row.
+  cd "$BATS_TEST_TMPDIR/clean"
+  run verify -- --emit=plain
+  local base; base=$(table_rows "$output")
+  [ "$base" -gt 5 ]
+  cd "$BATS_TEST_TMPDIR/checkout"
+  run verify -- --emit=plain
+  [ "$(table_rows "$output")" -eq "$base" ]
+  [[ "$output" == *'ignore-scripts=x\c'* ]]
 }

@@ -63,11 +63,15 @@ against starting Python in an environment suspected of the LiteLLM compromise. I
 think a host is already affected, inspect it with tools that don't start that
 interpreter, from a known-clean machine where possible, and rebuild rather than verify.
 
-Before its first Python check, the verifier reads the site-packages directories of
-the interpreters it is about to start, as plain files, and warns on stderr about any
-startup hook it doesn't recognise. The same finding is a WEAK `python startup hooks`
-row. That tells you a hook is there, not that the host is clean, and the checks after
-it still start Python.
+Before its first normal Python start, the verifier reads the site-packages directories
+of the interpreters it is about to run, as plain files, and warns on stderr about any
+startup hook that nothing vouches for. The same finding is a WEAK `python startup hooks`
+row. Hooks it recognises are listed in an OK row instead: files unchanged from a Debian
+package, and `.pth` lines that match what setuptools, virtualenv/uv or an editable
+install generate. Matching a line says nothing about the module it imports, so read
+that list too. To find an interpreter's directories it asks the interpreter with
+`-I -S`, which skips `site` and so runs no hook. None of this shows the host is clean,
+and the checks after it still start Python.
 
 ## Related
 

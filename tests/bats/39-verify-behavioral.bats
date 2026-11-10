@@ -281,11 +281,11 @@ EOF
 # --verbose view (asserted throughout the correctness tests above), and a
 # --json machine contract that doubles as a CI pre-install gate.
 
-@test "verify: an unrecognised Python startup hook is WEAK and named, with a warning" {
+@test "verify: a Python startup hook nothing vouches for is WEAK and named, with a warning" {
   # The verifier starts python3 and pip, and Python runs any .pth import line on
   # every start. It reads the site directories as plain files first and says what it
   # found. The block is shared with the CI surface; tests/ci/07-verify.bats covers
-  # recognition by content, ordering against the first Python start, and parity.
+  # how lines and paths are read, what is recognised, ordering, and parity.
   local h="$BATS_TEST_TMPDIR/hookhome" s
   s="$h/.local/lib/python3.99/site-packages"
   mkdir -p "$s"
@@ -294,6 +294,29 @@ EOF
   echo "$output" | grep -q "warning: .*startup hook"
   echo "$output" | grep "python startup hooks" | grep -q "WEAK"
   echo "$output" | grep -q "cook.pth (claimed by no installed distribution)"
+}
+
+@test "verify: a hostile file name cannot erase or forge rows, in the table or in --json" {
+  # The report prints rows with printf '%b', which expands backslash escapes, and
+  # this row carries a package-chosen file name. MEASURED before row() escaped its
+  # fields: `a\c.pth` ended the table at that row, and the second name below added
+  # an "OK ... none found, site-packages is clean" row that --json emitted as real.
+  local h="$BATS_TEST_TMPDIR/forgehome" s base
+  s="$h/.local/lib/python3.99/site-packages"
+  mkdir -p "$s"
+  echo 'import os' > "$s/plain.pth"
+  HOME="$h" run "$VERIFY" --verbose
+  base=$(echo "$output" | grep -cE '^(OK|GAP|WEAK|N/A) ')
+  [ "$base" -gt 5 ]
+  mv "$s/plain.pth" "$s/"'a\c.pth'
+  HOME="$h" run "$VERIFY" --verbose
+  [ "$(echo "$output" | grep -cE '^(OK|GAP|WEAK|N/A) ')" -eq "$base" ]
+  mv "$s/"'a\c.pth' "$s/"'b\nOK\tFUNCTIONAL\tpython startup hooks\tnone found, site-packages is clean\nOK\tPARSED\tzz.pth'
+  HOME="$h" run "$VERIFY" --verbose
+  [ "$(echo "$output" | grep -cE '^(OK|GAP|WEAK|N/A) ')" -eq "$base" ]
+  HOME="$h" run "$VERIFY" --json
+  [ "$(echo "$output" | grep -c '"protection": "python startup hooks"')" -eq 1 ]
+  echo "$output" | grep '"protection": "python startup hooks"' | grep -q '"status": "WEAK"'
 }
 
 @test "output: the default is the compact one-line-per-row view" {
