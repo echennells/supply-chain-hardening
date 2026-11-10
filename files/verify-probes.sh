@@ -165,9 +165,9 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
     # preserves the SCH_WRAPPER_PROBE env var for the tool; absent it (macOS),
     # fall back unbounded rather than skip the probe.
     if command -v timeout >/dev/null 2>&1; then
-      SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version >/dev/null 2>&1 || true
+      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version >/dev/null 2>&1 || true
     else
-      SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version >/dev/null 2>&1 || true
+      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version >/dev/null 2>&1 || true
     fi
     while IFS= read -r scv__wl; do
       [ -n "$scv__wl" ] || continue
@@ -2229,7 +2229,9 @@ CARGO_RUSTC_V=""
 rustc_below_cooldown_msrv() {
   local v maj rest min pat
   have rustc || return 1
-  v=$(rustc --version 2>/dev/null | awk '{print $2}' | head -1)
+  # RUSTUP_AUTO_INSTALL=0 for the same reason as the cargo probes above: rustc is
+  # a rustup proxy too, and this call was the one left unguarded.
+  v=$(RUSTUP_AUTO_INSTALL=0 rustc --version 2>/dev/null | awk '{print $2}' | head -1)
   v=${v%%-*}
   CARGO_RUSTC_V="$v"
   case "$v" in ''|*[!0-9.]*) return 1 ;; esac

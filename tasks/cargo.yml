@@ -135,7 +135,10 @@
   # but on a too-old toolchain it degrades to --locked with a recorded reason
   # rather than a wasted build and a silent gap.
   ansible.builtin.shell:
-    cmd: "{{ cargo_check.stdout | dirname }}/rustc --version 2>/dev/null | awk '{print $2}'"
+    # RUSTUP_AUTO_INSTALL=0: through a rustup proxy whose active toolchain is not
+    # installed, a bare `rustc --version` downloads it (MEASURED: 757 MB). An
+    # empty answer then skips the too-old check, which is the safe direction.
+    cmd: "RUSTUP_AUTO_INSTALL=0 {{ cargo_check.stdout | dirname }}/rustc --version 2>/dev/null | awk '{print $2}'"
     executable: /bin/bash
   register: cargo_rustc_version
   changed_when: false

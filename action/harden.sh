@@ -1714,7 +1714,14 @@ global-min-publish-age = "$RELEASE_AGE_HOURS hours"
 EOF
 
   HARDENED+=("cargo")
-  set_tool_version "cargo" "$(detect_version cargo "cargo --version")"
+  # RUSTUP_AUTO_INSTALL=0: on a rustup host `cargo` is a proxy, and when the active
+  # toolchain is not installed (a rust-toolchain.toml pinning one, or a fresh
+  # RUSTUP_HOME) a bare `cargo --version` goes and downloads it. MEASURED on
+  # rustup 1.29.3 with a toolchain named and a fresh HOME: 8 s and 757 MB, from a
+  # hardening step that installs nothing. It also filled the disk of the macos-15
+  # runner, one toolchain per test HOME. stderr is dropped so rustup's "toolchain
+  # 1.85.0 is not installed" cannot be read back as cargo's version.
+  set_tool_version "cargo" "$(RUSTUP_AUTO_INSTALL=0 cargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
 
   # ---- optional cargo-cooldown backend ----
   #

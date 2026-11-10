@@ -720,10 +720,13 @@ wrapper_ran() {
   local w="$1" probe line
   WRAPPER_RAN_PATH=""
   probe=$(mktemp 2>/dev/null) || return 2
+  # RUSTUP_AUTO_INSTALL=0: one of these tools is cargo, a rustup proxy that
+  # downloads its toolchain to answer --version when it is not installed
+  # (MEASURED: 757 MB). Only rustup reads the variable.
   if have timeout; then
-    SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
   else
-    SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue

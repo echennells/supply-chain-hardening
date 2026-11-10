@@ -707,3 +707,32 @@ esac'
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc" "ignore-scripts=true"
 }
+
+# --- rustup proxies ----------------------------------------------------------
+
+@test "cargo: no version probe lets a rustup proxy download a toolchain" {
+  # On a rustup host cargo and rustc are proxies, and a bare `--version` downloads
+  # the active toolchain when it is not installed. MEASURED on rustup 1.29.3 with a
+  # toolchain named and a fresh HOME: harden.sh took 11 s and left 757 MB behind,
+  # and on the macos-15 runner that happened once per test HOME until the disk was
+  # full. Every version probe has to carry RUSTUP_AUTO_INSTALL=0. The stubs record
+  # what each call was given.
+  local log="$BATS_TEST_TMPDIR/rustup-env.log"
+  stub_bin cargo "echo \"cargo auto=\${RUSTUP_AUTO_INSTALL:-unset} args=\$*\" >> '$log'; echo 'cargo 1.99.0 (stub)'"
+  stub_bin rustc "echo \"rustc auto=\${RUSTUP_AUTO_INSTALL:-unset} args=\$*\" >> '$log'; echo 'rustc 1.99.0 (stub)'"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  grep -q 'cargo auto=0 args=--version' "$log"       # harden.sh asked, guarded
+  # The verifier only asks rustc when a lockfile is present and no backend is.
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  : > "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  cd "$BATS_TEST_TMPDIR/proj"
+  run verify_sourced --emit=plain
+  grep -q 'rustc auto=0 args=--version' "$log"       # the verifier asked, guarded
+  run grep -E 'auto=unset args=(--version|-V)' "$log"
+  [ "$status" -ne 0 ] || { echo "unguarded: $output"; false; }
+  # The role asks rustc the same question; it has to carry the guard too.
+  run grep -nE 'cmd: .*(rustc|cargo) --version' "${BATS_TEST_DIRNAME}/../../tasks/cargo.yml"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\n'* ]] || { echo "more than one probe; check each: $output"; false; }
+  [[ "$output" == *"RUSTUP_AUTO_INSTALL=0 "* ]]
+}
