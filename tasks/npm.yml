@@ -142,7 +142,16 @@
   # edit, so skip and say why rather than record a bare "install failed".
   become: true
   ansible.builtin.shell:
-    cmd: command -v npm
+    cmd: |
+      # Found by root AND owned by root. Where sudoers sets no secure_path, root
+      # keeps the applying user's PATH and finds the per-user npm after all;
+      # running that as root would execute files the user can edit.
+      npm_path=$(command -v npm) || exit 1
+      for p in "$npm_path" "$(command -v node)"; do
+        [ -n "$p" ] || continue
+        real=$(readlink -f "$p")
+        [ "$(stat -c %u "$real" 2>/dev/null)" = 0 ] || { echo "$real"; exit 3; }
+      done
     executable: /bin/bash
   register: npm_root_for_lockfile_lint
   changed_when: false
@@ -186,7 +195,7 @@
 - name: Record skipped protection — lockfile-lint (npm is per-user)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['lockfile-lint — not installed: the only npm found is ' ~ (npm_check.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf), and lockfile-lint installs system-wide. It needs a system-wide Node. Lockfile URL/integrity linting is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['lockfile-lint — not installed: ' ~ (('root would run ' ~ (npm_root_for_lockfile_lint.stdout | trim) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), and the role does not run a user-writable program as root') if npm_root_for_lockfile_lint.rc == 3 else ('the only npm found is ' ~ (npm_check.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf)')) ~ '. lockfile-lint installs system-wide, so it needs a system-wide Node. Lockfile URL/integrity linting is not set up.'] }}
   when:
     - npm_root_for_lockfile_lint is defined
     - npm_root_for_lockfile_lint.rc is defined

@@ -58,7 +58,16 @@
   # files the user can edit. Skip the install and say why instead.
   become: true
   ansible.builtin.shell:
-    cmd: command -v npm
+    cmd: |
+      # Found by root AND owned by root. Where sudoers sets no secure_path, root
+      # keeps the applying user's PATH and finds the per-user npm after all;
+      # running that as root would execute files the user can edit.
+      npm_path=$(command -v npm) || exit 1
+      for p in "$npm_path" "$(command -v node)"; do
+        [ -n "$p" ] || continue
+        real=$(readlink -f "$p")
+        [ "$(stat -c %u "$real" 2>/dev/null)" = 0 ] || { echo "$real"; exit 3; }
+      done
     executable: /bin/bash
   register: npm_root_for_socket
   changed_when: false
@@ -127,6 +136,11 @@
       # "exit 0" with no reason. Surface both: stdout still ends in ok/broken for
       # the recorder, the diagnostic goes to stderr, and the shell exits with
       # sfw's real code so `sfw_warm.rc` is truthful.
+      # Nothing to warm when root cannot see sfw: the install was skipped or
+      # failed (each has its own record), or sfw exists only on the applying
+      # user's PATH. Carrying on recorded "installed, but its runtime binary could
+      # not be fetched from GitHub (exit 127)" for an sfw root never had.
+      command -v sfw >/dev/null 2>&1 || { echo absent; exit 0; }
       if out=$(timeout 120 sfw /bin/true 2>&1); then
         echo ok
       else
@@ -148,9 +162,6 @@
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
-    # No sfw to warm when root cannot run npm (install skipped above). Running
-    # anyway recorded a second wrong reason, "could not be fetched (exit 127)".
-    - npm_root_for_socket.rc | default(0) == 0
 
 - name: Record skipped protection — Socket Firewall binary could not be fetched
   ansible.builtin.set_fact:
@@ -171,7 +182,7 @@
 - name: Record skipped protection — Socket Firewall (npm is per-user)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — not installed: the only npm found is ' ~ (npm_for_socket.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf), and sfw installs system-wide. It needs a system-wide Node; while the version manager stays first on PATH the npm wrapper is shadowed anyway (docs/limitations.md). npm installs are not threat-intel filtered.'] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — not installed: ' ~ (('root would run ' ~ (npm_root_for_socket.stdout | trim) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), and the role does not run a user-writable program as root') if npm_root_for_socket.rc == 3 else ('the only npm found is ' ~ (npm_for_socket.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf)')) ~ '. sfw installs system-wide, so it needs a system-wide Node; while the version manager stays first on PATH the npm wrapper is shadowed anyway (docs/limitations.md). npm installs are not threat-intel filtered.'] }}
   when:
     - npm_root_for_socket is defined
     - npm_root_for_socket.rc is defined
