@@ -708,3 +708,40 @@ hook_site() {
   [[ "$output" == *"site-packages/bom.pth (claimed by no installed distribution)"* ]]
   [[ "$output" == *"site-packages/tab.pth (claimed by no installed distribution)"* ]]
 }
+
+# The scan functions alone, so a test can point them at a fixture dpkg directory.
+# In the verifier scv_dpkg_info is assigned unconditionally; nothing in the
+# environment can move it.
+hook_fns() { sed -n '/^scv_site_dirs() {$/,/^scv_dpkg_info=/p' "$VERIFY_SH" | sed '$d'; }
+
+@test "startup hooks: a Debian-packaged hook counts only while it matches dpkg's checksum" {
+  # MEASURED: stock ubuntu-24.04 runners ship python3-zope.interface's nspkg.pth, and
+  # its md5 is the one in the package's .md5sums. This stages the same shape.
+  hook_site
+  local info="$BATS_TEST_TMPDIR/dpkg-info" f
+  f="$(readlink -f "$HOOK_SITE")/zope.interface-6.1-nspkg.pth"
+  mkdir -p "$info"
+  echo "import sys, types, os;p = os.path.join(sys._getframe(1).f_locals['sitedir'], *('zope',))" > "$f"
+  echo "$f" > "$info/python3-zope.interface.list"
+  printf '%s  %s\n' "$(md5sum "$f" | cut -d' ' -f1)" "${f#/}" > "$info/python3-zope.interface.md5sums"
+  scan() { env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "$(hook_fns)"$'\n'"scv_dpkg_info='$info'; scv_startup_hooks"; }
+  run scan
+  [[ "$output" != *"/zope.interface-6.1-nspkg.pth ("* ]]
+  # A wheel that overwrote it: still listed by the package, no longer its bytes.
+  echo 'import os; os.system("true")' >> "$f"
+  run scan
+  [[ "$output" == *"/zope.interface-6.1-nspkg.pth (python3-zope.interface package, changed since it was installed)"* ]]
+}
+
+@test "startup hooks: an unmodified Debian-packaged hook on this host is not reported" {
+  local f found=""
+  for f in /usr/lib/python3/dist-packages/*.pth; do
+    [ -f "$f" ] || continue
+    grep -q '^import[[:blank:]]' "$f" || continue
+    grep -lqxF -- "$f" /var/lib/dpkg/info/*.list 2>/dev/null && { found=$f; break; }
+  done
+  [ -n "$found" ] || skip "no Debian-packaged .pth with an import line on this host"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" != *"$found ("* ]]
+}

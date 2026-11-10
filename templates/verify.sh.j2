@@ -407,7 +407,11 @@ npm_age_gate_behaves() {
 # behind a familiar name: setuptools' distutils-precedence.pth (the same bytes
 # from 60.0 through 84.2.1), the _virtualenv.pth that virtualenv and uv venvs
 # write, and setuptools' editable-install finder. Only the .pth line is checked,
-# not the module it imports. Anything else is listed with the installed
+# not the module it imports. A file Debian's package manager installed counts too,
+# while its md5 still matches the package's record: distro packages come from the
+# signed archive, not from PyPI, and a wheel that overwrote one no longer matches.
+# Stock ubuntu-24.04 runners ship one (python3-zope.interface 6.1's nspkg.pth,
+# MEASURED on image 20261101.360.1). Anything else is listed with the installed
 # distribution whose RECORD claims it, because that is the first thing to check:
 # an application dependency shipping a startup hook is the red flag, and a hook
 # no distribution claims is worse.
@@ -455,9 +459,22 @@ scv_hook_known() {
   ! scv_pth_imports "$1" | grep -qvE "${pat}[[:space:]]*\$"
 }
 
+# Which Debian package installed this file. Prints the package; returns 0 when the
+# file still matches the md5 dpkg recorded, 2 when it is listed but changed, 1 when
+# no package lists it. Reads dpkg's own files, so it runs no package tooling.
+scv_dpkg_owner() {
+  local list sum
+  list=$(grep -lxF -- "$1" "$scv_dpkg_info"/*.list 2>/dev/null | head -n 1)
+  [ -n "$list" ] || return 1
+  list=${list%.list}
+  printf '%s\n' "${list##*/}"
+  sum=$(md5sum "$1" 2>/dev/null) || return 2
+  grep -qxF -- "${sum%% *}  ${1#/}" "$list.md5sums" 2>/dev/null || return 2
+}
+
 # One line per unrecognised hook: its path, then the distribution claiming it.
 scv_startup_hooks() {
-  local d f n o
+  local d f n o p
   scv_site_dirs | while IFS= read -r d; do
     for f in "$d"/*.pth "$d"/sitecustomize "$d"/sitecustomize.* \
              "$d"/usercustomize "$d"/usercustomize.*; do
@@ -468,15 +485,26 @@ scv_startup_hooks() {
           [ -f "$f" ] && [ -n "$(scv_pth_imports "$f")" ] || continue
           scv_hook_known "$f" && continue ;;
       esac
-      o=$(awk -F, -v n="$n" '$1 == n || index($1, n "/") == 1 { print FILENAME; exit }' \
-            "$d"/*.dist-info/RECORD 2>/dev/null)
-      o=${o%.dist-info/RECORD}
-      o=${o##*/}
+      o=""
+      if [ -f "$f" ]; then
+        p=$(scv_dpkg_owner "$f")
+        case $? in
+          0) continue ;;
+          2) o="$p package, changed since it was installed" ;;
+        esac
+      fi
+      if [ -z "$o" ]; then
+        o=$(awk -F, -v n="$n" '$1 == n || index($1, n "/") == 1 { print FILENAME; exit }' \
+              "$d"/*.dist-info/RECORD 2>/dev/null)
+        o=${o%.dist-info/RECORD}
+        o=${o##*/}
+      fi
       printf '%s (%s)\n' "$f" "${o:-claimed by no installed distribution}"
     done
   done | awk '!seen[$0]++'
 }
 
+scv_dpkg_info=/var/lib/dpkg/info
 scv_hooks=$(scv_startup_hooks)
 if [ -n "$scv_hooks" ]; then
   scv_hook_n=$(printf '%s\n' "$scv_hooks" | wc -l | tr -d ' ')
@@ -484,7 +512,7 @@ if [ -n "$scv_hooks" ]; then
   [ "$scv_hook_n" -gt 5 ] && scv_hook_list="$scv_hook_list; and $((scv_hook_n - 5)) more"
   [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) not from a recognised tool: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
   row WEAK PRESENT "python startup hooks" \
-    "$scv_hook_n file(s) that run code on every Python start and are not setuptools, virtualenv/uv or an editable install: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
+    "$scv_hook_n file(s) that run code on every Python start and are not setuptools, virtualenv/uv, an editable install or an unmodified Debian package: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
 fi
 # <<< python startup hooks
 
