@@ -52,7 +52,18 @@ jobs:
       - name: Run the suite
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          bats --print-output-on-failure tests/ci/
+          bats --timing --no-tempdir-cleanup --print-output-on-failure tests/ci/
+
+      # The first macos-15 run (2026-11-10) ran out of disk at test 186 of 226, with
+      # each verify.sh test taking about 20 s against under 1 s on Linux; the whole
+      # suite took 94 s on macos-14 in October. The cause is not known yet. --timing
+      # and --no-tempdir-cleanup above, and this step, are there to show it.
+      - name: Where the disk went (on failure)
+        if: failure()
+        run: |
+          df -h / || true
+          du -sh "${TMPDIR:-/tmp}"/bats-run-*/test/*/* 2>/dev/null | sort -h | tail -15 || true
+          du -sh "$HOME"/.[!.]* "$HOME"/Library/Caches/* 2>/dev/null | sort -h | tail -15 || true
 
       - name: Shell-check harden.sh
         if: matrix.os == 'ubuntu-24.04'
