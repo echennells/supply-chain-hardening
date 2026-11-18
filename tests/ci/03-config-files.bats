@@ -153,6 +153,15 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.bundle/config" 'BUNDLE_COOLDOWN: "2"'
 }
 
+@test "bundler: the config opens with the YAML document marker" {
+  # Bundler 4.1.0 reads a file whose first line is a comment as the String
+  # "---" and crashes on every command (NoMethodError: undefined method
+  # `inject'), so a leading comment broke bundler outright, not just the gate.
+  run harden ECOSYSTEMS=bundler -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ "$(head -n 1 "$TEST_HOME/.bundle/config")" = "---" ]
+}
+
 @test "bundler: the age window follows release_age_hours, in days" {
   # bundler's own CLI banner: "gem versions published at least N days ago".
   run harden ECOSYSTEMS=bundler RELEASE_AGE_HOURS=168 -- --emit=plain

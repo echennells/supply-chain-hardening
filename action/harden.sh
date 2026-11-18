@@ -2301,9 +2301,16 @@ harden_bundler() {
   # BUNDLE_DISABLE_EXEC_LOAD was removed too. It changes `bundle exec` from
   # in-process `load` to Kernel.exec. Same gem code, same privileges, purely a
   # process-model knob — it was being counted as a security control and is not.
+  #
+  # "---" MUST be the first line. Bundler 4.1.0's YAML reader returns the
+  # String "---" for a file that opens with a comment, and every bundle
+  # command then dies in Settings#load_config (NoMethodError: undefined
+  # method `inject' for String) -- the whole tool, not just the gate.
+  # MEASURED: comment-first crashes 4.1.0; "---" then the comment reads
+  # frozen/cooldown correctly on 2.4.20, 2.6.9, 4.0.13 and 4.1.0.
   {
-    echo "# Managed by supply-chain-harden"
     echo "---"
+    echo "# Managed by supply-chain-harden"
     echo "BUNDLE_FROZEN: \"true\""
     echo "BUNDLE_COOLDOWN: \"$bundle_age_days\""
     # Pin the fail-safe side explicitly rather than relying on the default,
