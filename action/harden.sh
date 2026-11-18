@@ -1235,8 +1235,8 @@ harden_composer() {
   # COMPOSER_SKIP_SCRIPTS env var: belt-and-suspenders for `php composer.phar`
   # callers that bypass the wrapper but inherit the action's env.
   #
-  # MEASURED: honoured from composer 2.8.0 — silently ignored on 2.2.6 and
-  # 2.7.1, honoured on 2.8.12+. (This comment said "2.9+" before; the number
+  # MEASURED: honoured from composer 2.8.6 — ignored on 2.2.6, 2.7.1, 2.8.4 and
+  # 2.8.5 (every script ran with it set), honoured on 2.8.6+. (This comment said "2.9+" before; the number
   # was wrong and it was the number everyone cited.) On 2.2-2.7 the var is
   # inert, so the notice below says so instead of leaving an env var in the
   # log that reads as coverage.
@@ -1253,8 +1253,8 @@ harden_composer() {
     notice "composer $composer_version ignores config.policy.cooldown (MEASURED: added in 2.11.0), so the publish-age gate is written and NOT enforced on this runner. Install a current composer before this step to activate it."
   fi
 
-  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.0"; then
-    notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.0). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
+  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.6"; then
+    notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.6). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
   fi
 
   # PATH wrapper at the DISCOVERED composer location (wrap in-place —
