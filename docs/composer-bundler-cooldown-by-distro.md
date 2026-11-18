@@ -97,8 +97,11 @@ packages do on Ubuntu 22.04, 24.04, 26.04 and Debian 12.
 
 Read these before relying on either gate:
 
-- **`gem install` has no age gate on any OS.** RubyGems has no cooldown (checked in
-  rubygems-update 4.0.24). Bundler's setting only applies to Bundler.
+- **`gem install` has no age gate below RubyGems 4.1.0.** RubyGems 4.0.x has no
+  cooldown (checked in rubygems-update 4.0.24). RubyGems 4.1.0 (2026-11-16) added one
+  that reads the same `BUNDLE_COOLDOWN` (environment and `~/.bundle/config`) and a
+  gemrc `:cooldown:`, taking the larger. MEASURED: it installs an older version inside
+  the window and refuses an exact pin to a too-new one.
 - **The role's frozen mode already does most of Bundler's work.** It refuses `bundle
   install` without a lockfile, `bundle update` and `bundle add`. The cooldown adds
   `bundle lock`, and any project that turns frozen off. Bundler 2.3 and 2.4 refuse

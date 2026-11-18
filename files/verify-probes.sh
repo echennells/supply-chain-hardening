@@ -1528,6 +1528,21 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
   else
     pod=$(poetry config solver.min-release-age 2>/dev/null | tail -1)
     pox=$(poetry config solver.min-release-age-exclude 2>/dev/null | tail -1)
+    # exclude-SOURCE exempts whole package sources. MEASURED on Poetry 2.5.x with
+    # a 36500-day gate: ["pypi"] (repo poetry.toml, `poetry config --local`, or
+    # POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE_SOURCE=pypi) and the PyPI simple URL
+    # each installed `six` anyway, while this row printed OK because it never
+    # read the key. A bare string ("pypi", not a list) had no effect, and reads
+    # back without brackets.
+    poxs=$(poetry config solver.min-release-age-exclude-source 2>/dev/null | tail -1)
+    poxs_pypi=0; poxs_list=0
+    case "$poxs" in
+      \[\]|'') ;;
+      \[*) poxs_list=1
+            case "$(printf '%s' "$poxs" | tr '[:upper:]' '[:lower:]')" in
+              *'"pypi"'*|*"'pypi'"*|*pypi.org*) poxs_pypi=1 ;;
+            esac ;;
+    esac
     case "$pod" in
       ''|*[!0-9]*)
         row GAP PARSED "poetry publish-age gate" "poetry $pov reports min-release-age=$(cq "${pod:-<unset>}")" ;;
@@ -1535,9 +1550,15 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
         row GAP PARSED "poetry publish-age gate" \
           "poetry $pov reports min-release-age=0 in $(cq "$PWD"), which disables the gate - a repo's poetry.toml outranks the global config, though not POETRY_SOLVER_MIN_RELEASE_AGE" ;;
       *)
-        if [ -n "$pox" ] && [ "$pox" != "null" ] && [ "$pox" != "[]" ]; then
+        if [ "$poxs_pypi" -eq 1 ]; then
+          row GAP PARSED "poetry publish-age gate" \
+            "poetry $pov reports ${pod}d but exempts the PyPI source in $(cq "$PWD") (min-release-age-exclude-source=$(cq "$poxs")) - every package from PyPI skips the gate. An exported empty POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE_SOURCE= outranks a repo's list"
+        elif [ "$poxs_list" -eq 1 ]; then
           row WEAK PARSED "poetry publish-age gate" \
-            "poetry $pov enforces ${pod}d but exempts $(cq "$pox") in $(cq "$PWD") - no env var outranks a repo's exclude list"
+            "poetry $pov enforces ${pod}d but exempts the source(s) $(cq "$poxs") in $(cq "$PWD")"
+        elif [ -n "$pox" ] && [ "$pox" != "null" ] && [ "$pox" != "[]" ]; then
+          row WEAK PARSED "poetry publish-age gate" \
+            "poetry $pov enforces ${pod}d but exempts $(cq "$pox") in $(cq "$PWD") - an exported empty POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE= outranks a repo's exclude list (measured)"
         elif [ -n "$powant" ] && [ "$pod" -lt "$powant" ]; then
           row WEAK PARSED "poetry publish-age gate" \
             "poetry $pov reports ${pod}d, below the ${powant}d this host declared - something shortened the window"
@@ -2987,6 +3008,30 @@ else
       "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See docs/composer-bundler-cooldown-by-distro.md"
   else
     bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
+    # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
+    # and --parseable does not show that. MEASURED (4.1.0): with only ~/.gemrc
+    # `:cooldown: 3650` this row printed "none is set" while `bundle install`
+    # still resolved the older version, and with a repo "0" plus the gemrc it
+    # printed "cooldown=0 disables" while the gemrc value applied. Ask bundler
+    # for the window it will apply, pinned to the version `bundle` reported;
+    # bundler < 4.1 has no cooldown_for and keeps the --parseable answer.
+    bcd_src="reports"
+    bcd_eff=$(ruby -e 'begin; gem "bundler", ARGV[0]; require "bundler"; s = Bundler.settings; print(s.respond_to?(:cooldown_for) ? s.cooldown_for.to_s : ""); rescue Exception; end' "$bver" 2>/dev/null)
+    case "$bcd_eff" in
+      ''|*[!0-9]*) ;;
+      *) [ "$bcd_eff" != "${bcd:-}" ] && bcd_src="applies (raised by RubyGems' :cooldown:)"
+         bcd=$bcd_eff ;;
+    esac
+    # Does `gem install` share the window? RubyGems 4.1.0 added a cooldown that
+    # reads BUNDLE_COOLDOWN, ~/.bundle/config and gemrc `:cooldown:`, taking the
+    # larger. MEASURED: it installs an older version inside the window and
+    # refuses an exact pin to a too-new one.
+    bgv=$(gem --version 2>/dev/null | head -1 | tr -d '\r')
+    if [ -n "$bgv" ] && [ "$(printf '4.1.0\n%s\n' "$bgv" | sort -V | head -1)" = "4.1.0" ]; then
+      bgem="RubyGems $bgv applies the same window to \`gem install\`/\`gem update\` (it installs an older version; an exact pin to a newer one is refused)"
+    else
+      bgem="RubyGems ${bgv:-<unknown>} has no cooldown (added in 4.1.0), so \`gem install\` is not age-gated"
+    fi
     case "$bcd" in
       '')
         row GAP PARSED "bundler publish-age gate" \
@@ -2999,10 +3044,10 @@ else
       *)
         if [ -n "$bwant" ] && [ "$bcd" -lt "$bwant" ]; then
           row WEAK PARSED "bundler publish-age gate" \
-            "bundler $bver reports cooldown=${bcd}d, below the ${bwant}d this host declared - something shortened the window"
+            "bundler $bver $bcd_src cooldown=${bcd}d, below the ${bwant}d this host declared - something shortened the window"
         else
           row OK PARSED "bundler publish-age gate" \
-            "bundler $bver implements cooldown and reports ${bcd}d - bundler only: RubyGems has no equivalent, so \`gem install\` is not age-gated"
+            "bundler $bver implements cooldown and $bcd_src ${bcd}d - $bgem"
         fi ;;
     esac
   fi

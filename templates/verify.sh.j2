@@ -657,7 +657,29 @@ if have npm; then
         # PARSED is a floor, not the ceiling. With SCV_BEHAVIORAL=1, prove
         # ENFORCEMENT: resolve an old package under a huge window; a working
         # gate refuses it, an inert one resolves it.
-        if [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
+        # A repo .npmrc can exempt packages (min-release-age-exclude, npm 11.17)
+        # or pin a cutoff date (before, npm 11.15), and both are read from the
+        # working directory, as here. MEASURED on npm 11.19.1 and 12.2.2: a
+        # project `min-release-age-exclude[]=*` let every package through even
+        # with the env layer set (an exported empty list does NOT override it)
+        # while this row printed OK. npm_age_gate_behaves below runs in a temp
+        # dir and cannot see a repo file, so this check is not optional there.
+        # A repo `before=` wins only when no NPM_CONFIG_MIN_RELEASE_AGE is set.
+        nexcl=$(npm config get min-release-age-exclude 2>/dev/null | tr -d '\r')
+        case "$nexcl" in null|undefined) nexcl="" ;; esac
+        nbefore=$(npm config get before 2>/dev/null | tr -d '\r')
+        case "$nbefore" in null|undefined) nbefore="" ;; esac
+        case ",$(printf '%s' "$nexcl" | tr -d ' ')," in
+          *",*,"*) nexcl_all=1 ;;
+          *) nexcl_all=0 ;;
+        esac
+        if [ "$nexcl_all" -eq 1 ]; then
+          row GAP PARSED "npm age gate" "npm $nv reports min-release-age=$v but min-release-age-exclude=* in $(pwd) - every package skips the gate, and no exported setting overrides a repo's exclude list"
+        elif [ -n "$nbefore" ] && [ -z "${NPM_CONFIG_MIN_RELEASE_AGE:-}${npm_config_min_release_age:-}" ]; then
+          row GAP PARSED "npm age gate" "npm $nv reports before=$nbefore in $(pwd), which replaces the min-release-age window when no NPM_CONFIG_MIN_RELEASE_AGE is set"
+        elif [ -n "$nexcl" ]; then
+          row WEAK PARSED "npm age gate" "npm $nv enforces $v day(s) but $(pwd) exempts: $nexcl (min-release-age-exclude)"
+        elif [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
           row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this host declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
         elif [ "${SCV_BEHAVIORAL:-0}" = "1" ]; then
           if npm_age_gate_behaves; then
