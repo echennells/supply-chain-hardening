@@ -90,6 +90,14 @@ fi
 # runs as the caller's UID regardless.
 export COMPOSER_ALLOW_SUPERUSER=1
 
+# Publish-age gate, composer >= 2.11.0 (ignored below that). Exported here for
+# cron, systemd and container CMD callers that never load /etc/profile.d, and
+# set unconditionally so a job's own environment cannot shorten the window.
+# `composer --no-cooldown` still gets through on purpose: it is composer's own
+# escape hatch for an urgent fix, and MEASURED it outranks these.
+export COMPOSER_POLICY_COOLDOWN_PERIOD={{ composer_cooldown_seconds | int }}
+export COMPOSER_POLICY_COOLDOWN_BLOCK=1
+
 # Rendered from the composer version detected at apply time
 # ({{ composer_detected_version | default('', true) | default('undetected', true) }}).
 # Quoted on purpose: an unquoted Jinja expression here contains bare

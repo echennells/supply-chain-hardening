@@ -21,6 +21,16 @@ setup() { common_setup; }
   [[ "$output" == *"non-negative integer"* ]]
 }
 
+@test "a leading-zero release_age_hours is read as decimal, not octal" {
+  # Bash arithmetic reads 072 as octal 58. It passed validation and then gave
+  # every derived window 58 hours while the summary said 72.
+  run harden RELEASE_AGE_HOURS=072 ECOSYSTEMS=pnpm -- --emit=plain
+  [ "$status" -eq 0 ]
+  grep -rqs 'minimum-release-age=4320\|minimumReleaseAge: 4320' "$TEST_HOME/.config/pnpm" "$TEST_HOME/.npmrc"
+  run harden RELEASE_AGE_HOURS=09 ECOSYSTEMS=pnpm -- --emit=plain
+  [ "$status" -eq 0 ]
+}
+
 @test "negative release_age_hours is rejected" {
   run harden RELEASE_AGE_HOURS=-5 ECOSYSTEMS=npm
   [ "$status" -eq 2 ]

@@ -22,6 +22,13 @@
 # a repo that ships its own cooldown.toml overrides this file. That is
 # cargo-cooldown's design, not something the role can close — treat a
 # committed cooldown.toml in an untrusted repo as a hardening bypass.
+#
+# NO LONGER TRUE as of the cargo wrapper's environment pinning: the wrapper
+# exports COOLDOWN_MINUTES / _INCOMPATIBLE_PUBLISH_AGE / _LOCKFILE_BASELINE /
+# _ENFORCEMENT before dispatching, and the environment outranks all three file
+# levels, so this file's window wins over a repo-local one. Two residuals: the
+# repo file still supplies [[allow.exact]] rules (pinning does not touch those),
+# and a caller who reaches cargo WITHOUT the wrapper is back to file precedence.
 
 [cooldown]
 # "deny" = fail the command and restore the original Cargo.lock when a

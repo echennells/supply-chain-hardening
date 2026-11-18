@@ -135,7 +135,10 @@
   # but on a too-old toolchain it degrades to --locked with a recorded reason
   # rather than a wasted build and a silent gap.
   ansible.builtin.shell:
-    cmd: "{{ cargo_check.stdout | dirname }}/rustc --version 2>/dev/null | awk '{print $2}'"
+    # RUSTUP_AUTO_INSTALL=0: through a rustup proxy whose active toolchain is not
+    # installed, a bare `rustc --version` downloads it (MEASURED: 757 MB). An
+    # empty answer then skips the too-old check, which is the safe direction.
+    cmd: "RUSTUP_AUTO_INSTALL=0 {{ cargo_check.stdout | dirname }}/rustc --version 2>/dev/null | awk '{print $2}'"
     executable: /bin/bash
   register: cargo_rustc_version
   changed_when: false
@@ -322,9 +325,20 @@
       set -e
       CARGO_PATH='{{ cargo_check.stdout }}'
       REAL="${CARGO_PATH}-real"
+      # Three rustup proxy layouts: a symlink to rustup (default), a symlink to
+      # rustup-init (Homebrew), and a HARDLINK to rustup (RUSTUP_HARDLINK_PROXIES,
+      # older rustup), recognised by sharing an inode with the sibling rustup.
       TARGET=$(readlink -f "$CARGO_PATH")
-      if [ "$(basename "$TARGET")" = "rustup" ]; then
-        printf '#!/bin/bash\n# supply-chain-hardening: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$TARGET" > "$REAL"
+      SIB="$(dirname "$CARGO_PATH")/rustup"
+      case "$(basename "$TARGET")" in
+        rustup|rustup-init) PROXY=$TARGET ;;
+        *) PROXY="" ;;
+      esac
+      if [ -z "$PROXY" ] && [ ! -L "$CARGO_PATH" ] && [ -f "$SIB" ] && [ "$CARGO_PATH" -ef "$SIB" ]; then
+        PROXY=$(readlink -f "$SIB")
+      fi
+      if [ -n "$PROXY" ]; then
+        printf '#!/bin/bash\n# supply-chain-hardening: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$PROXY" > "$REAL"
         chmod 0755 "$REAL"
         echo shim
       else

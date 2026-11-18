@@ -28,6 +28,7 @@ setup_file() {
   gather_facts: false
   vars:
     composer_real_path: /usr/local/bin/composer-real
+    composer_cooldown_seconds: "172800"
   tasks:
     - ansible.builtin.template:
         src: $ROLE_DIR/templates/composer-wrapper.sh.j2
@@ -45,6 +46,11 @@ EOF
 
 teardown_file() {
   rm -rf "$WRAPPER_DIR"
+}
+
+@test "wrapper-render: the publish-age window is pinned for callers with no env layer" {
+  grep -q '^export COMPOSER_POLICY_COOLDOWN_PERIOD=172800$' "$WRAPPER_DIR/deny-plugins.sh"
+  grep -q '^export COMPOSER_POLICY_COOLDOWN_BLOCK=1$' "$WRAPPER_DIR/deny-plugins.sh"
 }
 
 @test "wrapper-render: composer_allow_plugins=false → wrapper injects --no-plugins" {

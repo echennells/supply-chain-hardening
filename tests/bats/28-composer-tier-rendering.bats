@@ -14,6 +14,7 @@
 #   - 2.5.5 bookwm → no audit block
 #   - 2.7.1 noble  → audit.abandoned only (no block-*)
 #   - 2.9.8 current → full audit (abandoned + block-insecure + block-abandoned)
+#   - every tier    → policy.cooldown, which is not tiered (see the test below)
 
 load setup
 
@@ -33,6 +34,7 @@ setup_file() {
     composer_audit_block_insecure: true
     composer_audit_block_abandoned: true
     composer_allow_plugins: false
+    composer_cooldown_seconds: "172800"
   tasks:
     - ansible.builtin.template:
         src: $ROLE_DIR/templates/composer-config.json.j2
@@ -47,6 +49,7 @@ setup_file() {
         - { label: tier2-noble, version: "2.7.1" }
         - { label: tier1-current, version: "2.9.8" }
         - { label: tier1-future, version: "2.10.0" }
+        - { label: tier1-cooldown, version: "2.11.1" }
 EOF
   ansible-playbook "$playbook" >/dev/null 2>&1
   rm -f "$playbook"
@@ -95,6 +98,19 @@ assert_has_baseline() {
   for f in undetected tier3-jammy tier3-bookworm tier2-noble tier1-current tier1-future; do
     grep -q '"allow-plugins": {}' "$TIER_DIR/$f.json" \
       || { echo "FAIL: $f must emit the {} baseline (never false)" >&2; cat "$TIER_DIR/$f.json" >&2; return 1; }
+  done
+}
+
+@test "tier-render: policy.cooldown is on EVERY tier and every render is valid JSON" {
+  # Not tiered, deliberately. MEASURED (composer 2.0.9 → 2.11.1): every version
+  # below 2.11.0 ignores it with exit 0, so writing it everywhere means upgrading
+  # composer activates the gate with no re-apply. A tier here would strand a host
+  # that self-updates after the apply, and would buy nothing.
+  local f
+  for f in undetected tier3-jammy tier3-bookworm tier2-noble tier1-current tier1-future tier1-cooldown; do
+    assert_valid_json "$TIER_DIR/$f.json"
+    python3 -c "import json,sys; c=json.load(open('$TIER_DIR/$f.json'))['config']['policy']['cooldown']; sys.exit(0 if c['period']==172800 and c['block'] is True else 1)" \
+      || { echo "FAIL: $f lacks the cooldown" >&2; cat "$TIER_DIR/$f.json" >&2; return 1; }
   done
 }
 

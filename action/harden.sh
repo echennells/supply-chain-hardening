@@ -80,7 +80,19 @@ WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
-CARGO_SOCKET_FIREWALL="${CARGO_SOCKET_FIREWALL:-true}"
+# Follows `intel` unless set explicitly. It used to default true on its own, so
+# with the default intel: none every cargo wrapper was rendered to route through
+# an sfw that was never installed: a no-op at runtime, and a GAP in verify,
+# which rightly refuses to count a no-op as filtering (issue #29). Explicit true
+# still means "route through an sfw I installed myself", and verify still holds
+# it to that.
+CARGO_SOCKET_FIREWALL="${CARGO_SOCKET_FIREWALL:-$INSTALL_SFW}"
+case "$CARGO_SOCKET_FIREWALL" in
+  true|false) ;;
+  *)
+    echo "[supply-chain-harden] error: cargo_socket_firewall must be true or false, got '$CARGO_SOCKET_FIREWALL'" >&2
+    exit 2 ;;
+esac
 
 # ---- CI platform adapter ----
 #
@@ -449,6 +461,11 @@ if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   err "release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
   exit 2
 fi
+# Normalise to base 10. Bash arithmetic reads a leading zero as OCTAL, so '072'
+# passed the check above and then became 58 hours in every $(( )) below (the
+# pnpm, yarn, bun and cargo windows) while cooldown.toml and the summary said 72;
+# '08' and '09' were arithmetic errors outright.
+RELEASE_AGE_HOURS=$((10#$RELEASE_AGE_HOURS))
 if [[ "$RELEASE_AGE_HOURS" -lt 1 ]]; then
   err "release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
   exit 2
@@ -550,6 +567,8 @@ NPM_AGE_DAYS=$(( RELEASE_AGE_HOURS / 24 ))
 [[ "$NPM_AGE_DAYS" -lt 1 ]] && NPM_AGE_DAYS=1     # npm wants integer days
 PNPM_AGE_MINUTES=$(( RELEASE_AGE_HOURS * 60 ))
 BUN_AGE_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
+COMPOSER_COOLDOWN_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
+POETRY_AGE_DAYS=$NPM_AGE_DAYS                     # integer days, floored at 1 like npm
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
 # INTEGER MINUTES, and rendered UNQUOTED. A duration-suffix string ("2d")
@@ -655,6 +674,16 @@ subst_inplace() {
   local file="$1" script="$2"
   sed "$script" "$file" > "${file}.new" && mv "${file}.new" "$file"
 }
+
+# Escape a value for safe use as the REPLACEMENT half of `sed "s|__X__|VALUE|"`.
+# Drops newlines (a wrapper value — a path, flag, or bool — is never multiline)
+# and escapes the sed metacharacters `\ & |`, so a value cannot close the `s|||`
+# delimiter to inject a sed command (e.g. the `e <cmd>` command) or splice a line
+# into a wrapper body that is then $SUDO-written to a root-owned path. These
+# inputs are operator/CI config, not attacker-controlled, so this is robustness
+# parity with the npm/bun/composer wrappers (which interpolate via single-quoted
+# heredocs), not a fix for a reachable vulnerability.
+sed_repl() { printf '%s' "$1" | tr -d '\n\r' | sed 's/[\\&|]/\\&/g'; }
 
 # detect_version <key> <command>: returns the version string the command
 # prints (typically major.minor.patch), or empty if the binary isn't
@@ -864,6 +893,15 @@ harden_pnpm() {
   # pnpm 11+ format (YAML, camelCase). This is the load-bearing file
   # for pnpm 11 — it ignores ~/.npmrc, ~/.config/pnpm/rc (the older
   # ini-format file), and /etc/npmrc for non-auth settings.
+  # NOTE (MEASURED pnpm 10.34 / 11.28 / 12.18, 2026-11-08): pnpm 11+ IGNORES
+  # onlyBuiltDependencies in this global config.yaml (it warns and tells you to
+  # move it to a project pnpm-workspace.yaml), so the allowlist written here is
+  # inert on pnpm 11+ — an allowlisted package is NOT built from this file; use
+  # pnpm-workspace.yaml per project. The pnpm-10 rc written below is where the
+  # allowlist actually takes effect. `ignoreScripts: false` here is NOT a
+  # fail-open: pnpm 10+ default-denies dependency build scripts regardless, so a
+  # non-allowlisted script stays blocked (the role keeps ignoreScripts: true as
+  # the stricter, clearer signal).
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
@@ -970,23 +1008,51 @@ harden_pip() {
   section "pip"
   write_env PIP_DISABLE_PIP_VERSION_CHECK 1
   write_env PYTHONDONTWRITEBYTECODE       1
+  # pip 26.0+ native age gate. Shares uv's cutoff deliberately: one clock for
+  # both Python gates. Accepted and inert on every pre-26 pip (MEASURED across
+  # ten versions), so it ships unconditionally. UV_EXCLUDE_NEWER is guaranteed
+  # non-empty and Z-suffixed here -- the computation above hard-exits on failure,
+  # which matters because a MALFORMED value makes pip >= 26 exit 2 on every
+  # install for every user on the host.
+  write_env PIP_UPLOADED_PRIOR_TO         "$UV_EXCLUDE_NEWER"
+  # Poetry reads neither pip.conf nor uv.toml (MEASURED on 2.5.1), so it needs its
+  # own gate. The env var outranks a repo's poetry.toml. The file is only created,
+  # never edited: it is the user's whole Poetry config, and a second [solver] table
+  # would be invalid TOML.
+  write_env POETRY_SOLVER_MIN_RELEASE_AGE "$POETRY_AGE_DAYS"
+  local poetry_cfg="${POETRY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pypoetry}/config.toml"
+  if [[ ! -e "$poetry_cfg" ]]; then
+    mkdir -p "$(dirname "$poetry_cfg")"
+    printf '[solver]\nmin-release-age = %s\n' "$POETRY_AGE_DAYS" > "$poetry_cfg"
+  fi
+  local poetry_version
+  poetry_version=$(detect_version poetry "poetry --version")
+  if [[ -n "$poetry_version" ]] && ! version_ge "$poetry_version" "2.4.0"; then
+    notice "poetry $poetry_version has no solver.min-release-age (MEASURED: added in 2.4.0), and it reads neither pip.conf nor uv.toml, so it is not age-gated on this runner."
+  fi
 
   mkdir -p "$HOME/.config/pip"
-  cat > "$HOME/.config/pip/pip.conf" <<'EOF'
+  cat > "$HOME/.config/pip/pip.conf" <<EOF
 ; Managed by supply-chain-harden action
 [global]
 disable-pip-version-check = true
+; pip's native age gate (pip 26.0+; accepted and inert below that). MUST be
+; under [global]: under [install] it does not cover \`pip download\`,
+; \`pip wheel\` or \`pip index\`.
+uploaded-prior-to = $UV_EXCLUDE_NEWER
 
 [install]
-; Refuse sdists — blocks the LiteLLM/BufferZoneCorp-class attack
+; Refuse sdists — blocks the March-2026 LiteLLM / BufferZoneCorp-class attack
+; (NOT the October-2026 LiteLLM wheel-startup-hook compromise)
 ; where setup.py executes arbitrary code at install time.
 only-binary = :all:
 EOF
 
-  cat <<'EOF' | write_etc /etc/pip.conf
+  cat <<EOF | write_etc /etc/pip.conf
 ; Managed by supply-chain-harden action
 [global]
 disable-pip-version-check = true
+uploaded-prior-to = $UV_EXCLUDE_NEWER
 
 [install]
 only-binary = :all:
@@ -994,7 +1060,7 @@ EOF
 
   HARDENED+=("pip")
   set_tool_version "pip" "$(detect_version pip "pip --version")"
-  log "pip: only-binary=:all: (refuses sdist setup.py execution)"
+  log "pip: only-binary=:all: (refuses sdist setup.py execution), uploaded-prior-to=$UV_EXCLUDE_NEWER (pip 26.0+ age gate)"
   end_section
 }
 
@@ -1107,13 +1173,37 @@ harden_composer() {
       else
         echo "      \"abandoned\": \"fail\""
       fi
-      echo "    }"
+      echo "    },"
     else
-      echo "    \"allow-plugins\": $allow_plugins_json"
+      echo "    \"allow-plugins\": $allow_plugins_json,"
     fi
+    # The publish-age gate is written on every version: MEASURED 2.0.9 -> 2.10.3
+    # ignore it with exit 0, and it enforces from 2.11.0. It does not disturb the
+    # audit block above (MEASURED on 2.11.1, see templates/composer-config.json.j2).
+    echo "    \"policy\": {"
+    echo "      \"cooldown\": {"
+    echo "        \"period\": $COMPOSER_COOLDOWN_SECONDS,"
+    echo "        \"block\": true"
+    echo "      }"
+    echo "    }"
     echo "  }"
     echo "}"
   } > "$HOME/.config/composer/config.json"
+
+  # ~/.config/composer is not where composer reads on every host: with no XDG_*
+  # variable set it was ~/.composer (MEASURED), which left the file above unread
+  # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
+  local composer_home=""
+  if command -v composer >/dev/null 2>&1; then
+    composer_home=$(composer config --global home --no-ansi 2>/dev/null | tail -1)
+  fi
+  case "$composer_home" in
+    /*)
+      if [[ "$composer_home" != "$HOME/.config/composer" ]]; then
+        mkdir -p "$composer_home"
+        cp "$HOME/.config/composer/config.json" "$composer_home/config.json"
+      fi ;;
+  esac
 
   HARDENED+=("composer")
   set_tool_version "composer" "$composer_version"
@@ -1129,6 +1219,15 @@ harden_composer() {
   write_env COMPOSER_SKIP_SCRIPTS \
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
   write_env COMPOSER_ALLOW_SUPERUSER 1
+  # The env form outranks a checked-out composer.json (MEASURED on 2.11.1: a
+  # repo's "period": null or "block": false turns off the config.json gate and
+  # not these). A repo's "ignore" list still wins; verify.sh reports that.
+  write_env COMPOSER_POLICY_COOLDOWN_PERIOD "$COMPOSER_COOLDOWN_SECONDS"
+  write_env COMPOSER_POLICY_COOLDOWN_BLOCK  1
+
+  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.11.0"; then
+    notice "composer $composer_version ignores config.policy.cooldown (MEASURED: added in 2.11.0), so the publish-age gate is written and NOT enforced on this runner. Install a current composer before this step to activate it."
+  fi
 
   if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.0"; then
     notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.0). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
@@ -1220,6 +1319,11 @@ if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER"
   exit 127
 fi
 export COMPOSER_ALLOW_SUPERUSER=1
+# Publish-age gate (composer >= 2.11.0). Set unconditionally so a step's own env
+# cannot shorten the window; \`composer --no-cooldown\` still gets through, on
+# purpose, as composer's escape hatch for an urgent fix.
+export COMPOSER_POLICY_COOLDOWN_PERIOD=$COMPOSER_COOLDOWN_SECONDS
+export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 
 NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
 
@@ -1444,10 +1548,20 @@ if [ -z "\$REAL_BUN" ] || [ ! -x "\$REAL_BUN" ] || [ "\$REAL_BUN" = "$wrapper_ta
   echo "[supply-chain-harden] error: real bun not found at '\$REAL_BUN'; refusing to recurse" >&2
   exit 127
 fi
-# Package-mgmt + metadata subcommands consult bunfig as normal.
+# Package-mgmt subcommands consult bunfig as normal.
 case "\${1:-}" in
-  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create|--version|-v|--help|-h|--revision)
+  install|i|add|a|remove|rm|uninstall|un|update|up|upgrade|link|unlink|pm|outdated|why|audit|publish|patch|patch-commit|init|create)
     exec "\$REAL_BUN" "\$@"
+    ;;
+  --version|-v|--help|-h|--revision)
+    # Only as the WHOLE command line. MEASURED on bun 1.4.4: with more after
+    # it, bun ignores the flag -- \`bun --version x cowsay hi\` downloaded and
+    # ran cowsay -- so passing any leading metadata flag through was a
+    # one-flag bypass. With --no-install in front bun refuses it.
+    if [ "\$#" -eq 1 ]; then
+      exec "\$REAL_BUN" "\$@"
+    fi
+    exec "\$REAL_BUN" --no-install "\$@"
     ;;
   *)
     exec "\$REAL_BUN" --no-install "\$@"
@@ -1534,7 +1648,20 @@ fi
 # Metadata flags don't resolve or execute a package — pass them through.
 case "\${1:-}" in
   --version|-v|--help|-h|--revision)
-    exec -a bunx "\$REAL_BUN" "\$@"
+    # ONLY when the flag is the WHOLE command line. MEASURED on bun 1.4.3:
+    # with a package name after it, bunx ignores the flag's metadata meaning
+    # and fetch-and-executes the package anyway -- \`bunx --version cowsay hi\`
+    # downloaded cowsay from npm and ran it, rc 0, with NO cache involved. So
+    # this arm was a complete bypass of the --no-install injection below,
+    # independent of cache state, reachable by prepending one flag.
+    #
+    # \`\$# -eq 1\` is the shape to use rather than dropping the arm or injecting
+    # --no-install into it: tests/ci/04-wrappers.bats:142 runs \`bunx --version\`
+    # and asserts the output carries no --no-install, and that stays green
+    # here. Every other argv shape falls through to the hardened path.
+    if [ "\$#" -eq 1 ]; then
+      exec -a bunx "\$REAL_BUN" "\$@"
+    fi
     ;;
 esac
 exec -a bunx "\$REAL_BUN" --no-install "\$@"
@@ -1568,9 +1695,12 @@ EOF
   # Deployed at $CARGO_HOME/cooldown.toml, the weakest level of
   # cargo-cooldown's precedence chain (env > member > workspace > CARGO_HOME)
   # and the only one that applies to every project without per-repo opt-in.
-  # Corollary: a repo shipping its own cooldown.toml overrides this. That is
-  # cargo-cooldown's design — treat a committed cooldown.toml in an untrusted
-  # repo as a hardening bypass.
+  # On its own, the weakest level would let a repo's committed cooldown.toml
+  # override this file. It does not, because the wrapper below exports the same
+  # policy into the ENVIRONMENT, which outranks every file level — see
+  # sanitize_cooldown_env in the WRAPPER heredoc. Residuals: a repo file still
+  # supplies [[allow.exact]] rules (the env pin does not touch those), and a
+  # caller who reaches cargo WITHOUT the wrapper is back to file precedence.
   #
   # Writing this costs nothing and is harmless when the cargo-cooldown binary
   # is absent, so it is unconditional; the binary itself is opt-in below.
@@ -1596,7 +1726,14 @@ global-min-publish-age = "$RELEASE_AGE_HOURS hours"
 EOF
 
   HARDENED+=("cargo")
-  set_tool_version "cargo" "$(detect_version cargo "cargo --version")"
+  # RUSTUP_AUTO_INSTALL=0: on a rustup host `cargo` is a proxy, and when the active
+  # toolchain is not installed (a rust-toolchain.toml pinning one, or a fresh
+  # RUSTUP_HOME) a bare `cargo --version` goes and downloads it. MEASURED on
+  # rustup 1.29.3 with a toolchain named and a fresh HOME: 8 s and 757 MB, from a
+  # hardening step that installs nothing. It also filled the disk of the macos-15
+  # runner, one toolchain per test HOME. stderr is dropped so rustup's "toolchain
+  # 1.85.0 is not installed" cannot be read back as cargo's version.
+  set_tool_version "cargo" "$(RUSTUP_AUTO_INSTALL=0 cargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
 
   # ---- optional cargo-cooldown backend ----
   #
@@ -1644,8 +1781,50 @@ EOF
       return 0
     fi
   else
+    # Moved FIRST, before anything else touches this path: the wrapper is later
+    # written with `cp`, and `cp` onto a symlink writes THROUGH it — into the
+    # shared rustup binary, replacing rustc, rustfmt and every other proxy.
     $SUDO mv "$real_cargo" "${real_cargo}-real"
     real_cargo="${real_cargo}-real"
+  fi
+
+  # ARGV[0]-SAFE BACKUP — parity with tasks/cargo.yml "Prepare cargo-real".
+  # rustup's cargo is a symlink to the rustup binary, which dispatches on the
+  # name it is invoked as, so a backup called cargo-real is rejected:
+  #   error: unknown proxy name: 'cargo-real'
+  # The wrapper's own `exec -a cargo` covers ITS call, but cargo hands
+  # subcommands its own path via $CARGO, so cargo-cooldown re-enters as
+  # cargo-real and dies; so does the `sfw` branch of run_real, which cannot set
+  # argv[0] at all. This surface did a plain rename while run_real's comment
+  # already claimed "cargo-real is an argv[0] shim on rustup hosts". MEASURED
+  # before this change, rustup cargo + cargo-cooldown: every routed
+  # `cargo check` failed with exactly the error above. So on rustup the backup
+  # becomes a two-line shim restoring argv[0]=cargo. Applied on the re-wrap
+  # path too, because a runner that ran an older action already has the broken
+  # symlink and the branch above would otherwise reuse it.
+  #
+  # Three proxy layouts, all one multicall binary that dispatches on argv[0]:
+  # a symlink to `rustup` (rustup's default), a symlink to `rustup-init`
+  # (Homebrew's rustup formula), and a HARDLINK to rustup (RUSTUP_HARDLINK_PROXIES,
+  # and the default on older rustup) -- the last is no symlink at all, so it is
+  # recognised by sharing an inode with the sibling `rustup`.
+  local cargo_target="" tmp_shim cargo_sib
+  if [[ -L "$real_cargo" ]]; then
+    cargo_target=$(readlink -f "$real_cargo" 2>/dev/null || true)
+    case "$(basename "${cargo_target:-none}")" in rustup|rustup-init) ;; *) cargo_target="" ;; esac
+  fi
+  cargo_sib="$(dirname "$real_cargo")/rustup"
+  if [[ -z "$cargo_target" && ! -L "$real_cargo" && -f "$cargo_sib" && "$real_cargo" -ef "$cargo_sib" ]]; then
+    cargo_target=$(readlink -f "$cargo_sib" 2>/dev/null || true)
+  fi
+  if [[ -n "$cargo_target" ]]; then
+    tmp_shim=$(mktemp)
+    printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$cargo_target" > "$tmp_shim"
+    chmod 0755 "$tmp_shim"
+    # mv replaces the directory entry; it neither follows a symlink nor
+    # writes into a hardlink's shared inode (the rustup binary).
+    $SUDO mv -f "$tmp_shim" "$real_cargo"
+    log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
   # Written via placeholders + sed rather than an interpolating heredoc: the
@@ -1816,6 +1995,72 @@ exec_sub() {
   run_real "${out[@]}"
 }
 
+# Occupy cargo-cooldown's TOP precedence level (environment) with this run's
+# policy, instead of leaving it to the caller. Parity with the role's
+# templates/cargo-wrapper.sh.j2, which carries the full measurement record:
+# cargo-cooldown ranks env > member > workspace > $CARGO_HOME/cooldown.toml, so
+# any of ten exported variables, or simply relocating CARGO_HOME, switched the
+# gate off while the rows still read healthy.
+#
+# ONE SPELLING PER SETTING. COOLDOWN_ENFORCEMENT is a compat alias of
+# COOLDOWN_INCOMPATIBLE_PUBLISH_AGE (likewise *_CARGO_COMPATIBLE_ACCEPT of
+# *_FALLBACK_ACCEPT), and cargo-cooldown ABORTS when both are set and disagree.
+# This surface writes "fallback" whenever strict=false, so exporting
+# ENFORCEMENT=strict here would have failed every non-strict CI build. MEASURED:
+#   Error: environment defines incompatible `COOLDOWN_ENFORCEMENT` and
+#   `COOLDOWN_INCOMPATIBLE_PUBLISH_AGE` values
+# Aliases are cleared; only canonical names are pinned, to the values the
+# cooldown.toml above was written with.
+#
+# NOT A FIX FOR A COMMITTED cooldown.toml. The pins win for every setting that
+# has an environment form (global and crates.io windows, now, skip_registries,
+# the violation action, the lockfile baseline), but `[allow.global] minutes`,
+# `[[allow.package]]`, `[[allow.exact]]` and `[registries.<alt>]` windows have
+# none, and a repo's cooldown.toml can still use them to loosen the gate.
+# MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` committed next
+# to Cargo.toml still admits a crate published hours ago. Treat a cooldown.toml
+# in an untrusted repo as a bypass.
+sanitize_cooldown_env() {
+  _sc_env=$(env)
+  _sc_had=''
+  for _sc_v in COOLDOWN_MINUTES COOLDOWN_ENFORCEMENT COOLDOWN_INCOMPATIBLE_PUBLISH_AGE \
+               COOLDOWN_FALLBACK_ACCEPT COOLDOWN_CARGO_COMPATIBLE_ACCEPT \
+               COOLDOWN_LOCKFILE_BASELINE COOLDOWN_NOW COOLDOWN_SKIP_REGISTRIES \
+               CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE CARGO_REGISTRY_MIN_PUBLISH_AGE; do
+    if printf '%s\n' "$_sc_env" | grep -q "^$_sc_v="; then
+      _sc_had="$_sc_had $_sc_v"
+    fi
+    unset "$_sc_v"
+  done
+  # Per-registry windows (CARGO_REGISTRIES_<NAME>_MIN_PUBLISH_AGE): names match a
+  # fixed [A-Za-z0-9_] pattern, so the word-split cannot carry anything else.
+  for _sc_v in $(printf '%s\n' "$_sc_env" | sed -n 's/^\(CARGO_REGISTRIES_[A-Za-z0-9_]*_MIN_PUBLISH_AGE\)=.*/\1/p'); do
+    _sc_had="$_sc_had $_sc_v"
+    unset "$_sc_v"
+  done
+  # A dashed name (CARGO_REGISTRIES_my-reg_MIN_PUBLISH_AGE) is a valid registry
+  # name to cargo-cooldown but not an identifier to bash, so it cannot be unset.
+  if printf '%s\n' "$_sc_env" | grep -q '^CARGO_REGISTRIES_[^=]*[^A-Za-z0-9_=][^=]*_MIN_PUBLISH_AGE='; then
+    echo "[supply-chain-harden] error: a CARGO_REGISTRIES_*_MIN_PUBLISH_AGE variable with a non-identifier name is set; this wrapper cannot clear it and it would override this run's publish-age window. Unset it and retry." >&2
+    exit 2
+  fi
+  if [ -n "$_sc_had" ]; then
+    echo "[supply-chain-harden] note: overriding caller publish-age setting(s):$_sc_had - this run's __RELEASE_AGE_HOURS__h/__VIOLATION_ACTION__ policy applies instead." >&2
+  fi
+  export COOLDOWN_MINUTES=__MIN_AGE_MIN__
+  # The crates.io window, which a repo cooldown.toml's `[registry]
+  # min-publish-age` otherwise sets. Cargo also reads this name (its unstable
+  # registry.min-publish-age) and warns that it is ignoring it; harmless.
+  export CARGO_REGISTRY_MIN_PUBLISH_AGE="__RELEASE_AGE_HOURS__ hours"
+  export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=__VIOLATION_ACTION__
+  export COOLDOWN_LOCKFILE_BASELINE=floor
+  export COOLDOWN_FALLBACK_ACCEPT=auto
+  # The real clock and an empty skip list replace a repo cooldown.toml's
+  # `now` / `skip_registries`.
+  export COOLDOWN_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export COOLDOWN_SKIP_REGISTRIES=
+}
+
 case "$subcmd" in
   build|b|check|c|test|t|run|r|bench|doc|d|rustc|rustdoc|tree|fetch|package|publish|clippy)
     KIND=RESOLVING ;;
@@ -1863,6 +2108,7 @@ case "$KIND" in
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
     if command -v cargo-cooldown >/dev/null 2>&1; then
+      sanitize_cooldown_env
       case "$subcmd" in
         update)
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
@@ -1882,6 +2128,7 @@ case "$KIND" in
 
   RESOLVING)
     if command -v cargo-cooldown >/dev/null 2>&1; then
+      sanitize_cooldown_env
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -1909,7 +2156,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$real_cargo|; s|__COOLDOWN_BIN__|$cooldown_bin|; s|__CARGO_SFW__|$CARGO_SOCKET_FIREWALL|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_BIN__|$(sed_repl "$cooldown_bin")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
   $SUDO cp "$tmp_wrapper" "$wrapper_target"
   $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo
@@ -2054,9 +2301,16 @@ harden_bundler() {
   # BUNDLE_DISABLE_EXEC_LOAD was removed too. It changes `bundle exec` from
   # in-process `load` to Kernel.exec. Same gem code, same privileges, purely a
   # process-model knob — it was being counted as a security control and is not.
+  #
+  # "---" MUST be the first line. Bundler 4.1.0's YAML reader returns the
+  # String "---" for a file that opens with a comment, and every bundle
+  # command then dies in Settings#load_config (NoMethodError: undefined
+  # method `inject' for String) -- the whole tool, not just the gate.
+  # MEASURED: comment-first crashes 4.1.0; "---" then the comment reads
+  # frozen/cooldown correctly on 2.4.20, 2.6.9, 4.0.13 and 4.1.0.
   {
-    echo "# Managed by supply-chain-harden"
     echo "---"
+    echo "# Managed by supply-chain-harden"
     echo "BUNDLE_FROZEN: \"true\""
     echo "BUNDLE_COOLDOWN: \"$bundle_age_days\""
     # Pin the fail-safe side explicitly rather than relying on the default,
@@ -2064,6 +2318,7 @@ harden_bundler() {
     # a default we do not state is a default someone else can flip.
     echo "BUNDLE_DISABLE_CHECKSUM_VALIDATION: \"false\""
   } > "$HOME/.bundle/config"
+  write_env BUNDLE_COOLDOWN "$bundle_age_days"
 
   HARDENED+=("bundler")
   local bundler_version
@@ -2175,8 +2430,19 @@ if [ -z "$REAL_DENO" ] || [ ! -x "$REAL_DENO" ] || [ "$REAL_DENO" = "__WRAPPER_P
 fi
 
 subcmd=""
+skip_value=0
 for arg in "$@"; do
+  # Skip the VALUE of a value-taking global flag before the subcommand, or the
+  # scan reads that value as the subcommand and misses the gate. MEASURED on
+  # deno 2.9.8: `deno --log-level debug run app.ts` (and `-L debug`) are accepted
+  # by deno, and without this the scan picked "debug" as the subcommand and
+  # exec'd deno with NO --minimum-dependency-age. `--flag=value` is one token
+  # starting with `-`, so `-*` already covers it; only separate-word values
+  # matter. This mirrors the role wrapper (templates/deno-wrapper.sh.j2).
+  if [ "$skip_value" = "1" ]; then skip_value=0; continue; fi
   case "$arg" in
+    --config|-c|--import-map|--lock|--cert|--log-level|-L|--v8-flags|--seed)
+      skip_value=1 ;;
     -*) ;;
     *) subcmd="$arg"; break ;;
   esac
@@ -2210,7 +2476,7 @@ case "$subcmd" in
     ;;
 esac
 DENOWRAP
-  subst_inplace "$tmp_deno" "s|__REAL_DENO__|$real_deno|; s|__WRAPPER_PATH__|$wrapper_path|; s|__MIN_AGE__|$DENO_AGE_ISO|"
+  subst_inplace "$tmp_deno" "s|__REAL_DENO__|$(sed_repl "$real_deno")|; s|__WRAPPER_PATH__|$(sed_repl "$wrapper_path")|; s|__MIN_AGE__|$DENO_AGE_ISO|"
   $SUDO cp "$tmp_deno" "$wrapper_path"
   rm -f "$tmp_deno"
   $SUDO chmod 755 "$wrapper_path"
@@ -2237,12 +2503,32 @@ harden_maven() {
       <blocked>true</blocked>
     </mirror>
   </mirrors>
-  <profiles/>
+  <!-- Integrity: refuse an artifact whose content does not match its published
+       checksum (Maven's default is 'warn', which installs anyway). This covers
+       Central-sourced artifacts; the role additionally routes ALL repos through
+       Central (mirrorOf=*), which the action does not, to avoid breaking a
+       project's own HTTPS repositories. -->
+  <profiles>
+    <profile>
+      <id>strict-checksums</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><checksumPolicy>fail</checksumPolicy></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>strict-checksums</activeProfile>
+  </activeProfiles>
 </settings>
 EOF
   HARDENED+=("maven")
   set_tool_version "maven" "$(detect_version maven "mvn --version")"
-  log "maven: HTTPS-only mirror enforced; HTTP repos blocked"
+  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central"
   end_section
 }
 
@@ -2521,7 +2807,7 @@ done
 case "\$subcmd" in
   # Parity with the role wrapper (templates/npm-wrapper.sh.j2): rebuild/exec/x/
   # link/view/info/show/search/outdated also touch the registry and were routed
-  # there but not here, so `npm exec`/`npx`-style fetch-and-run went unfiltered.
+  # there but not here, so \`npm exec\`/\`npx\`-style fetch-and-run went unfiltered.
   install|i|add|ci|update|up|rebuild|exec|x|dedupe|link|audit|view|info|show|search|outdated)
     if command -v sfw >/dev/null 2>&1; then
       exec sfw "\$REAL_NPM" "\$@"

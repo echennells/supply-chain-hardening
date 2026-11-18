@@ -99,30 +99,34 @@
           ansible-playbook site.yml -e accept_root_home_targeting=true
     success_msg: "Privilege context OK — per-user config targets {{ ansible_env.HOME }}."
   when: not (accept_root_home_targeting | default(false) | bool)
-- name: Probe GNU date for uv_exclude_newer rendering
-  # defaults/main.yml renders uv_exclude_newer via
-  #   lookup('pipe', 'date -u -d @<epoch> +%Y-%m-%dT%H:%M:%SZ')
+- name: Probe GNU date on the controller for the rolling uv/pip cutoff
+  # defaults/main.yml computes the rolling cutoff (sch_uv_cutoff, sch_pip_cutoff) via
+  #   lookup('pipe', 'date -u -d @<epoch> +%Y-%m-%dT00:00:00Z')
   # which requires GNU date (Linux) or coreutils' `gdate` (macOS). BSD
-  # date (macOS default) lacks the `-d @<epoch>` syntax — the lookup
-  # silently returns an empty string, which then gets templated into
-  # /etc/uv/uv.toml as `exclude-newer = ""`. uv rejects empty datetime
-  # values with a parser error, breaking every uv invocation. This
-  # check fails loudly at preflight rather than silently at runtime.
-  ansible.builtin.command: date -u -d @0 +%Y-%m-%dT%H:%M:%SZ
-  register: gnu_date_probe
-  changed_when: false
-  check_mode: false
-  failed_when: false
+  # date (macOS default) lacks the `-d @<epoch>` syntax, and the lookup then
+  # aborts the play with only "lookup_plugin.pipe(...) returned 1".
+  # The lookup runs on the CONTROLLER, so the probe goes through the same
+  # lookup: a command task here would probe the target instead, passing a
+  # controller that cannot render the cutoff and blocking a target that never
+  # needs to. Only a `rolling` cutoff evaluates the lookup; a pinned one needs
+  # no GNU date anywhere, so the probe is skipped. The defaults keep this safe
+  # when preflight.yml is imported on its own (tests/bats/38 does), where the
+  # role's defaults are not loaded; they match defaults/main.yml.
+  ansible.builtin.set_fact:
+    gnu_date_probe: >-
+      {{ lookup('pipe', 'date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>&1 || echo "rc=$?"') }}
+  when: >-
+    (uv_exclude_newer | default('rolling')) == 'rolling'
+    or (pip_uploaded_prior_to | default(uv_exclude_newer | default('rolling'))) == 'rolling'
 
 - name: Fail when GNU date is unavailable on the controller
   ansible.builtin.fail:
     msg: |
-      The role's uv_exclude_newer default uses `lookup('pipe', 'date -u -d @<epoch>')`
+      The role's rolling uv/pip cutoff uses `lookup('pipe', 'date -u -d @<epoch>')`
       which requires GNU date. Your controller's date refused the probe:
 
         $ date -u -d @0 +%Y-%m-%dT%H:%M:%SZ
-        rc={{ gnu_date_probe.rc }}
-        {{ gnu_date_probe.stderr or gnu_date_probe.stdout }}
+        {{ gnu_date_probe | indent(2) }}
 
       Fix:
         - Linux: install coreutils (`apt install coreutils`) — usually already present.
@@ -135,10 +139,11 @@
               `-e 'uv_exclude_newer=2026-05-24T12:00:00Z'`
           Do NOT symlink gdate over /usr/local/bin/date system-wide — other
           macOS tools depend on BSD date semantics.
-        - To skip this check (and ship empty exclude-newer, which breaks uv):
-          `-e skip_gnu_date_check=true` — not recommended.
+        - To skip this check (the cutoff lookup then fails or renders a bad
+          value instead): `-e skip_gnu_date_check=true` — not recommended.
   when:
-    - gnu_date_probe.rc != 0 or gnu_date_probe.stdout != "1970-01-01T00:00:00Z"
+    - gnu_date_probe is defined
+    - gnu_date_probe != "1970-01-01T00:00:00Z"
     - not (skip_gnu_date_check | default(false) | bool)
 
 - name: Detect non-managed existing system config files
@@ -194,3 +199,62 @@
   when:
     - etc_preflight.rc == 42
     - not (accept_etc_overwrite | default(false) | bool)
+
+- name: Assert the pip age-gate cutoff is an absolute Z-suffixed RFC 3339 instant
+  # A MALFORMED value makes pip >= 26 exit 2 on every install / download / list
+  # and even `pip install --help` -- host-wide and for every account, because
+  # this lands in /etc/pip.conf and /etc/environment. Two shapes are rejected
+  # deliberately: the relative `P<n>D` form (pip 26.1+, hard error on 26.0) and
+  # any value without a literal Z (read in the host's LOCAL time -- 26h of
+  # spread measured across TZ=UTC / Pacific/Kiritimati / Etc/GMT+12).
+  #
+  # This lives in preflight, not pip.yml, because preflight carries
+  # `tags: always` -- so `--tags npm` or `--skip-tags pip` cannot deploy the
+  # higher-precedence env layer without this check having run.
+  ansible.builtin.assert:
+    that:
+      - sch_pip_cutoff is string
+      - sch_pip_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$')
+    fail_msg: >-
+      pip_uploaded_prior_to must be `rolling` or an absolute RFC 3339 instant
+      ending in a literal Z (e.g. 2026-10-19T00:00:00Z); it resolved to
+      '{{ sch_pip_cutoff | default("<undefined>") }}'. A malformed value
+      makes pip >= 26 exit 2 on every install for every user on this host. The
+      relative P<n>D form needs pip 26.1+ and is a hard error on 26.0.
+    quiet: true
+  # `default(false)`, not a bare reference: tests/bats/38-preflight-become-guard.bats
+  # imports THIS FILE into a bare playbook that supplies only release_age_hours,
+  # so defaults/main.yml is never loaded and a bare `pip_age_gate | bool` raises
+  # an undefined-variable error that fails the play. Preflight has to stand on
+  # its own. In a real apply the role's defaults make this true.
+  when: pip_age_gate | default(false) | bool
+
+- name: Validate the uv cutoff shape (a malformed value breaks every uv on the host)
+  # sch_uv_cutoff lands in /etc/uv/uv.toml, which every interpreter on the host
+  # reads, and uv refuses to start on a value it cannot parse. The pip check above
+  # only covers uv incidentally (pip inherits uv's value by default), so a bad
+  # uv-only pin got through with no preflight catch.
+  #
+  # Deliberately LOOSER than the pip check: uv accepts forms pip does not. It
+  # accepts every form defaults/main.yml documents for uv_exclude_newer: an
+  # absolute RFC 3339 instant, a local date, and the span forms uv 0.10+ accepts
+  # (which supply-chain-verify grades WEAK). This catches empty, garbage and
+  # malformed values; it does NOT prove the host's uv is new enough for a span.
+  # `is defined` keeps it skipped when preflight.yml is imported on its own
+  # (tests/bats/38), where the role defaults are not loaded.
+  ansible.builtin.assert:
+    that:
+      - sch_uv_cutoff is string
+      - >-
+        sch_uv_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$')
+        or sch_uv_cutoff is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        or sch_uv_cutoff is match('^[0-9]+ ?(second|minute|hour|day|week)s?$')
+        or sch_uv_cutoff is match('^P(T[0-9]+[HMS]|[0-9]+[DW])$')
+    fail_msg: >-
+      uv_exclude_newer must be `rolling`, an absolute RFC 3339 instant
+      (e.g. 2026-10-19T00:00:00Z), a date (2026-10-19), or a span uv 0.10+
+      accepts (e.g. "2 days", P2D); it resolved to
+      '{{ sch_uv_cutoff | default("<undefined>") }}'. A value uv cannot parse
+      is written to /etc/uv/uv.toml and stops uv from starting for every user.
+    quiet: true
+  when: sch_uv_cutoff is defined

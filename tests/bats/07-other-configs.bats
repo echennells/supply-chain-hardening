@@ -10,8 +10,8 @@ load setup
   assert_file_contains "$HOME/.config/composer/config.json" "dist"
 }
 
-@test "bundler: BUNDLE_DISABLE_EXEC_LOAD true" {
-  assert_file_contains "$HOME/.bundle/config" 'BUNDLE_DISABLE_EXEC_LOAD: "true"'
+@test "bundler: BUNDLE_DISABLE_EXEC_LOAD is not set (a process-model knob, not a control)" {
+  ! grep -q 'BUNDLE_DISABLE_EXEC_LOAD' "$HOME/.bundle/config"
 }
 
 @test "cargo: git-fetch-with-cli = true" {

@@ -96,3 +96,62 @@ setup() {
   rm -f /tmp/marker-composer-script
   [ "$marker_present" = "no" ]
 }
+
+# --- publish-age gate ---------------------------------------------------------
+# These call the real binary with a scratch COMPOSER_HOME: the deployed wrapper
+# pins the 48h window, and "the newest release is older than 48h" is true of most
+# packages most days, so only a window far wider than any release cadence can
+# tell an enforcing composer from one that ignores the key.
+
+cooldown_composer() {
+  local real; real=$(command -v composer-real || command -v composer) || return 1
+  local v; v=$("$real" --version --no-ansi 2>/dev/null | sed -nE 's/^Composer (version )?([0-9]+\.[0-9]+\.[0-9]+).*$/\2/p' | head -1)
+  [ -n "$v" ] && [ "$(printf '2.11.0\n%s\n' "$v" | sort -V | head -1)" = "2.11.0" ] || return 1
+  printf '%s' "$real"
+}
+
+# resolve <project-config-json-or-empty> [env assignments...] -> the constraint written
+cooldown_resolve() {
+  local cfg="$1"; shift
+  local d; d=$(mktemp -d)
+  mkdir -p "$d/home" "$d/p"
+  echo '{}' > "$d/home/config.json"
+  printf '{"name":"t/t","require":{}%s}\n' "${cfg:+,\"config\":$cfg}" > "$d/p/composer.json"
+  ( cd "$d/p" && env -u COMPOSER_POLICY_COOLDOWN_PERIOD -u COMPOSER_POLICY_COOLDOWN_BLOCK \
+      COMPOSER_HOME="$d/home" COMPOSER_NO_INTERACTION=1 "$@" \
+      "$COOLDOWN_BIN" require monolog/monolog --no-install --no-plugins --no-scripts >/dev/null 2>&1 )
+  grep -oE '"monolog/monolog": *"[^"]+"' "$d/p/composer.json" | cut -d'"' -f4
+  rm -rf "$d"
+}
+
+@test "BEHAVIORAL: the composer env gate withholds the newest release (control takes it)" {
+  COOLDOWN_BIN=$(cooldown_composer) || skip "composer < 2.11 has no cooldown"
+  local control gated
+  control=$(cooldown_resolve '')
+  [ -n "$control" ] || skip "packagist unreachable: the control resolved nothing"
+  gated=$(cooldown_resolve '' COMPOSER_POLICY_COOLDOWN_PERIOD=81648000)
+  [ -n "$gated" ]
+  [ "$gated" != "$control" ]
+}
+
+@test "BEHAVIORAL: the env var outranks a repo's period null and block false" {
+  COOLDOWN_BIN=$(cooldown_composer) || skip "composer < 2.11 has no cooldown"
+  local control a b
+  control=$(cooldown_resolve '')
+  [ -n "$control" ] || skip "packagist unreachable: the control resolved nothing"
+  a=$(cooldown_resolve '{"policy":{"cooldown":{"period":null}}}' COMPOSER_POLICY_COOLDOWN_PERIOD=81648000)
+  b=$(cooldown_resolve '{"policy":{"cooldown":{"period":81648000,"block":false}}}' COMPOSER_POLICY_COOLDOWN_BLOCK=1)
+  [ "$a" != "$control" ]
+  [ "$b" != "$control" ]
+}
+
+@test "KNOWN GAP: a repo's ignore list outranks COMPOSER_POLICY_COOLDOWN_PERIOD" {
+  # This documents the bypass; supply-chain-verify reports it. If this test starts
+  # failing, composer has closed the gap and docs/limitations.md should say so.
+  COOLDOWN_BIN=$(cooldown_composer) || skip "composer < 2.11 has no cooldown"
+  local control got
+  control=$(cooldown_resolve '')
+  [ -n "$control" ] || skip "packagist unreachable: the control resolved nothing"
+  got=$(cooldown_resolve '{"policy":{"cooldown":{"ignore":["*"]}}}' COMPOSER_POLICY_COOLDOWN_PERIOD=81648000)
+  [ "$got" = "$control" ]
+}

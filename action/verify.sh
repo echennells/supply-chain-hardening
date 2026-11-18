@@ -305,12 +305,29 @@ expected() {
 requested() { expected "$1"; }
 
 # ============================================================ row API =========
+# One field of a row, made safe for the renderer. The report prints ROWS with
+# printf '%b', which expands backslash escapes, and details carry text this script
+# does not control: a config value read from the working directory, a file name a
+# package chose. MEASURED: `min-release-age=1\c` in a checkout's .npmrc ended the
+# table at that row, and a file named with `\n` and `\t` in it forged whole rows,
+# in the table and in --json alike. Doubling every backslash makes %b print it
+# literally; real control characters are flattened so a tab or newline cannot
+# split a row either. Sets REPLY, to stay out of a subshell.
+scv_field() {
+  REPLY=${1//[[:cntrl:]]/ }
+  REPLY=${REPLY//\\/\\\\}
+}
+
 row() { # status, evidence, protection, detail
   # A `-` evidence cell on an N/A row is the shared body's spelling for "no
   # evidence applies". Split it into the two states that actually differ, so
   # "cargo is not installed" stops reading the same as "cargo was never
   # requested". Deleted once the shared body carries ids of its own.
-  local s="$1" e="$2" p="$3" d="$4"
+  local s e p d
+  scv_field "$1"; s=$REPLY
+  scv_field "$2"; e=$REPLY
+  scv_field "$3"; p=$REPLY
+  scv_field "$4"; d=$REPLY
   if [ "$s" = "N/A" ] && [ "$e" = "-" ]; then
     case "$d" in
       *"not in the ecosystems this job requested"*|*"not in the requested ecosystems"*) e=BYDESIGN ;;
@@ -372,6 +389,213 @@ case "$_record_note_status" in
   gap)  GAPS_CONFIG=$((GAPS_CONFIG + 1)); row GAP  FUNCTIONAL "hardening run record" "$_record_note_detail" ;;
   weak) row WEAK PRESENT    "hardening run record" "$_record_note_detail" ;;
 esac
+
+# >>> python startup hooks
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them). It sits
+# in both preambles instead of files/verify-probes.sh because it has to run before
+# the first probe that starts Python normally, and both preambles start pip before
+# the shared body is reached.
+#
+# A wheel's .data/purelib can drop a *.pth or a sitecustomize into the
+# site-packages root, and Python runs it on EVERY interpreter start: the October
+# 2026 litellm wheels did exactly that (docs/limitations.md). This script starts
+# python3 and pip below, so it would be one more thing that fires such a hook.
+# Read the site directories as plain files first and say what is there before
+# anything runs it.
+#
+# DETECTION, NOT A PROTECTION, AND NOT A CLEAN BILL. Nothing is removed or
+# blocked. It reports what it can see in the directories it found; a payload
+# somewhere else on sys.path, or inside a module a listed hook imports, is not
+# seen. Three outcomes: WEAK when a hook has nothing vouching for it, OK listing
+# the hooks that are recognised, and no row only when there are no hooks at all.
+#
+# Where it reads: the prefixes of the interpreters this run starts (python3,
+# python, and pip/pip3 through their shebang), as found on PATH, resolved, and as
+# the interpreter itself reports them; plus /usr, /usr/local, the user site
+# (PYTHONUSERBASE too) and $VIRTUAL_ENV. The interpreter is asked with -I -S,
+# which does not import site, so no .pth or sitecustomize runs (MEASURED). Without
+# that, a python3 behind a pyenv/asdf/mise-style shim was never located. Its own
+# executable path is asked for as well: under -S a venv's python reports the base
+# install as sys.prefix, because it is site.py that points it at the venv.
+#
+# What counts, matching CPython's site.py (MEASURED on 3.13.12 and 3.12.3):
+#   - Lines are split the way Python splits them, not on \n alone. 3.13 uses
+#     str.splitlines(), so \r, \v, \f, \x1c-\x1e, U+0085, U+2028 and U+2029 all
+#     end a line; a payload after any of them, behind a `#` comment, ran.
+#   - A line starting with `import` and a space or tab runs, including after a
+#     UTF-8 BOM. One with a leading space does not. Dotfiles are skipped.
+#   - Any other line is a directory added to sys.path, and Python imports
+#     sitecustomize and usercustomize from anywhere on sys.path, so those
+#     directories and PYTHONPATH are read for them as well as the site root.
+#   - sitecustomize/usercustomize run as a module, a compiled module or a package.
+#
+# What "recognised" means, and what it does not. Two kinds:
+#   - a file a Debian package installed, whose md5 still matches the one dpkg
+#     recorded. dpkg's records are root-owned, so a wheel cannot forge this.
+#   - a .pth whose executing lines are exactly what setuptools, virtualenv/uv or
+#     a setuptools editable install generate. This is NOISE REDUCTION ONLY: the
+#     line just imports a module, and a wheel can ship the same line plus its own
+#     copy of that module (MEASURED: it ran, unreported). Nothing on the host can
+#     vouch for a file installed from PyPI, which is why recognised hooks are
+#     listed in an OK row instead of being dropped.
+# Anything else is listed with the installed distribution whose RECORD claims it.
+scv_site_dirs() {
+  local p c r pre d
+  {
+    for p in python3 python pip3 pip; do
+      c=$(command -v "$p" 2>/dev/null) || continue
+      case "$p" in
+        pip*)
+          r=$(sed -n '1s/^#![[:space:]]*\([^[:space:]]*\).*/\1/p' "$c" 2>/dev/null)
+          case "${r##*/}" in python*) c="$r" ;; *) continue ;; esac ;;
+      esac
+      printf '%s\n' "${c%/*/*}"
+      r=$(readlink -f "$c" 2>/dev/null) && printf '%s\n' "${r%/*/*}"
+      "$c" -I -S -c 'import sys; print(sys.prefix); print(sys.base_prefix); print(sys.executable.rsplit("/", 2)[0])' 2>/dev/null </dev/null
+    done
+    printf '%s\n' /usr /usr/local "$HOME/.local" ${PYTHONUSERBASE:+"$PYTHONUSERBASE"} ${VIRTUAL_ENV:+"$VIRTUAL_ENV"}
+  } | while IFS= read -r pre; do
+    for d in "$pre"/lib/python3*/site-packages "$pre"/lib/python3*/dist-packages \
+             "$pre"/lib/python3/dist-packages "$pre"/lib64/python3*/site-packages; do
+      [ -d "$d" ] && readlink -f "$d"
+    done
+  done | awk '!seen[$0]++'
+}
+
+# A .pth file's lines, split where CPython splits them.
+scv_pth_lines() {
+  local bom nel ls ps nl
+  bom=$(printf '\357\273\277')
+  nel=$(printf '\302\205')
+  ls=$(printf '\342\200\250')
+  ps=$(printf '\342\200\251')
+  nl='\
+'
+  LC_ALL=C tr '\r\013\014\034\035\036' '\n' < "$1" 2>/dev/null \
+    | LC_ALL=C sed -e "1s/^$bom//" -e "s/$nel/$nl/g" -e "s/$ls/$nl/g" -e "s/$ps/$nl/g"
+}
+
+# The lines CPython would execute from one .pth file.
+scv_pth_imports() { scv_pth_lines "$1" | LC_ALL=C grep '^import[[:blank:]]'; }
+
+# The directories one .pth file adds to sys.path, resolved against its site dir.
+scv_pth_paths() {
+  local x
+  scv_pth_lines "$1" | LC_ALL=C grep -v -e '^#' -e '^import[[:blank:]]' -e '^[[:space:]]*$' \
+    | LC_ALL=C sed 's/[[:space:]]*$//' | while IFS= read -r x; do
+      case "$x" in /*) ;; *) x="$2/$x" ;; esac
+      [ -d "$x" ] && printf '%s\n' "$x"
+    done
+}
+
+# True when every executing line in a .pth is a known tool's generated text.
+scv_hook_known() {
+  local pat
+  case "${1##*/}" in
+    distutils-precedence.pth)
+      pat="^import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os\.environ\.get\(var, '[a-z]+'\) == 'local'; enabled and __import__\('_distutils_hack'\)\.add_shim\(\);" ;;
+    _virtualenv.pth)
+      pat='^import _virtualenv' ;;
+    __editable__.*.pth)
+      pat='^import __editable___[A-Za-z0-9_]+_finder; __editable___[A-Za-z0-9_]+_finder\.install\(\)' ;;
+    *) return 1 ;;
+  esac
+  ! scv_pth_imports "$1" | LC_ALL=C grep -qvE "${pat}[[:space:]]*\$"
+}
+
+# Which Debian package installed this file. Prints the package. Returns 0 when the
+# file still matches the md5 dpkg recorded, 2 when it does not, 3 when the package
+# lists the file but records no checksum for it, 1 when no package lists it. Reads
+# dpkg's own files, so it runs no package tooling.
+scv_dpkg_owner() {
+  local list sum
+  list=$(grep -lxF -- "$1" "$scv_dpkg_info"/*.list 2>/dev/null | head -n 1)
+  [ -n "$list" ] || return 1
+  list=${list%.list}
+  printf '%s\n' "${list##*/}"
+  sum=$(md5sum "$1" 2>/dev/null) || return 3
+  grep -qxF -- "${sum%% *}  ${1#/}" "$list.md5sums" 2>/dev/null && return 0
+  grep -qF -- "  ${1#/}" "$list.md5sums" 2>/dev/null && return 2
+  return 3
+}
+
+# One hook, classified. Prints "K<TAB>path (why it is recognised)" or
+# "U<TAB>path (who claims it)". $2 is the site directory whose RECORD files may
+# claim it. Control characters in a name are replaced: the name is package-chosen
+# and ends up on a terminal and in a CI log.
+scv_hook_file() {
+  local f=$1 d=$2 kind=U o="" p rel
+  if [ -f "$f" ]; then
+    p=$(scv_dpkg_owner "$f")
+    case $? in
+      0) kind=K; o="$p package, checksum matches" ;;
+      2) o="$p package, changed since it was installed" ;;
+      3) o="$p package, which records no checksum for it" ;;
+    esac
+  fi
+  if [ -z "$o" ]; then
+    case "$f" in *.pth) scv_hook_known "$f" && { kind=K; o="a known tool's generated line"; } ;; esac
+  fi
+  if [ -z "$o" ]; then
+    case "$f" in "$d"/*) rel=${f#"$d"/} ;; *) rel=${f##*/} ;; esac
+    o=$(REL="$rel" awk -F, '$1 == ENVIRON["REL"] || index($1, ENVIRON["REL"] "/") == 1 { print FILENAME; exit }' \
+          "$d"/*.dist-info/RECORD 2>/dev/null)
+    o=${o%.dist-info/RECORD}
+    o=${o##*/}
+  fi
+  f=${f//[[:cntrl:]]/?}
+  o=${o//[[:cntrl:]]/?}
+  printf '%s\t%s (%s)\n' "$kind" "$f" "${o:-claimed by no installed distribution}"
+}
+
+# Every startup hook found, one classified line each.
+scv_startup_hooks() {
+  local d f x
+  {
+    scv_site_dirs | while IFS= read -r d; do
+      for f in "$d"/*.pth; do
+        [ -f "$f" ] && [ -n "$(scv_pth_imports "$f")" ] && scv_hook_file "$f" "$d"
+      done
+      { printf '%s\n' "$d"
+        for f in "$d"/*.pth; do [ -f "$f" ] && scv_pth_paths "$f" "$d"; done
+      } | while IFS= read -r x; do
+        for f in "$x"/sitecustomize "$x"/sitecustomize.* "$x"/usercustomize "$x"/usercustomize.*; do
+          case "$f" in *.pth) continue ;; esac
+          [ -e "$f" ] && scv_hook_file "$f" "$d"
+        done
+      done
+    done
+    printf '%s\n' "${PYTHONPATH:-}" | tr ':' '\n' | while IFS= read -r x; do
+      [ -n "$x" ] && [ -d "$x" ] || continue
+      for f in "$x"/sitecustomize "$x"/sitecustomize.* "$x"/usercustomize "$x"/usercustomize.*; do
+        [ -e "$f" ] && scv_hook_file "$f" "$x"
+      done
+    done
+  } | awk '!seen[$0]++'
+}
+
+# "a; b; c; and N more" from one item per line, on stdin.
+scv_hook_join() {
+  awk 'NR <= 5 { printf "%s%s", (NR > 1 ? "; " : ""), $0 } END { if (NR > 5) printf "; and %d more", NR - 5 }'
+}
+
+scv_dpkg_info=/var/lib/dpkg/info
+scv_hooks=$(scv_startup_hooks)
+scv_hooks_u=$(printf '%s\n' "$scv_hooks" | awk -F'\t' '$1 == "U" { print $2 }')
+scv_hooks_k=$(printf '%s\n' "$scv_hooks" | awk -F'\t' '$1 == "K" { print $2 }')
+if [ -n "$scv_hooks_u" ]; then
+  scv_hook_n=$(printf '%s\n' "$scv_hooks_u" | wc -l | tr -d ' ')
+  scv_hook_list=$(printf '%s\n' "$scv_hooks_u" | scv_hook_join)
+  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
+  row WEAK PRESENT "python startup hooks" \
+    "$scv_hook_n file(s) that run code on every Python start with nothing vouching for them: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
+elif [ -n "$scv_hooks_k" ]; then
+  scv_hook_n=$(printf '%s\n' "$scv_hooks_k" | wc -l | tr -d ' ')
+  row OK PRESENT "python startup hooks" \
+    "$scv_hook_n startup hook file(s), each unchanged from a Debian package or matching a known tool's generated line: $(printf '%s\n' "$scv_hooks_k" | scv_hook_join). That recognises the file named, not the module it imports, and it is not a clean bill for the host"
+fi
+# <<< python startup hooks
 
 # ============================================================ env layer =======
 #
@@ -463,6 +687,7 @@ describe_binary() {
   case "$f" in
     */.asdf/shims/*)                      echo "an asdf shim" ;;
     */mise/shims/*|*/.local/share/mise/*) echo "a mise shim" ;;
+    */fnm_multishells/*|*/.fnm/*|*/fnm/node-versions/*|*/fnm/aliases/*) echo "an fnm shim" ;;
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     */hostedtoolcache/*)                  echo "a toolcache binary — a setup-* step ran AFTER hardening" ;;
@@ -495,10 +720,13 @@ wrapper_ran() {
   local w="$1" probe line
   WRAPPER_RAN_PATH=""
   probe=$(mktemp 2>/dev/null) || return 2
+  # RUSTUP_AUTO_INSTALL=0: one of these tools is cargo, a rustup proxy that
+  # downloads its toolchain to answer --version when it is not installed
+  # (MEASURED: 757 MB). Only rustup reads the variable.
   if have timeout; then
-    SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
   else
-    SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -638,9 +866,33 @@ else
       ''|null|undefined) gap npm.age-gate PARSED "npm age gate" "npm implements min-release-age but reports no value" ;;
       *[!0-9]*)          gap npm.age-gate PARSED "npm age gate" "npm reports non-numeric min-release-age='$v'" ;;
       0)                 gap npm.age-gate PARSED "npm age gate" "min-release-age=0 disables the gate" ;;
-      *)                 row OK  PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)" ;;
+      *)
+        # The env var outranks both npmrc files, so a healthy-looking number can
+        # still be shorter than the window this job declared.
+        nwanth=$(_rec release_age_hours); nwant=""
+        case "$nwanth" in
+          ''|*[!0-9]*) ;;
+          *) nwant=$((nwanth / 24)); [ "$nwant" -lt 1 ] && nwant=1 ;;
+        esac
+        if [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
+          row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this job declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
+        else
+          row OK PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)"
+        fi ;;
     esac
   fi
+fi
+
+# ===================================================== id-token exposure ======
+# GitHub sets this only in a job granted `id-token: write`, and it is granted per
+# job, so anything executing in this job can mint an OIDC token. That is how the
+# TanStack compromise (May 2026) published without stealing a single npm token: a
+# poisoned cache ran in the release job, read the token out of Runner.Worker and
+# posted straight to the registry. WEAK, not GAP: the permission can be legitimate,
+# and no setting here changes it. No row when it is absent, which is the good case.
+if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+  row WEAK PARSED "ci id-token exposure" \
+    "this job can mint OIDC tokens (id-token: write), so any package that executes here can too. If it publishes, install in one job and publish from a separate, gated one"
 fi
 
 # ============================================================ pip ============

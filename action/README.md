@@ -7,9 +7,11 @@ Block malicious package installs in your CI workflow at the package-manager laye
 Before your workflow runs any package install (`npm install`, `pnpm install`, `pip install`, `uv pip install`, `yarn install`, `bun install`, `cargo build`, `go get`, `composer install`, `bundle install`, `mvn`, `gradle`, `dotnet restore`), this action configures the runner so that:
 
 - **Lifecycle scripts are blocked** (`ignore-scripts=true` for npm/pnpm/bun, `enableScripts=false` for yarn, `--no-scripts` wrapper for composer, sdist refusal for pip via `only-binary=:all:`). Defeats the `preinstall`/`postinstall`/`setup.py`/`post-install-cmd` attack class — the same vector used in the May 2026 AntV / Shai-Hulud npm compromise, the March 2026 LiteLLM PyPI incident, and BufferZoneCorp.
-- **Fresh packages are refused** (`min-release-age` / `minimumReleaseAge` / `exclude-newer` / `npmMinimalAgeGate` / `--minimum-dependency-age`). Default: 48 hours. The 2026 AntV attack was live for ~1 hour before yank; a 48h gate would have blocked every malicious version.
+- **Fresh packages are refused** (`min-release-age` / `minimumReleaseAge` / `exclude-newer` / `npmMinimalAgeGate` / `--minimum-dependency-age` / `policy.cooldown` / `BUNDLE_COOLDOWN`). Default: 48 hours. The 2026 AntV attack was live for ~1 hour before yank; a 48h gate would have blocked every malicious version.
 
   > **npm needs 11.10.0+ for its half of this.** GitHub's `ubuntu-24.04` runners ship **npm 10.9.8**, which accepts `min-release-age`, echoes it back from `npm config get`, and enforces nothing. If you rely on the npm age gate, add `actions/setup-node` with Node 24 (or `npm i -g npm@latest`) *before* this action. `action/verify.sh` reports the inert case as a GAP. Every other ecosystem's age gate is unaffected.
+
+  > **Composer needs 2.11.0+ and Bundler needs 4.0.13+ for theirs.** Below that the key is written, ignored, and echoed back. `action/verify.sh` reports it as a GAP in the toolchain class, so `fail-on: config` does not fail the job, but the default `fail-on: any` does. See [docs/composer-bundler-cooldown-by-distro.md](../docs/composer-bundler-cooldown-by-distro.md).
 - **`bun run` runtime auto-install is blocked.** bun's `auto = "disable"` config doesn't work for `bun run` (bun's global bunfig isn't read by that code path). The action deploys a PATH wrapper at `/usr/local/bin/bun` that injects `--no-install` — closes the typosquat-via-runtime-auto-install vector.
 - **`bunx` fetch-and-execute is blocked.** `bunx <pkg>` downloads a package from npm and runs it in one step. It is a *separate entry point* from `bun`, so wrapping the bun binary does not cover it and the global `~/.bunfig.toml` never applies to it. A wrapper injects `--no-install`, which fails closed: `bunx` will only run a tool that is already installed.
 - **Cargo resolution is publish-age gated.** Cargo runs `build.rs` and proc-macro code at *compile* time with your privileges, before any of your code is called, and has no `--ignore-scripts` equivalent — so refusing to *resolve* a too-new version is the only control that prevents execution. A `cooldown.toml` sets the window and a `cargo` wrapper injects `--locked`. Enforcement of the age gate needs the `cargo-cooldown` backend (`install_cargo_cooldown: true`); without it you still get `--locked`.
@@ -187,7 +189,7 @@ this action.
 
 Socket Firewall starts a local filtering proxy and the action wraps `npm` and
 `npx` to route fetches through it; `cargo` goes through the same proxy via
-`cargo_socket_firewall` (on by default, and a no-op when intel is off). A
+`cargo_socket_firewall` (follows `intel` unless set explicitly). A
 flagged package is refused:
 
 ```
@@ -512,7 +514,10 @@ Example consumption:
 
 ## What this action does NOT do
 
-- **Doesn't replace [step-security/harden-runner](https://github.com/step-security/harden-runner).** That action does *network* egress filtering. This action does *package manager* hardening. They're complementary — use both for layered defense.
+- **Doesn't replace [step-security/harden-runner](https://github.com/step-security/harden-runner).** That action does *network* egress filtering. This action does *package manager* hardening. They're complementary — use both for layered defense. Neither is a boundary against code that already runs in the job: on a hosted runner it has sudo, and the `strutil-core` worm (November 2026) disables harden-runner, adds a `NOPASSWD` sudoers entry and reads runner memory.
+- **Doesn't protect a job's OIDC token.** `id-token: write` is granted per job, so anything that executes there can mint a token, which is how TanStack (May 2026) was published from with no npm token stolen. Install in one job and publish from a separate, gated one. `action/verify.sh` prints a WEAK `ci id-token exposure` row when a job holds the permission.
+- **Doesn't audit which secrets a pushed branch can read.** A stolen token with push access can commit a workflow to a throwaway branch, and it runs with every secret the repository can use that isn't scoped to a protected environment. That is how Shai-Hulud exfiltrated them. Keep publish and deploy credentials in an environment with required reviewers or a deployment-branch rule, and prefer OIDC or trusted publishing to stored tokens. An audit here would only limit damage after a token is stolen, and a job's `GITHUB_TOKEN` cannot list secrets anyway.
+- **Doesn't remove sudo.** A later step can use the runner's passwordless sudo to undo what this action configured. Taking sudo away is anti-tamper, which this project leaves out of scope, and it breaks any later `sudo apt-get`. If you want it gone, harden-runner's `disable-sudo-and-containers` input does that (its older `disable-sudo` is deprecated).
 - **Doesn't scan your workflow files** the way [zizmor](https://github.com/woodruffw/zizmor) does. That's a static-analysis tool for the workflow YAML itself; this action is a runtime defense against package-manager attacks.
 - **Doesn't install language runtimes.** It assumes Node/Python/Ruby/PHP/etc. are already installed (typically via `actions/setup-node`, `actions/setup-python`, `ruby/setup-ruby`, etc.). The action configures whatever's there.
 - **Doesn't fix existing lockfiles.** If `package-lock.json` already pins to a known-malicious version, the install will still attempt it (and the age gate may reject; lifecycle scripts won't run). Combine with a dependency-audit step for full coverage.

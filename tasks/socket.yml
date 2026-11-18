@@ -23,7 +23,7 @@
           exit 0
         fi
       done
-      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm; do
+      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
         if [ -x "$p" ]; then
           echo "$p"
           exit 0
@@ -48,6 +48,36 @@
   failed_when: false
   when: npm_for_socket.rc == 0
 
+- name: Check that root can run npm (a per-user Node is invisible to become)
+  # The install below runs `npm install -g` as root, and root's PATH is sudo's
+  # secure_path, not the user's shell. On a host whose only Node is per-user
+  # (fnm, nvm, volta, asdf) the detection above finds the user's npm but root
+  # cannot run it (MEASURED on fnm: not found under sudo), so the install failed
+  # and was recorded as "install failed", which sends the reader after the wrong
+  # problem. Running the user's npm as root is not the fix: root would execute
+  # files the user can edit. Skip the install and say why instead.
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      # Found by root AND owned by root. Where sudoers sets no secure_path, root
+      # keeps the applying user's PATH and finds the per-user npm after all;
+      # running that as root would execute files the user can edit.
+      npm_path=$(command -v npm) || exit 1
+      for p in "$npm_path" "$(command -v node)"; do
+        [ -n "$p" ] || continue
+        real=$(readlink -f "$p")
+        [ "$(stat -c %u "$real" 2>/dev/null)" = 0 ] || { echo "$real"; exit 3; }
+      done
+    executable: /bin/bash
+  register: npm_root_for_socket
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - sfw_check.rc != 0
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+
 - name: Install Socket Firewall Free via npm (requires Node >= 20)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and
@@ -66,6 +96,7 @@
     - sfw_check.rc != 0
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+    - npm_root_for_socket.rc | default(1) == 0
   changed_when: true
   register: sfw_install
   failed_when: false
@@ -105,6 +136,11 @@
       # "exit 0" with no reason. Surface both: stdout still ends in ok/broken for
       # the recorder, the diagnostic goes to stderr, and the shell exits with
       # sfw's real code so `sfw_warm.rc` is truthful.
+      # Nothing to warm when root cannot see sfw: the install was skipped or
+      # failed (each has its own record), or sfw exists only on the applying
+      # user's PATH. Carrying on recorded "installed, but its runtime binary could
+      # not be fetched from GitHub (exit 127)" for an sfw root never had.
+      command -v sfw >/dev/null 2>&1 || { echo absent; exit 0; }
       if out=$(timeout 120 sfw /bin/true 2>&1); then
         echo ok
       else
@@ -142,6 +178,15 @@
   when:
     - sfw_install is defined
     - sfw_install.rc | default(0) != 0
+
+- name: Record skipped protection — Socket Firewall (npm is per-user)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — not installed: ' ~ (('root would run ' ~ (npm_root_for_socket.stdout | trim) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), and the role does not run a user-writable program as root') if npm_root_for_socket.rc == 3 else ('the only npm found is ' ~ (npm_for_socket.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf)')) ~ '. sfw installs system-wide, so it needs a system-wide Node; while the version manager stays first on PATH the npm wrapper is shadowed anyway (docs/limitations.md). npm installs are not threat-intel filtered.'] }}
+  when:
+    - npm_root_for_socket is defined
+    - npm_root_for_socket.rc is defined
+    - npm_root_for_socket.rc != 0
 
 - name: Warn if Node too old for Socket Firewall
   ansible.builtin.debug:
@@ -196,7 +241,7 @@
           exit 0
         fi
       done
-      for p in "$HOME"/.local/share/fnm/node-versions/*/installation/bin/sfw; do
+      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/sfw "$HOME"/.local/share/fnm/node-versions/*/installation/bin/sfw "$HOME"/.fnm/node-versions/*/installation/bin/sfw; do
         if [ -x "$p" ]; then
           echo "$p"
           exit 0
@@ -230,6 +275,8 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
     - preflight_invoking_user.stdout | default('') | length > 0
+    # Otherwise this creates an empty root-owned sfw tree on a host with no sfw.
+    - npm_root_for_socket.rc | default(0) == 0
 
 # --- npm PATH wrapper (opt-in via npm_path_wrapper) ---
 # Without this, sfw is installed but never invoked except by callers who

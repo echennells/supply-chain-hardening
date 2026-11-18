@@ -1,0 +1,115 @@
+#!/bin/sh
+# supply-chain-age-gate-refresh — Managed by ansible-supply-chain-security.
+#
+# Advances the uv exclude-newer and pip uploaded-prior-to cutoffs to
+# (now - {{ release_age_hours | int }}h), rounded down to midnight UTC: the
+# same formula the role renders at apply time (defaults/main.yml,
+# uv_exclude_newer), so a re-apply on the same day changes nothing.
+# Run by supply-chain-age-gate-refresh.timer.
+#
+# WHY. Both cutoffs are ABSOLUTE instants, because the relative forms are a
+# hard error on older pip and uv (see age_gate_refresh in defaults/main.yml).
+# Left alone, an unattended host drifts into a freeze that refuses every
+# release since the last apply, security fixes included.
+#
+# WHAT IT TOUCHES. Only the role's own cutoff line in each file, matched in
+# the exact shape the role renders. These files are role-managed: a re-apply
+# overwrites a hand edit, and this overwrites a hand-edited cutoff VALUE the
+# same way (every rewrite is logged as old -> new). To hold a cutoff still,
+# pin uv_exclude_newer / pip_uploaded_prior_to and re-apply, or
+# `systemctl disable --now supply-chain-age-gate-refresh.timer`. A file whose
+# cutoff line is missing or duplicated, a symlink, or a missing file is left
+# alone and reported. Each write is atomic (temp file in the same directory,
+# then rename) and keeps the file's owner and mode.
+#
+#   --system   /etc/uv/uv.toml, /etc/pip.conf, /etc/profile.d (root only)
+#   --user     {{ ansible_user_id }}'s uv.toml and pip.conf (that uid only)
+#
+# With no argument: everything the caller may do. As root that is --system,
+# plus --user when root is the deploying user; as {{ ansible_user_id }}, --user.
+#
+# The PIP_UPLOADED_PRIOR_TO env var outranks pip.conf, and a shell that is
+# already open keeps the value it logged in with. New logins get the
+# advanced one.
+set -eu
+
+me=supply-chain-age-gate-refresh
+hours={{ release_age_hours | int }}
+deploy_uid={{ ansible_user_uid | int }}
+cut=$(date -u -d "@$(( $(date -u +%s) - hours * 3600 ))" +%Y-%m-%dT00:00:00Z)
+case "$cut" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T00:00:00Z) ;;
+  *) echo "$me: refusing to write a malformed cutoff '$cut'" >&2; exit 1 ;;
+esac
+
+ts='[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9:.]*Z'
+tmp=""
+trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT
+
+advance() { # advance <file> <line-regex> <replacement-line>
+  f=$1; re=$2; new=$3
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  if [ -L "$f" ] || [ ! -f "$f" ]; then
+    echo "$me: $f is not a regular file; left alone" >&2
+    return 0
+  fi
+  n=$(grep -c "$re" "$f" || true)
+  if [ "$n" != 1 ]; then
+    echo "$me: $f has $n role-shaped cutoff lines, expected 1; left alone" >&2
+    return 0
+  fi
+  grep -qxF "$new" "$f" && return 0
+  old=$(grep "$re" "$f" | sed 's/^[^0-9]*//; s/"$//')
+  tmp=$(mktemp "$f.XXXXXX")
+  sed "/$re/s|.*|$new|" "$f" > "$tmp"
+  chmod --reference="$f" "$tmp"
+  if [ "$(id -u)" = 0 ]; then chown --reference="$f" "$tmp"; fi
+  mv -f "$tmp" "$f"
+  tmp=""
+  echo "$me: $f: $old -> $cut"
+}
+
+mode=${1:-}
+if [ -z "$mode" ]; then
+  if [ "$(id -u)" != 0 ]; then
+    mode=--user
+  elif [ "$deploy_uid" = 0 ]; then
+    "$0" --system && exec "$0" --user
+  else
+    mode=--system
+  fi
+fi
+
+case "$mode" in
+  --system)
+    if [ "$(id -u)" != 0 ]; then
+      echo "$me: --system rewrites files under /etc and needs root" >&2
+      exit 1
+    fi
+{% if sch_refresh_uv | bool %}
+    advance /etc/uv/uv.toml "^exclude-newer = \"$ts\"\$" "exclude-newer = \"$cut\""
+{% endif %}
+{% if sch_refresh_pip | bool %}
+    advance /etc/pip.conf "^uploaded-prior-to = $ts\$" "uploaded-prior-to = $cut"
+    advance /etc/profile.d/supply-chain-hardening.sh "^export PIP_UPLOADED_PRIOR_TO=$ts\$" "export PIP_UPLOADED_PRIOR_TO=$cut"
+{% endif %}
+    ;;
+  --user)
+    # Never as anyone else: root writing into a user-owned directory is a
+    # symlink race, and another user's files are not ours to advance.
+    if [ "$(id -u)" != "$deploy_uid" ]; then
+      echo "$me: --user rewrites {{ ansible_user_id }}'s files and must run as uid $deploy_uid" >&2
+      exit 1
+    fi
+{% if sch_refresh_uv | bool %}
+    advance {{ ((uv_config_dir | default(ansible_env.HOME ~ '/.config/uv')) ~ '/uv.toml') | quote }} "^exclude-newer = \"$ts\"\$" "exclude-newer = \"$cut\""
+{% endif %}
+{% if sch_refresh_pip | bool %}
+    advance {{ (ansible_env.HOME ~ '/.config/pip/pip.conf') | quote }} "^uploaded-prior-to = $ts\$" "uploaded-prior-to = $cut"
+{% endif %}
+    ;;
+  *)
+    echo "usage: $me [--system|--user]" >&2
+    exit 2
+    ;;
+esac

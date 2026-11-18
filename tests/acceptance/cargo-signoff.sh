@@ -88,52 +88,66 @@ hdr "2. EFFICACY — the gate must refuse a too-new version, BY NAME"
 # ---------------------------------------------------------------------------
 # Window wide enough that every crate on crates.io violates it, and NO lockfile,
 # so this is a fresh resolution — the case the gate exists for.
-CH="${CARGO_HOME:-$HOME/.cargo}"
-cp "$CH/cooldown.toml" /tmp/cooldown.bak
-sed -i 's/^global-min-publish-age = .*/global-min-publish-age = "99999 days"/' "$CH/cooldown.toml"
-mkproj
-rm -f Cargo.lock
-out=$(timeout 900 cargo build 2>&1); rc=$?
-
-# A refusal only counts if the gate names it. Infrastructure failures — a
-# missing binary, a loader error, a network fault — must NOT read as enforcement.
-if printf '%s' "$out" | grep -qiE 'GLIBC|error while loading shared|unknown proxy name|No such file|syntax error|command not found'; then
-  bad "build failed for INFRASTRUCTURE reasons, not the gate"
-  eviden "$(printf '%s' "$out" | grep -iE 'GLIBC|loading shared|unknown proxy' | head -1)"
-elif [ "$rc" -eq 0 ]; then
-  bad "build SUCCEEDED under a 99999-day window — the gate is not enforcing"
-  eviden "exit 0; lockfile: $(grep -A1 'name = "arrayref"' Cargo.lock 2>/dev/null | grep version | tr -d ' ')"
-elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
-  ok "fresh resolution REFUSED by the gate (exit $rc)"
-  eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh versions|publish.?age' | head -1 | cut -c1-150)"
+#
+# Widened IN THE WRAPPER, not in $CARGO_HOME/cooldown.toml. The wrapper exports
+# cargo-cooldown's environment layer itself, and that outranks every
+# cooldown.toml (it has to: a repo-committed one could otherwise zero the
+# window), so a cooldown.toml edit changes nothing and the build runs under the
+# role's real 48h window, which a long-published crate passes. If the wrapper no
+# longer carries both pins, say so rather than measure the wrong window.
+W=$(command -v cargo)
+cp "$W" /tmp/cargo-wrapper.bak
+sed -i -e 's/^\([[:space:]]*export COOLDOWN_MINUTES=\).*/\1143998560/' \
+       -e 's/^\([[:space:]]*export CARGO_REGISTRY_MIN_PUBLISH_AGE=\).*/\1"2399976 hours"/' "$W"
+npins=$(grep -cE '^[[:space:]]*export (COOLDOWN_MINUTES=143998560|CARGO_REGISTRY_MIN_PUBLISH_AGE="2399976 hours")$' "$W")
+if [ "$npins" -ne 2 ]; then
+  bad "could not widen the window: found $npins of the 2 window pins in the wrapper at $W"
+  eviden "update this script together with templates/cargo-wrapper.sh.j2"
 else
-  bad "build failed, but not with a gate message (exit $rc)"
-  eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
+  mkproj
+  rm -f Cargo.lock
+  out=$(timeout 900 cargo build 2>&1); rc=$?
+
+  # A refusal only counts if the gate names it. Infrastructure failures — a
+  # missing binary, a loader error, a network fault — must NOT read as enforcement.
+  if printf '%s' "$out" | grep -qiE 'GLIBC|error while loading shared|unknown proxy name|No such file|syntax error|command not found'; then
+    bad "build failed for INFRASTRUCTURE reasons, not the gate"
+    eviden "$(printf '%s' "$out" | grep -iE 'GLIBC|loading shared|unknown proxy' | head -1)"
+  elif [ "$rc" -eq 0 ]; then
+    bad "build SUCCEEDED under a 99999-day window — the gate is not enforcing"
+    eviden "exit 0; lockfile: $(grep -A1 'name = "arrayref"' Cargo.lock 2>/dev/null | grep version | tr -d ' ')"
+  elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
+    ok "fresh resolution REFUSED by the gate (exit $rc)"
+    eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh versions|publish.?age' | head -1 | cut -c1-150)"
+  else
+    bad "build failed, but not with a gate message (exit $rc)"
+    eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
+  fi
+
+  [ -f Cargo.lock ] && bad "a lockfile was written despite the refusal" \
+                    || ok "nothing written on refusal (prior state preserved)"
+
+  # A global flag before the subcommand must NOT bypass the gate. This was a
+  # real, silent, total bypass: `cargo -q build` matched no case, fell through
+  # with no controls and no warning, while the verifier reported OK.
+  rm -f Cargo.lock; rm -rf target
+  out=$(timeout 900 cargo -q build 2>&1); rc=$?
+  if printf '%s' "$out" | grep -qiE 'GLIBC|loading shared|unknown proxy name|syntax error'; then
+    bad "'cargo -q build' failed for INFRASTRUCTURE reasons, not the gate"
+    eviden "$(printf '%s' "$out" | head -1 | cut -c1-150)"
+  elif [ "$rc" -eq 0 ]; then
+    bad "'cargo -q build' SUCCEEDED under a 99999-day window — a leading flag bypasses the gate"
+    eviden "exit 0 while bare 'cargo build' was refused"
+  elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
+    ok "'cargo -q build' is gated identically to 'cargo build'"
+    eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh|publish.?age' | head -1 | cut -c1-130)"
+  else
+    bad "'cargo -q build' failed, but not with a gate message (exit \$rc)"
+    eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
+  fi
 fi
 
-[ -f Cargo.lock ] && bad "a lockfile was written despite the refusal" \
-                  || ok "nothing written on refusal (prior state preserved)"
-
-# A global flag before the subcommand must NOT bypass the gate. This was a
-# real, silent, total bypass: `cargo -q build` matched no case, fell through
-# with no controls and no warning, while the verifier reported OK.
-rm -f Cargo.lock; rm -rf target
-out=$(timeout 900 cargo -q build 2>&1); rc=$?
-if printf '%s' "$out" | grep -qiE 'GLIBC|loading shared|unknown proxy name|syntax error'; then
-  bad "'cargo -q build' failed for INFRASTRUCTURE reasons, not the gate"
-  eviden "$(printf '%s' "$out" | head -1 | cut -c1-150)"
-elif [ "$rc" -eq 0 ]; then
-  bad "'cargo -q build' SUCCEEDED under a 99999-day window — a leading flag bypasses the gate"
-  eviden "exit 0 while bare 'cargo build' was refused"
-elif printf '%s' "$out" | grep -qiE 'publish.?age|blocked fresh versions'; then
-  ok "'cargo -q build' is gated identically to 'cargo build'"
-  eviden "$(printf '%s' "$out" | grep -iE 'blocked fresh|publish.?age' | head -1 | cut -c1-130)"
-else
-  bad "'cargo -q build' failed, but not with a gate message (exit \$rc)"
-  eviden "$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-150)"
-fi
-
-cp /tmp/cooldown.bak "$CH/cooldown.toml"
+cp /tmp/cargo-wrapper.bak "$W"
 
 # ---------------------------------------------------------------------------
 hdr "3. RESILIENCE — the gate survives a rustup-style clobber"

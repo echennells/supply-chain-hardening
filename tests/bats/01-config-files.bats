@@ -233,8 +233,20 @@ load setup
   assert_file_contains "$HOME/.bundle/config" 'BUNDLE_FROZEN: "true"'
 }
 
-@test "bundler: BUNDLE_DEPLOYMENT true" {
-  assert_file_contains "$HOME/.bundle/config" 'BUNDLE_DEPLOYMENT: "true"'
+@test "bundler: BUNDLE_COOLDOWN is the 48h gate in days" {
+  assert_file_contains "$HOME/.bundle/config" 'BUNDLE_COOLDOWN: "2"'
+}
+
+@test "bundler: BUNDLE_DEPLOYMENT is not set (redundant with frozen, and it moves every install)" {
+  ! grep -q 'BUNDLE_DEPLOYMENT' "$HOME/.bundle/config"
+}
+
+@test "bundler: checksum validation is pinned on" {
+  assert_file_contains "$HOME/.bundle/config" 'BUNDLE_DISABLE_CHECKSUM_VALIDATION: "false"'
+}
+
+@test "poetry: the 48h gate is in days" {
+  assert_file_contains "$HOME/.config/pypoetry/config.toml" 'min-release-age = 2'
 }
 
 # system-wide /etc fallbacks (close the sudo / other-user gap where $HOME

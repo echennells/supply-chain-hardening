@@ -1,0 +1,125 @@
+---
+# Keep uv exclude-newer and pip uploaded-prior-to ROLLING. Both are absolute
+# instants rendered at apply time; see age_gate_refresh in defaults/main.yml
+# for why this is a timer rather than a relative cutoff.
+
+- name: Decide which cutoffs roll
+  # `rolling` is the explicit default; any other value is a pin and is never
+  # advanced. Deciding from the value, not by comparing it with today's
+  # cutoff, is what lets an operator pin the gate exactly where it stands.
+  ansible.builtin.set_fact:
+    sch_refresh_uv: >-
+      {{ (age_gate_refresh | bool) and ansible_system == 'Linux'
+         and uv_exclude_newer == 'rolling' }}
+    sch_refresh_pip: >-
+      {{ (age_gate_refresh | bool) and ansible_system == 'Linux'
+         and (pip_age_gate | bool) and pip_uploaded_prior_to == 'rolling' }}
+
+- name: Detect systemd (the refresh timer needs a running systemd)
+  ansible.builtin.stat:
+    path: /run/systemd/system
+  register: sch_systemd_present
+
+- name: Deploy the age-gate refresher
+  become: true
+  ansible.builtin.template:
+    src: age-gate-refresh.sh.j2
+    dest: /usr/local/sbin/supply-chain-age-gate-refresh
+    owner: root
+    group: root
+    mode: "0755"
+  when: sch_refresh_uv | bool or sch_refresh_pip | bool
+
+- name: Deploy the refresh service and timer
+  become: true
+  ansible.builtin.template:
+    src: "age-gate-refresh.{{ item }}.j2"
+    dest: "/etc/systemd/system/supply-chain-age-gate-refresh.{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: [service, timer]
+  register: sch_refresh_units
+  when:
+    - sch_refresh_uv | bool or sch_refresh_pip | bool
+    - sch_systemd_present.stat.exists
+
+- name: Enable and start the refresh timer
+  # Not under --check when the units are new: check mode wrote no unit file,
+  # and the systemd module fails a unit it cannot find rather than reporting
+  # what it would do (ansible-core 2.14-2.21, module_utils/service.py
+  # fail_if_missing), which aborted the whole dry run on every systemd host
+  # that did not have the timer yet.
+  become: true
+  ansible.builtin.systemd:
+    name: supply-chain-age-gate-refresh.timer
+    enabled: true
+    state: started
+    daemon_reload: "{{ sch_refresh_units is changed }}"
+  when:
+    - sch_refresh_uv | bool or sch_refresh_pip | bool
+    - sch_systemd_present.stat.exists
+    - not (ansible_check_mode and sch_refresh_units is changed)
+
+# Turning the refresh off, or pinning both cutoffs, must also stop a timer an
+# earlier apply installed: a leftover timer would keep advancing a gate the
+# operator now expects to hold still.
+- name: Stop and disable the refresh timer when nothing rolls
+  become: true
+  ansible.builtin.systemd:
+    name: supply-chain-age-gate-refresh.timer
+    enabled: false
+    state: stopped
+  failed_when: false
+  when:
+    - not (sch_refresh_uv | bool or sch_refresh_pip | bool)
+    - sch_systemd_present.stat.exists
+
+- name: Remove the refresher when nothing rolls
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/supply-chain-age-gate-refresh.timer
+    - /etc/systemd/system/supply-chain-age-gate-refresh.service
+    - /usr/local/sbin/supply-chain-age-gate-refresh
+  register: sch_refresh_removed
+  when: not (sch_refresh_uv | bool or sch_refresh_pip | bool)
+
+- name: Reload systemd after removing the refresh units
+  become: true
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - sch_refresh_removed is changed
+    - sch_systemd_present.stat.exists
+
+- name: Record skipped protection — age-gate refresh needs systemd
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['age-gate refresh — no running
+         systemd on this host, so the uv exclude-newer / pip uploaded-prior-to
+         cutoff stays frozen at ' ~ sch_uv_cutoff ~ ' until the role is
+         re-applied, and drifts one day further behind every day. The refresher
+         is deployed: ' ~ ('add `/usr/local/sbin/supply-chain-age-gate-refresh` to
+         root''s crontab (run as root with no argument it advances both the /etc
+         files and root''s own uv.toml and pip.conf)' if ansible_user_uid | int == 0
+         else 'run `/usr/local/sbin/supply-chain-age-gate-refresh` from root''s crontab
+         and `/usr/local/sbin/supply-chain-age-gate-refresh --user` from ' ~
+         ansible_user_id ~ '''s') ~ ' every few hours to keep the gate rolling.'] }}
+  when:
+    - sch_refresh_uv | bool or sch_refresh_pip | bool
+    - not sch_systemd_present.stat.exists
+
+- name: Record skipped protection — age-gate refresh is Linux-only
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['age-gate refresh — not implemented
+         on ' ~ ansible_system ~ ', so the uv exclude-newer / pip uploaded-prior-to
+         cutoff stays frozen at apply time and drifts one day further behind every
+         day until the role is re-applied.'] }}
+  when:
+    - age_gate_refresh | bool
+    - ansible_system != 'Linux'
+    - uv_exclude_newer == 'rolling' or (pip_age_gate | bool and pip_uploaded_prior_to == 'rolling')

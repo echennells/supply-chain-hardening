@@ -52,6 +52,17 @@ setup() {
   [[ "$output" != *"--no-install"* ]]
 }
 
+@test "bun: a metadata flag in FRONT of more arguments still gets --no-install" {
+  # MEASURED on bun 1.4.4: `bun --version x cowsay hi` ignores the flag and
+  # fetch-and-executes cowsay. Only the bare flag may skip --no-install.
+  stub_bin bun
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run "$TEST_BIN/bun" --version x cowsay hi
+  [[ "$output" == *"--no-install --version x cowsay hi"* ]]
+  run "$TEST_BIN/bun" --version
+  [[ "$output" != *"--no-install"* ]]
+}
+
 @test "bun: re-running the action does not wrap the wrapper" {
   stub_bin bun
   harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
@@ -148,6 +159,18 @@ setup() {
   [[ "$output" != *"--no-install"* ]]
 }
 
+@test "bunx: a metadata flag in FRONT of a package still gets --no-install" {
+  # MEASURED on bun 1.4.3 and 1.4.4: `bunx --version cowsay hi` ignores the
+  # flag and fetch-and-executes cowsay. Passing a leading metadata flag through
+  # untouched made that a one-flag bypass; only the bare flag may skip it.
+  stub_bin bun
+  stub_bin bunx
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run "$TEST_BIN/bunx" --version cowsay hi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--no-install --version cowsay hi"* ]]
+}
+
 @test "bunx: refuses to recurse when the real bun is gone" {
   stub_bin bun
   stub_bin bunx
@@ -156,6 +179,44 @@ setup() {
   run -127 "$TEST_BIN/bunx" cowsay
   [ "$status" -eq 127 ]
   [[ "$output" == *"refusing to recurse"* ]]
+}
+
+@test "bunx: writing the wrapper executes nothing its comments mention" {
+  # The wrapper body is an unquoted heredoc. A backticked `bunx --version
+  # cowsay hi` in its comments once ran at harden time against whatever bunx
+  # was next on PATH, and an unwrapped one fetch-and-executes cowsay.
+  stub_bin bun
+  stub_bin bunx
+  mkdir -p "$BATS_TEST_TMPDIR/later"
+  printf '#!/bin/bash\necho "$*" >> "%s/ran"\n' "$BATS_TEST_TMPDIR" > "$BATS_TEST_TMPDIR/later/bunx"
+  chmod +x "$BATS_TEST_TMPDIR/later/bunx"
+  harden PATH="${TEST_BIN}:${BATS_TEST_TMPDIR}/later:${PATH}" ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  [ ! -e "$BATS_TEST_TMPDIR/ran" ]
+}
+
+@test "no wrapper heredoc expands a command while harden writes it" {
+  run python3 "${BATS_TEST_DIRNAME}/heredoc-scan.py" "$HARDEN_SH"
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "the heredoc scan actually catches a command in an unquoted body" {
+  # A checker that cannot fail is worse than none — it reads as coverage.
+  cat > "$BATS_TEST_TMPDIR/h.sh" <<'FIXTURE'
+cat <<EOF
+# runs: `date`
+EOF
+cat <<'EOF'
+# quoted delimiter, stays text: `date` $(date)
+EOF
+cat <<EOF
+# escaped, stays text: \`date\` \$(date)
+EOF
+FIXTURE
+  run python3 "${BATS_TEST_DIRNAME}/heredoc-scan.py" "$BATS_TEST_TMPDIR/h.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"h.sh:2:"* ]]
+  [ "$(printf '%s\n' "$output" | grep -c 'expands at write time')" -eq 1 ]
 }
 
 @test "bunx-as-symlink: wrapping it does not clobber the bun wrapper" {
@@ -285,6 +346,54 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
   [[ "$output" == *"ARGS=[build]"* ]]
 }
 
+# A stub cargo that reports the cooldown environment it was handed, plus a
+# cargo-cooldown where harden.sh looks for one, so builds route through it.
+cooldown_stubs() {
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+}
+
+@test "cargo-cooldown: the crates.io window, clock and skip list are pinned over the caller's" {
+  # Each has a cooldown.toml form a committed repo file can set
+  # ([registry] min-publish-age, now, skip_registries), and MEASURED on
+  # cargo-cooldown 0.3.5 each built a fresh crate until the environment, which
+  # outranks every file, was pinned.
+  cooldown_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && CARGO_REGISTRY_MIN_PUBLISH_AGE=0 COOLDOWN_NOW=2099-01-01T00:00:00Z COOLDOWN_SKIP_REGISTRIES=crates-io '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" == *"MIN=2880 "* ]]
+  [[ "$output" == *"CRATES=48 hours "* ]]
+  [[ "$output" == *"SKIP=[]"* ]]
+  [[ "$output" != *"NOW=2099"* ]]
+}
+
+@test "cargo-cooldown: a per-registry window under a name bash cannot unset is refused" {
+  cooldown_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && env 'CARGO_REGISTRIES_my-reg_MIN_PUBLISH_AGE=0' '$TEST_BIN/cargo' build"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"non-identifier name"* ]]
+  [[ "$output" != *"STUB:cargo"* ]]
+}
+
+@test "cargo: a HARDLINKED rustup proxy gets an argv[0] shim, not a plain rename" {
+  # RUSTUP_HARDLINK_PROXIES (and older rustup) make cargo a hardlink to rustup,
+  # not a symlink. A plain rename leaves a file named cargo-real that rustup
+  # rejects as an unknown proxy (MEASURED: every routed build failed).
+  stub_bin rustup 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:rustup ARGS=[$*]";; esac'
+  ln "$TEST_BIN/rustup" "$TEST_BIN/cargo"
+  cp "$TEST_BIN/rustup" "$BATS_TEST_TMPDIR/rustup.orig"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  # The shim names the RESOLVED path. On macOS $TMPDIR is under /var, a symlink
+  # to /private/var, so the unresolved $TEST_BIN never matches there.
+  assert_file_contains "$TEST_BIN/cargo-real" "exec -a cargo \"$(cd "$TEST_BIN" && pwd -P)/rustup\""
+  # And nothing was written into the shared inode.
+  cmp -s "$TEST_BIN/rustup" "$BATS_TEST_TMPDIR/rustup.orig"
+}
+
 @test "cargo: refuses to recurse when the real binary is gone" {
   stub_bin cargo
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
@@ -314,6 +423,41 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
   [[ "$output" != *"--no-plugins"* ]]
 }
 
+@test "composer: the wrapper pins the publish-age window against the caller's env" {
+  stub_bin composer 'case "${1:-}" in
+  --version) echo "Composer version 2.11.1 2026-10-01 00:00:00" ;;
+  *) echo "PERIOD=$COMPOSER_POLICY_COOLDOWN_PERIOD BLOCK=$COMPOSER_POLICY_COOLDOWN_BLOCK" ;;
+esac'
+  harden ECOSYSTEMS=composer RELEASE_AGE_HOURS=72 -- --emit=plain >/dev/null
+  COMPOSER_POLICY_COOLDOWN_PERIOD=60 COMPOSER_POLICY_COOLDOWN_BLOCK=0 run "$TEST_BIN/composer" install
+  [[ "$output" == *"PERIOD=259200 BLOCK=1"* ]]
+}
+
+@test "composer: config also lands in the home composer really reads" {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *'config --global home'*) echo '$TEST_HOME/.composer' ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cmp "$TEST_HOME/.config/composer/config.json" "$TEST_HOME/.composer/config.json"
+}
+
+@test "composer: config.json stays valid JSON with the policy block on every audit tier" {
+  # The audit block changes shape at 2.7 and 2.9, and the comma before "policy"
+  # is written by a different branch on each side of that.
+  local v
+  for v in 2.2.6 2.7.1 2.9.5 2.11.1; do
+    stub_bin composer "echo 'Composer version $v 2026-01-01 00:00:00'"
+    harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+    run node -e '
+      const c = JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).config;
+      process.exit(c.policy.cooldown.period === 172800 ? 0 : 1);
+    ' "$TEST_HOME/.config/composer/config.json"
+    [ "$status" -eq 0 ] || { echo "composer $v wrote invalid config" >&2; return 1; }
+  done
+}
+
 # --- cargo <-> socket firewall ---------------------------------------------
 
 cargo_sfw_stubs() {
@@ -325,8 +469,9 @@ cargo_sfw_stubs() {
 @test "cargo+sfw: registry-touching commands are routed through sfw" {
   # The role defaults cargo_socket_firewall on; the action had no equivalent,
   # so cargo was the one ecosystem where installing sfw bought nothing.
+  # Explicit true: an sfw installed by an earlier step, not by intel.
   cargo_sfw_stubs
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
   [[ "$output" == *"SFW-WRAPPED"* ]]
   [[ "$output" == *"--locked"* ]]
@@ -336,7 +481,7 @@ cargo_sfw_stubs() {
   # `cargo update` is the one resolution path --locked can never cover, so it
   # is the one that most needs the network filter.
   cargo_sfw_stubs
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' update 2>/dev/null"
   [[ "$output" == *"SFW-WRAPPED"* ]]
 }
@@ -345,18 +490,18 @@ cargo_sfw_stubs() {
   # Prefixing everything would put a network filter in front of `cargo fmt`,
   # which has nothing to inspect and only adds latency and a failure mode.
   cargo_sfw_stubs
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fmt"
   [[ "$output" != *"SFW-WRAPPED"* ]]
   [[ "$output" == *"ARGS=[fmt]"* ]]
 }
 
 @test "cargo+sfw: absent sfw is a no-op, not a broken cargo" {
-  # sfw is opt-in. A wrapper that hard-required it would break every build on
-  # a runner that did not install it.
+  # A wrapper rendered with the sfw route must not hard-require sfw: it would
+  # break every build on a runner where sfw went missing after hardening.
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.80.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$BATS_TEST_TMPDIR/proj2"; touch "$BATS_TEST_TMPDIR/proj2/Cargo.lock"
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj2' && '$TEST_BIN/cargo' build"
   [ "$status" -eq 0 ]
   [[ "$output" == *"ARGS=[build --locked]"* ]]
@@ -368,6 +513,38 @@ cargo_sfw_stubs() {
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
   [[ "$output" != *"SFW-WRAPPED"* ]]
   [[ "$output" == *"--locked"* ]]
+}
+
+@test "cargo+sfw: the default follows intel, so intel: none renders no sfw route" {
+  # Issue #29. It defaulted true on its own, so with the default intel: none
+  # every wrapper was rendered to route through an sfw nothing installed, and
+  # verify reported GAP PRESENT on every stock runner. sfw on PATH here proves
+  # the route is absent from the wrapper, not merely skipped at runtime.
+  cargo_sfw_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" != *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+  run grep -c '^  if \[ "true" = "true" \]' "$TEST_BIN/cargo"
+  [ "$output" = "0" ]
+}
+
+@test "cargo+sfw: the default follows intel, so intel: sfw routes cargo" {
+  cargo_sfw_stubs
+  stub_bin npm 'case "$*" in "--version") echo "10.9.8" ;; *) echo "STUB" ;; esac'
+  stub_bin node 'echo 22'
+  harden ECOSYSTEMS=cargo INTEL=sfw -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"--locked"* ]]
+}
+
+@test "cargo+sfw: a non-boolean cargo_socket_firewall is refused" {
+  # Anything but the literal "true" rendered the route off, so a typo read as
+  # "filtering on" and silently was not.
+  run harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=yes -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"must be true or false"* ]]
 }
 
 # --- deno ------------------------------------------------------------------
@@ -395,6 +572,22 @@ cargo_sfw_stubs() {
   stub_bin deno
   harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
   run "$TEST_BIN/deno" --quiet run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P2D"* ]]
+}
+
+@test "deno: a value-taking global flag before the subcommand does not hide it" {
+  # MEASURED on deno 2.9.8: `deno --log-level debug run app.ts` (and `-L debug`)
+  # are accepted by deno. Before the value-flag skip, the scanner read "debug" as
+  # the subcommand, missed the run case, and exec'd deno UNGATED. The space-
+  # separated value is the hazard; `--log-level=debug` is one `-*` token and was
+  # always fine.
+  stub_bin deno
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" --log-level debug run app.ts
+  [[ "$output" == *"--minimum-dependency-age=P2D"* ]] || {
+    echo "no age gate injected for 'deno --log-level debug run': $output"; return 1
+  }
+  run "$TEST_BIN/deno" -L debug run app.ts
   [[ "$output" == *"--minimum-dependency-age=P2D"* ]]
 }
 
@@ -546,4 +739,33 @@ esac'
   run harden ECOSYSTEMS=bun,cargo,composer,npm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc" "ignore-scripts=true"
+}
+
+# --- rustup proxies ----------------------------------------------------------
+
+@test "cargo: no version probe lets a rustup proxy download a toolchain" {
+  # On a rustup host cargo and rustc are proxies, and a bare `--version` downloads
+  # the active toolchain when it is not installed. MEASURED on rustup 1.29.3 with a
+  # toolchain named and a fresh HOME: harden.sh took 11 s and left 757 MB behind,
+  # and on the macos-15 runner that happened once per test HOME until the disk was
+  # full. Every version probe has to carry RUSTUP_AUTO_INSTALL=0. The stubs record
+  # what each call was given.
+  local log="$BATS_TEST_TMPDIR/rustup-env.log"
+  stub_bin cargo "echo \"cargo auto=\${RUSTUP_AUTO_INSTALL:-unset} args=\$*\" >> '$log'; echo 'cargo 1.99.0 (stub)'"
+  stub_bin rustc "echo \"rustc auto=\${RUSTUP_AUTO_INSTALL:-unset} args=\$*\" >> '$log'; echo 'rustc 1.99.0 (stub)'"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  grep -q 'cargo auto=0 args=--version' "$log"       # harden.sh asked, guarded
+  # The verifier only asks rustc when a lockfile is present and no backend is.
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  : > "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  cd "$BATS_TEST_TMPDIR/proj"
+  run verify_sourced --emit=plain
+  grep -q 'rustc auto=0 args=--version' "$log"       # the verifier asked, guarded
+  run grep -E 'auto=unset args=(--version|-V)' "$log"
+  [ "$status" -ne 0 ] || { echo "unguarded: $output"; false; }
+  # The role asks rustc the same question; it has to carry the guard too.
+  run grep -nE 'cmd: .*(rustc|cargo) --version' "${BATS_TEST_DIRNAME}/../../tasks/cargo.yml"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\n'* ]] || { echo "more than one probe; check each: $output"; false; }
+  [[ "$output" == *"RUSTUP_AUTO_INSTALL=0 "* ]]
 }

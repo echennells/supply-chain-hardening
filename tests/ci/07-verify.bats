@@ -167,6 +167,165 @@ EOF
   [[ "$output" == *"refuse to run"* ]]
 }
 
+@test "the bunx row catches a wrapper that lets a leading metadata flag skip --no-install" {
+  # `bunx some-cli` alone cannot see this: the plain shape is hardened while
+  # `bunx --version some-cli` reaches real bun without --no-install, which
+  # fetch-and-executes. The stub answers --help in bunx mode so the row gets
+  # past its entry-point check to the dispatch it is testing.
+  local body='case "${1:-}" in --version|-v) echo "1.4.4";; --help) echo "Usage: bunx [flags] <package>";; *) echo STUB;; esac'
+  stub_bin bun "$body"
+  stub_bin bunx "$body"
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  # Put the bypass back: pass ANY leading metadata flag through, as the
+  # wrapper did before the `$# -eq 1` guard. Assert the mutation landed, or a
+  # wrapper rewrite would turn this into a test of nothing.
+  # Not `sed -i`: BSD sed (the macOS job) needs `-i ''`. cp keeps the mode.
+  sed 's/if \[ "\$#" -eq 1 \]; then/if true; then/' "$TEST_BIN/bunx" > "$BATS_TEST_TMPDIR/bunx"
+  sudo cp "$BATS_TEST_TMPDIR/bunx" "$TEST_BIN/bunx"
+  grep -q 'if true; then' "$TEST_BIN/bunx"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  [[ "$output" == *'`bunx --version some-cli`'* ]]
+}
+
+@test "the bunx row catches a BUN wrapper that lets a leading metadata flag skip --no-install" {
+  # Same bypass one token later: `bun --version x <pkg>` fetch-and-executes on
+  # bun 1.4.4, and the Action's bun wrapper passed any leading metadata flag
+  # through. No bunx here, so the row's bun-only branch is the one under test.
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.4.4";; --help) echo "Usage: bun <command> [...flags]";; *) echo STUB;; esac'
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  # Put the bypass back, portably (BSD sed has no bare -i), and prove it landed.
+  sed 's/if \[ "\$#" -eq 1 \]; then/if true; then/' "$TEST_BIN/bun" > "$BATS_TEST_TMPDIR/bun"
+  sudo cp "$BATS_TEST_TMPDIR/bun" "$TEST_BIN/bun"
+  grep -q 'if true; then' "$TEST_BIN/bun"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  bunx fetch-and-execute blocked"* ]]
+  [[ "$output" == *'`bun --version x some-cli`'* ]]
+}
+
+@test "pip age gate: a cutoff in the future is a GAP, not OK" {
+  # A future uploaded-prior-to admits everything published before it. The row
+  # used to compute a negative age, miss the > 7 day test and print OK.
+  local realpy; realpy=$(command -v python3)
+  stub_bin python3 'if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
+  case "${3:-}" in
+    --version) echo "pip 26.1 from /x/pip (python 3.13)" ;;
+    install) echo "  --uploaded-prior-to <datetime>" ;;
+    config) echo "global.uploaded-prior-to='"'"'2099-01-01T00:00:00Z'"'"'" ;;
+  esac
+  exit 0
+fi
+exec '"$realpy"' "$@"'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"*"FUTURE"* ]]
+}
+
+@test "pip age gate: a pip without the flag fails only the jobs that hardened pip" {
+  # Stock ubuntu-24.04 runners have pip 24.0. That is a real GAP for a job that
+  # asked for pip -- and none of the business of a job that did not.
+  local realpy; realpy=$(command -v python3)
+  stub_bin python3 'if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
+  case "${3:-}" in
+    --version) echo "pip 24.0 from /usr/lib/python3/dist-packages/pip (python 3.12)" ;;
+    install) echo "  --only-binary <format_control>" ;;
+  esac
+  exit 0
+fi
+exec '"$realpy"' "$@"'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
+  # Counted as toolchain: no re-run teaches pip 24 the flag. It was counted as
+  # config, so the summary told the reader re-running the hardening would fix it.
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"N/A    BYDESIGN    pip native age gate"*"not in the requested ecosystems"* ]]
+  [[ "$output" != *"GAP    PARSED      pip native age gate"* ]]
+}
+
+@test "cargo publish-age gate: a repo cooldown.toml is a GAP even with the environment pinned" {
+  # The pin beats a repo file only for settings that have an environment form.
+  # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` in a repo
+  # cooldown.toml still built a crate published hours earlier through a pinned
+  # wrapper. The row used to downgrade this to WEAK.
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  mkdir -p "$BATS_TEST_TMPDIR/repo"
+  printf '[allow.global]\nminutes = 0\n' > "$BATS_TEST_TMPDIR/repo/cooldown.toml"
+  cd "$BATS_TEST_TMPDIR/repo"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"[allow.global]"* ]]
+}
+
+# uv_reporting <cutoff>: a uv that reports an absolute exclude-newer instant in
+# the Debug shape `uv pip list --show-settings` prints, so the age-gate row
+# can be driven without a real uv or a frozen clock.
+uv_reporting() {
+  stub_bin uv 'case "$*" in
+  --version*|-V*) echo "uv 0.13.5" ;;
+  "pip list --show-settings") printf "%s\n" "PipSettings {" "    no_build: true," "    exclude_newer: ExcludeNewer {" "        global: Some(" "            Absolute(" "                '"$1"'," "            )," "        )," "    }," "}" ;;
+  *) echo /tmp ;;
+esac'
+}
+
+# A BSD date stand-in, macOS shape: no -d at all, -j -f to parse.
+bsd_date() {
+  cat > "${TEST_BIN}/date" <<'SHIM'
+#!/usr/bin/env python3
+import sys, calendar, time
+a = sys.argv[1:]
+if "-d" in a:
+    sys.stderr.write("date: illegal option -- d\n"); sys.exit(1)
+if "-j" in a and "-f" in a:
+    i = a.index("-f")
+    try:
+        print(calendar.timegm(time.strptime(a[i + 2], a[i + 1]))); sys.exit(0)
+    except ValueError:
+        sys.exit(1)
+if a and a[-1].startswith("+"):
+    print(int(time.time()) if a[-1] == "+%s" else time.strftime(a[-1][1:], time.gmtime())); sys.exit(0)
+sys.exit(1)
+SHIM
+  chmod +x "${TEST_BIN}/date"
+}
+
+@test "uv age gate: a cutoff weeks old reads as a freeze, not as OK" {
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      uv age gate"*"FREEZE"* ]]
+}
+
+@test "uv age gate: a cutoff two days old reads as OK with its age" {
+  # GNU `-d` or BSD `-v`: this suite also runs on macOS.
+  uv_reporting "$(date -u -d '2 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-2d '+%Y-%m-%dT%H:%M:%SZ')"
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      uv age gate"*"(2 day(s) old)"* ]]
+}
+
+@test "uv age gate: BSD date still sees the freeze (it used to read 0 days old)" {
+  # macOS date has no -d. The age used to fall back to 0, so a months-old
+  # freeze read OK "(0 day(s) old)" on exactly the hosts least likely to
+  # have GNU date.
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  bsd_date
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      uv age gate"*"FREEZE"* ]]
+  [[ "$output" != *"0 day(s) old"* ]]
+}
+
 @test "an active wrapper reads as OK at FUNCTIONAL strength" {
   stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
   harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
@@ -244,4 +403,489 @@ EOF
   # The help text documents the STATUS legend, so its presence proves nothing.
   # No RESULT line means no probe ran.
   [[ "$output" != *"RESULT:"* ]]
+}
+
+# --- publish-age gates: composer and bundler --------------------------------
+
+# Both tools echo a key they ignore (MEASURED: composer 2.7.1, bundler 2.4.20), so
+# these stubs report a healthy value at every version on purpose. A verdict that
+# came from the readback would call the old versions OK.
+composer_age_stub() { # version [extra line for the config dump]
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version $1 2026-01-01 00:00:00' ;;
+  *--list*) echo '[policy.cooldown.period] 172800 (/x/config.json)'
+            echo '[policy.cooldown.block] true (/x/config.json)'
+            echo '${2:-}' ;;
+  *) echo STUB ;;
+esac"
+}
+
+bundler_age_stub() { # version cooldown
+  stub_bin bundle "case \"\$*\" in
+  *--version*) echo '$1' ;;
+  *'config get cooldown --parseable'*) echo 'cooldown=$2' ;;
+  *) echo STUB ;;
+esac"
+}
+
+@test "composer below 2.11 is a toolchain GAP even though it echoes the key" {
+  composer_age_stub 2.10.3
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"does NOT implement config.policy.cooldown"* ]]
+  # Counted as toolchain, or --fail-on=config fails a job for what it was handed.
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+}
+
+@test "composer: every version-limited gap is toolchain, so fail-on=config can pass on a stock LTS" {
+  # noble's 2.7.1 lacks both block-insecure and the cooldown. Neither is closed by
+  # re-running the hardening, so neither may count as fixable.
+  composer_age_stub 2.7.1
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer audit blocking"* ]]
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+  [[ "$output" =~ [2-9]\ need\ a\ newer\ toolchain ]]
+}
+
+@test "composer 2.11 with the gate in effect reads OK" {
+  composer_age_stub 2.11.1
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer publish-age gate"* ]]
+}
+
+@test "composer: a window shorter than the declared one is WEAK, not OK" {
+  composer_age_stub 2.11.1
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  echo 'export COMPOSER_POLICY_COOLDOWN_PERIOD=3600' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"below the 48h"* ]]
+}
+
+@test "composer: a repo ignoring every package is a GAP, since no env var outranks it" {
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore] [*] (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"every package skips the gate"* ]]
+}
+
+@test "composer: a narrow repo ignore list is WEAK and named" {
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore] [acme/*, foo/bar] (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"acme/*"* ]]
+}
+
+@test "bundler below 4.0.13 is a toolchain GAP even though it echoes the key" {
+  bundler_age_stub 2.4.20 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"does NOT implement cooldown"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+}
+
+@test "bundler 4.0.13 is the first version the row accepts" {
+  bundler_age_stub 4.0.12 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
+  bundler_age_stub 4.0.13 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"is not age-gated"* ]]
+}
+
+@test "bundler: cooldown=0 is a GAP, because a repo's .bundle/config outranks the env var" {
+  bundler_age_stub 4.0.24 0
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"disables the gate"* ]]
+}
+
+@test "bundler: a window shorter than the declared one is WEAK, not OK" {
+  bundler_age_stub 4.0.24 1
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"below the 2d"* ]]
+}
+
+@test "composer: our config in the home composer really reads is OK, anyone else's is a GAP" {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *'config --global home'*) echo '$TEST_HOME/.composer' ;;
+  *--list*) echo '[home] $TEST_HOME/.composer ($TEST_HOME/.composer/config.json)'
+            echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer config in effect"* ]]
+  echo '{"config":{}}' > "$TEST_HOME/.composer/config.json"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer config in effect"* ]]
+}
+
+@test "npm: a window shorter than the declared one is WEAK and names the env var" {
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  echo 'export NPM_CONFIG_MIN_RELEASE_AGE=1' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"does NOT implement min-release-age"* ]] && skip "this npm predates the gate"
+  [[ "$output" == *"WEAK   PARSED      npm age gate"* ]]
+  [[ "$output" == *"below the 2 day(s)"* ]]
+  [[ "$output" == *"NPM_CONFIG_MIN_RELEASE_AGE"* ]]
+}
+
+poetry_age_stub() { # version value [exclude]
+  stub_bin poetry "case \"\$*\" in
+  *--version*) echo 'Poetry (version $1)' ;;
+  'config solver.min-release-age') echo '$2' ;;
+  'config solver.min-release-age-exclude') echo '${3:-null}' ;;
+  *) echo STUB ;;
+esac"
+}
+
+@test "poetry below 2.4.0 is a toolchain GAP" {
+  poetry_age_stub 2.3.4 0
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
+  [[ "$output" == *"has no solver.min-release-age"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+}
+
+@test "poetry 2.4.0 is the first version the row accepts" {
+  poetry_age_stub 2.4.0 2
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      poetry publish-age gate"* ]]
+}
+
+@test "poetry: min-release-age=0 is a GAP" {
+  poetry_age_stub 2.5.1 0
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
+  [[ "$output" == *"disables the gate"* ]]
+}
+
+@test "poetry: a repo's exclude list and a short window are both WEAK" {
+  poetry_age_stub 2.5.1 2 '["six"]'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      poetry publish-age gate"* ]]
+  [[ "$output" == *"exempts"* ]]
+  poetry_age_stub 2.5.1 1
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"below the 2d"* ]]
+}
+
+@test "pip: a python whose ensurepip seeds an ungated pip is WEAK" {
+  stub_bin python3 'case "$*" in
+  *ensurepip*) echo 25.3 ;;
+  *) exit 1 ;;
+esac'
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip venv age gate"* ]]
+  [[ "$output" == *"seeds pip 25.3"* ]]
+}
+
+@test "a job holding id-token: write is told so, and one without gets no row" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" != *"ci id-token exposure"* ]]
+  echo 'export ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/token' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      ci id-token exposure"* ]]
+}
+
+# ------------------------------------------------------- python startup hooks
+# The probe reads a user site under the throwaway HOME whatever python3 is, so
+# these plant files there. python3.99 keeps the fixture independent of the real
+# interpreter's version. Assertions name the planted file by its FULL path, never
+# by a bare name: the scan also reads this host's own site directories, and a
+# fixture that reused a real file's name failed on the first runner that had it.
+hook_site() {
+  HOOK_SITE="$TEST_HOME/.local/lib/python3.99/site-packages"
+  mkdir -p "$HOOK_SITE"
+  HOOK_SITE=$(cd "$HOOK_SITE" && pwd -P)
+}
+
+# The classified scan on its own: one "U<TAB>path (who claims it)" line per hook
+# nothing vouches for, one "K<TAB>path (why)" line per recognised one. In the
+# verifier scv_dpkg_info is assigned unconditionally, so nothing in the environment
+# can move it; here it points at a fixture, or nowhere.
+hook_fns() { sed -n '/^scv_site_dirs() {$/,/^scv_dpkg_info=/p' "$VERIFY_SH" | sed '$d'; }
+hook_scan() { # [VAR=value ...]
+  env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" "$@" \
+    bash -c "$(hook_fns)"$'\n'"scv_dpkg_info='${HOOK_DPKG:-/nonexistent}'; scv_startup_hooks"
+}
+U() { printf 'U\t%s (%s)' "$1" "${2:-claimed by no installed distribution}"; }
+K() {
+  local why="${2:-}"
+  [ -n "$why" ] || why="a known tool's generated line"
+  printf 'K\t%s (%s)' "$1" "$why"
+}
+table_rows() { grep -cE '^(OK|GAP|WEAK|N/A) ' <<<"$1"; }
+
+@test "startup hooks: the probe is byte-identical on both surfaces" {
+  local role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  block() { sed -n '/^# >>> python startup hooks$/,/^# <<< python startup hooks$/p' "$1"; }
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+}
+
+@test "startup hooks: an unvouched import line is WEAK, named with its owner, and warned on stderr" {
+  hook_site
+  mkdir -p "$HOOK_SITE/litellm-1.107.0.dist-info"
+  echo 'import os' > "$HOOK_SITE/cook.pth"
+  printf 'cook.pth,sha256=x,1\nlitellm/__init__.py,sha256=y,2\n' > "$HOOK_SITE/litellm-1.107.0.dist-info/RECORD"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run --separate-stderr verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PRESENT     python startup hooks"* ]]
+  [[ "$output" == *"$HOOK_SITE/cook.pth (litellm-1.107.0)"* ]]
+  [[ "$stderr" == *"warning: "*"startup hook"*"$HOOK_SITE/cook.pth (litellm-1.107.0)"* ]]
+}
+
+@test "startup hooks: the warning comes before anything starts Python with site processing" {
+  # Ground truth from Python itself, two ways, into ONE file: the planted hook logs
+  # whenever a real interpreter processes this user site (the verifier's pip runs
+  # one), and a stub python3 logs every start that would process site hooks. The
+  # scan's own question to the interpreter uses -I -S, which imports no site, so
+  # the stub stays quiet for that and the planted hook is what would catch it
+  # misbehaving. The verifier silences python3's stderr, so its own stderr appends
+  # to the same file; O_APPEND keeps everything in the order it happened. A run
+  # where nothing started Python proves nothing, so that fails too.
+  local log="$BATS_TEST_TMPDIR/order.log" v
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  for v in 9 10 11 12 13 14 15 16; do
+    mkdir -p "$TEST_HOME/.local/lib/python3.$v/site-packages"
+    printf '%s\n' "import os; open('$log', 'a').write('PYTHON STARTED (hook)\\n')" \
+      > "$TEST_HOME/.local/lib/python3.$v/site-packages/cook.pth"
+  done
+  stub_bin python3 "case \" \$* \" in *' -S '*) exit 1 ;; esac
+echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
+  : > "$log"
+  verify_sourced --emit=plain >/dev/null 2>>"$log" || true
+  local warn py
+  warn=$(grep -n 'startup hook' "$log" | head -1 | cut -d: -f1)
+  py=$(grep -n 'PYTHON STARTED' "$log" | head -1 | cut -d: -f1)
+  [ -n "$warn" ]
+  [ -n "$py" ]
+  [ "$warn" -lt "$py" ]
+}
+
+@test "startup hooks: an interpreter behind a shim is found by asking it, and asking fires nothing" {
+  # The pyenv/asdf/mise shape: `python3` on PATH is a script, and the interpreter and
+  # its site-packages live somewhere the PATH entry does not reveal. MEASURED before
+  # the -I -S query existed: Python ran the hook and the scan reported nothing.
+  local real v="$BATS_TEST_TMPDIR/venv" site marker="$BATS_TEST_TMPDIR/fired"
+  real=$(command -v python3) || skip "python3 not installed"
+  "$real" -m venv --without-pip "$v" 2>/dev/null || skip "this python3 cannot create a venv"
+  site=$(cd "$v"/lib/python3*/site-packages && pwd -P)
+  echo "import os; open('$marker', 'w')" > "$site/cook.pth"
+  stub_bin python3 "exec '$v/bin/python' \"\$@\""
+  run hook_scan
+  [[ "$output" == *"$(U "$site/cook.pth")"* ]]
+  [ ! -e "$marker" ]                       # the scan, and its question, ran no hook
+  "$TEST_BIN/python3" -c pass
+  [ -e "$marker" ]                         # control: it is a live hook
+}
+
+@test "startup hooks: sitecustomize and usercustomize are reported in the forms Python imports" {
+  hook_site
+  mkdir "$HOOK_SITE/sitecustomize"
+  : > "$HOOK_SITE/sitecustomize/__init__.py"
+  : > "$HOOK_SITE/usercustomize.py"
+  run hook_scan
+  [[ "$output" == *"$(U "$HOOK_SITE/sitecustomize")"* ]]
+  [[ "$output" == *"$(U "$HOOK_SITE/usercustomize.py")"* ]]
+}
+
+@test "startup hooks: a path line leads the scan to a sitecustomize outside the site root" {
+  # Python imports sitecustomize from anywhere on sys.path, and a .pth line that is
+  # not an import adds a directory to it. MEASURED: paths.pth + sub/sitecustomize.py
+  # ran and went unreported while only the site root was read.
+  hook_site
+  local abs="$BATS_TEST_TMPDIR/elsewhere" pp="$BATS_TEST_TMPDIR/onpythonpath" base="$BATS_TEST_TMPDIR/userbase"
+  mkdir -p "$HOOK_SITE/sub" "$abs" "$pp" "$base/lib/python3.99/site-packages"
+  printf 'sub  \n%s\n# a comment\n\n' "$abs" > "$HOOK_SITE/paths.pth"
+  : > "$HOOK_SITE/sub/sitecustomize.py"
+  : > "$abs/usercustomize.py"
+  : > "$pp/sitecustomize.py"
+  echo 'import os' > "$base/lib/python3.99/site-packages/moved.pth"
+  run hook_scan PYTHONPATH="/nonexistent:$pp" PYTHONUSERBASE="$base"
+  [[ "$output" == *"$(U "$HOOK_SITE/sub/sitecustomize.py")"* ]]
+  [[ "$output" == *"$(U "$abs/usercustomize.py")"* ]]
+  [[ "$output" == *"$(U "$pp/sitecustomize.py")"* ]]
+  [[ "$output" == *"$(U "$(cd "$base" && pwd -P)/lib/python3.99/site-packages/moved.pth")"* ]]
+  [[ "$output" != *"paths.pth"* ]]         # a path-only file is not itself a hook
+}
+
+@test "startup hooks: lines are split where CPython splits them, not on newline alone" {
+  # str.splitlines() ends a line at \r, \v, \f, \x1c-\x1e, U+0085, U+2028 and U+2029.
+  # MEASURED on 3.13.12: a payload after any of them, behind a `#`, ran unreported.
+  hook_site
+  local i=0 sep
+  for sep in '\r' '\013' '\014' '\034' '\035' '\036' '\302\205' '\342\200\250' '\342\200\251'; do
+    i=$((i + 1))
+    # shellcheck disable=SC2059  # the separator IS the escape sequence
+    printf "# harmless comment${sep}import os\n" > "$HOOK_SITE/sep$i.pth"
+  done
+  run hook_scan
+  for i in 1 2 3 4 5 6 7 8 9; do
+    [[ "$output" == *"$(U "$HOOK_SITE/sep$i.pth")"* ]] || { echo "separator $i hid the import line"; false; }
+  done
+}
+
+@test "startup hooks: a BOM or a tab does not hide an import line, and ignored lines are not hooks" {
+  # CPython 3.13 decodes .pth as utf-8-sig and accepts `import\t` (MEASURED: both
+  # ran). A leading space and a dotfile are not executed.
+  hook_site
+  printf '\357\273\277import os\n' > "$HOOK_SITE/bom.pth"
+  printf 'import\tos\n' > "$HOOK_SITE/tab.pth"
+  echo ' import os' > "$HOOK_SITE/leading-space.pth"
+  echo 'import os' > "$HOOK_SITE/.dotfile.pth"
+  run hook_scan
+  [[ "$output" == *"$(U "$HOOK_SITE/bom.pth")"* ]]
+  [[ "$output" == *"$(U "$HOOK_SITE/tab.pth")"* ]]
+  [[ "$output" != *"leading-space.pth"* ]]
+  [[ "$output" != *".dotfile.pth"* ]]
+}
+
+@test "startup hooks: a known tool's line is listed as recognised, never dropped" {
+  hook_site
+  # Byte-for-byte what setuptools 60.0 through 84.2.1, uv venv and a setuptools
+  # editable install write (MEASURED).
+  printf "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var, 'local') == 'local'; enabled and __import__('_distutils_hack').add_shim(); \n" \
+    > "$HOOK_SITE/distutils-precedence.pth"
+  printf 'import _virtualenv' > "$HOOK_SITE/_virtualenv.pth"
+  echo 'import __editable___my_pkg_0_1_finder; __editable___my_pkg_0_1_finder.install()' \
+    > "$HOOK_SITE/__editable__.my_pkg-0.1.pth"
+  run hook_scan
+  local n
+  for n in distutils-precedence.pth _virtualenv.pth __editable__.my_pkg-0.1.pth; do
+    [[ "$output" == *"$(K "$HOOK_SITE/$n")"* ]] || { echo "not listed as recognised: $n"; false; }
+  done
+  # In the report they are an OK row that says what it does not vouch for. Only
+  # checked where this host has no unvouched hook of its own to turn the row WEAK.
+  HOOK_DPKG=/var/lib/dpkg/info run hook_scan
+  if [[ "$output" != *$'U\t'* ]]; then
+    harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+    run verify_sourced --emit=plain
+    [[ "$output" == *"OK     PRESENT     python startup hooks"* ]]
+    [[ "$output" == *"$HOOK_SITE/_virtualenv.pth"* ]]
+    [[ "$output" == *"not the module it imports"* ]]
+  fi
+  # The familiar name with a payload appended is no longer the tool's text.
+  echo 'import os; os.system("true")' >> "$HOOK_SITE/distutils-precedence.pth"
+  run hook_scan
+  [[ "$output" == *"$(U "$HOOK_SITE/distutils-precedence.pth")"* ]]
+}
+
+@test "startup hooks: a recognised line with a planted module is still shown, because nothing vouches for the module" {
+  # The limit of recognising by text, kept visible on purpose. A wheel can ship the
+  # exact editable-finder line AND its own finder module. MEASURED: Python ran it,
+  # and while recognised hooks were dropped from the report it left no trace.
+  hook_site
+  echo 'import __editable___evil_1_finder; __editable___evil_1_finder.install()' > "$HOOK_SITE/__editable__.evil-1.pth"
+  printf 'def install():\n    pass\n' > "$HOOK_SITE/__editable___evil_1_finder.py"
+  run hook_scan
+  [[ "$output" == *"$(K "$HOOK_SITE/__editable__.evil-1.pth")"* ]]
+}
+
+@test "startup hooks: a Debian-packaged hook counts only while it matches dpkg's checksum" {
+  # MEASURED: stock ubuntu-24.04 runners ship python3-zope.interface's nspkg.pth, and
+  # its md5 is the one in the package's .md5sums. This stages the same shape under a
+  # name no real host has.
+  command -v md5sum >/dev/null 2>&1 || skip "no md5sum here; dpkg hosts have it"
+  hook_site
+  local f="$HOOK_SITE/fixture-nspkg.pth" g="$HOOK_SITE/fixture-nosum.pth"
+  HOOK_DPKG="$BATS_TEST_TMPDIR/dpkg-info"
+  mkdir -p "$HOOK_DPKG"
+  echo "import sys, types, os;p = os.path.join(sys._getframe(1).f_locals['sitedir'], *('zope',))" > "$f"
+  echo 'import os' > "$g"
+  printf '%s\n%s\n' "$f" "$g" > "$HOOK_DPKG/python3-fixture.list"
+  printf '%s  %s\n' "$(md5sum "$f" | cut -d' ' -f1)" "${f#/}" > "$HOOK_DPKG/python3-fixture.md5sums"
+  run hook_scan
+  [[ "$output" == *"$(K "$f" "python3-fixture package, checksum matches")"* ]]
+  # Listed by the package with no checksum on record: not vouched for, and not
+  # called "changed", which is not known.
+  [[ "$output" == *"$(U "$g" "python3-fixture package, which records no checksum for it")"* ]]
+  # A wheel that overwrote it: still listed by the package, no longer its bytes.
+  echo 'import os; os.system("true")' >> "$f"
+  run hook_scan
+  [[ "$output" == *"$(U "$f" "python3-fixture package, changed since it was installed")"* ]]
+}
+
+@test "startup hooks: an unmodified Debian-packaged hook on this host is recognised" {
+  local f found=""
+  for f in /usr/lib/python3/dist-packages/*.pth; do
+    [ -f "$f" ] || continue
+    grep -q '^import[[:blank:]]' "$f" || continue
+    grep -lqxF -- "$f" /var/lib/dpkg/info/*.list 2>/dev/null && { found=$f; break; }
+  done
+  [ -n "$found" ] || skip "no Debian-packaged .pth with an import line on this host"
+  HOOK_DPKG=/var/lib/dpkg/info run hook_scan
+  [[ "$output" == *$'K\t'"$found ("* ]]
+}
+
+# ------------------------------------------------------------ report integrity
+# The report prints its rows with printf '%b', which expands backslash escapes, and
+# row text carries strings this script does not choose.
+
+@test "report: a file name cannot erase or forge rows" {
+  # MEASURED before row() escaped its fields: `a\c.pth` cut a 42-row table to 1, and
+  # the second name below added an "OK ... none found, site-packages is clean" row.
+  hook_site
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  echo 'import os' > "$HOOK_SITE/plain.pth"
+  run verify_sourced --emit=plain
+  local base; base=$(table_rows "$output")
+  [ "$base" -gt 5 ]
+  mv "$HOOK_SITE/plain.pth" "$HOOK_SITE/"'a\c.pth'
+  run verify_sourced --emit=plain
+  [ "$(table_rows "$output")" -eq "$base" ]
+  [[ "$output" == *'a\c.pth'* ]]
+  mv "$HOOK_SITE/"'a\c.pth' "$HOOK_SITE/"'b\nOK\tFUNCTIONAL\tpython startup hooks\tnone found, site-packages is clean\nOK\tPARSED\tzz.pth'
+  run verify_sourced --emit=plain
+  [ "$(table_rows "$output")" -eq "$base" ]
+  [ "$(grep -c '^OK .*python startup hooks' <<<"$output")" -eq 0 ]
+}
+
+@test "report: a config value read from a hostile checkout cannot end the table" {
+  # The same renderer, reached without any package: a backslash-c in a checkout's
+  # .npmrc, with the verifier run from that checkout as AGENTS.md advises.
+  # MEASURED at d64ec46 with `min-release-age=1\c`: 41 rows from a clean directory,
+  # 10 from the checkout. ignore-scripts is used here because every npm echoes it.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  mkdir -p "$BATS_TEST_TMPDIR/clean" "$BATS_TEST_TMPDIR/checkout"
+  printf 'ignore-scripts=x\\c\n' > "$BATS_TEST_TMPDIR/checkout/.npmrc"
+  # Asked of npm directly, not read off the verifier's output: the bug this guards
+  # against eats that output, so a check that depended on it would skip, not fail.
+  cd "$BATS_TEST_TMPDIR/checkout"
+  [ "$(env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" npm config get ignore-scripts 2>/dev/null)" = 'x\c' ] \
+    || skip "this npm does not hand back the checkout's value"
+  # Not verify_sourced: with the env layer loaded, NPM_CONFIG_IGNORE_SCRIPTS
+  # outranks the checkout's .npmrc and the hostile value never reaches a row.
+  cd "$BATS_TEST_TMPDIR/clean"
+  run verify -- --emit=plain
+  local base; base=$(table_rows "$output")
+  [ "$base" -gt 5 ]
+  cd "$BATS_TEST_TMPDIR/checkout"
+  run verify -- --emit=plain
+  [ "$(table_rows "$output")" -eq "$base" ]
+  [[ "$output" == *'ignore-scripts=x\c'* ]]
 }
