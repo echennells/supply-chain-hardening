@@ -349,7 +349,8 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
 # A stub cargo that reports the cooldown environment it was handed, plus a
 # cargo-cooldown where harden.sh looks for one, so builds route through it.
 cooldown_stubs() {
-  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}]";; esac'
+  local ver="${1:-1.99.0}"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo '"$ver"' (abc 2026-11-12)";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}] GLOBAL=[${CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE-unset}] RESOLVER=[${CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE-unset}] TESTTIME=[${__CARGO_TEST_INVOCATION_TIME-unset}]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\nexit 0\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
   chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
@@ -368,6 +369,49 @@ cooldown_stubs() {
   [[ "$output" == *"CRATES=48 hours "* ]]
   [[ "$output" == *"SKIP=[]"* ]]
   [[ "$output" != *"NOW=2099"* ]]
+}
+
+@test "cargo-cooldown: commands it never sees keep the caller's native publish-age gate" {
+  # Regression from v2.0.0. The environment was pinned for EVERY resolving or
+  # writing command whenever cargo-cooldown was installed, which stripped
+  # CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE from commands cargo-cooldown never
+  # runs. MEASURED on cargo 1.100.0: generate-lockfile, tree and fetch then
+  # resolved a version real cargo refused, and add wrote it.
+  cooldown_stubs 1.100.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  for sub in generate-lockfile tree fetch add; do
+    run bash -c "cd '$(lockdir)' && CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE='87600 hours' '$TEST_BIN/cargo' $sub 2>&1"
+    [[ "$output" == *"GLOBAL=[87600 hours]"* ]] || { echo "$sub lost the caller's gate: $output"; return 1; }
+    [[ "$output" != *"overriding caller"* ]]
+  done
+}
+
+@test "cargo-cooldown: the routed path defers cargo's native gate to cargo-cooldown on 1.100+ only" {
+  # MEASURED (cargo 1.100.0 + cargo-cooldown 0.3.5): cargo's native gate also
+  # applied to cargo-cooldown's internal resolves and broke [[allow.exact]];
+  # CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow on the routed call fixed it,
+  # and cargo-cooldown still denied. Older cargo warns about the setting.
+  cooldown_stubs 1.100.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" == *"RESOLVER=[allow]"* ]]
+  cooldown_stubs 1.99.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" == *"RESOLVER=[unset]"* ]]
+}
+
+@test "cargo: cargo's internal test clock is dropped on every path" {
+  # __CARGO_TEST_INVOCATION_TIME=2099-... defeats cargo 1.100's native gate
+  # (measured). Only cargo's own test suite needs it.
+  cooldown_stubs 1.100.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && __CARGO_TEST_INVOCATION_TIME=2099-01-01T00:00:00Z '$TEST_BIN/cargo' tree 2>&1"
+  [[ "$output" == *"TESTTIME=[unset]"* ]]
+  run bash -c "cd '$(lockdir)' && __CARGO_TEST_INVOCATION_TIME=2099-01-01T00:00:00Z '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" == *"TESTTIME=[unset]"* ]]
 }
 
 @test "cargo-cooldown: a per-registry window under a name bash cannot unset is refused" {

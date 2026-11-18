@@ -1890,6 +1890,11 @@ EOF
 set -u
 
 REAL_CARGO='__REAL_CARGO__'
+
+# cargo's internal test clock. Set to a future date it defeats cargo 1.100's
+# native publish-age gate (MEASURED: __CARGO_TEST_INVOCATION_TIME=2099-...
+# admitted a version the gate refused). Only cargo's own test suite needs it.
+unset __CARGO_TEST_INVOCATION_TIME
 # RUN-PROBE. Record that this wrapper actually executed.
 #
 # Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
@@ -2050,6 +2055,13 @@ exec_sub() {
 # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` committed next
 # to Cargo.toml still admits a crate published hours ago. Treat a cooldown.toml
 # in an untrusted repo as a bypass.
+# Does the real cargo have the native publish-age gate (stable since 1.100)?
+# RUSTUP_AUTO_INSTALL=0 so a version probe can never download a toolchain.
+cargo_has_native_gate() {
+  _ng_minor=$(RUSTUP_AUTO_INSTALL=0 "$REAL_CARGO" --version 2>/dev/null | sed -n 's/^cargo 1\.\([0-9][0-9]*\)\..*/\1/p')
+  [ -n "$_ng_minor" ] && [ "$_ng_minor" -ge 100 ]
+}
+
 sanitize_cooldown_env() {
   _sc_env=$(env)
   _sc_had=''
@@ -2089,6 +2101,17 @@ sanitize_cooldown_env() {
   # `now` / `skip_registries`.
   export COOLDOWN_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   export COOLDOWN_SKIP_REGISTRIES=
+  # cargo >= 1.100 has a NATIVE publish-age gate. When a config.toml sets it,
+  # cargo applies it to cargo-cooldown's own internal resolves as well, and an
+  # [[allow.exact]] pin then hard-fails inside cargo-cooldown's temporary
+  # workspace while a loose requirement is silently cooled. MEASURED on cargo
+  # 1.100.0 + cargo-cooldown 0.3.5. On this path cargo-cooldown IS the gate
+  # (it still denies and cools with this set, measured), so the native resolver
+  # is told to defer to it. Only on 1.100+: older cargo warns about the
+  # unknown setting.
+  if cargo_has_native_gate; then
+    export CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow
+  fi
 }
 
 case "$subcmd" in
@@ -2138,9 +2161,9 @@ case "$KIND" in
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
     if command -v cargo-cooldown >/dev/null 2>&1; then
-      sanitize_cooldown_env
       case "$subcmd" in
         update)
+          sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
         *)
@@ -2158,7 +2181,6 @@ case "$KIND" in
 
   RESOLVING)
     if command -v cargo-cooldown >/dev/null 2>&1; then
-      sanitize_cooldown_env
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -2167,6 +2189,14 @@ case "$KIND" in
         *)       SUB="" ;;
       esac
       if [ -n "$SUB" ]; then
+        # The environment is pinned ONLY on the path that hands off to
+        # cargo-cooldown. It used to be pinned for every resolving and writing
+        # command whenever cargo-cooldown was installed, which on cargo 1.100+
+        # STRIPPED a caller's native CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE from
+        # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
+        # and fetch then resolved a version real cargo refused, and add wrote
+        # it, while the note claimed this policy "applies instead".
+        sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
       fi
@@ -2180,7 +2210,7 @@ case "$KIND" in
     if has_lockfile; then
       SCH_NET=1 exec_with "--locked" "$@"
     fi
-    echo "[supply-chain-harden] warning: no Cargo.lock found and no publish-age gate available — 'cargo $subcmd' will resolve the newest matching versions unchecked" >&2
+    echo "[supply-chain-harden] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2
     SCH_NET=1 run_real "$@"
     ;;
 esac
