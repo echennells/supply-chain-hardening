@@ -2224,7 +2224,7 @@ cargo_delegate_err() { # <delegate>
     else RUSTUP_AUTO_INSTALL=0 "$1" --version; fi; } 2>&1 | head -1
 }
 
-# VERSION TIER. cargo-cooldown 0.3.4 (what the Ansible role pins) has MSRV
+# VERSION TIER. cargo-cooldown 0.3.5 (what the role AND the action pin) has MSRV
 # rustc 1.91.1; Ubuntu 24.04's distro rust is 1.75.0. Below the MSRV
 # `cargo install cargo-cooldown` cannot build, so "set install_cargo_cooldown:
 # true" is advice that cannot work and the row must say so instead.

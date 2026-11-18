@@ -41,3 +41,21 @@ setup() { common_setup; }
   echo "$output"
   [ "$status" -eq 0 ]
 }
+
+@test "the action pins the same tool versions as the role" {
+  # The action installed cargo-cooldown unpinned and got 0.4.2 (MSRV 1.97):
+  # the install failed on rust 1.93 with the error discarded, and on newer
+  # rust every MSRV job's `cargo build` died. Same drift risk for sfw.
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local role_cc role_sfw act_cc act_sfw
+  role_cc=$(sed -n 's/^cargo_cooldown_version: *"\(.*\)"/\1/p' "$root/defaults/main.yml")
+  role_sfw=$(sed -n 's/^sfw_version: *"\(.*\)"/\1/p' "$root/defaults/main.yml")
+  act_cc=$(sed -n 's/^CARGO_COOLDOWN_VERSION="\(.*\)"/\1/p' "$root/action/harden.sh")
+  act_sfw=$(sed -n 's/^SFW_NPM_VERSION="\(.*\)"/\1/p' "$root/action/harden.sh")
+  [ -n "$role_cc" ] && [ -n "$role_sfw" ]
+  [ "$act_cc" = "$role_cc" ]
+  [ "$act_sfw" = "$role_sfw" ]
+  # And the install lines actually use the variables.
+  grep -q 'cargo-cooldown@${CARGO_COOLDOWN_VERSION}' "$root/action/harden.sh"
+  grep -q 'sfw@${SFW_NPM_VERSION}' "$root/action/harden.sh"
+}

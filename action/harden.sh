@@ -80,6 +80,13 @@ WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
+# Tool pins this script installs. Kept equal to the role's defaults/main.yml
+# (cargo_cooldown_version, sfw_version); tests/ci/06-role-parity.bats checks.
+# Unpinned, `cargo install cargo-cooldown` took 0.4.2 (MSRV 1.97): the install
+# FAILED on rust 1.93 with the error discarded, and on rust >= 1.97 every
+# later `cargo build` in an MSRV job died with "requires Cargo 1.97".
+CARGO_COOLDOWN_VERSION="0.3.5"
+SFW_NPM_VERSION="2.0.6"
 # Follows `intel` unless set explicitly. It used to default true on its own, so
 # with the default intel: none every cargo wrapper was rendered to route through
 # an sfw that was never installed: a no-op at runtime, and a GAP in verify,
@@ -428,6 +435,17 @@ err() {
     azure)  echo "##vso[task.logissue type=error]$*" ;;
     *)      echo "[supply-chain-harden] error: $*" >&2 ;;
   esac
+}
+
+# run_bounded <seconds> <cmd...> — `timeout` where it exists. macOS runners
+# ship none (gtimeout only with coreutils), and a missing bound must not turn
+# into a missing command: without either, the command runs unbounded.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"
+  fi
 }
 
 # GitLab's collapsible sections require section_end to carry the SAME name
@@ -1744,12 +1762,18 @@ EOF
   local cooldown_bin=""
   if [[ "$INSTALL_CARGO_COOLDOWN" == "true" ]]; then
     if command -v cargo >/dev/null 2>&1; then
-      log "installing cargo-cooldown (compiles from source; this takes a few minutes)"
-      if cargo install cargo-cooldown --locked >/dev/null 2>&1; then
+      log "installing cargo-cooldown ${CARGO_COOLDOWN_VERSION} (compiles from source; this takes a few minutes)"
+      # Pinned (see CARGO_COOLDOWN_VERSION). stderr is KEPT for the warning:
+      # it used to go to /dev/null, which hid cargo's own explanation
+      # ("cargo-cooldown 0.4.2 requires rustc 1.97") of why the gate was absent.
+      local cc_err cc_rc=0
+      cc_err=$(cargo install --locked "cargo-cooldown@${CARGO_COOLDOWN_VERSION}" 2>&1 >/dev/null) || cc_rc=$?
+      if [[ "$cc_rc" -eq 0 ]]; then
         cooldown_bin="$cargo_home/bin"
-        log "cargo-cooldown installed at $cooldown_bin"
+        log "cargo-cooldown ${CARGO_COOLDOWN_VERSION} installed at $cooldown_bin"
+        set_tool_version "cargo-cooldown" "$CARGO_COOLDOWN_VERSION"
       else
-        warn "cargo-cooldown install failed — the age gate config is deployed but nothing enforces it; --locked injection still applies"
+        warn "cargo-cooldown ${CARGO_COOLDOWN_VERSION} install failed (rc=$cc_rc: $(printf '%s' "$cc_err" | grep -E '^(error|  )' | head -n 3 | tr '\n' ' ')) — the age gate config is deployed but nothing enforces it; --locked injection still applies"
       fi
     else
       warn "install_cargo_cooldown=true but cargo is not installed — skipping"
@@ -2719,13 +2743,48 @@ install_sfw_and_wrap() {
   # resolves against root's secure_path, which on a setup-node runner does not
   # contain the toolcache npm at all — so this either failed outright or
   # installed sfw into a different node prefix than the one the job uses.
+  #
+  # Pinned and --ignore-scripts, like the role's own tool installs (ECH-185):
+  # a floating `sfw@2` gave this enforcement tool no age gate at all.
   local npm_bin
   npm_bin=$(command -v npm)
-  $SUDO "$npm_bin" install -g sfw@2 >/dev/null 2>&1 || {
+  $SUDO "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
   }
+
+  # WARM IT HERE, AND REFUSE TO WRAP IF IT CANNOT RUN. Parity with the role's
+  # "Warm the Socket Firewall binary cache" task (tasks/socket.yml).
+  #
+  # sfw's npm package is a shim: the firewall binary is downloaded from GitHub
+  # on first use, through an UNAUTHENTICATED API call (60 requests/hour per IP,
+  # shared by every job on a hosted runner's address). Left cold, that fetch
+  # happened inside the user's first `npm install`, and when it failed the shim
+  # exited 1 there. MEASURED on sfw 2.0.6 with api.github.com refused and with
+  # a 403 rate-limit reply: `npm install` rc=1, "[sfw] Failed to prepare
+  # firewall binary", while this script exited 0 and reported sfw installed.
+  # The first successful use took 79 s and downloaded 137 MB.
+  #
+  # So `sfw /bin/true` runs now, where a failure is visible, and is exactly what
+  # the wrappers do. If it fails, sfw is MOVED ASIDE so `command -v sfw` fails
+  # for the cargo wrapper too, no npm/npx wrapper is deployed, and
+  # sfw_installed stays false: the job runs unfiltered, says so, and builds.
+  local sfw_bin sfw_out sfw_rc
+  sfw_bin=$(command -v sfw 2>/dev/null || true)
+  if [[ -z "$sfw_bin" ]]; then
+    warn "sfw installed but not on PATH; skipping wrapper deployment"
+    end_section
+    return 0
+  fi
+  sfw_rc=0
+  sfw_out=$(run_bounded 180 sfw /bin/true 2>&1) || sfw_rc=$?
+  if [[ "$sfw_rc" -ne 0 ]]; then
+    $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
+    warn "sfw could not prepare its firewall binary (rc=$sfw_rc: $(printf '%s' "$sfw_out" | grep -v '^[[:space:]]*$' | tail -n 1)); it was moved aside and NO npm/npx wrapper was deployed, so installs in this job are NOT threat-intel filtered. sfw downloads that binary from the GitHub API on first use; a 403 here is usually the shared runner's unauthenticated rate limit"
+    end_section
+    return 0
+  fi
 
   # Wrap npm AT THE PATH IT ACTUALLY RESOLVES TO — same rule as the bun,
   # composer, deno and cargo wrappers.

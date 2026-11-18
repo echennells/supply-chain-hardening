@@ -659,14 +659,16 @@ cargo_sfw_stubs() {
 # --- socket firewall / npm -------------------------------------------------
 
 sfw_stubs() {
-  # An npm that reports a version and pretends the sfw install succeeds, plus
-  # a node new enough to clear the >= 20 gate.
+  # An npm that reports a version and pretends the PINNED, script-less sfw
+  # install succeeds, a node new enough to clear the >= 20 gate, and an sfw
+  # whose warm-up (`sfw /bin/true`) succeeds by running its argument.
   stub_bin npm 'case "$*" in
-  "install -g sfw@2") exit 0 ;;
+  "install -g --ignore-scripts sfw@2.0.6") exit 0 ;;
   "--version") echo "10.9.8" ;;
   *) echo "STUB:npm ARGS=[$*]" ;;
 esac'
   stub_bin node 'echo 22'
+  stub_bin sfw 'exec "$@"'
 }
 
 @test "sfw: the wrapper lands on the npm PATH resolves, not a hardcoded path" {
@@ -720,7 +722,7 @@ esac'
 
 @test "sfw: a failed install does not leave a wrapper claiming success" {
   stub_bin npm 'case "$*" in
-  "install -g sfw@2") exit 1 ;;
+  "install -g --ignore-scripts sfw@2.0.6") exit 1 ;;
   "--version") echo "10.9.8" ;;
   *) echo "STUB" ;;
 esac'
@@ -730,6 +732,39 @@ esac'
   [[ "$output" == *"sfw global install failed"* ]]
   assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
   assert_file_contains "$OUT_FILE" "sfw_installed=false"
+}
+
+@test "sfw: a warm-up failure moves sfw aside and deploys no wrapper" {
+  # MEASURED on sfw 2.0.6: on a cold cache with the GitHub API refused or
+  # rate-limited, the shim exits 1 INSIDE the user's npm install, while this
+  # script reported sfw installed. The warm-up surfaces that here instead.
+  sfw_stubs
+  stub_bin sfw 'echo "[sfw] Failed to prepare firewall binary" >&2; exit 1'
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not prepare its firewall binary"* ]]
+  [[ "$output" == *"Failed to prepare firewall binary"* ]]
+  assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
+  assert_file_contains "$OUT_FILE" "sfw_installed=false"
+  # Moved aside, so the cargo wrapper's `command -v sfw` guard fails too.
+  [ ! -e "$TEST_BIN/sfw" ]
+  [ -e "$TEST_BIN/sfw.broken" ]
+  run "$TEST_BIN/npm" --version
+  [ "$output" = "10.9.8" ]
+}
+
+@test "sfw: the npm install is pinned and runs no install scripts" {
+  # The role pins sfw_version and passes --ignore-scripts (ECH-185); the
+  # action floated sfw@2 with scripts on.
+  sfw_stubs
+  stub_bin npm 'case "$*" in
+  "install -g --ignore-scripts sfw@2.0.6") echo "PINNED-INSTALL" > "$TEST_TMP/sfw-install-args"; exit 0 ;;
+  "install -g"*) echo "UNPINNED: $*" > "$TEST_TMP/sfw-install-args"; exit 0 ;;
+  "--version") echo "10.9.8" ;;
+  *) echo "STUB:npm ARGS=[$*]" ;;
+esac'
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  assert_file_contains "$TEST_TMP/sfw-install-args" "PINNED-INSTALL"
 }
 
 # --- absence ---------------------------------------------------------------
