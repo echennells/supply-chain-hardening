@@ -48,7 +48,7 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 |---|---|---|
 | `enableHardenedMode: true` | **Lockfile-tampering detection** — yarn queries the upstream registry and validates that lockfile contents match what's actually published. Catches attacks where someone modifies `yarn.lock` to point at a malicious dep version. | **Yarn 4.0+** |
 | `enableImmutableInstalls: true` | Refuses install if lockfile would change (catches sneaky dep additions during a build) | All Berry |
-| `enableImmutableCache: true` | Prevents cache mutation during install | All Berry |
+| `enableImmutableCache: false` | Was `true`. Reverted 2026-11: with an empty cache every install failed (`YN0056 Cache entry required but missing`, measured on 4.10.3 and 4.18.1), so fresh hosts and CI runners could not install. `checksumBehavior: throw` still catches cache tampering. | All Berry |
 | `checksumBehavior: throw` | Errors on checksum mismatch instead of silently updating | All Berry |
 | `approvedGitRepositories: []` | **Allowlist of git repo globs allowed for git deps** — without it, ANY git URL is fetchable (`git+https://attacker.com/payload`) | All Berry |
 | `unsafeHttpWhitelist: []` | Explicit empty list documents HTTPS-only enforcement | All Berry |

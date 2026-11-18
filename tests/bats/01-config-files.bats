@@ -158,8 +158,8 @@ load setup
   assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableInstalls: true"
 }
 
-@test "yarnrc: enableImmutableCache true (prevent cache mutation during install)" {
-  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableCache: true"
+@test "yarnrc: enableImmutableCache false (true fails every cold-cache install with YN0056)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableCache: false"
 }
 
 @test "yarnrc: checksumBehavior throw (error on hash mismatch)" {

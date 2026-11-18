@@ -995,7 +995,7 @@ harden_yarn() {
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
     echo "enableImmutableInstalls: true"
-    echo "enableImmutableCache: true"
+    echo "enableImmutableCache: false"   # true fails every cold-cache install (YN0056); see the role default
     echo "checksumBehavior: throw"
     # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
     # absent key as "no restriction", so emitting [] is what closes it.
@@ -1012,7 +1012,7 @@ harden_yarn() {
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
     echo "enableImmutableInstalls: true"
-    echo "enableImmutableCache: true"
+    echo "enableImmutableCache: false"   # true fails every cold-cache install (YN0056); see the role default
     echo "checksumBehavior: throw"
     # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
     # absent key as "no restriction", so emitting [] is what closes it.

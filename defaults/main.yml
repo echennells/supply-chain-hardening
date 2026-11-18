@@ -360,7 +360,14 @@ bun_path_wrapper: true
 yarn_enable_scripts: false
 # yarn settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
 yarn_enable_immutable_installs: true    # refuse install if lockfile would change
-yarn_enable_immutable_cache: true       # prevent cache mutation during install
+# enableImmutableCache: FALSE (yarn's own default), written explicitly. True
+# made every install on a cold cache fail: MEASURED on Yarn 4.10.3 and 4.18.1,
+# "YN0056 Cache entry required but missing" (3.8.7: "Cache path does not
+# exist"), i.e. every fresh host, CI runner and new HOME. The error names the
+# cache, not this role, so it failed the attribution test (design-principles.md).
+# Cache tampering is still caught by checksumBehavior: throw against the
+# lockfile's checksums.
+yarn_enable_immutable_cache: false
 yarn_checksum_behavior: "throw"         # error on checksum mismatch (alternatives: ignore, update, reset)
 yarn_approved_git_repositories: []      # allowlist of git-URL globs; empty = block all git deps
 yarn_unsafe_http_whitelist: []          # allowlist of HTTP-allowed hosts; empty = HTTPS-only
