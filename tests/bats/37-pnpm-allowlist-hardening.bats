@@ -43,7 +43,7 @@ setup_file() {
     pnpm_minimum_release_age_minutes: 2880
     pnpm_minimum_release_age_strict: true
     pnpm_verify_store_integrity: true
-    pnpm_prefer_frozen_lockfile: true
+    pnpm_prefer_frozen_lockfile: null
   tasks:
     # Default posture: both allowlists empty.
     - ansible.builtin.template:
@@ -73,6 +73,22 @@ setup_file() {
         mode: "0644"
       vars:
         pnpm_minimum_release_age_exclude: ["@myorg/internal"]
+    # Explicit opt-in: an operator who sets the variable still gets the key.
+    - ansible.builtin.template:
+        src: $ROLE_DIR/templates/pnpm-rc.j2
+        dest: "$RENDER_DIR/optin-rc"
+        mode: "0644"
+      vars:
+        pnpm_minimum_release_age_exclude: []
+        pnpm_built_dependencies: []
+        pnpm_prefer_frozen_lockfile: true
+    - ansible.builtin.template:
+        src: $ROLE_DIR/templates/pnpm-config.yaml.j2
+        dest: "$RENDER_DIR/optin-config.yaml"
+        mode: "0644"
+      vars:
+        pnpm_minimum_release_age_exclude: []
+        pnpm_prefer_frozen_lockfile: true
 EOF
   ansible-playbook "$playbook" >/dev/null 2>&1
   rm -f "$playbook"
@@ -116,7 +132,7 @@ run_pnpm_task() {
     pnpm_minimum_release_age_exclude: []
     pnpm_built_dependencies: []
     pnpm_verify_store_integrity: true
-    pnpm_prefer_frozen_lockfile: true
+    pnpm_prefer_frozen_lockfile: null
     pnpm_allowlist_conflict_action: "fail"
   tasks:
     - include_role:
@@ -140,15 +156,21 @@ EOF
   grep -q "^verify-store-integrity=true$" "$RENDER_DIR/default-rc"
 }
 
-@test "render(default): rc has prefer-frozen-lockfile=true (no hard-freeze)" {
-  grep -q "^prefer-frozen-lockfile=true$" "$RENDER_DIR/default-rc"
+@test "render(default): rc does NOT write prefer-frozen-lockfile (it would turn off pnpm's CI freeze)" {
+  ! grep -q "prefer-frozen-lockfile" "$RENDER_DIR/default-rc"
+}
+
+@test "render(opt-in): an explicit pnpm_prefer_frozen_lockfile is still written, in both files" {
+  grep -q "^prefer-frozen-lockfile=true$" "$RENDER_DIR/optin-rc"
+  assert_valid_yaml "$RENDER_DIR/optin-config.yaml"
+  grep -q "^preferFrozenLockfile: true$" "$RENDER_DIR/optin-config.yaml"
 }
 
 @test "render(default): config.yaml is valid YAML with integrity + lockfile + strict keys" {
   assert_valid_yaml "$RENDER_DIR/default-config.yaml"
   grep -q "^ignoreScripts: true$" "$RENDER_DIR/default-config.yaml"
   grep -q "^verifyStoreIntegrity: true$" "$RENDER_DIR/default-config.yaml"
-  grep -q "^preferFrozenLockfile: true$" "$RENDER_DIR/default-config.yaml"
+  ! grep -q "preferFrozenLockfile" "$RENDER_DIR/default-config.yaml"
 }
 
 # ---- render: allowlist set — ignore-scripts flips, integrity keys survive ----
@@ -161,7 +183,7 @@ EOF
 @test "render(allowlist): integrity + lockfile keys still present in the allowlist branch" {
   # Regression guard: the allowlist branch must not drop the always-on keys.
   grep -q "^verify-store-integrity=true$" "$RENDER_DIR/allow-rc"
-  grep -q "^prefer-frozen-lockfile=true$" "$RENDER_DIR/allow-rc"
+  ! grep -q "prefer-frozen-lockfile" "$RENDER_DIR/allow-rc"
 }
 
 @test "render(allowlist): config.yaml stays strict (pnpm 11 allowlists per-project) and valid" {

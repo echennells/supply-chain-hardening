@@ -806,13 +806,12 @@ jobs:
           ecosystems: pnpm
           pnpm_built_dependencies: 'esbuild,sharp'
 
-      - name: config.yaml + rc reflect onlyBuiltDependencies allowlist
+      - name: config.yaml + rc reflect the allowlist
         run: |
-          # pnpm 11+ format: ignoreScripts=false + onlyBuiltDependencies list
+          # pnpm 11+ format: ignoreScripts=false, and NO onlyBuiltDependencies
+          # list (pnpm 11+ ignores it in the global file; MEASURED).
           grep -q '^ignoreScripts: false$' "$HOME/.config/pnpm/config.yaml"
-          grep -q '^onlyBuiltDependencies:$' "$HOME/.config/pnpm/config.yaml"
-          grep -q '^  - esbuild$' "$HOME/.config/pnpm/config.yaml"
-          grep -q '^  - sharp$' "$HOME/.config/pnpm/config.yaml"
+          ! grep -q 'onlyBuiltDependencies' "$HOME/.config/pnpm/config.yaml"
           # pnpm 10 format: ini-style allowlist entries
           grep -q '^ignore-scripts=false$' "$HOME/.config/pnpm/rc"
           grep -q '^only-built-dependencies\[\]=esbuild$' "$HOME/.config/pnpm/rc"

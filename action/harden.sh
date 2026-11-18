@@ -228,6 +228,7 @@ suggest_for_repo() {
     found_any=1
     with_lines+=("          pnpm_built_dependencies: '$scripted'")
     notes+=("These packages run code at install time. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing. Allowlisting them restores their build scripts and nothing else.")
+    notes+=("On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
     if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ]; then
       notes+=("This list came from a known-names scan, not a lockfile — treat it as a floor, not the full set. Commit a package-lock.json or pnpm-lock.yaml and re-run for the exact answer.")
     fi
@@ -911,23 +912,23 @@ harden_pnpm() {
   # pnpm 11+ format (YAML, camelCase). This is the load-bearing file
   # for pnpm 11 — it ignores ~/.npmrc, ~/.config/pnpm/rc (the older
   # ini-format file), and /etc/npmrc for non-auth settings.
-  # NOTE (MEASURED pnpm 10.34 / 11.28 / 12.18, 2026-11-08): pnpm 11+ IGNORES
-  # onlyBuiltDependencies in this global config.yaml (it warns and tells you to
-  # move it to a project pnpm-workspace.yaml), so the allowlist written here is
-  # inert on pnpm 11+ — an allowlisted package is NOT built from this file; use
-  # pnpm-workspace.yaml per project. The pnpm-10 rc written below is where the
-  # allowlist actually takes effect. `ignoreScripts: false` here is NOT a
-  # fail-open: pnpm 10+ default-denies dependency build scripts regardless, so a
-  # non-allowlisted script stays blocked (the role keeps ignoreScripts: true as
-  # the stricter, clearer signal).
+  #
+  # THE ALLOWLIST IS NOT WRITTEN HERE. No pnpm version builds a package because
+  # this global file lists it: pnpm 10 reads the rc below, and pnpm 11 and 12
+  # ignore onlyBuiltDependencies here (MEASURED on 11.0.0, 11.28.12, 12.21.0:
+  # ERR_PNPM_IGNORED_BUILDS). `allowBuilds` is rejected in this file too, so on
+  # pnpm 11+ there is no global allowlist at all; it has to be the project's
+  # pnpm-workspace.yaml. Writing the list anyway was not just inert: a scoped
+  # name went out unquoted (`  - @scope/pkg`), which is invalid YAML, and every
+  # pnpm 11.0.0 command (even --version) then failed to load its config.
+  #
+  # `ignoreScripts: false` with an allowlist is NOT a fail-open: pnpm 10+
+  # default-denies dependency build scripts regardless (the approve-builds
+  # gate), and false is what lets a project's allowBuilds take effect.
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
       echo "ignoreScripts: false"
-      echo "onlyBuiltDependencies:"
-      for pkg in "${pnpm_allowlist[@]}"; do
-        echo "  - $pkg"
-      done
     else
       echo "ignoreScripts: true"
     fi
@@ -935,13 +936,13 @@ harden_pnpm() {
     echo "minimumReleaseAgeStrict: $STRICT"
     echo "minimumReleaseAgeExclude: []"
     echo "blockExoticSubdeps: true"
-    # Store integrity + lockfile determinism. Standard pnpm settings that ARE
-    # readable from the global config — unlike onlyBuiltDependencies, which
-    # pnpm 11 rejects here. verifyStoreIntegrity hash-checks the store against
-    # the lockfile; preferFrozenLockfile installs from an up-to-date lockfile
-    # without re-resolving. Neither hard-fails on drift.
+    # Store integrity: hash-checks the store against the lockfile. Readable
+    # from the global config, unlike onlyBuiltDependencies.
+    # preferFrozenLockfile is deliberately NOT written: pnpm defaults it to
+    # true, and an explicit value turns OFF pnpm's own CI frozen-lockfile
+    # default on pnpm 11 before 11.28.1 and 12 before 12.8.0 (MEASURED with
+    # CI=true and an out-of-sync lockfile: the lockfile was rewritten).
     echo "verifyStoreIntegrity: true"
-    echo "preferFrozenLockfile: true"
   } > "$HOME/.config/pnpm/config.yaml"
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
@@ -962,9 +963,14 @@ harden_pnpm() {
   } > "$HOME/.config/pnpm/rc"
 
   HARDENED+=("pnpm")
-  set_tool_version "pnpm" "$(detect_version pnpm "pnpm --version")"
+  local pnpm_version
+  pnpm_version=$(detect_version pnpm "pnpm --version")
+  set_tool_version "pnpm" "$pnpm_version"
   if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
-    log "pnpm: onlyBuiltDependencies=[${pnpm_allowlist[*]}], minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+    log "pnpm: onlyBuiltDependencies=[${pnpm_allowlist[*]}] (pnpm 10 rc), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+    if [[ -z "$pnpm_version" ]] || version_ge "$pnpm_version" "11.0.0"; then
+      warn "pnpm_built_dependencies takes effect on pnpm 10 only. pnpm ${pnpm_version:-11+} has no global build allowlist: add the packages to the project's pnpm-workspace.yaml as allowBuilds (e.g. 'allowBuilds: {${pnpm_allowlist[0]}: true}'), or their install fails with ERR_PNPM_IGNORED_BUILDS"
+    fi
   else
     log "pnpm: ignoreScripts=true (blanket block), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
   fi
