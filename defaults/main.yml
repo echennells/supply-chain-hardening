@@ -578,7 +578,7 @@ pinact_version: "v5.0.0"
 # npm tools. npm verifies tarball integrity against the registry, so again the
 # pin is the missing half. Note sfw's npm package is a shim that downloads a
 # firewall binary at runtime, which this pin does NOT cover.
-npq_version: "3.27.2"
+npq_version: "3.27.4"   # GHSA-mcxv-wphc-7xjm (high): <3.27.4 could audit a different version than npm installs
 lockfile_lint_version: "5.1.0"
 sfw_version: "2.0.6"
 
