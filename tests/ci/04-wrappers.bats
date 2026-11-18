@@ -647,6 +647,40 @@ cargo_sfw_stubs() {
   [[ "$output" == *"--minimum-dependency-age=P7D"* ]]
 }
 
+deno_stub_version() { # a deno stub that reports the given version
+  stub_bin deno 'case "${1:-}" in --version|-V) echo "deno '"$1"' (stable, release, x86_64-unknown-linux-gnu)" ;; *) echo "STUB:deno ARGS=[$*]" ;; esac'
+}
+
+@test "deno: info gets the age flag only from 2.8.3 (2.8.2 rejects it)" {
+  # MEASURED on deno 2.8.2: "error: unexpected argument
+  # '--minimum-dependency-age' found" -- injecting it broke `deno info`.
+  deno_stub_version 2.8.2
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" info npm:is-number
+  [[ "$output" == *"ARGS=[info npm:is-number]"* ]]
+  deno_stub_version 2.8.3
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" info npm:is-number
+  [[ "$output" == *"ARGS=[info --minimum-dependency-age=P2D npm:is-number]"* ]]
+}
+
+@test "deno: x runs with --ignore-scripts on 2.9.3+ and is refused below" {
+  # MEASURED on 2.7.14-2.9.8: `deno x` runs the package's lifecycle scripts
+  # with no prompt, and nothing in the role stopped it; --ignore-scripts does
+  # (2.9.3, 2.9.8).
+  deno_stub_version 2.9.3
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" x npm:cowsay hi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ARGS=[x --ignore-scripts npm:cowsay hi]"* ]]
+  deno_stub_version 2.9.2
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" x npm:cowsay hi
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing 'deno x'"* ]]
+  [[ "$output" != *"STUB:deno"* ]]
+}
+
 @test "deno: refuses to recurse when the real binary is gone" {
   stub_bin deno
   harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
