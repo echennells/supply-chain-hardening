@@ -1390,7 +1390,10 @@ if have python3 && python3 -m pip --version >/dev/null 2>&1 \
 elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
   pipver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
   if ! python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
-    row GAP PARSED "pip native age gate" \
+    # Toolchain, not config: no re-run of the hardening teaches pip 24 the flag.
+    # As a plain row() it was counted "fixable by re-running the hardening", so
+    # --fail-on=config failed every stock-runner job that hardened pip.
+    scv_toolchain_gap pip.native-age-gate PARSED "pip native age gate" \
       "pip $pipver does NOT implement --uploaded-prior-to (added in pip 26.0) - the key is deployed but inert, so \`python3 -m pip install\` is not age-gated on this interpreter"
   else
     # pip prints `config list` in override-order groups, so the LAST match is
@@ -2602,14 +2605,14 @@ else
     row "N/A" - "cargo threat-intel filtering" \
       "no working cargo wrapper to route through - see the publish-age gate row"
   elif ! grep -q 'sfw' "$cw" 2>/dev/null || ! cargo_wrapper_uses_sfw; then
-    # Not a GAP: harden.sh's cargo wrapper has no sfw route AT ALL (install_sfw
-    # wires sfw into the npm wrapper only), and the role's is off unless
-    # cargo_socket_firewall is true. This is a coverage difference, not a
-    # misconfiguration the user of this action can fix, and emitting GAP for it
-    # would fail every strict run for a feature that cannot be turned on - the
+    # Not a GAP: the wrapper was rendered without the sfw route, which is a
+    # choice, not a misconfiguration. Both surfaces render it only when
+    # cargo_socket_firewall is true; harden.sh defaults that to follow
+    # `intel`, so the default intel: none lands here. Emitting GAP for it
+    # would fail every strict run for a feature the job did not ask for - the
     # thing the `requested()` comment already warns against.
     row "N/A" - "cargo threat-intel filtering" \
-      "this wrapper does not route cargo through sfw (sfw $(have sfw && echo 'is installed but not wired into the cargo wrapper' || echo 'not installed')) - crate downloads are not threat-intel filtered, so a lockfile pinning a known-malicious crate is fetched normally. harden.sh wires sfw into the npm wrapper only; the Ansible role's cargo wrapper routes through sfw when cargo_socket_firewall is true"
+      "this wrapper does not route cargo through sfw (sfw $(have sfw && echo 'is installed but not wired into the cargo wrapper' || echo 'not installed')) - crate downloads are not threat-intel filtered, so a lockfile pinning a known-malicious crate is fetched normally. The action routes cargo through sfw with intel: sfw (or cargo_socket_firewall: true); the Ansible role with cargo_socket_firewall: true"
   elif ! have sfw; then
     row GAP PRESENT "cargo threat-intel filtering" \
       "the wrapper routes cargo through sfw but sfw is not on PATH - crate downloads are unfiltered"

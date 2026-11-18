@@ -189,7 +189,7 @@ this action.
 
 Socket Firewall starts a local filtering proxy and the action wraps `npm` and
 `npx` to route fetches through it; `cargo` goes through the same proxy via
-`cargo_socket_firewall` (on by default, and a no-op when intel is off). A
+`cargo_socket_firewall` (follows `intel` unless set explicitly). A
 flagged package is refused:
 
 ```

@@ -95,13 +95,13 @@ inputs:
   cargo_socket_firewall:
     description: >-
       Route cargo's registry-touching commands through Socket Firewall for
-      threat-intel blocking, mirroring the role's `cargo_socket_firewall`
-      (which defaults on). Only takes effect when sfw is actually present —
-      the wrapper guards on `command -v sfw`, so with `install_sfw: false`
-      this is a no-op rather than a broken cargo. Set false to keep cargo
-      unfiltered even when sfw is installed.
+      threat-intel blocking, mirroring the role's `cargo_socket_firewall`.
+      Default (empty) follows `intel`: on with `intel: sfw`, off otherwise.
+      Set true to route through an sfw installed by an earlier step (verify
+      reports a GAP if it is missing), or false to keep cargo unfiltered
+      even with `intel: sfw`.
     required: false
-    default: 'true'
+    default: ''
   install_cargo_cooldown:
     description: >-
       Install the cargo-cooldown backend that ENFORCES the cargo publish-age

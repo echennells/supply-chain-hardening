@@ -80,7 +80,19 @@ WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
-CARGO_SOCKET_FIREWALL="${CARGO_SOCKET_FIREWALL:-true}"
+# Follows `intel` unless set explicitly. It used to default true on its own, so
+# with the default intel: none every cargo wrapper was rendered to route through
+# an sfw that was never installed: a no-op at runtime, and a GAP in verify,
+# which rightly refuses to count a no-op as filtering (issue #29). Explicit true
+# still means "route through an sfw I installed myself", and verify still holds
+# it to that.
+CARGO_SOCKET_FIREWALL="${CARGO_SOCKET_FIREWALL:-$INSTALL_SFW}"
+case "$CARGO_SOCKET_FIREWALL" in
+  true|false) ;;
+  *)
+    echo "[supply-chain-harden] error: cargo_socket_firewall must be true or false, got '$CARGO_SOCKET_FIREWALL'" >&2
+    exit 2 ;;
+esac
 
 # ---- CI platform adapter ----
 #

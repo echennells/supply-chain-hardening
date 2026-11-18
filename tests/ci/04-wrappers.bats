@@ -469,8 +469,9 @@ cargo_sfw_stubs() {
 @test "cargo+sfw: registry-touching commands are routed through sfw" {
   # The role defaults cargo_socket_firewall on; the action had no equivalent,
   # so cargo was the one ecosystem where installing sfw bought nothing.
+  # Explicit true: an sfw installed by an earlier step, not by intel.
   cargo_sfw_stubs
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
   [[ "$output" == *"SFW-WRAPPED"* ]]
   [[ "$output" == *"--locked"* ]]
@@ -480,7 +481,7 @@ cargo_sfw_stubs() {
   # `cargo update` is the one resolution path --locked can never cover, so it
   # is the one that most needs the network filter.
   cargo_sfw_stubs
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' update 2>/dev/null"
   [[ "$output" == *"SFW-WRAPPED"* ]]
 }
@@ -489,18 +490,18 @@ cargo_sfw_stubs() {
   # Prefixing everything would put a network filter in front of `cargo fmt`,
   # which has nothing to inspect and only adds latency and a failure mode.
   cargo_sfw_stubs
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fmt"
   [[ "$output" != *"SFW-WRAPPED"* ]]
   [[ "$output" == *"ARGS=[fmt]"* ]]
 }
 
 @test "cargo+sfw: absent sfw is a no-op, not a broken cargo" {
-  # sfw is opt-in. A wrapper that hard-required it would break every build on
-  # a runner that did not install it.
+  # A wrapper rendered with the sfw route must not hard-require sfw: it would
+  # break every build on a runner where sfw went missing after hardening.
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.80.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$BATS_TEST_TMPDIR/proj2"; touch "$BATS_TEST_TMPDIR/proj2/Cargo.lock"
-  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
   run bash -c "cd '$BATS_TEST_TMPDIR/proj2' && '$TEST_BIN/cargo' build"
   [ "$status" -eq 0 ]
   [[ "$output" == *"ARGS=[build --locked]"* ]]
@@ -512,6 +513,38 @@ cargo_sfw_stubs() {
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
   [[ "$output" != *"SFW-WRAPPED"* ]]
   [[ "$output" == *"--locked"* ]]
+}
+
+@test "cargo+sfw: the default follows intel, so intel: none renders no sfw route" {
+  # Issue #29. It defaulted true on its own, so with the default intel: none
+  # every wrapper was rendered to route through an sfw nothing installed, and
+  # verify reported GAP PRESENT on every stock runner. sfw on PATH here proves
+  # the route is absent from the wrapper, not merely skipped at runtime.
+  cargo_sfw_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" != *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+  run grep -c '^  if \[ "true" = "true" \]' "$TEST_BIN/cargo"
+  [ "$output" = "0" ]
+}
+
+@test "cargo+sfw: the default follows intel, so intel: sfw routes cargo" {
+  cargo_sfw_stubs
+  stub_bin npm 'case "$*" in "--version") echo "10.9.8" ;; *) echo "STUB" ;; esac'
+  stub_bin node 'echo 22'
+  harden ECOSYSTEMS=cargo INTEL=sfw -- --emit=plain >/dev/null
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"SFW-WRAPPED"* ]]
+  [[ "$output" == *"--locked"* ]]
+}
+
+@test "cargo+sfw: a non-boolean cargo_socket_firewall is refused" {
+  # Anything but the literal "true" rendered the route off, so a typo read as
+  # "filtering on" and silently was not.
+  run harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=yes -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"must be true or false"* ]]
 }
 
 # --- deno ------------------------------------------------------------------

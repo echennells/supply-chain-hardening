@@ -240,6 +240,9 @@ exec '"$realpy"' "$@"'
   harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
+  # Counted as toolchain: no re-run teaches pip 24 the flag. It was counted as
+  # config, so the summary told the reader re-running the hardening would fix it.
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
 
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
