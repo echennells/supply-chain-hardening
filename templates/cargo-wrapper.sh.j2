@@ -115,8 +115,9 @@ fi
 # sfw runs read-only, as in the npm wrapper (templates/npm-wrapper.sh.j2 has
 # the measurements): SFW_SKIP_UPDATE_CHECK=1 stops a non-root caller trying to
 # rewrite sfw's root-owned .sfw-cache/next-check, which sfw treats as fatal, so
-# every cargo build failed one hour after each apply. A cold cache, which only
-# root can fill, warns and runs cargo unfiltered instead of failing.
+# every cargo build failed one hour after each apply. A cold cache that this
+# caller cannot fill (only root can, unless sfw is the caller's own) warns and
+# runs cargo unfiltered instead of failing.
 SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
 sfw_ready() {
   local s p
@@ -125,6 +126,8 @@ sfw_ready() {
   p=${s%/*}; p=${p%/*}
   [ -f "$p/package.json" ] || return 0
   [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
   echo "[supply-chain-hardening] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-apply the role. cargo call not filtered through threat intel" >&2
   return 1
 }

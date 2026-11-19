@@ -1958,7 +1958,8 @@ fi
 # npm, npx and cargo call through sfw failed with "[sfw] Failed to prepare
 # firewall binary: EACCES ... next-check". SFW_SKIP_UPDATE_CHECK=1 runs the
 # cached binary without writing (MEASURED). A COLD cache still needs a
-# download only root can do, so it warns and runs cargo unfiltered.
+# download, which only root can do unless the caller can write the cache, so
+# otherwise it warns and runs cargo unfiltered.
 if [ "__CARGO_SFW__" = "true" ]; then
   SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
 fi
@@ -1969,6 +1970,8 @@ sfw_ready() {
   p=${s%/*}; p=${p%/*}
   [ -f "$p/package.json" ] || return 0
   [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
   echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. cargo call not filtered through threat intel" >&2
   return 1
 }
@@ -2935,8 +2938,9 @@ install_sfw_and_wrap() {
 # cached binary without writing (MEASURED: no file under the cache changed).
 SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
 # A COLD cache still needs a download that only root can do (MEASURED:
-# "EACCES ... mkdir .sfw-cache"); a root reinstall of sfw leaves it cold. That
-# warns and passes through, the way an absent sfw does, instead of failing.
+# "EACCES ... mkdir .sfw-cache"), unless the caller can write the cache; a
+# root reinstall of sfw leaves it cold. That warns and passes through, the way
+# an absent sfw does, instead of failing.
 sfw_ready() {
   local s p
   command -v sfw >/dev/null 2>&1 || return 1
@@ -2945,6 +2949,8 @@ sfw_ready() {
   p=${s%/*}; p=${p%/*}
   [ -f "$p/package.json" ] || return 0
   [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
   echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. Call not filtered through threat intel" >&2
   return 1
 }

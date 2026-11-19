@@ -921,8 +921,9 @@ exec "$@"'
   # Warm: routed through sfw.
   run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
   [[ "$output" == *"SFW-STUB"* ]]
-  # Cold.
+  # Cold, in a cache this account cannot write (root's, on a real host).
   rm -f "$pkg/.sfw-cache/latest"
+  chmod a-w "$pkg/.sfw-cache"
   run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
   [ "$status" -eq 0 ]
   [[ "$output" == *"sfw has no firewall binary cached"* ]]
@@ -937,6 +938,14 @@ exec "$@"'
   [[ "$output" == *"sfw has no firewall binary cached"* ]]
   [[ "$output" != *"SFW-STUB"* ]]
   [[ "$output" == *"ARGS=[build --locked]"* ]]
+  # Cold, but in a cache this account CAN write (its own sfw, or a run that
+  # could not escalate): sfw downloads the binary itself, so it is used.
+  chmod u+w "$pkg/.sfw-cache"
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [[ "$output" == *"SFW-STUB"* ]]
+  [[ "$output" != *"sfw has no firewall binary cached"* ]]
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" == *"SFW-STUB"* ]]
 }
 
 # --- absence ---------------------------------------------------------------

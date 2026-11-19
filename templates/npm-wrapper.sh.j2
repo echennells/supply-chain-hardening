@@ -60,8 +60,9 @@ SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
 # .../sfw/.sfw-cache"). A root reinstall of sfw leaves the cache cold, because
 # npm replaces the package directory (MEASURED). Rather than
 # fail every install in sfw's words, treat that like an absent sfw: warn, name
-# the fix, and pass through. Root can fill the cache itself. When the layout
-# is not the one recognised here, sfw is left to decide.
+# the fix, and pass through. Root can fill the cache itself, and so can a
+# caller who can write it (a per-user sfw). When the layout is not the one
+# recognised here, sfw is left to decide.
 sfw_why="sfw not found"
 sfw_ready() {
   _s=$(command -v sfw 2>/dev/null) || return 1
@@ -70,6 +71,8 @@ sfw_ready() {
   _p=${_s%/*}; _p=${_p%/*}
   [ -f "$_p/package.json" ] || return 0
   [ -e "$_p/.sfw-cache/latest" ] && return 0
+  if [ -e "$_p/.sfw-cache" ]; then [ -w "$_p/.sfw-cache" ] && return 0
+  else [ -w "$_p" ] && return 0; fi
   sfw_why="sfw has no firewall binary cached that this account can run ($_p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-apply the role"
   return 1
 }
