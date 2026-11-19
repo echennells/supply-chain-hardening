@@ -2193,9 +2193,11 @@ sanitize_cooldown_env() {
     echo "[supply-chain-harden] note: overriding caller publish-age setting(s):$_sc_had - this run's __RELEASE_AGE_HOURS__h/__VIOLATION_ACTION__ policy applies instead." >&2
   fi
   export COOLDOWN_MINUTES=__MIN_AGE_MIN__
-  # The crates.io window, which a repo cooldown.toml's `[registry]
-  # min-publish-age` otherwise sets. Cargo also reads this name (its unstable
-  # registry.min-publish-age) and warns that it is ignoring it; harmless.
+  # The crates.io window, read by CARGO-COOLDOWN (a repo cooldown.toml's
+  # `[registry] min-publish-age` otherwise sets it). Cargo itself ignores this
+  # name: MEASURED on cargo 1.100.0, set alone it neither gated nor warned.
+  # Cargo's own gate is CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE. See the role's
+  # templates/cargo-wrapper.sh.j2 for the measurement.
   export CARGO_REGISTRY_MIN_PUBLISH_AGE="__RELEASE_AGE_HOURS__ hours"
   export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=__VIOLATION_ACTION__
   export COOLDOWN_LOCKFILE_BASELINE=floor

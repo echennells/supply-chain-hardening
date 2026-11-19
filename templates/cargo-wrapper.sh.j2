@@ -414,13 +414,17 @@ sanitize_cooldown_env() {
     echo "[supply-chain-hardening] note: overriding caller publish-age setting(s):$_sc_had - this host's {{ release_age_hours }}h/{{ cargo_cooldown_violation_action }} policy applies instead. For a per-crate exception use cargo_cooldown_allow_exact, which writes an [[allow.exact]] rule this override does not touch." >&2
   fi
   export COOLDOWN_MINUTES={{ release_age_hours | int * 60 }}
-  # The crates.io window. Without it a repo cooldown.toml's
-  # `[registry] min-publish-age = "0"` beats COOLDOWN_MINUTES (MEASURED: built a
-  # crate published hours earlier). Cargo reads the same variable as its own
-  # unstable registry.min-publish-age and prints `warning: ignoring
-  # registry.min-publish-age without -Zmin-publish-age` once or twice per build
-  # (cargo 1.99). Harmless, and if cargo stabilises the setting it will enforce
-  # this same window itself.
+  # The crates.io window, read by CARGO-COOLDOWN, not by cargo. Without it a
+  # repo cooldown.toml's `[registry] min-publish-age = "0"` beats
+  # COOLDOWN_MINUTES. MEASURED on cargo-cooldown 0.3.5 (itoa = "1", one-year
+  # window): with that repo file, COOLDOWN_MINUTES alone resolved the newest
+  # itoa, 1.0.19, published 11 days earlier; adding this variable cooled it to
+  # 1.0.15. Cargo itself ignores this name. MEASURED on cargo 1.100.0: set
+  # alone, plain `cargo generate-lockfile` took 1.0.19 and printed nothing.
+  # Cargo's own stabilised gate reads registry.global-min-publish-age
+  # (CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE) and [registries.crates-io]
+  # min-publish-age, and calls a [registry] min-publish-age key in config.toml
+  # unused.
   export CARGO_REGISTRY_MIN_PUBLISH_AGE="{{ release_age_hours | int }} hours"
   export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE={{ cargo_cooldown_violation_action }}
   export COOLDOWN_LOCKFILE_BASELINE=floor
