@@ -47,12 +47,15 @@ npm error notarget No matching version found for electron-to-chromium@1.5.491 wi
 ```
 
 The version exists. `with a date before` is the age gate (`min-release-age`,
-npm 11.10.0 and later): it was published less than `release_age_hours` ago.
-Pick an older version or wait until it ages past the window.
+npm 11.10.0 and later): it was published less than `min-release-age` days
+ago. The role sets that window in whole days, to
+`npm_minimum_release_age_days`: `release_age_hours` divided by 24, rounded
+down, and at least 1 (2 at the 48-hour default). Pick an older version or
+wait until it ages past the window.
 
 Without an exact pin there is no error at all: npm quietly installs the newest
 version that is old enough. Set `SCV_AGE_NOTICE=1` to have the npm wrapper say
-when that happened:
+when that happened, for the packages you name on the command line:
 
 ```
 [supply-chain-hardening] age gate: electron-to-chromium@1.5.491 (0.6d old) skipped as < 2d; installed 1.5.487
@@ -60,8 +63,9 @@ when that happened:
 
 It is opt-in and per command. It covers successful non-interactive installs
 through the role's npm wrapper, and needs `NPM_CONFIG_MIN_RELEASE_AGE` in the
-environment, which the role's env layer sets. It does not explain an
-`ETARGET`.
+environment, which the role's env layer sets. It compares each named
+package's `latest` with what was installed, so a transitive dependency that
+the gate held back is not reported. It does not explain an `ETARGET`.
 
 ## Yarn (Berry): `YN0028` in a project with no `yarn.lock`
 
