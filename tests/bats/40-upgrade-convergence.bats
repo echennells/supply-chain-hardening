@@ -288,3 +288,69 @@ sfw_cache_dir() {
   # Neither reset nor re-downloaded.
   [ "$(stat -c %i "$(readlink -f "$c/latest")")" = "$before" ]
 }
+
+# --- an sfw older than 2.0.6 ---------------------------------------------------
+#
+# The npm and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1 so that a
+# non-root caller never writes its root-owned cache, and only sfw 2.0.6 reads
+# that variable (2.0.4's shouldCheckForUpdate() has no such test; there is no
+# 2.0.5). Role releases before v2.0.0 installed a floating `sfw@2`, which was
+# 2.0.4 until 2026-05-22, and the install used to run only when sfw was absent,
+# so those hosts kept it. MEASURED on NodeSource with this branch before the
+# fix: every non-root npm and cargo call failed an hour after the apply with
+# "[sfw] Failed to prepare firewall binary: EACCES ... next-check". A re-apply
+# must replace it, and when it cannot, move it aside and say so.
+
+@test "upgrade: an sfw older than 2.0.6 is replaced, or moved aside and reported when it cannot be" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to install a global sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  want=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  true_bin=/usr/bin/true; [ -x "$true_bin" ] || true_bin=/bin/true
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+
+  # The prior state: 2.0.4, installed and warmed by root. Installing it
+  # replaces the package directory, so put the warm cache back afterwards;
+  # that keeps this test to one binary download.
+  cp -a "$c" "$BATS_TEST_TMPDIR/cache"
+  npm install -g --ignore-scripts sfw@2.0.4 >/dev/null 2>&1 || skip "could not install sfw@2.0.4 (offline?)"
+  rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/cache" "$c"
+  shim=$(readlink -f "$(command -v sfw)")
+  run grep -c SFW_SKIP_UPDATE_CHECK "$shim"
+  [ "$output" = 0 ]
+
+  # 1) The replacement leaves it old (sfw_version pins 2.0.4 here): moved
+  #    aside, so the wrappers pass through instead of failing, and recorded.
+  sfw_path=$(command -v sfw)
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false -e sfw_version=2.0.4
+  echo "$output" | tail -25
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Socket Firewall — sfw 2.0.4 at $sfw_path predates 2.0.6"* ]]
+  [[ "$output" == *"sfw_version must be 2.0.6 or later"* ]]
+  hash -r
+  [ -z "$(command -v sfw)" ]
+  [ -e "$sfw_path.broken" ]
+
+  # 2) The default pin: sfw is reinstalled at sfw_version, warmed by root, and
+  #    a non-root caller runs it read-only once the update check is due.
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false
+  echo "$output" | tail -25
+  rm -f "$sfw_path.broken"
+  [ "$status" -eq 0 ]
+  hash -r
+  shim=$(readlink -f "$(command -v sfw)")
+  grep -q SFW_SKIP_UPDATE_CHECK "$shim"
+  grep -q "\"version\": \"$want\"" "${shim%/dist/*}/package.json"
+  [ -e "$c/latest" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
+  run su -s /bin/sh sfwprior -c "SFW_SKIP_UPDATE_CHECK=1 '$(command -v sfw)' $true_bin"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$c/next-check")" = "2026-01-01T00:00:00.000Z" ]
+}

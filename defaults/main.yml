@@ -585,6 +585,11 @@ pinact_version: "v5.0.0"
 # firewall binary at runtime, which this pin does NOT cover.
 npq_version: "3.27.4"   # GHSA-mcxv-wphc-7xjm (high): <3.27.4 could audit a different version than npm installs
 lockfile_lint_version: "5.1.0"
+# sfw must be 2.0.6 or later: the npm and cargo wrappers run it with
+# SFW_SKIP_UPDATE_CHECK=1, which older versions ignore (there is no 2.0.5), and
+# then every non-root call through it fails an hour after each update check.
+# Unlike the other tools here, an installed sfw older than 2.0.6 is replaced at
+# re-apply, and moved aside (recorded) if the replacement is still too old.
 sfw_version: "2.0.6"
 
 # zizmor, installed via `uv tool install`.

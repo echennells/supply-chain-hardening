@@ -48,59 +48,6 @@
   failed_when: false
   when: npm_for_socket.rc == 0
 
-- name: Check that root can run npm (a per-user Node is invisible to become)
-  # The install below runs `npm install -g` as root, and root's PATH is sudo's
-  # secure_path, not the user's shell. On a host whose only Node is per-user
-  # (fnm, nvm, volta, asdf) the detection above finds the user's npm but root
-  # cannot run it (MEASURED on fnm: not found under sudo), so the install failed
-  # and was recorded as "install failed", which sends the reader after the wrong
-  # problem. Running the user's npm as root is not the fix: root would execute
-  # files the user can edit. Skip the install and say why instead.
-  become: true
-  ansible.builtin.shell:
-    cmd: |
-      # Found by root AND owned by root. Where sudoers sets no secure_path, root
-      # keeps the applying user's PATH and finds the per-user npm after all;
-      # running that as root would execute files the user can edit.
-      npm_path=$(command -v npm) || exit 1
-      for p in "$npm_path" "$(command -v node)"; do
-        [ -n "$p" ] || continue
-        real=$(readlink -f "$p")
-        [ "$(stat -c %u "$real" 2>/dev/null)" = 0 ] || { echo "$real"; exit 3; }
-      done
-    executable: /bin/bash
-  register: npm_root_for_socket
-  changed_when: false
-  check_mode: false
-  failed_when: false
-  when:
-    - sfw_check.rc != 0
-    - npm_for_socket.rc == 0
-    - node_major_version.stdout | int >= 20
-
-- name: Install Socket Firewall Free via npm (requires Node >= 20)
-  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
-  # abort the play: the config-file layer is the load-bearing protection and
-  # every include after this one would be skipped. Measured consequence of the
-  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
-  # 11 downstream includes, including the entire env-var layer. The failure is
-  # recorded below instead, so it is reported rather than fatal or silent.
-  become: true
-  # --ignore-scripts: dogfood the script-block on the role's own install. Safe for
-  # sfw despite it fetching a firewall binary: that fetch is lazy at first runtime,
-  # not a postinstall — if it WERE a postinstall it would already be blocked on
-  # every npm >=12 host by native allowScripts (which the role supports), so sfw
-  # cannot depend on an install-time script. Universal CLI flag across npm versions.
-  ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
-  when:
-    - sfw_check.rc != 0
-    - npm_for_socket.rc == 0
-    - node_major_version.stdout | int >= 20
-    - npm_root_for_socket.rc | default(1) == 0
-  changed_when: true
-  register: sfw_install
-  failed_when: false
-
 - name: Reset an sfw cache that anyone but root could have written
   # sfw runs the cached firewall binary (.sfw-cache/latest) without checking its
   # digest again; the digest is checked once, when the file is downloaded
@@ -117,7 +64,24 @@
   # Changing the owner back to root does not repair that. The binary may
   # already have been replaced, so the whole cache is removed, and the warm task
   # below downloads it again and checks the digest. This runs BEFORE the warm,
-  # because the warm runs sfw as root.
+  # because the warm runs sfw as root, and before the install, because
+  # replacing an old sfw (below) runs `npm install -g` as root, which goes
+  # through the npm wrapper an earlier apply deployed and so through sfw. If
+  # the cache cannot be removed, sfw is moved aside: root callers would
+  # otherwise keep running its binary through the wrappers.
+  #
+  # It also reports an sfw older than 2.0.6 ("old-shim"), which the install
+  # below replaces. The wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1 so that a
+  # non-root caller never writes the root-owned cache, and only 2.0.6 reads
+  # that variable: 2.0.4's shouldCheckForUpdate() has no such test (both
+  # dist/sfw.mjs read), and there is no 2.0.5. Role releases before v2.0.0
+  # installed a floating `sfw@2`, which was 2.0.4 until 2026-05-22, and the
+  # install below used to run only when sfw was absent, so those hosts kept
+  # it. MEASURED (NodeSource, sfw 2.0.4 installed by root, this branch applied
+  # by a non-root user before this check existed, next-check backdated): npm
+  # as that user and as a second user, and cargo, each exited 1 with
+  # "[sfw] Failed to prepare firewall binary: EACCES ... next-check", and a
+  # second apply did not repair it.
   #
   # The cache is found from the sfw that root runs. sfw keeps it inside its own
   # package directory (the parent of the directory holding dist/sfw.mjs), so it
@@ -131,7 +95,7 @@
   #
   # The same script also refuses to touch an sfw that root does not own. If
   # sudo keeps the applying user's PATH, root can resolve a per-user sfw, and
-  # the role never runs a user-writable program as root (the npm check above
+  # the role never runs a user-writable program as root (the npm check below
   # follows the same rule).
   #
   # check_mode: false with the dry flag below, so a --check run reports what
@@ -165,6 +129,10 @@
         echo "not-root-owned $shim"
         exit 0
       fi
+      if ! grep -q SFW_SKIP_UPDATE_CHECK "$shim"; then
+        v=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg/package.json" | head -n 1)
+        echo "old-shim ${v:-unknown} $sfw"
+      fi
       c=$pkg/.sfw-cache
       if [ ! -e "$c" ] && [ ! -L "$c" ]; then echo "cold $c"; exit 0; fi
       why=""
@@ -182,15 +150,78 @@
       fi
       if [ -z "$why" ]; then echo "ok $c"; exit 0; fi
       if [ "$dry" = 1 ]; then echo "would-reset $c: $why"; exit 0; fi
-      rm -rf -- "$c" && echo "reset $c: $why"
+      if rm -rf -- "$c"; then
+        echo "reset $c: $why"
+      else
+        mv -f -- "$sfw" "$sfw.broken" 2>/dev/null
+        echo "reset-failed $c: $why"
+      fi
     executable: /bin/bash
   register: sfw_cache_reset
-  changed_when: sfw_cache_reset.stdout is search('^(would-)?reset(-stray)? ', multiline=True)
+  changed_when: sfw_cache_reset.stdout is search('^((would-)?reset(-stray)?|reset-failed) ', multiline=True)
   check_mode: false
   failed_when: false
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+
+- name: Check that root can run npm (a per-user Node is invisible to become)
+  # The install below runs `npm install -g` as root, and root's PATH is sudo's
+  # secure_path, not the user's shell. On a host whose only Node is per-user
+  # (fnm, nvm, volta, asdf) the detection above finds the user's npm but root
+  # cannot run it (MEASURED on fnm: not found under sudo), so the install failed
+  # and was recorded as "install failed", which sends the reader after the wrong
+  # problem. Running the user's npm as root is not the fix: root would execute
+  # files the user can edit. Skip the install and say why instead.
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      # Found by root AND owned by root. Where sudoers sets no secure_path, root
+      # keeps the applying user's PATH and finds the per-user npm after all;
+      # running that as root would execute files the user can edit.
+      npm_path=$(command -v npm) || exit 1
+      for p in "$npm_path" "$(command -v node)"; do
+        [ -n "$p" ] || continue
+        real=$(readlink -f "$p")
+        [ "$(stat -c %u "$real" 2>/dev/null)" = 0 ] || { echo "$real"; exit 3; }
+      done
+    executable: /bin/bash
+  register: npm_root_for_socket
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+
+- name: Install Socket Firewall Free via npm (requires Node >= 20)
+  # NON-FATAL BY DESIGN. An optional scanner failing to install must never
+  # abort the play: the config-file layer is the load-bearing protection and
+  # every include after this one would be skipped. Measured consequence of the
+  # old behavior: on stock Ubuntu 22.04 / Debian 12 the Go tool install killed
+  # 11 downstream includes, including the entire env-var layer. The failure is
+  # recorded below instead, so it is reported rather than fatal or silent.
+  become: true
+  # --ignore-scripts: dogfood the script-block on the role's own install. Safe for
+  # sfw despite it fetching a firewall binary: that fetch is lazy at first runtime,
+  # not a postinstall — if it WERE a postinstall it would already be blocked on
+  # every npm >=12 host by native allowScripts (which the role supports), so sfw
+  # cannot depend on an install-time script. Universal CLI flag across npm versions.
+  #
+  # Also run over an sfw older than 2.0.6 (the reset above says "old-shim"):
+  # the wrappers depend on SFW_SKIP_UPDATE_CHECK, which only 2.0.6 reads. npm
+  # replaces the package directory, so the cache goes with it and the warm
+  # below downloads the binary again (MEASURED from 2.0.4 to 2.0.6).
+  ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
+  when:
+    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+    - npm_root_for_socket.rc | default(1) == 0
+  changed_when: true
+  register: sfw_install
+  failed_when: false
 
 - name: Warm the Socket Firewall binary cache at apply time
   # sfw's npm package is a SHIM: the actual firewall binary is downloaded from
@@ -233,8 +264,20 @@
       # not be fetched from GitHub (exit 127)" for an sfw root never had.
       P=$(command -v sfw 2>/dev/null) || { echo absent; exit 0; }
       # The path root ran, for the non-root check below. The LAST line stays
-      # ok/broken/absent for the recorders.
+      # ok/broken/old/absent for the recorders.
       echo "path=$P"
+      # Still older than 2.0.6 after the install above (it failed, was
+      # skipped, or sfw_version pins an older release): it ignores the
+      # SFW_SKIP_UPDATE_CHECK the wrappers set, so every non-root call through
+      # it would fail an hour after each update check. Move it aside, as for a
+      # failed warm, and record why. Not in a --check run.
+      shim=$(readlink -f "$P"); pkg=${shim%/*}; pkg=${pkg%/*}
+      if [ -f "$pkg/package.json" ] && ! grep -q SFW_SKIP_UPDATE_CHECK "$shim"; then
+        echo "version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg/package.json" | head -n 1)"
+        {{ 'true' if ansible_check_mode else 'mv -f "$P" "$P.broken" 2>/dev/null' }}
+        echo old
+        exit 0
+      fi
       # umask 022: sudo applies the union of the caller's umask and its own, so
       # a caller with umask 077 would leave the downloaded binary in a 0700
       # directory that no other account can reach.
@@ -263,8 +306,9 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
     # Never run sfw as root over a cache the reset above found untrusted and
-    # did not remove (a --check run), or over an sfw root does not own.
-    - sfw_cache_reset.stdout | default('') is not search('^(would-reset|not-root-owned) ', multiline=True)
+    # did not remove (a --check run, or the removal failed), or over an sfw
+    # root does not own.
+    - sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True)
 
 - name: Check that a non-root caller can run the warmed sfw
   # Parity with the action (install_sfw_and_wrap in action/harden.sh): warm as
@@ -323,6 +367,22 @@
   when:
     - sfw_warm is defined
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'broken'
+
+- name: Record skipped protection — Socket Firewall older than 2.0.6
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — sfw ' ~ (sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true)) ~ ' at ' ~ sfw_warm.stdout_lines[0][5:] ~ ' predates 2.0.6, so it ignores SFW_SKIP_UPDATE_CHECK, which the npm and cargo wrappers set so that a non-root caller never writes its root-owned cache. With it, every non-root npm and cargo call through sfw fails from an hour after each update check ("[sfw] Failed to prepare firewall binary: EACCES ... next-check"). ' ~ (('This --check run changed nothing: a real run replaces it with sfw@' ~ sfw_version ~ ', and moves it aside only if it is still older than 2.0.6.') if ansible_check_mode else ((('Replacing it with sfw@' ~ sfw_version ~ ((' failed (exit ' ~ (sfw_install.rc | string) ~ ').') if (sfw_install.rc | default(0)) != 0 else ' left it unchanged: sfw_version must be 2.0.6 or later.')) if (sfw_install is defined and sfw_install is not skipped) else 'It was not replaced (see the other Socket Firewall entries).') ~ ' It was moved aside so npm and cargo keep working, unfiltered. Install sfw 2.0.6 or later as root and re-apply.'))] }}
+  when:
+    - sfw_warm is defined
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'old'
+
+- name: Record skipped protection — Socket Firewall cache could not be reset
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — its cache could be written by an account other than root (' ~ (sfw_cache_reset.stdout | regex_search('^reset-failed (.*)$', '\1', multiline=True) | first) ~ '), so that account may have chosen the binary sfw runs, and removing the cache failed. sfw was moved aside and not run, so npm and cargo run unfiltered. Remove that cache as root and re-apply.'] }}
+  when:
+    - sfw_cache_reset is defined
+    - sfw_cache_reset.stdout | default('') is search('^reset-failed ', multiline=True)
 
 - name: Record skipped protection — Socket Firewall resolves to a program root does not own
   ansible.builtin.set_fact:
