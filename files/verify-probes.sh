@@ -113,6 +113,81 @@ discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bi
 discover poetry  "$HOME/.local/bin" "${POETRY_HOME:-$HOME/.local/share/pypoetry}/venv/bin" || true
 
 # ======================================================================
+# yarn
+# ======================================================================
+
+# --- yarn age gate, yarn lifecycle scripts  [PARSED] ---
+# ---------------------------------------------------------------- yarn -------
+# One probe for both surfaces. It lived in the role's preamble only; the CI
+# surface grepped ~/.yarnrc.yml for the key and graded that WEAK PRESENT, which
+# cannot tell a yarn that implements npmMinimalAgeGate from one that does not.
+# MEASURED (VM#10, apt yarnpkg 4.1.0 on Ubuntu 26.04 and Debian 13): harden.sh
+# said "Fully applied", a release 13 hours old installed, and that row stayed
+# WEAK PRESENT.
+#
+# BRANCH ON THE EXIT CODE, NOT ON THE TEXT. Below Yarn 4.10.0 the key does not
+# exist: `yarn config get npmMinimalAgeGate` prints a usage error ("Couldn't
+# find a configuration settings named ...") on STDOUT and exits 1 (MEASURED,
+# 4.1.0 and 4.9.4). Read as a value, that became "non-integer
+# npmMinimalAgeGate='UsageError:...' (this is the NaN failure)": the wrong
+# diagnosis, for a gap only an upgrade closes. In the HOME ~/.yarnrc.yml those
+# versions ignore the key without a word and run the install (MEASURED).
+#
+# DURATION STRINGS. `yarn config get` prints the number yarn will use, so a
+# value is judged by that number. MEASURED 2026-11-19: yarn 4.10.3 reads "2d"
+# (quoted or not) as its leading integer, 2 MINUTES, and "36500d" as 36500;
+# yarn 4.11.0 parses durations ("2d" = 2880). So on 4.10.x a duration string is
+# a gate of a few minutes, which the window comparison below reports. Integer
+# minutes mean the same on every version that has the key, which is what both
+# writers emit.
+#
+# Yarn 1.x (classic) never reads .yarnrc.yml: `yarn config get` answers
+# "undefined" for both keys with exit 0 (MEASURED, 1.22.22), so it is
+# recognised by its version first.
+if ! have yarn; then
+  row "N/A" - "yarn" "yarn not installed"
+elif command -v requested >/dev/null 2>&1 && ! requested yarn; then
+  row "N/A" - "yarn" "yarn installed but not in the requested ecosystems"
+else
+  yv=$(yarn --version 2>/dev/null | head -1 | tr -d '\r')
+  case "$yv" in
+    1.*)
+      scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
+        "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them" ;;
+    *)
+      yout=$(yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
+      v=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | tr -d ' ')
+      ywant=$(scv_want_hours)
+      if [ "$yrc" -ne 0 ]; then
+        scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
+          "yarn ${yv:-<unknown>} has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $(printf '%s\n' "$yout" | head -1 | tr -d '\r' | cut -c1-90). Only a yarn upgrade closes this"
+      else
+        case "$v" in
+          ''|undefined|null)
+            row GAP PARSED "yarn age gate" "yarn $yv reports no npmMinimalAgeGate value, so no age gate is in effect" ;;
+          *[!0-9]*)
+            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate='$v', which is not a whole number of minutes, so the gate cannot be confirmed" ;;
+          0)
+            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=0, which disables the gate" ;;
+          *)
+            if [ -n "$ywant" ] && [ "$v" -lt "$((ywant * 60))" ] 2>/dev/null; then
+              row WEAK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes, below the ${ywant}h promised here. Yarn 4.10.x reads a duration string such as \"2d\" as 2 minutes; write integer minutes"
+            else
+              row OK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes"
+            fi ;;
+        esac
+      fi
+      v=$(yarn config get enableScripts 2>/dev/null | head -1 | tr -d '\r' | tr -d ' ')
+      if [ "$v" = "false" ]; then
+        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
+      else
+        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}"
+      fi
+      ;;
+  esac
+fi
+
+# ======================================================================
 # bun
 # ======================================================================
 

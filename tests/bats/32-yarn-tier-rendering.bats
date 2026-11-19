@@ -109,3 +109,59 @@ assert_has_baseline() {
   assert_valid_yaml "$f"
   grep -q "^enableHardenedMode: true$" "$f"
 }
+
+# The role's "NOT applied" summary used to say nothing about yarn on a host
+# whose yarn cannot enforce the age gate (VM#10: apt yarnpkg 4.1.0 on Debian 13
+# and Ubuntu 26.04). This runs the REAL task from tasks/yarn.yml, lifted out by
+# name so nothing else in that file (the ~/.yarnrc.yml and /etc/yarnrc.yml
+# writes) touches this container, at fixed yarn_detected_version inputs.
+yarn_skip_entries() { # <yarn_detected_version> -> skipped_protections, one per line
+  local dir task play out
+  dir=$(mktemp -d)
+  task="$dir/task.json"; play="$dir/play.yml"; out="$dir/out.txt"
+  python3 - "$ROLE_DIR/tasks/yarn.yml" "$task" <<'PY'
+import json, sys, yaml
+tasks = yaml.safe_load(open(sys.argv[1]))
+t = [t for t in tasks if t.get("name", "").startswith("Record skipped protection")]
+assert len(t) == 1, "expected exactly one skip-recording task in tasks/yarn.yml"
+json.dump(t, open(sys.argv[2], "w"))
+PY
+  cat > "$play" <<PLAY
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    yarn_detected_version: "$1"
+  tasks:
+    - ansible.builtin.include_tasks: $task
+    - ansible.builtin.copy:
+        content: "{{ (skipped_protections | default([])) | join('\n') }}\n"
+        dest: $out
+        mode: "0644"
+PLAY
+  ansible-playbook "$play" >/dev/null 2>&1 || { echo "playbook failed for '$1'" >&2; rm -rf "$dir"; return 1; }
+  cat "$out"; rm -rf "$dir"
+}
+
+@test "skip report: yarn below 4.10 is listed as an inert age gate" {
+  run yarn_skip_entries 4.1.0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Yarn publish-age gate"*"yarn 4.1.0"*"4.10.0"* ]]
+  run yarn_skip_entries 4.9.4
+  [[ "$output" == *"Yarn publish-age gate"*"yarn 4.9.4"* ]]
+}
+
+@test "skip report: yarn classic is listed as not reading .yarnrc.yml at all" {
+  run yarn_skip_entries 1.22.22
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Yarn hardening"*"1.22.22"*"never"*"reads .yarnrc.yml"* ]]
+}
+
+@test "skip report: yarn 4.10+ and an undetected yarn add nothing" {
+  local v
+  for v in 4.10.0 4.11.0 5.0.0 ""; do
+    run yarn_skip_entries "$v"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Yarn"* ]] || { echo "unexpected entry for '$v': $output"; return 1; }
+  done
+}

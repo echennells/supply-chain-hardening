@@ -1106,7 +1106,24 @@ harden_yarn() {
 
   HARDENED+=("yarn")
   set_tool_version "yarn" "$yarn_version"
-  log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  # SAY IT HERE, NOT ONLY IN THE VERIFIER — the npm rule above, for yarn.
+  #
+  # npmMinimalAgeGate arrived in Yarn 4.10.0. Older Berry ignores the key in
+  # ~/.yarnrc.yml without a word (MEASURED: 4.1.0, the apt yarnpkg on Debian 13
+  # and Ubuntu 26.04, and 4.9.4: exit 0, no warning), and Yarn 1.x (classic)
+  # never reads .yarnrc.yml at all. This used to report yarn as "Fully
+  # applied" on 4.1.0 while a release 13 hours old installed (VM#10).
+  if [[ -n "$yarn_version" ]] && ! version_ge "$yarn_version" "2.0.0"; then
+    warn "yarn $yarn_version is Yarn 1.x (classic), which never reads .yarnrc.yml — none of the yarn settings are in force: no age gate and no enableScripts. Yarn 4.10 or later is needed."
+    set_eco_status yarn NONE "yarn $yarn_version is classic and never reads .yarnrc.yml; nothing written for yarn is in force"
+    log "yarn: .yarnrc.yml written but NOT read by yarn $yarn_version (classic)"
+  elif [[ -n "$yarn_version" ]] && ! version_ge "$yarn_version" "4.10.0"; then
+    warn "yarn $yarn_version does NOT implement npmMinimalAgeGate (added in Yarn 4.10.0) — the age gate is written and NOT enforced. enableScripts=false still applies. Install Yarn 4.10 or later before this step to make it effective."
+    set_eco_status yarn INERT "age gate written but yarn $yarn_version does not implement npmMinimalAgeGate (Yarn 4.10.0); enableScripts=false still applies"
+    log "yarn: enableScripts=false (age gate written but INERT on yarn $yarn_version)$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  else
+    log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  fi
   end_section
 }
 

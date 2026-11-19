@@ -948,3 +948,53 @@ forge_record() { # a COMPLETE-looking record scoped to npm only
   [ "$status" -eq 1 ]
 }
 
+# ---- VM#10: yarn is probed, not grepped, and below 4.10 is a toolchain gap ----
+
+# yarn_stub <version> <config-get npmMinimalAgeGate stdout> <its exit code>
+yarn_stub() {
+  stub_bin yarn 'case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get npmMinimalAgeGate") printf "%s\n" "'"$2"'"; exit '"$3"' ;;
+  "config get enableScripts") echo false ;;
+  *) echo STUB ;;
+esac'
+}
+
+@test "yarn: below 4.10 the age gate is a toolchain GAP naming 4.10, not 'the NaN failure'" {
+  # MEASURED (apt yarnpkg 4.1.0): `yarn config get npmMinimalAgeGate` prints a
+  # usage error on stdout and exits 1. Old main: the CI row was a WEAK PRESENT
+  # grep of our own file, and the role read the usage text as a NaN value.
+  yarn_stub 4.1.0 'Usage Error: Couldn'"'"'t find a configuration settings named "npmMinimalAgeGate"' 1
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'yarn age gate' <<<"$output")
+  [[ "$r" == GAP*"yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0)"* ]]
+  [[ "$r" != *"NaN"* ]]
+  [[ "$output" == *"OK     PARSED      yarn lifecycle scripts blocked"* ]]
+  [[ "$output" != *"file contents only"*"yarnrc"* ]]
+  [ "$status" -eq 1 ]
+  # A gap no config can close: --fail-on=config does not fail on it.
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ]
+}
+
+@test "yarn: 4.10 reading \"2d\" as 2 minutes is WEAK, below the promised window" {
+  yarn_stub 4.10.3 2 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn age gate' <<<"$output")" == WEAK*"npmMinimalAgeGate=2 minutes, below the 48h"* ]]
+}
+
+@test "yarn: a working gate is OK, so GAP is not the default answer" {
+  yarn_stub 4.11.0 2880 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn age gate' <<<"$output")" == OK*"npmMinimalAgeGate=2880 minutes"* ]]
+}
+
+@test "yarn: classic is a GAP for the whole ecosystem" {
+  yarn_stub 1.22.22 undefined 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn hardening' <<<"$output")" == GAP*"classic and ignores .yarnrc.yml"* ]]
+}

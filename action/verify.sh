@@ -55,7 +55,7 @@ SCV_SCOPE_LABEL="in this job"
 
 # The shared probe body. Overridable so a checkout laid out differently, or a
 # test, can point at another copy — but NEVER optional. A verifier that
-# silently skips nine ecosystems' probes and then prints "no gaps" is the
+# silently skips ten ecosystems' probes and then prints "no gaps" is the
 # exact fail-open shape this whole script exists to catch, so a missing body
 # is a hard error, not a degraded run.
 SCV_PROBES="${SCV_PROBES:-$(CDPATH="" cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/files/verify-probes.sh}"
@@ -1011,31 +1011,31 @@ fi
 # PRESENT-level only, and reported as such. These exist so a missing file is
 # visible; they are not evidence that anything enforces.
 #
-# bun and bundler used to be in this loop and are NOT any more: the shared
-# probe body runs real `bun install` / `bundle config` probes for both, and a
-# second value-blind grep row for the same protection would double-count it in
-# the table and in every count derived from it. pnpm and yarn keep their
-# grep-level rows until real `config get` probes exist for them.
-for pair in "pnpm:$HOME/.config/pnpm/config.yaml:ignoreScripts" \
-            "yarn:$HOME/.yarnrc.yml:enableScripts"; do
-  tool="${pair%%:*}"; rest="${pair#*:}"; file="${rest%%:*}"; key="${rest##*:}"
-  have "$tool" || { na_absent "$tool config" "$tool not installed"; continue; }
-  requested "$tool" || { row "N/A" BYDESIGN "$tool config" "$tool installed but not in the requested ecosystems"; continue; }
-  if [ -f "$file" ] && grep -q "$key" "$file" 2>/dev/null; then
-    row WEAK PRESENT "$tool config" "$key present in $file — file contents only, not proof of enforcement"
-  else
-    gap "$tool.config" PRESENT "$tool config" "$key not found in $file"
-  fi
-done
+# bun, bundler and yarn used to be grep rows here and are NOT any more: the
+# shared probe body runs real `bun install` / `bundle config` / `yarn config
+# get` probes for them, and a second value-blind grep row for the same
+# protection would double-count it in the table and in every count derived
+# from it. pnpm keeps its grep-level row until a real `config get` probe exists
+# for it.
+pcfg="$HOME/.config/pnpm/config.yaml"
+if ! have pnpm; then
+  na_absent "pnpm config" "pnpm not installed"
+elif ! requested pnpm; then
+  row "N/A" BYDESIGN "pnpm config" "pnpm installed but not in the requested ecosystems"
+elif [ -f "$pcfg" ] && grep -q ignoreScripts "$pcfg" 2>/dev/null; then
+  row WEAK PRESENT "pnpm config" "ignoreScripts present in $pcfg — file contents only, not proof of enforcement"
+else
+  gap pnpm.config PRESENT "pnpm config" "ignoreScripts not found in $pcfg"
+fi
 
 # ============================================================ shared probes ==
 #
-# bun, deno, uv, composer, cargo, bundler, maven, gradle, nuget — the same
+# yarn, bun, deno, uv, composer, cargo, bundler, maven, gradle, nuget — the same
 # bytes the Ansible role installs at /usr/local/bin/supply-chain-verify. The
 # body needs row(), have() and requested(), all defined above. It never exits.
 if [ ! -r "$SCV_PROBES" ]; then
   echo "[supply-chain-verify] error: shared probe body not found at $SCV_PROBES" >&2
-  echo "  nine ecosystems would go unprobed and this run would print a short green table," >&2
+  echo "  ten ecosystems would go unprobed and this run would print a short green table," >&2
   echo "  which is the exact failure this verifier exists to catch. Set SCV_PROBES to its path." >&2
   exit 2
 fi

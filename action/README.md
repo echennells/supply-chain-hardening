@@ -425,7 +425,7 @@ The probes themselves live in `files/verify-probes.sh` — the same bytes the
 Ansible role installs as `/usr/local/bin/supply-chain-verify`, so the two
 surfaces cannot drift. `action/verify.sh` is the CI half: what this job
 promised, the runner-only probes, and the report. It **exits 2** if the probe
-body is missing rather than quietly skipping nine ecosystems and printing a
+body is missing rather than quietly skipping ten ecosystems and printing a
 short green table.
 
 ## Inputs

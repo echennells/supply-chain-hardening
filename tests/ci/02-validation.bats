@@ -233,6 +233,32 @@ setup() { common_setup; }
   assert_file_contains "$OUT_FILE" "ecosystems_degraded=cargo"
 }
 
+@test "reporting: yarn below 4.10 is degraded, not 'Fully applied' (VM#10)" {
+  # MEASURED on old main with apt yarnpkg 4.1.0: "Fully applied | yarn" while a
+  # release 13 hours old installed. npmMinimalAgeGate arrived in Yarn 4.10.0.
+  stub_bin yarn 'case "${1:-}" in --version) echo "4.1.0" ;; *) echo STUB ;; esac'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yarn 4.1.0 does NOT implement npmMinimalAgeGate"* ]]
+  [[ "$output" != *"Fully applied | \`yarn\`"* ]]
+  assert_file_contains "$OUT_FILE" "ecosystems_degraded=yarn"
+  # Script blocking is still written: this is INERT, not a refusal.
+  assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableScripts: false"
+}
+
+@test "reporting: yarn classic is NOT applied, and yarn 4.10+ is" {
+  stub_bin yarn 'case "${1:-}" in --version) echo "1.22.22" ;; *) echo STUB ;; esac'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"never reads .yarnrc.yml"* ]]
+  assert_file_contains "$OUT_FILE" "ecosystems_ineffective=yarn"
+  stub_bin yarn 'case "${1:-}" in --version) echo "4.10.3" ;; *) echo STUB ;; esac'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$OUT_FILE" "ecosystems_effective=yarn"
+  [[ "$output" != *"does NOT implement npmMinimalAgeGate"* ]]
+}
+
 @test "reporting: npm that cannot enforce the age gate is flagged at hardening time" {
   # min-release-age landed in npm 11.10.0. The version is already detected, so
   # the run can say so itself instead of leaving it to an opt-in verifier.
