@@ -164,7 +164,11 @@ hostile_install_fixture() {
 @test "ATTACK: a script named install does not lift --no-scripts from composer install" {
   command -v php >/dev/null 2>&1 || skip "php not installed"
   hostile_install_fixture
-  run bash -c 'cd "$1" && composer install --no-interaction' _ "$HOST"
+  # COMPOSER_SKIP_SCRIPTS is unset so the wrapper is the only thing that can
+  # block the script. setup() loads the env layer, which on composer >= 2.8.6
+  # blocks post-install-cmd by itself: MEASURED on 2.11.2, this test still
+  # passed with "install" removed from the wrapper's built-in list.
+  run bash -c 'cd "$1" && env -u COMPOSER_SKIP_SCRIPTS composer install --no-interaction' _ "$HOST"
   [ "$status" -eq 0 ]
   [ -f "$HOST/vendor/autoload.php" ]
   [ ! -f /tmp/marker-composer-script ]

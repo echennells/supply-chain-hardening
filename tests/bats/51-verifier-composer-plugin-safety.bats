@@ -101,7 +101,10 @@ J
 
 @test "verify: composer probes do not run a checkout's plugin or scripts" {
   stage_hostile_checkout
-  run env PATH="$shim:$PATH" COMPOSER_ALLOW_SUPERUSER=1 bash -c "cd '$root/app' && '$VERIFY' --verbose"
+  # COMPOSER_SKIP_SCRIPTS is unset: on composer >= 2.8.6 it lists pre-command-run
+  # and would block the root script whatever the probes do, which made the
+  # script assertion below vacuous wherever the env layer was loaded.
+  run env -u COMPOSER_SKIP_SCRIPTS PATH="$shim:$PATH" COMPOSER_ALLOW_SUPERUSER=1 bash -c "cd '$root/app' && '$VERIFY' --verbose"
 
   # The load-bearing assertions: neither the plugin nor the root script ran.
   [ ! -f "$MARKER" ] || { echo "the checkout's plugin ran during verify" >&2; return 1; }
