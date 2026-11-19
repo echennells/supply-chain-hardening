@@ -2072,14 +2072,32 @@ has_resolution_flag() {
 
 # Walk up for a lockfile: cargo is routinely run from a workspace
 # subdirectory, so checking only ./Cargo.lock would skip --locked for most
-# real invocations.
+# real invocations. Records the directory in LOCK_DIR.
 has_lockfile() {
   local d="$PWD"
+  LOCK_DIR=""
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -f "$d/Cargo.lock" ] && return 0
+    [ -f "$d/Cargo.lock" ] && { LOCK_DIR="$d"; return 0; }
     d="$(dirname "$d")"
   done
-  [ -f "/Cargo.lock" ]
+  [ -f "/Cargo.lock" ] && { LOCK_DIR="/"; return 0; }
+  return 1
+}
+
+# --locked is OURS, so say so when it is about to bite: after a Cargo.toml edit
+# cargo stops with "cannot update the lock file ... because --locked was passed
+# to prevent this" (MEASURED, cargo 1.93.1, on this plain path), naming a flag
+# the caller never typed. Parity with the role wrapper, which records the
+# measurement; fires only when a manifest is newer than the lockfile.
+locked_note() {
+  local m
+  for m in "$PWD/Cargo.toml" "${LOCK_DIR%/}/Cargo.toml"; do
+    if [ -f "$m" ] && [ "$m" -nt "${LOCK_DIR%/}/Cargo.lock" ]; then
+      echo "[supply-chain-harden] note: this cargo wrapper adds --locked because a Cargo.lock exists, and $m is newer than it. If cargo stops with \"--locked was passed\", that flag is ours: record the change with 'cargo update --workspace', then build again." >&2
+      return 0
+    fi
+  done
+  return 0
 }
 
 # Insert EXTRA immediately after the subcommand, never appended:
@@ -2295,6 +2313,7 @@ case "$KIND" in
       SCH_NET=1 run_real "$@"
     fi
     if has_lockfile; then
+      locked_note
       SCH_NET=1 exec_with "--locked" "$@"
     fi
     echo "[supply-chain-harden] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2

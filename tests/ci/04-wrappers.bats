@@ -403,6 +403,21 @@ path_stubs() {
   [[ "$output" != *"STUB:cargo"* ]]
 }
 
+@test "cargo: a manifest newer than the lockfile gets a note naming the wrapper's --locked" {
+  stub_bin cargo
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  d=$(lockdir)
+  touch -d '2020-01-01' "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  : > "$BATS_TEST_TMPDIR/proj/Cargo.toml"
+  run bash -c "cd '$d' && '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+  [[ "$output" == *"[supply-chain-harden] note: this cargo wrapper adds --locked"* ]]
+  [[ "$output" == *"cargo update --workspace"* ]]
+  touch "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  run bash -c "cd '$d' && '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" != *"adds --locked"* ]]
+}
+
 @test "cargo-cooldown: the crates.io window, clock and skip list are pinned over the caller's" {
   # Each has a cooldown.toml form a committed repo file can set
   # ([registry] min-publish-age, now, skip_registries), and MEASURED on

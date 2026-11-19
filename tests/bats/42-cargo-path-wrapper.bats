@@ -394,6 +394,31 @@ path_probe() {
   [ "$status" -eq 0 ]
 }
 
+# ---- --locked is ours, so it is attributed when it bites ----
+#
+# After a Cargo.toml edit, cargo stops with "--locked was passed to prevent
+# this", naming a flag the caller never typed (VM test report, section 6).
+
+@test "cargo: a manifest newer than the lockfile gets a note naming the wrapper's --locked" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  touch -d '2020-01-01' "$PROBE_DIR/proj/Cargo.lock"
+  : > "$PROBE_DIR/proj/Cargo.toml"
+  err=$(probe_err build)
+  [[ "$err" == *"[supply-chain-hardening] note: this cargo wrapper adds --locked"* ]]
+  [[ "$err" == *"cargo update --workspace"* ]]
+  [[ "$(probe build)" == *"build --locked"* ]]
+}
+
+@test "cargo: no --locked note when the lockfile is newer than the manifest" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  touch -d '2020-01-01' "$PROBE_DIR/proj/Cargo.toml"
+  touch "$PROBE_DIR/proj/Cargo.lock"
+  err=$(probe_err build)
+  [[ "$err" != *"adds --locked"* ]]
+}
+
 # ---- the gate config ----
 
 cargo_home_dir() { echo "${CARGO_HOME:-$HOME/.cargo}"; }

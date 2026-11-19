@@ -234,14 +234,35 @@ has_resolution_flag() {
 
 # Walk up for a lockfile. Cargo is routinely run from a workspace subdirectory,
 # so checking only ./Cargo.lock would skip --locked for most real invocations.
-# Stops at the first directory containing one.
+# Stops at the first directory containing one, and records it in LOCK_DIR.
 has_lockfile() {
   local d="$PWD"
+  LOCK_DIR=""
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -f "$d/Cargo.lock" ] && return 0
+    [ -f "$d/Cargo.lock" ] && { LOCK_DIR="$d"; return 0; }
     d="$(dirname "$d")"
   done
-  [ -f "/Cargo.lock" ]
+  [ -f "/Cargo.lock" ] && { LOCK_DIR="/"; return 0; }
+  return 1
+}
+
+# --locked IS OURS, SO SAY SO WHEN IT IS ABOUT TO BITE. After a Cargo.toml edit
+# cargo stops with "error: cannot update the lock file <path> because --locked
+# was passed to prevent this" (MEASURED, cargo 1.93.1), naming a flag the caller
+# never typed and nothing that points here (VM test report, section 6, Rust
+# row). A manifest newer than the lockfile is when that happens, so the note
+# fires only then. The advice is measured too: after adding ryu to a manifest
+# whose lockfile pinned itoa 1.0.10, `cargo update --workspace` added ryu and
+# left itoa at 1.0.10.
+locked_note() {
+  local m
+  for m in "$PWD/Cargo.toml" "${LOCK_DIR%/}/Cargo.toml"; do
+    if [ -f "$m" ] && [ "$m" -nt "${LOCK_DIR%/}/Cargo.lock" ]; then
+      echo "[supply-chain-hardening] note: this cargo wrapper adds --locked because a Cargo.lock exists, and $m is newer than it. If cargo stops with \"--locked was passed\", that flag is ours: record the change with 'cargo update --workspace', then build again." >&2
+      return 0
+    fi
+  done
+  return 0
 }
 
 # Re-emit argv with EXTRA inserted immediately after the subcommand. Never
@@ -545,6 +566,7 @@ case "$KIND" in
       SCH_NET=1 run_real "$@"
     fi
     if has_lockfile; then
+      locked_note
       SCH_NET=1 exec_with "--locked" "$@"
     fi
     echo "[supply-chain-hardening] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2
