@@ -459,6 +459,11 @@ degrades the env-propagation row to `WEAK`; without `output-file` it has no
 record of what the job hardened and falls back to checking every installed
 tool.
 
+The verify step runs in the job's working directory, normally the checkout,
+so it asks the project's own yarn: a committed `.yarnrc.yml` `yarnPath` or
+`plugins:` entry runs during the check, as it does during `yarn install`
+([docs/verify.md](../docs/verify.md#in-a-checkout-it-runs-that-projects-yarn)).
+
 The probes themselves live in `files/verify-probes.sh` — the same bytes the
 Ansible role installs as `/usr/local/bin/supply-chain-verify`, so the two
 surfaces cannot drift. `action/verify.sh` is the CI half: what this job

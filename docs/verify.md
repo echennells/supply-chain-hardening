@@ -74,6 +74,20 @@ that list too. To find an interpreter's directories it asks the interpreter with
 `-I -S`, which skips `site` and so runs no hook. None of this shows the host is clean,
 and the checks after it still start Python.
 
+## In a checkout, it runs that project's yarn
+
+The verifier asks each tool from the directory it runs in, because a project's own
+config can override the host's. The action's verify step runs in the job's working
+directory, normally the checkout. For yarn, that means the project's yarn. MEASURED
+(apt yarnpkg 4.1.0): in a directory whose `.yarnrc.yml` sets `yarnPath`, both
+`yarn --version` and `yarn config get` ran the file it names, and a `plugins:` entry
+was loaded by both. That is the same code the project's own `yarn install` runs, so in a
+CI job that installs anyway, verifying runs nothing new. On a checkout you have not
+reviewed, though, the check runs that repo's code. The verifier does not skip
+`yarnPath`: it would then grade a different yarn from the one the install uses.
+Composer is read with `--no-plugins` instead. To check the host alone, run the
+verifier from a directory outside any checkout.
+
 ## Related
 
 - [how-it-works.md](how-it-works.md) — the layers the verifier is checking.
