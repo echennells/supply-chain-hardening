@@ -24,6 +24,9 @@
 #
 #   --system   /etc/uv/uv.toml, /etc/pip.conf, /etc/profile.d (root only)
 #   --user     {{ ansible_user_id }}'s uv.toml and pip.conf (that uid only)
+{% if socket_firewall_install | bool %}
+#   --sfw      Socket Firewall's cached firewall binary (root only)
+{% endif %}
 #
 # With no argument: everything the caller may do. As root that is --system,
 # plus --user when root is the deploying user; as {{ ansible_user_id }}, --user.
@@ -108,8 +111,30 @@ case "$mode" in
     advance {{ (ansible_env.HOME ~ '/.config/pip/pip.conf') | quote }} "^uploaded-prior-to = $ts\$" "uploaded-prior-to = $cut"
 {% endif %}
     ;;
+{% if socket_firewall_install | bool %}
+  --sfw)
+    # The npm and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1, so
+    # that a non-root caller never writes sfw's root-owned cache (see
+    # tasks/socket.yml). The update check they skip runs here instead, as
+    # root. sfw checks GitHub for a newer firewall binary when its last check
+    # is over an hour old, downloads it, verifies the digest, and repoints
+    # .sfw-cache/latest. A failed check keeps the cached binary, which still
+    # works, so it is reported and does not fail the unit.
+    if [ "$(id -u)" != 0 ]; then
+      echo "$me: --sfw updates a root-owned cache and needs root" >&2
+      exit 1
+    fi
+    sfw=$(command -v sfw 2>/dev/null) || exit 0
+    # The cache must stay readable by every account that runs the wrappers.
+    umask 022
+    true_bin=/usr/bin/true; [ -x "$true_bin" ] || true_bin=/bin/true
+    if ! out=$(env -u SFW_SKIP_UPDATE_CHECK timeout 600 "$sfw" "$true_bin" 2>&1); then
+      echo "$me: sfw could not refresh its firewall binary: $(printf '%s' "$out" | grep -v '^[[:space:]]*$' | tail -n 1)" >&2
+    fi
+    ;;
+{% endif %}
   *)
-    echo "usage: $me [--system|--user]" >&2
+    echo "usage: $me [--system|--user{{ '|--sfw' if socket_firewall_install | bool else '' }}]" >&2
     exit 2
     ;;
 esac
