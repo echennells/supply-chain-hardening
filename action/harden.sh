@@ -1430,9 +1430,13 @@ harden_bun() {
 
   # FAIL-WHOLE HAZARD, not fail-silent. bun rejects the ENTIRE bunfig on ONE
   # bad value — "Invalid Bunfig: failed to load bunfig", exit 1 — MEASURED
-  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d"). One malformed
-  # key disarms every other key in the file AND breaks bun itself, so a bad
-  # value here is strictly worse than writing nothing. BUN_AGE_SECONDS is
+  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d") on bun 1.3.0
+  # through 1.4.3, which want a number of seconds there. bun 1.4.4 accepts a
+  # duration string (MEASURED), but the runner's bun version is not known
+  # here, and a bare integer of seconds works on every bun from 1.3.0. On
+  # the versions that reject it, one malformed key disarms every other key
+  # in the file AND breaks bun itself, so a bad value here is strictly worse
+  # than writing nothing. BUN_AGE_SECONDS is
   # $(( RELEASE_AGE_HOURS * 3600 )), i.e. always a bare integer and never
   # quoted — but RELEASE_AGE_HOURS is caller-supplied, so a negative or
   # otherwise non-integer value drops the key rather than risking the file.

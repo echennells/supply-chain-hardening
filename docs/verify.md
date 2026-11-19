@@ -12,7 +12,7 @@ exactly what we intended, the tool ignored it, and the run reported success:
 | pnpm 10 `block-exotic-subdeps` | accepted the key, ignored it |
 | bun `ignoreScripts` | bunfig not loaded for `bun run`; and inert in ANY bunfig below bun 1.2.0 |
 | bun `minimumReleaseAge` | key does not exist below bun 1.3.0 — accepted and ignored |
-| bun's whole bunfig | one bad value (a quoted `minimumReleaseAge`) makes bun reject the entire file, exit 1 |
+| bun's whole bunfig | on bun 1.3.0 through 1.4.3, one bad value (a quoted `minimumReleaseAge`) makes bun reject the entire file, exit 1. bun 1.4.4 accepts a quoted duration, which the verifier reports as WEAK |
 | npq on Node < 20.13 | passes through to npm and exits 0 |
 
 Grepping our own files catches none of these. So the role ships a verifier that

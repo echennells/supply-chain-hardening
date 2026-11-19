@@ -88,9 +88,10 @@ JSON
 
 @test "uv: accepts the rendered uv.toml rather than erroring on it" {
   have uv || skip "uv not installed"
-  # The failure this guards: a relative duration in exclude-newer makes uv's
-  # TOML parser reject the file, breaking EVERY uv invocation rather than
-  # just weakening the gate.
+  # The failure this guards: on uv before 0.9.17, a relative duration in
+  # exclude-newer makes uv's TOML parser reject the file, breaking EVERY uv
+  # invocation rather than just weakening the gate. (0.9.17 added relative
+  # durations; the action writes an absolute instant for every uv.)
   harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
   run env -i PATH="$PATH" HOME="$TEST_HOME" uv pip list
   [ "$status" -eq 0 ] || {

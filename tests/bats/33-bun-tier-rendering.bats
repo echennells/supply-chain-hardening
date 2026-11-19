@@ -255,8 +255,10 @@ EOF
 }
 
 @test "tier-render: no rendered tier ever quotes minimumReleaseAge" {
-  # bun rejects the WHOLE bunfig on one bad value, so a quoted age would
-  # disarm ignoreScripts, frozenLockfile and auto along with itself.
+  # bun 1.3.0 through 1.4.3 reject the WHOLE bunfig on one bad value, so a
+  # quoted age would disarm ignoreScripts, frozenLockfile and auto along with
+  # itself there (1.4.4 accepts a duration string; the template writes an
+  # integer, which every bun from 1.3.0 reads).
   # Anchor to real KEY lines (optional indent, then the key): the template's own
   # comment documents the failure mode with a literal `minimumReleaseAge = "2d"`
   # example, and bun ignores comment (#) lines — matching that would be a false

@@ -93,7 +93,7 @@ This is the weakest option. Use it only when neither path above is possible, and
 | npm | `min-release-age` | `2` | npm 11.10.0 | Integer days. `48h` fails installs, and `2880` means about 8 years. |
 | pnpm | `minimumReleaseAge` | `2880` | | Minutes. pnpm 11 no longer reads `~/.npmrc` or `/etc/npmrc`. |
 | Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. `"2d"` parses to NaN and disables the gate. |
-| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds. One bad value makes Bun reject the whole file. |
+| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds, which every Bun from 1.3.0 reads. On 1.3.0 to 1.4.3 a quoted value such as `"2d"` makes Bun reject the whole file. |
 | uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. A span such as `"48 hours"` needs uv 0.9.17; older uv rejects the whole file. |
 | pip | `uploaded-prior-to` | a date | pip 26.0 | Same, with a literal `Z`. |
 | Deno | `--minimum-dependency-age` | `P2D` | | A flag, not a config key. Deno has no config file for it. |

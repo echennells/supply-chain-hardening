@@ -137,9 +137,10 @@ setup() { common_setup; }
 }
 
 @test "uv: exclude-newer is an absolute RFC 3339 stamp, not a duration" {
-  # uv's TOML parser rejects "48 hours" with "failed to parse year in date",
-  # which breaks every uv invocation. The role hit this; the action hit it
-  # again independently at the bash layer.
+  # uv before 0.9.17 rejects "48 hours" with "failed to parse year in date",
+  # which breaks every uv invocation; 0.9.17 added relative durations, but
+  # the action cannot know which uv the runner has. The role hit this; the
+  # action hit it again independently at the bash layer.
   run harden ECOSYSTEMS=uv -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.config/uv/uv.toml" \
