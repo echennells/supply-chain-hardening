@@ -344,10 +344,11 @@ writer into trusted state is worse than an ungated reader.
 
 ### Wrong syntax / parser-breaking values
 
-`uv_exclude_newer = "48 hours"` was relative-duration syntax — uv
-requires RFC 3339 absolute datetime. uv rejected the entire config,
-silently disabling every uv hardening key. Same risk for any TOML/JSON/
-YAML field where a "looks right" value is actually invalid.
+`uv_exclude_newer = "48 hours"` was relative-duration syntax, which uv
+did not accept before 0.9.17 (it wanted an RFC 3339 absolute datetime).
+uv rejected the entire config, silently disabling every uv hardening key.
+Same risk for any TOML/JSON/YAML field where a "looks right" value is
+actually invalid.
 
 **Principle**: parse-test rendered templates against the real tool's
 parser. `01-config-files.bats` parses uv.toml with `tomllib`. Composer

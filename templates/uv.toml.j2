@@ -23,10 +23,11 @@ allow-insecure-host = []
 
 # Reject packages published after this instant
 # (release_age_hours = {{ release_age_hours }} back from the clock, rounded down to midnight UTC).
-# uv's exclude-newer requires an absolute RFC 3339 timestamp — NOT a relative
-# duration. It is set at apply time; where systemd runs
-# supply-chain-age-gate-refresh.timer it is advanced in place, otherwise
-# re-apply the role to advance it.
+# An absolute RFC 3339 instant, not a relative span. uv reads a span (2 days)
+# only from 0.9.17; older uv rejects it and with it this whole file, which is
+# also written to /etc/uv/uv.toml for every uv on the host. It is set at
+# apply time; where systemd runs supply-chain-age-gate-refresh.timer it is
+# advanced in place, otherwise re-apply the role to advance it.
 exclude-newer = "{{ sch_uv_cutoff }}"
 
 {% if uv_no_build %}

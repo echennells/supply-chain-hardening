@@ -599,15 +599,15 @@ DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 # the same way. The role has derived this in minutes since c9a250f; the
 # action was still shipping the exact bug the role documented.
 YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
-# uv requires an absolute RFC 3339 datetime — "48 hours" or similar
-# relative-duration strings fail uv's TOML parser with
-# "failed to parse year in date '48 hours'", breaking every uv
-# invocation. Same bug the Ansible role had in defaults/main.yml
-# (fixed in b96bb7e); the action re-introduced it independently
-# at the bash layer.
-# (uv 0.11.4+ added relative-duration support for pylock.toml
-# lockfiles, NOT for the config-file exclude-newer setting; config
-# requires absolute datetimes on all uv versions.)
+# uv's exclude-newer is written as an absolute RFC 3339 datetime. A
+# relative span such as "48 hours" is accepted only from uv 0.9.17 (its
+# changelog: "Add support for relative durations in exclude-newer",
+# #16814). MEASURED: 0.9.16 fails the whole config with "failed to parse
+# year in date", breaking every uv invocation; 0.9.17 resolves the span to
+# now minus 48h. The runner's uv version is not known here, so the absolute
+# form is the one every uv reads. Same bug the Ansible role had in
+# defaults/main.yml (fixed in b96bb7e); the action re-introduced it
+# independently at the bash layer.
 #
 # BSD date (macOS runners) takes -v-Nh where GNU takes -d "N hours ago".
 # Try GNU first, fall back to BSD — CI runners are usually Linux but

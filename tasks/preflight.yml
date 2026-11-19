@@ -237,7 +237,7 @@
   #
   # Deliberately LOOSER than the pip check: uv accepts forms pip does not. It
   # accepts every form defaults/main.yml documents for uv_exclude_newer: an
-  # absolute RFC 3339 instant, a local date, and the span forms uv 0.10+ accepts
+  # absolute RFC 3339 instant, a local date, and the span forms uv 0.9.17+ accepts
   # (which supply-chain-verify grades WEAK). This catches empty, garbage and
   # malformed values; it does NOT prove the host's uv is new enough for a span.
   # `is defined` keeps it skipped when preflight.yml is imported on its own
@@ -252,7 +252,7 @@
         or sch_uv_cutoff is match('^P(T[0-9]+[HMS]|[0-9]+[DW])$')
     fail_msg: >-
       uv_exclude_newer must be `rolling`, an absolute RFC 3339 instant
-      (e.g. 2026-10-19T00:00:00Z), a date (2026-10-19), or a span uv 0.10+
+      (e.g. 2026-10-19T00:00:00Z), a date (2026-10-19), or a span uv 0.9.17+
       accepts (e.g. "2 days", P2D); it resolved to
       '{{ sch_uv_cutoff | default("<undefined>") }}'. A value uv cannot parse
       is written to /etc/uv/uv.toml and stops uv from starting for every user.

@@ -50,13 +50,15 @@ bundler_cooldown_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  
 # Integer days, and 0 means off, so floored at 1 like npm and bundler. Poetry reads
 # neither pip.conf nor uv.toml, so the Python gates above do not reach it.
 poetry_min_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  # 2 days at the 48h default
-# uv requires an absolute RFC 3339 datetime here. MEASURED 2026-10-21 on the
+# The role writes an absolute RFC 3339 datetime here. MEASURED 2026-10-21 on the
 # real release binaries: a relative-duration string such as "48 hours" in a
 # config file is REJECTED on every uv <= 0.9.9 (rc=2, "failed to parse year in
 # date '48 hours'") — which breaks every uv invocation, and this template is
-# also written to /etc/uv/uv.toml for every user on the host. uv 0.10.0+ does
-# accept it (as Relative(ExcludeNewerSpan(..))), and 0.13.4 still rejects
-# calendar forms like "P1Y". The role pins an absolute instant because it does
+# also written to /etc/uv/uv.toml for every user on the host. MEASURED
+# 2026-11-19: 0.9.16 still rejects it and 0.9.17 accepts it, matching uv's
+# changelog (0.9.17: "Add support for relative durations in exclude-newer",
+# #16814); 0.13.4 still rejects calendar forms like "P1Y". The role pins an
+# absolute instant because it does
 # not control the host's uv version — do NOT override this with a span unless
 # you control every uv on every target. supply-chain-verify reports a span as
 # WEAK, never OK, because it cannot resolve one to an instant. Compute the cutoff via lookup('pipe', ...)
@@ -108,7 +110,7 @@ sch_pip_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | i
 # (an external review found hosts eight weeks behind, and an emergency
 # certifi fix that needed a manual override). A relative form would roll on
 # its own but is a hard error on the older tools this role must not break
-# (MEASURED: pip 26.0 exits 2 on `P2D`, uv <= 0.9.9 rejects "48 hours"), and
+# (MEASURED: pip 26.0 exits 2 on `P2D`, uv <= 0.9.16 rejects "48 hours"), and
 # /etc/pip.conf + /etc/uv/uv.toml are read by EVERY interpreter on the host.
 # So a systemd timer re-runs the apply-time formula every 6 hours and
 # rewrites only the role's own cutoff lines. Linux + systemd only; elsewhere
