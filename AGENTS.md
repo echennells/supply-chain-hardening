@@ -99,7 +99,7 @@ This is the weakest option. Use it only when neither path above is possible, and
 |---|---|---|---|---|
 | npm | `min-release-age` | `2` | npm 11.10.0 | Integer days. `48h` fails installs, and `2880` means about 8 years. |
 | pnpm | `minimumReleaseAge` | `2880` | | Minutes. pnpm 11 no longer reads `~/.npmrc` or `/etc/npmrc`. |
-| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. `"2d"` parses to NaN and disables the gate. |
+| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. Yarn 4.10 reads `"2d"` as 2 minutes; 4.11+ parses it. Below 4.10 the key is ignored in `~/.yarnrc.yml` and rejected in a project's. |
 | Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds. One bad value makes Bun reject the whole file. |
 | uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. |
 | pip | `uploaded-prior-to` | a date | pip 26.0 | Same, with a literal `Z`. |

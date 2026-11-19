@@ -672,14 +672,13 @@ COMPOSER_COOLDOWN_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
 POETRY_AGE_DAYS=$NPM_AGE_DAYS                     # integer days, floored at 1 like npm
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
-# INTEGER MINUTES, and rendered UNQUOTED. A duration-suffix string ("2d")
-# hits a yarn parser bug that yields NaN and silently disables the gate
-# entirely, and yarn has no second age-gate layer to fall back on.
-# MEASURED against yarn 4.10.3 (2026-08), recorded in defaults/main.yml:53:
-# "36500d" let a fresh package install; 52560000 (minutes) blocked it.
-# Quoting it lands a YAML string where yarn wants a number, which fails
-# the same way. The role has derived this in minutes since c9a250f; the
-# action was still shipping the exact bug the role documented.
+# INTEGER MINUTES, rendered unquoted. Yarn 4.10.x reads a duration string as
+# its leading integer, in minutes: "2d" is a 2-minute gate, quoted or not
+# (MEASURED 2026-11-19, yarn 4.10.3; "36500d" read as 36500). Yarn 4.11.0
+# parses durations ("2d" = 2880). Integer minutes mean the same on every yarn
+# that has the key, and yarn has no second age-gate layer to fall back on. The
+# role has derived this in minutes since c9a250f; the action once shipped "2d".
+# (An older note here said "2d" parsed to NaN. Re-measured, it does not.)
 YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
 # uv requires an absolute RFC 3339 datetime — "48 hours" or similar
 # relative-duration strings fail uv's TOML parser with

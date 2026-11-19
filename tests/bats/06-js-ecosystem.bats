@@ -11,13 +11,12 @@ load setup
 }
 
 @test "yarn: npmMinimalAgeGate is a BARE INTEGER (minutes), not a duration string" {
-  # Regression catcher for the silent no-op. yarn 4.10+ types this setting as
-  # integer minutes; a unit-suffixed value ("2d") parses to NaN and yarn applies
-  # NO age filtering — with no warning or error, so the gate is invisibly absent.
-  # The old "presence" assertion above passed happily on the broken value, which
-  # is why this one matches the VALUE shape.
-  # Verified on yarn 4.10.3: "36500d" (100y) installed a fresh package;
-  # 52560000 (same 100y in minutes) correctly blocked it.
+  # Regression catcher for the silent no-op. yarn reads this setting in
+  # minutes, and yarn 4.10.x reads a unit-suffixed value as its leading integer:
+  # "2d" is a 2-MINUTE gate, with no warning or error, so the 48h gate is
+  # invisibly absent (MEASURED 2026-11-19, yarn 4.10.3; 4.11.0 parses "2d" as
+  # 2880). The old "presence" assertion above passed happily on the broken
+  # value, which is why this one matches the VALUE shape.
   grep -qE '^npmMinimalAgeGate: [0-9]+$' "$HOME/.yarnrc.yml"
 }
 

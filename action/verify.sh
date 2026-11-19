@@ -85,7 +85,7 @@ same shape: the file was exactly what we meant to write, the tool ignored it,
 and nothing said so.
 
   npm  MINIMUM_RELEASE_AGE   a key npm does not read — gate absent
-  yarn npmMinimalAgeGate     parsed to NaN — gate absent
+  yarn npmMinimalAgeGate     "2d" read as 2 minutes on yarn 4.10 — gate absent
   bun  ignoreScripts         bunfig not loaded for `bun run`
   sfw  npm wrapper           written to a path PATH never resolves
   bunx wrapper               overwrote the bun wrapper through a symlink

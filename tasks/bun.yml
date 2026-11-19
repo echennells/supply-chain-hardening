@@ -59,7 +59,8 @@
   # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d"). It does not
   # skip the offending key: every other key in the file is disarmed with it
   # AND bun itself stops working, so a malformed value here is strictly worse
-  # than deploying nothing. Same shape as the yarn npmMinimalAgeGate NaN bug.
+  # than deploying nothing. Worse than yarn 4.10's "2d", which only shrinks
+  # the gate to 2 minutes.
   # Caught at apply time instead of on the host's next `bun install`; the
   # template also renders the value through `| int` so nothing quoted or
   # fractional can reach the file.

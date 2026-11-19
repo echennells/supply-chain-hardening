@@ -15,7 +15,7 @@ Then it **proves the policy is in effect.** Writing a config file is not the sam
 $ supply-chain-verify
 STATUS EVIDENCE    PROTECTION                       DETAIL
 OK     PARSED      npm lifecycle scripts blocked    npm reports ignore-scripts=true
-GAP    PARSED      yarn age gate                    yarn reports non-integer npmMinimalAgeGate='NaN'
+GAP    PARSED      yarn age gate                    yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0), so the...
 GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on Node v18.19.1
 WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
 ```

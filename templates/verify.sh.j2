@@ -22,7 +22,7 @@
 #
 # Every protection in this role has failed at least once in the same way: the
 # config file was written correctly, the tool ignored it, and nothing said so.
-#   yarn npmMinimalAgeGate: "2d"     -> parsed to NaN, gate silently absent
+#   yarn npmMinimalAgeGate: "2d"     -> 2 MINUTES on yarn 4.10.x, gate effectively absent
 #   npm  MINIMUM_RELEASE_AGE         -> key npm does not read, gate absent
 #   pnpm 11                          -> stopped reading rc/npmrc entirely
 #   pnpm 10 block-exotic-subdeps     -> accepted the key, ignored it

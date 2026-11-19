@@ -6,7 +6,8 @@ exactly what we intended, the tool ignored it, and the run reported success:
 
 | | |
 |---|---|
-| yarn `npmMinimalAgeGate: "2d"` | parsed to NaN; no gate, no warning |
+| yarn `npmMinimalAgeGate: "2d"` | read as 2 minutes on yarn 4.10; no warning |
+| yarn `npmMinimalAgeGate` below yarn 4.10 | key does not exist; ignored in `~/.yarnrc.yml` without a word |
 | npm `MINIMUM_RELEASE_AGE` | a key npm does not read |
 | pnpm 11 | stopped reading `rc` / `npmrc` entirely |
 | pnpm 10 `block-exotic-subdeps` | accepted the key, ignored it |
@@ -29,7 +30,7 @@ supply-chain-verify --json    # machine-readable; exit is non-zero on any GAP, s
 ```
 STATUS EVIDENCE    PROTECTION                       DETAIL
 OK     PARSED      npm lifecycle scripts blocked    npm reports ignore-scripts=true
-GAP    PARSED      yarn age gate                    yarn reports non-integer npmMinimalAgeGate='NaN'
+GAP    PARSED      yarn age gate                    yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0), so the...
 GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on Node v18.19.1
 WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
 ```
