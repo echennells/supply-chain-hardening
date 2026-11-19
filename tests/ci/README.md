@@ -23,7 +23,7 @@ silently inert.
 
 | File | Covers |
 |---|---|
-| `01-emit-targets.bats` | The platform adapter. Each `--emit` target writes to its own sink and no other; the canonical env file round-trips through `source`. |
+| `01-emit-targets.bats` | The platform adapter. Each `--emit` target writes to its own sink and no other; the canonical env file round-trips through `source`; the shipped GitLab example's lines, read from the file, work under the Docker executor's `umask 0000`. |
 | `02-validation.bats` | Input validation and the fail-loud guards — rejected age windows, missing `HOME`, the skip path, unknown ecosystems, unwritable paths, and where the env file and run record may go (per-user by default; refused when the file is not ours, or any directory above it is world-writable without the sticky bit or is another user's sticky directory). |
 | `03-config-files.bats` | Per-ecosystem config content, asserted **by key name**. |
 | `04-wrappers.bats` | Wrapper deployment and behavior, via stub binaries that get really wrapped. Needs passwordless sudo; skips without it. |

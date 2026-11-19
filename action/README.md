@@ -112,6 +112,12 @@ record or env file owned by anyone but you or root, and says so. Run it as the
 user who ran `harden.sh`: as root under `sudo -E`, it finds that user's record,
 does not read it, and fails with a GAP.
 
+Upgrading from an earlier release: outside a runner both files used to default
+to `${TMPDIR:-/tmp}`. A pipeline that sources that path itself gets "No such file"
+now; use the expansion above. On GitLab, don't point `HARDENING_ENV_FILE` into
+the checkout, which the Docker executor makes world-writable (see
+[`examples/gitlab-ci.yml`](examples/gitlab-ci.yml)).
+
 Worked examples for each platform live in [`examples/`](examples/).
 
 That file is what makes the env layer survive a step boundary on runners

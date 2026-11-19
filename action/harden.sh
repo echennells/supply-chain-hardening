@@ -677,9 +677,11 @@ write_env() {
     # calling job shell does not inherit it. On these targets the env file is
     # the mechanism and the caller must source it:
     #
-    #   ./harden.sh --emit=gitlab && source "$HARDENING_ENV_FILE"
+    #   ./harden.sh --emit=gitlab &&
+    #     source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}"
     #
-    # (default path: see "The env file and the run record" above)
+    # (that expansion is the default path: see "The env file and the run
+    # record" above)
     #
     # The config-file and wrapper layers need no such step; they are already
     # on disk. Buildkite conventionally does the source in a pre-command hook.
