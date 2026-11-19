@@ -33,10 +33,12 @@
   // is no urgency to any of them, and the conservative direction is free here
   // in a way it is not for a consumer's build.
   //
-  // internalChecksFilter: 'strict' is what makes it bite. Without it Renovate
-  // still opens the PR and merely marks the age check pending, so a reviewer
-  // can merge inside the window; 'strict' withholds the PR until the age is
-  // satisfied.
+  // internalChecksFilter: 'strict' filters out every release still inside
+  // minimumReleaseAge, so Renovate proposes only a version that has aged, or
+  // nothing. With 'none' Renovate uses the newest release even while its age
+  // check is still pending, so a reviewer could merge inside the window.
+  // 'strict' has been Renovate's default since 33.0.0 (#18460); it is set
+  // here so the cooldown does not depend on that default.
   minimumReleaseAge: '3 days',
   internalChecksFilter: 'strict',
   prConcurrentLimit: 6,
