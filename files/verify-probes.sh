@@ -3843,9 +3843,11 @@ fi
 # --- gradle HTTPS-only repos  [FUNCTIONAL] ---
 # ---------------------------------------------------------------- gradle -----
 # Gradle's hardening is an init SCRIPT, not a key/value file: the role writes
-# $GRADLE_USER_HOME/init.d/supply-chain-security.gradle (Groovy, HTTP-repo
-# refusal only) and harden.sh writes $GRADLE_USER_HOME/init.gradle.kts (Kotlin,
-# HTTP-repo refusal PLUS failOnDynamicVersions/failOnChangingVersions).
+# $GRADLE_USER_HOME/init.d/supply-chain-security.gradle (Groovy) and harden.sh
+# writes $GRADLE_USER_HOME/init.gradle.kts (Kotlin). Both refuse an http://
+# repository and both call failOnDynamicVersions()/failOnChangingVersions();
+# the role's script guards those two calls with respondsTo(), the action's
+# does not (tasks/gradle.yml, action/harden.sh harden_gradle).
 #
 # Three things follow, and they shape the whole probe.
 #
@@ -3857,10 +3859,15 @@ fi
 # 2. `gradle dependencies` REPORTS an unresolved graph and exits 0 (474b165).
 #    The only honest evidence is a real resolve(). This probe forces one from a
 #    file:// repo it writes itself, so it stays entirely offline.
-# 3. Gradle has FOUR http-capable repository containers and both writers hook
-#    exactly ONE (project.repositories, maven only). The probe baits all four,
-#    because "HTTPS-only repos" is what the row is NAMED, and a plugin jar
-#    fetched over http from buildscript{} executes at configuration time.
+# 3. Gradle has FOUR http-capable repository containers: project
+#    repositories, buildscript{} (the plugin classpath), and the settings
+#    pluginManagement{} and dependencyResolutionManagement{}. Until ECH-171
+#    (bb5446d) both writers hooked only project.repositories, and only maven
+#    repos, so this probe measured the other three, and ivy, as ADDED on gradle
+#    8.14.3. Both writers now hook all four, maven and ivy alike (ECH-171,
+#    verified per scope on 8.14.3). The probe still baits all four, because
+#    "HTTPS-only repos" is what the row is NAMED, and a plugin jar fetched over
+#    http from buildscript{} executes at configuration time.
 #
 # CAVEATS this probe cannot remove, documented rather than papered over:
 #   - Running gradle at all populates $GRADLE_USER_HOME/{caches,native,daemon}.
@@ -3919,9 +3926,9 @@ SCEOF
     > "$r/1.0/probe-1.0.jar"
   cat > "$tmp/settings.gradle" <<'SCEOF'
 rootProject.name = 'sc-probe'
-// Baits #1 and #2: the two SETTINGS-level repository containers. Neither
-// writer hooks them -- both hook only allprojects{repositories}, which is
-// project.repositories. MEASURED on 8.14.3 with each writer's file: ADDED.
+// Baits #1 and #2: the two SETTINGS-level repository containers. Before
+// ECH-171 (bb5446d) neither writer hooked them (MEASURED on 8.14.3 with each
+// writer's file: ADDED); both now do, through beforeSettings.
 // The property form (not the pluginManagement{} block) is used deliberately:
 // it is legal after rootProject.name, and a throw from the hook is CAUGHT
 // here rather than aborting settings evaluation. MEASURED both ways.
@@ -3939,21 +3946,23 @@ SCEOF
   cat > "$tmp/build.gradle" <<'SCEOF'
 def sc = [:]
 // Bait #3: an http:// MAVEN repo in project.repositories -- the one container
-// both writers hook. MEASURED: with no init script gradle ACCEPTS it here
+// both writers hooked before ECH-171. MEASURED: with no init script gradle ACCEPTS it here
 // (gradle's own insecure-protocol refusal fires later, at RESOLUTION), so a
 // BLOCKED verdict cannot be manufactured by gradle's built-in behaviour.
 sc.http = 'ADDED'
 sc.httpmsg = ''
 try { repositories { maven { url = uri('http://127.0.0.1:9/sc-probe-http') } } }
 catch (Throwable t) { sc.http = 'BLOCKED'; sc.httpmsg = String.valueOf(t.message) }
-// Bait #4: an http:// IVY repo in the SAME container. Both writers test
-// `instanceof MavenArtifactRepository`, so ivy slips past. MEASURED ADDED.
+// Bait #4: an http:// IVY repo in the SAME container. Before ECH-171 both
+// writers tested only `instanceof MavenArtifactRepository`, so ivy slipped
+// past (MEASURED ADDED); both now test IvyArtifactRepository too.
 sc.ivy = 'ADDED'
 try { repositories { ivy { url = uri('http://127.0.0.1:9/sc-ivy-http') } } }
 catch (Throwable t) { sc.ivy = 'BLOCKED' }
 // Bait #5: buildscript.repositories -- the PLUGIN CLASSPATH container, where
 // gradle fetches jars it then EXECUTES at configuration time. A different
-// container from project.repositories; neither writer hooks it. MEASURED ADDED.
+// container from project.repositories; neither writer hooked it before ECH-171
+// (MEASURED ADDED); both now do.
 sc.bs = 'ADDED'
 try { buildscript { repositories { maven { url = uri('http://127.0.0.1:9/sc-bs-http') } } } }
 catch (Throwable t) { sc.bs = 'BLOCKED' }
@@ -4149,10 +4158,12 @@ fi
 
 # --- gradle dynamic-version refusal  [FUNCTIONAL] ---
 # ---------------------------------------------- gradle: dynamic versions -----
-# CI-only protection: action/harden.sh:1409-1410 emits failOnDynamicVersions()
-# and failOnChangingVersions(); tasks/gradle.yml deploys NO resolutionStrategy
-# at all, so this row reads GAP on a role-hardened host. That is the point of
-# the row - it is the divergence, reported.
+# Both writers call failOnDynamicVersions() and failOnChangingVersions() on
+# every configuration: action/harden.sh (harden_gradle) unconditionally, and
+# tasks/gradle.yml behind respondsTo(), so an older gradle skips them instead of
+# failing every build. (This comment used to call it CI-only: the role's script
+# once deployed no resolutionStrategy at all.) Gradle added both methods in 6.1
+# (@since 6.1 in ResolutionStrategy.java; absent from the 6.0 source).
 #
 # The evidence is a real resolve() from a file:// repo built in a temp dir.
 # `gradle dependencies` REPORTS an unresolved graph and exits 0 (474b165): it
@@ -4209,9 +4220,9 @@ SCEOF
     > "$r/1.0/probe-1.0.jar"
   cat > "$tmp/settings.gradle" <<'SCEOF'
 rootProject.name = 'sc-probe'
-// Baits #1 and #2: the two SETTINGS-level repository containers. Neither
-// writer hooks them -- both hook only allprojects{repositories}, which is
-// project.repositories. MEASURED on 8.14.3 with each writer's file: ADDED.
+// Baits #1 and #2: the two SETTINGS-level repository containers. Before
+// ECH-171 (bb5446d) neither writer hooked them (MEASURED on 8.14.3 with each
+// writer's file: ADDED); both now do, through beforeSettings.
 // The property form (not the pluginManagement{} block) is used deliberately:
 // it is legal after rootProject.name, and a throw from the hook is CAUGHT
 // here rather than aborting settings evaluation. MEASURED both ways.
@@ -4229,21 +4240,23 @@ SCEOF
   cat > "$tmp/build.gradle" <<'SCEOF'
 def sc = [:]
 // Bait #3: an http:// MAVEN repo in project.repositories -- the one container
-// both writers hook. MEASURED: with no init script gradle ACCEPTS it here
+// both writers hooked before ECH-171. MEASURED: with no init script gradle ACCEPTS it here
 // (gradle's own insecure-protocol refusal fires later, at RESOLUTION), so a
 // BLOCKED verdict cannot be manufactured by gradle's built-in behaviour.
 sc.http = 'ADDED'
 sc.httpmsg = ''
 try { repositories { maven { url = uri('http://127.0.0.1:9/sc-probe-http') } } }
 catch (Throwable t) { sc.http = 'BLOCKED'; sc.httpmsg = String.valueOf(t.message) }
-// Bait #4: an http:// IVY repo in the SAME container. Both writers test
-// `instanceof MavenArtifactRepository`, so ivy slips past. MEASURED ADDED.
+// Bait #4: an http:// IVY repo in the SAME container. Before ECH-171 both
+// writers tested only `instanceof MavenArtifactRepository`, so ivy slipped
+// past (MEASURED ADDED); both now test IvyArtifactRepository too.
 sc.ivy = 'ADDED'
 try { repositories { ivy { url = uri('http://127.0.0.1:9/sc-ivy-http') } } }
 catch (Throwable t) { sc.ivy = 'BLOCKED' }
 // Bait #5: buildscript.repositories -- the PLUGIN CLASSPATH container, where
 // gradle fetches jars it then EXECUTES at configuration time. A different
-// container from project.repositories; neither writer hooks it. MEASURED ADDED.
+// container from project.repositories; neither writer hooked it before ECH-171
+// (MEASURED ADDED); both now do.
 sc.bs = 'ADDED'
 try { buildscript { repositories { maven { url = uri('http://127.0.0.1:9/sc-bs-http') } } } }
 catch (Throwable t) { sc.bs = 'BLOCKED' }
@@ -4429,10 +4442,10 @@ elif have gradle; then
   elif [ "$gdflag" = "true" ]; then
     row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver reports failingOnDynamicVersions=true yet RESOLVED com.example:probe:1.+ - the setting is accepted and NOT enforced on this version"
   else
-    row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver resolved com.example:probe:1.+; failingOnDynamicVersions=$gdflag. The role's init script IS deployed and calls failOnDynamicVersions()/failOnChangingVersions(), guarded by respondsTo() - so this is NOT 'the role deploys nothing'. But those methods need gradle >= 6.0, and on an older gradle the guard correctly SKIPS them (rather than bricking the build with a missing-method error), leaving this gradle with no dynamic-version control. Upgrade to gradle >= 6.0.$ghome"
+    row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver resolved com.example:probe:1.+; failingOnDynamicVersions=$gdflag. The role's init script IS deployed and calls failOnDynamicVersions()/failOnChangingVersions(), guarded by respondsTo() - so this is NOT 'the role deploys nothing'. But those methods need gradle >= 6.1 (@since 6.1 in gradle's ResolutionStrategy), and on an older gradle the guard correctly SKIPS them (rather than bricking the build with a missing-method error), leaving this gradle with no dynamic-version control. Upgrade to gradle >= 6.1.$ghome"
   fi
 elif gradle_script_deployed; then
-  row WEAK PRESENT "gradle dynamic-version refusal" "no 'gradle' on PATH, but an init script IS deployed under $(gradle_san "$gwrite") and will run for ./gradlew builds - including failOnDynamicVersions(), a hard evaluation error on gradle < 6.0. Unexercised in both directions"
+  row WEAK PRESENT "gradle dynamic-version refusal" "no 'gradle' on PATH, but an init script IS deployed under $(gradle_san "$gwrite") and will run for ./gradlew builds - including failOnDynamicVersions(), which the role's script skips on gradle < 6.1 and the action's script calls unguarded, a hard evaluation error there. Unexercised in both directions"
 else
   row "N/A" - "gradle dynamic-version refusal" "gradle not installed and no init script deployed"
 fi
