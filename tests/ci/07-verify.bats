@@ -570,6 +570,69 @@ esac"
   [[ "$output" == *"policy.cooldown.ignore entries"* ]]
 }
 
+# composer_ignore_stub <ignore JSON, empty = not set> [--list line]: answers the
+# single-key read `composer config policy.cooldown.ignore` inside the checkout
+# with the JSON composer prints; the global config sets no ignore list.
+composer_ignore_stub() {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *'--global policy.cooldown.ignore'*) exit 1 ;;
+  *'policy.cooldown.ignore'*) [ -n '$1' ] || exit 1; echo '$1' ;;
+  *--global*--list*) echo '[secure-http] true (/x/config.json)'
+                     echo '[policy.cooldown.period] 172800 (/x/config.json)'
+                     echo '[policy.cooldown.block] true (/x/config.json)' ;;
+  *--list*) echo '[secure-http] true (/x/config.json)'
+            echo '[policy.cooldown.period] 172800 (/x/config.json)'
+            echo '[policy.cooldown.block] true (/x/config.json)'
+            echo '${2:-}' ;;
+  *) echo STUB ;;
+esac"
+  CHECKOUT="$BATS_TEST_TMPDIR/checkout"; mkdir -p "$CHECKOUT"
+  echo '{"name":"t/t"}' > "$CHECKOUT/composer.json"
+}
+
+# MEASURED on 2.11.2 with the role applied: a checkout's {"*": {}}, {"*/*": {}}
+# or {"*": []} let `composer require aws/aws-sdk-php --dry-run` take a release the
+# baseline withholds as "still in the cooldown period", while `config --list`
+# printed no line for the rule and both rows read OK. Composer prints the
+# single-key read of all three as {"*":[]} / {"*/*":[]}.
+@test "composer: an ignore rule with no fields that matches every package is a GAP on both rows" {
+  have php || skip "php not installed (the verifier decodes the ignore list with php)"
+  local shape
+  for shape in '{"*":[]}' '{"*/*":[]}' '{"*":{}}' '{"*":null}' '{"*":[{"reason":"x"}]}'; do
+    composer_ignore_stub "$shape"
+    harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+    cd "$CHECKOUT"
+    run verify_sourced --emit=plain
+    cd - >/dev/null
+    [[ "$output" == *"GAP    PARSED      composer publish-age gate"* && "$output" == *"every package skips the gate"* ]] \
+      || { echo "gate row for $shape: $(printf '%s\n' "$output" | grep 'publish-age gate')" >&2; return 1; }
+    [[ "$output" == *"GAP    PARSED      composer repo config override"* && "$output" == *"policy.cooldown.ignore entries: <none> -> "* ]] \
+      || { echo "override row for $shape: $(printf '%s\n' "$output" | grep 'repo config override')" >&2; return 1; }
+  done
+  # The control: no ignore list reads OK on both rows.
+  composer_ignore_stub ''
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"OK     PARSED      composer repo config override"* ]]
+}
+
+# MEASURED on 2.11.2: {"*": {"on-block": false}} still withheld the release; the
+# rule only affects the audit report. It read GAP "every package skips the gate",
+# and the override row named its field as a pattern ("<none> -> *.on-block").
+@test "composer: a rule with on-block false exempts nothing from the gate" {
+  have php || skip "php not installed (the verifier decodes the ignore list with php)"
+  composer_ignore_stub '{"*":{"on-block":false}}' '[policy.cooldown.ignore.*.on-block] false (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"OK     PARSED      composer repo config override"* ]]
+  [[ "$output" != *"on-block"* ]]
+}
+
 # What every composer call in harden.sh and verify.sh hands composer, recorded by
 # an UNWRAPPED stub (the wrapper sets COMPOSER_ALLOW_SUPERUSER itself, which would
 # hide the probe's own environment). MEASURED before: run as root on a terminal,

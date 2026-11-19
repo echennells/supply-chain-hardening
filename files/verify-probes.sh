@@ -1677,12 +1677,55 @@ composer_policy_off() {
   fi
   return 1
 }
-# Cooldown ignore entries in MAP form ({"vendor/pkg": "reason"}, the docs' own
-# example), which --list prints one key per entry:
-#   [policy.cooldown.ignore.*] trusted (./composer.json)
-# composer_val only matched the bare list key, so `{"*": "..."}` read OK while
-# every package skipped the gate (MEASURED on 2.11.2: the install went through).
-composer_ignore_map() { printf '%s\n' "$1" | sed -n 's|^\[policy\.cooldown\.ignore\.\([^]]*\)\] .*$|\1|p' | tr '\n' ' ' | sed 's/ *$//'; }
+# Every cooldown ignore rule that exempts a package from BLOCKING, one per line
+# as "<pattern> <c>", <c> = 1 when a version constraint narrows it to some
+# versions. $1 is the JSON `composer config policy.cooldown.ignore` prints.
+# --list is not enough: it flattens a rule with no fields to no line at all, so
+# {"*": {}}, {"*/*": {}} and {"*": []} listed nothing while they exempt every
+# package (MEASURED on 2.11.2 with the role applied: `composer require
+# aws/aws-sdk-php --dry-run` was offered a release the baseline withholds as
+# "still in the cooldown period", and both rows read OK). The shapes follow
+# composer's own parser (Composer\Policy\IgnorePackageRule::parseIgnoreMap,
+# 2.11.2): a list of names; or a map of name to null, a reason string, a rule
+# object or a list of rule objects, where a missing field means every version
+# and "on-block": true. A rule with "on-block": false only affects the audit
+# report: MEASURED, {"*": {"on-block": false}} still withheld that release. A
+# constraint of "*" is every version: MEASURED, {"*": {"constraint": "*"}} let
+# it through (it read WEAK, "for the versions its constraint names").
+# Returns 2, printing nothing, when $1 cannot be read (no php, or not JSON);
+# php is what runs composer itself, and it only decodes the string here.
+composer_ignore_rules() {
+  command -v php >/dev/null 2>&1 || return 2
+  printf '%s' "$1" | php -r '
+    $s = trim((string) stream_get_contents(STDIN));
+    if ($s === "null") exit(0);
+    $j = json_decode($s, true);
+    if (!is_array($j)) exit(2);
+    $out = function ($p, $c) { echo strtr((string) $p, " \t\r\n", "____"), " ", $c, "\n"; };
+    $rule = function ($p, $r) use ($out) {
+      if (array_key_exists("on-block", $r) && $r["on-block"] === false) return;
+      $out($p, (isset($r["constraint"]) && trim((string) $r["constraint"]) !== "*") ? 1 : 0);
+    };
+    foreach ($j as $k => $v) {
+      if ($v === null || (is_string($v) && !is_int($k))) { $out($k, 0); continue; }
+      if (is_int($k) && is_string($v)) { $out($v, 0); continue; }
+      if (is_array($v) && !is_int($k) && isset($v[0])) {
+        foreach ($v as $r) { if (is_array($r)) $rule($k, $r); }
+        continue;
+      }
+      if (is_array($v) && !is_int($k)) $rule($k, $v);
+    }' 2>/dev/null
+}
+# The same lines from whichever reading works: the single-key JSON ($1 = its exit
+# status, $2 = its output) when composer answered and php could decode it, else
+# the --list dump $3 (composer without that key, or no php).
+composer_ignore_lines() {
+  if [ "$1" -eq 0 ] && _cil=$(composer_ignore_rules "$2"); then
+    [ -z "$_cil" ] || printf '%s\n' "$_cil"
+    return 0
+  fi
+  composer_ignore_entries "$3"
+}
 # Every cooldown ignore entry in a --list dump, one per line as "<pattern> <c>",
 # <c> = 1 when the entry carries a version constraint (it then exempts only the
 # versions that match it). The list form prints one line,
@@ -1807,6 +1850,10 @@ if have composer; then
   if [ "$crc" -ne 0 ]; then
     (cd "$cnone" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global --list --no-ansi --no-plugins --no-interaction) >/dev/null 2>&1 && clist=0
   fi
+  # The cooldown ignore list as JSON (see composer_ignore_rules): exits 1 when the
+  # key is not set.
+  CGIGN=$(cd "$cnone" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global policy.cooldown.ignore --no-ansi --no-plugins --no-interaction 2>/dev/null); cgirc=$?
+  CGIGN=$(printf '%s\n' "$CGIGN" | sed '/^[[:space:]]*$/d' | tail -1)
   [ "$cnone" = / ] || rmdir "$cnone" 2>/dev/null
   if [ "$crc" -ne 0 ] && [ "$clist" -eq 0 ]; then
     # --list works, --list --source does not: composer < 2.2 has no --source.
@@ -1874,6 +1921,13 @@ if have composer; then
     # tests/bats/51-verifier-composer-plugin-safety.bats.
     PDUMP=$(COMPOSER_ALLOW_SUPERUSER=1 composer config --list --source --no-ansi --no-plugins --no-scripts --no-interaction 2>/dev/null); prc=$?
     if [ "$prc" -eq 0 ]; then EDUMP="$PDUMP"; escope="effective config for $(cq "$PWD")"; fi
+  fi
+  # The cooldown ignore list in effect here, as JSON: the checkout's when it can be
+  # read, else the global one.
+  CIGN="$CGIGN"; cignrc=$cgirc
+  if [ "$phas" -eq 1 ] && [ "$prc" -eq 0 ]; then
+    CIGN=$(COMPOSER_ALLOW_SUPERUSER=1 composer config policy.cooldown.ignore --no-ansi --no-plugins --no-scripts --no-interaction 2>/dev/null); cignrc=$?
+    CIGN=$(printf '%s\n' "$CIGN" | sed '/^[[:space:]]*$/d' | tail -1)
   fi
   # A checkout we could not read is a checkout that may be overriding us; that
   # caps the two config rows below at WEAK instead of OK.
@@ -1999,6 +2053,10 @@ if have composer; then
     csec=$(composer_period_seconds "$cper")
     cisrc=$(composer_src "$EDUMP" policy.cooldown.ignore)
     [ -n "$cisrc" ] || cisrc=$(printf '%s\n' "$EDUMP" | sed -n 's|^\[policy\.cooldown\.ignore\.[^]]*\] .* (\(.*\))$|\1|p' | head -1)
+    # A rule with no fields has no --list line, so no source either.
+    if [ -z "$cisrc" ]; then
+      if [ "$escope" = "global config" ]; then cisrc="the global config"; else cisrc="./composer.json"; fi
+    fi
     # cign: every pattern, for the text. cignall: one of them exempts every
     # package at every version. cignpart: matches every package but only the
     # versions its constraint names.
@@ -2010,7 +2068,7 @@ if have composer; then
         if [ "$_cic" = 1 ]; then cignpart="${cignpart:+$cignpart, }$_cip"; else cignall=1; fi
       fi
     done <<CIGN
-$(composer_ignore_entries "$EDUMP")
+$(composer_ignore_lines "$cignrc" "$CIGN" "$EDUMP")
 CIGN
     if cpoff=$(composer_policy_off "$EDUMP"); then
       row GAP PARSED "composer publish-age gate" \
@@ -2086,7 +2144,7 @@ CIGN
     # in effect, so it goes in penv instead.
     for pk in secure-http lock preferred-install allow-plugins \
               audit.abandoned audit.block-insecure audit.block-abandoned \
-              policy policy.cooldown.period policy.cooldown.block policy.cooldown.ignore; do
+              policy policy.cooldown.period policy.cooldown.block; do
       pg=$(composer_val "$CDUMP" "$pk"); pe=$(composer_val "$PDUMP" "$pk")
       [ "$pg" = "$pe" ] && continue
       pev=""
@@ -2102,10 +2160,14 @@ CIGN
         povr="${povr:+$povr, }$pk: ${pg:-<unset>} -> ${pe:-<unset>}"
       fi
     done
-    # Map-form ignore entries are one line per key, which composer_val above
-    # never matches: {"*": "x"} switched the gate off while this row said
-    # "matches the global config" (VM run, 2.11.2).
-    pig=$(composer_ignore_map "$CDUMP"); pie=$(composer_ignore_map "$PDUMP")
+    # The cooldown ignore list, compared as the rules composer applies when it
+    # blocks: a map-form entry is one --list line per field, which composer_val
+    # never matched ({"*": "x"} switched the gate off while this row said
+    # "matches the global config", VM run, 2.11.2), and a rule with no fields is
+    # no line at all ({"*": {}}, MEASURED on 2.11.2). A rule narrowed by a
+    # constraint is shown as "<pattern> (some versions)".
+    pig=$(composer_ignore_lines "$cgirc" "$CGIGN" "$CDUMP" | sort -u | sed 's/ 1$/ (some versions)/; s/ 0$//' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+    pie=$(composer_ignore_lines "$cignrc" "$CIGN" "$PDUMP" | sort -u | sed 's/ 1$/ (some versions)/; s/ 0$//' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
     [ "$pig" != "$pie" ] && povr="${povr:+$povr, }policy.cooldown.ignore entries: ${pig:-<none>} -> ${pie:-<none>}"
     plg=$(composer_allowed_plugins "$CDUMP"); ple=$(composer_allowed_plugins "$PDUMP")
     [ "$plg" != "$ple" ] && povr="${povr:+$povr, }plugins the checkout allows: ${ple:-<none>}"
