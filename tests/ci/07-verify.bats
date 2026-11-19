@@ -927,3 +927,20 @@ esac"
   [[ "$output" != *"OK     PARSED      pip sdist execution blocked"* ]]
 }
 
+@test "report: the footer separates PRESENT-only WEAK rows from caveated ones" {
+  # The footer said "N row(s) verified only as PRESENT" with N counting every
+  # WEAK row, PARSED and FUNCTIONAL ones included.
+  stub_bin pip3 "case \"\$*\" in
+  --version) echo 'pip 24.0 from /x (python 3.12)' ;;
+  'config list') echo \"install.only-binary=':all:'\" ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  weak_all=$(grep -cE '^WEAK ' <<<"$output" || true)
+  weak_present=$(grep -cE '^WEAK +PRESENT ' <<<"$output" || true)
+  [ "$weak_all" -gt "$weak_present" ]
+  [[ "$output" == *"$weak_all row(s) WEAK — not counted as coverage: $weak_present verified only as PRESENT"* ]]
+  [[ "$output" != *"$weak_all row(s) verified only as PRESENT"* ]]
+}
+

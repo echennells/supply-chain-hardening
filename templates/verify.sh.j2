@@ -196,8 +196,9 @@ supply-chain-verify — what is ACTUALLY enforcing on this host
 USAGE
   supply-chain-verify [--strict] [--verbose] [--json] [--quiet] [--help]
 
-  --strict   also exit non-zero when a row could only be established as
-             PRESENT (a protection that looks deployed but was not proven)
+  --strict   also exit non-zero on any WEAK row: a protection that looks
+             deployed but was only established as PRESENT, or one in effect
+             with a caveat the row states
   --verbose  show the full rationale for each row. The default prints a
              one-line summary per row so the table is scannable; -v is an alias
   --json     emit the rows and result as JSON instead of the table — the shape
@@ -220,8 +221,10 @@ EVIDENCE STRENGTH — reported per row, because it is the whole point
 STATUS
   OK        protection verified at the stated evidence strength
   GAP       the protection this host asked for is NOT in effect
-  WEAK      protection looks present, but we could only establish PRESENT —
-            treat as unverified, not as covered
+  WEAK      not counted as coverage: either the protection looks present
+            but we could only establish PRESENT, or the tool reported or showed
+            it in effect with a caveat the row names (a stale cutoff, a narrow
+            exemption, a default that proves nothing). Treat as unverified
   N/A       nothing to report. The EVIDENCE column says which kind:
               -         the tool is not installed on this host
               BYDESIGN  this host's role configuration never asked for it
@@ -251,6 +254,7 @@ done
 
 GAPS=0
 WEAKS=0
+WEAK_PRESENT=0   # the WEAK rows whose evidence is only PRESENT; the footer reports both
 NA_DESIGN=0
 ROWS=""
 
@@ -276,6 +280,7 @@ row() { # status, strength, protection, detail
   ROWS="${ROWS}${s}\t${e}\t${p}\t${d}\n"
   [ "$s" = "GAP" ]  && GAPS=$((GAPS + 1))
   [ "$s" = "WEAK" ] && WEAKS=$((WEAKS + 1))
+  [ "$s" = "WEAK" ] && [ "$e" = "PRESENT" ] && WEAK_PRESENT=$((WEAK_PRESENT + 1))
   [ "$e" = "BYDESIGN" ] && NA_DESIGN=$((NA_DESIGN + 1))
   return 0
 }

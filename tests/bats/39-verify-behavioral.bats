@@ -352,3 +352,22 @@ EOF
   run "$VERIFY" --quiet
   [ "$j" -eq "$status" ]
 }
+
+# ---- verifier cluster: repo overrides, go, npm exclude, text ----------------
+#
+# Each test below stages a failure shape that the verifier at 8281a6b reported
+# as OK (or mis-described), measured on the real tools in this image.
+
+@test "verify: the footer counts PRESENT-only WEAK rows apart from caveated ones" {
+  run "$VERIFY" --verbose
+  all=$(echo "$output" | grep -cE '^WEAK ' || true)
+  pres=$(echo "$output" | grep -cE '^WEAK +PRESENT ' || true)
+  [ "$all" -gt 0 ] || skip "no WEAK rows on this host"
+  if [ "$all" -eq "$pres" ]; then
+    echo "$output" | grep -q "$all row(s) WEAK, all verified only as PRESENT"
+  else
+    echo "$output" | grep -q "$all row(s) WEAK — not counted as coverage: $pres verified only as PRESENT"
+  fi
+  ! echo "$output" | grep -q "$all row(s) verified only as PRESENT"
+}
+

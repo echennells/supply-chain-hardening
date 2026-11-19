@@ -67,8 +67,9 @@ supply-chain-verify — what is ACTUALLY enforcing in this job
 USAGE
   verify.sh [--strict] [--quiet] [--emit=TARGET] [--fail-on=POLICY]
 
-  --strict          also fail when a protection could only be verified as
-                    PRESENT — unproven counts as unprotected.
+  --strict          also fail on any WEAK row: a protection verified only as
+                    PRESENT, or one in effect with a caveat the row states —
+                    unproven counts as unprotected.
   --quiet           suppress the table on stdout. The job summary and the exit
                     code are still produced.
   --emit=TARGET     auto|github|gitlab|circleci|azure|buildkite|plain
@@ -115,7 +116,8 @@ EVIDENCE STRENGTH — reported per row, because it is the whole point
 STATUS
   OK    verified at the stated evidence strength
   GAP   the protection this job promised is NOT in effect
-  WEAK  the promise is met but we could not PROVE it — unverified
+  WEAK  not counted as coverage: verified only as PRESENT, or parsed or
+        observed in effect with a caveat the row names
   N/A   nothing to check here. The EVIDENCE column says which kind:
         ABSENT    the tool is not installed
         BYDESIGN  this job never asked for it
@@ -195,6 +197,7 @@ GAPS=0
 GAPS_CONFIG=0
 GAPS_TOOLCHAIN=0
 WEAKS=0
+WEAK_PRESENT=0   # the WEAK rows whose evidence is only PRESENT; the footer reports both
 OKS=0
 NA_ABSENT=0
 NA_DESIGN=0
@@ -338,7 +341,7 @@ row() { # status, evidence, protection, detail
   NROWS=$((NROWS + 1))
   case "$s" in
     GAP)  GAPS=$((GAPS + 1)) ;;
-    WEAK) WEAKS=$((WEAKS + 1)) ;;
+    WEAK) WEAKS=$((WEAKS + 1)); [ "$e" = PRESENT ] && WEAK_PRESENT=$((WEAK_PRESENT + 1)) ;;
     OK)   OKS=$((OKS + 1)) ;;
     "N/A") if [ "$e" = BYDESIGN ]; then NA_DESIGN=$((NA_DESIGN + 1)); else NA_ABSENT=$((NA_ABSENT + 1)); fi ;;
   esac
@@ -1079,7 +1082,15 @@ if [ "$QUIET" -eq 0 ]; then
   else
     echo "RESULT: no gaps."
   fi
-  [ "$WEAKS" -gt 0 ] && echo "        $WEAKS row(s) verified only as PRESENT — not evidence of enforcement."
+  # WEAKS counts every WEAK row, PARSED and FUNCTIONAL ones included, so it
+  # cannot be called "verified only as PRESENT" (it was). Say both numbers.
+  if [ "$WEAKS" -gt 0 ]; then
+    if [ "$WEAK_PRESENT" -eq "$WEAKS" ]; then
+      echo "        $WEAKS row(s) WEAK, all verified only as PRESENT — not evidence of enforcement."
+    else
+      echo "        $WEAKS row(s) WEAK — not counted as coverage: $WEAK_PRESENT verified only as PRESENT, the rest parsed or observed with a caveat the row states."
+    fi
+  fi
   [ $((NA_ABSENT + NA_DESIGN)) -gt 0 ] && \
     echo "        $((NA_ABSENT + NA_DESIGN)) row(s) N/A ($NA_ABSENT tool not installed, $NA_DESIGN not requested here)."
   echo
@@ -1095,7 +1106,7 @@ fi
   if [ "$GAPS" -gt 0 ]; then
     echo "**$GAPS gap(s)** — protections are not in effect in this job."
   else
-    echo "No gaps. $WEAKS row(s) carry PRESENT-level evidence only."
+    echo "No gaps. $WEAKS row(s) WEAK, $WEAK_PRESENT of them with PRESENT-level evidence only."
   fi
 } | emit_summary
 
@@ -1141,7 +1152,7 @@ if [ "$fail" -eq 1 ]; then
   exit 1
 fi
 if [ "$SCV_FAIL_ON" != never ] && [ "$STRICT" -eq 1 ] && [ "$WEAKS" -gt 0 ]; then
-  annotate_error "--strict: $WEAKS protection(s) could only be verified as PRESENT"
+  annotate_error "--strict: $WEAKS protection(s) are WEAK ($WEAK_PRESENT only PRESENT, the rest in effect with a caveat) — see the verification table"
   exit 1
 fi
 exit 0

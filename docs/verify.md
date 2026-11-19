@@ -22,7 +22,7 @@ real installed versions:
 ```bash
 supply-chain-verify           # what is actually enforcing right now (scannable, one line per row)
 supply-chain-verify --verbose # the full rationale behind each row
-supply-chain-verify --strict  # also fail on unverifiable (PRESENT-only) rows
+supply-chain-verify --strict  # also fail on any WEAK row (PRESENT-only, or in effect with a stated caveat)
 supply-chain-verify --json    # machine-readable; exit is non-zero on any GAP, so it doubles as a CI pre-install gate
 ```
 
@@ -43,6 +43,12 @@ Every row states **how** it was established, because that is the whole point:
 - **PRESENT** — a file or binary exists and nothing more. This is the evidence
   level that produced every bug in the table, so these rows are reported as
   `WEAK` rather than counted as coverage.
+
+`WEAK` is not only a PRESENT-only row. A protection the tool did report, or that
+was observed working, is also `WEAK` when the row names a caveat: a cutoff weeks
+old, a narrow exemption list, a value that is also the tool's default. The
+footer gives both numbers: how many rows are `WEAK`, and how many of those were
+verified only as PRESENT.
 
 It runs at the end of every apply and is installed as a standalone command, so
 you can re-check at any time — including long after the apply, when tool
