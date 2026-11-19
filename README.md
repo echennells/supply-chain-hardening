@@ -116,6 +116,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
 | [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
+| [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
 | [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
 | [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |

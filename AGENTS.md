@@ -170,6 +170,10 @@ If a fresh release is refused or an install script is blocked, the control is wo
 An agent fails closed. A person can vouch for a specific build they trust, and
 `supply-chain-allow-build` exists for that person. It is not for you to reach for.
 
+Several of these refusals don't name this project (npm `ETARGET`, a native module that
+fails when loaded, Yarn `YN0028`, Bundler frozen mode). [docs/day-one.md](docs/day-one.md)
+explains each one, so you can tell the user what was refused and what their options are.
+
 ## What this does not cover
 
 Say so when it matters to the task:
