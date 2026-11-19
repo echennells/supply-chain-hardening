@@ -181,3 +181,127 @@ EOF
   fi
   [ -z "$dupes" ]
 }
+
+# ---- cargo: a system-path wrapper that an earlier version left behind ----
+#
+# MEASURED (VM#2's u2204/u2404 layout, reproduced on Ubuntu 26.04 with apt
+# cargo 1.93.1): old main wrapped /usr/bin/cargo with the deployer's
+# ~/.cargo/bin PREPENDED to PATH. Once the deployer had a ~/.cargo/bin/cargo of
+# their own (rustup, which the role's "rustc too old" record recommends), the
+# fixed role discovered that one first and re-rendered only it, so
+# /usr/bin/cargo kept the prepend and root and a second account still ran the
+# deployer's cargo-cooldown and ~/.cargo/bin/cargo. In this image cargo is in
+# /root/.cargo/bin, so the system-path wrapper is seeded at /usr/local/bin.
+
+SYS_CARGO=/usr/local/bin/cargo
+SYS_BACKEND=/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown
+
+# The shape old main rendered at a system path: the marker, REAL_CARGO, and a
+# COOLDOWN_BIN directory prepended to PATH, here one owned by another account.
+# Its cargo-real is a stub that prints its argv and PATH. Refuses to clobber.
+seed_old_sys_cargo() {
+  [ -e "$SYS_CARGO" ] || [ -e "$SYS_CARGO-real" ] || [ -e "${SYS_BACKEND%/*}" ] && return 1
+  SEEDED_SYS_CARGO=1
+  OLD_BIN=$(mktemp -d /tmp/sch-oldbin.XXXXXX)
+  chmod 755 "$OLD_BIN"; chown 65534 "$OLD_BIN"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\nprintf "PATH=%%s\\n" "$PATH"\n' > "$SYS_CARGO-real"
+  chmod 755 "$SYS_CARGO-real"
+  cat > "$SYS_CARGO" <<OLD
+#!/bin/bash
+# cargo — supply-chain-hardening wrapper
+REAL_CARGO='$SYS_CARGO-real'
+COOLDOWN_BIN='$OLD_BIN'
+if [ -n "\$COOLDOWN_BIN" ] && [ -d "\$COOLDOWN_BIN" ]; then
+  case ":\$PATH:" in *":\$COOLDOWN_BIN:"*) ;; *) PATH="\$COOLDOWN_BIN:\$PATH"; export PATH ;; esac
+fi
+exec "\$REAL_CARGO" "\$@"
+OLD
+  chmod 755 "$SYS_CARGO"
+}
+
+cargo_backend_is_pinned() {
+  local pin have
+  pin=$(sed -n 's/^cargo_cooldown_version: *"\{0,1\}\([0-9.]*\)"\{0,1\}.*/\1/p' "$ROLE_DIR/defaults/main.yml" | head -1)
+  have=$("$HOME/.cargo/bin/cargo-cooldown" --version 2>/dev/null | awk '{print $NF}')
+  [ -n "$pin" ] && [ "$have" = "$pin" ]
+}
+
+apply_cargo() {
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags cargo -e podman_enabled=false -e verify_protections=false "$@"
+  echo "$output" | tail -20
+}
+
+teardown() {
+  if [ -n "${SEEDED_SYS_CARGO:-}" ]; then
+    rm -f "$SYS_CARGO" "$SYS_CARGO-real"
+    rm -rf /usr/local/libexec/supply-chain-hardening "${OLD_BIN:-/nonexistent-sch}"
+  fi
+  if [ -n "${CARGO_WRAPPER_BAK:-}" ] && [ -f "$CARGO_WRAPPER_BAK" ]; then
+    cp -a "$CARGO_WRAPPER_BAK" "$HOME/.cargo/bin/cargo" && rm -f "$CARGO_WRAPPER_BAK"
+  fi
+  return 0
+}
+
+@test "upgrade: an older cargo wrapper at a system path is re-rendered with the root-owned backend" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "seeds files under /usr/local"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  cargo_backend_is_pinned || skip "no cargo-cooldown at the pinned version in ~/.cargo/bin"
+  seed_old_sys_cargo || skip "a cargo or backend already exists under /usr/local"
+
+  apply_cargo
+  [ "$status" -eq 0 ]
+
+  # Re-rendered by THIS version: an absolute root-owned backend, no prepend.
+  grep -q "^REAL_CARGO='$SYS_CARGO-real'\$" "$SYS_CARGO"
+  grep -q "^COOLDOWN_EXE='$SYS_BACKEND'\$" "$SYS_CARGO"
+  ! grep -q '^COOLDOWN_BIN=' "$SYS_CARGO"
+  ! grep -q 'PATH="$COOLDOWN' "$SYS_CARGO"
+  [ -n "$(find "$SYS_BACKEND" -user 0 -perm 0755)" ]
+  # The deployer's own wrapper still names the deployer's own copy.
+  grep -q "^COOLDOWN_EXE='$HOME/.cargo/bin/cargo-cooldown'\$" "$HOME/.cargo/bin/cargo"
+
+  # Behaviour, as another account: gated through the root-owned copy, and the
+  # old directory is nowhere on the PATH cargo gets. A pass-through sfw first,
+  # because the wrapper prefixes sfw when one is installed.
+  printf '#!/bin/sh\nexec "$@"\n' > "$OLD_BIN.sfw"; mkdir -p "$OLD_BIN.pass"
+  mv "$OLD_BIN.sfw" "$OLD_BIN.pass/sfw"; chmod 755 "$OLD_BIN.pass" "$OLD_BIN.pass/sfw"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd /tmp && HOME=/nonexistent PATH='$OLD_BIN.pass:/usr/bin:/bin' '$SYS_CARGO' build 2>&1"
+  rm -rf "$OLD_BIN.pass"
+  echo "$output"
+  [[ "$output" == *"cooldown build"* ]]
+  [[ "$output" == *"PATH=$OLD_BIN.pass:/usr/bin:/bin:${SYS_BACKEND%/*}"* ]]
+  [[ "$output" != *"PATH=$OLD_BIN:"* ]]
+  [[ "$output" != *"refusing"* ]]
+}
+
+@test "upgrade: an apply that turns its own gate off leaves the root-owned backend another wrapper names" {
+  # A second deployer whose cargo is in ~/.cargo/bin used to delete the shared
+  # copy when they set cargo_cooldown_enforce=false (MEASURED with a stub
+  # backend on Ubuntu 26.04): the first deployer's /usr/bin/cargo still named
+  # it, and that user's builds then ran with --locked only, with no warning.
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "seeds files under /usr/local"
+  cargo_backend_is_pinned || skip "no cargo-cooldown at the pinned version in ~/.cargo/bin"
+  seed_old_sys_cargo || skip "a cargo or backend already exists under /usr/local"
+
+  apply_cargo
+  [ "$status" -eq 0 ]
+  grep -q "^COOLDOWN_EXE='$SYS_BACKEND'\$" "$SYS_CARGO"
+  [ -x "$SYS_BACKEND" ]
+  local before
+  before=$(sha256sum < "$SYS_CARGO")
+  CARGO_WRAPPER_BAK=$(mktemp)
+  cp -a "$HOME/.cargo/bin/cargo" "$CARGO_WRAPPER_BAK"
+
+  apply_cargo -e cargo_cooldown_enforce=false
+  [ "$status" -eq 0 ]
+  # This apply's own wrapper is rendered with the gate off ...
+  grep -q "^COOLDOWN_EXE=''\$" "$HOME/.cargo/bin/cargo"
+  # ... but the system-path wrapper and the copy it runs are untouched.
+  [ -x "$SYS_BACKEND" ]
+  [ "$(sha256sum < "$SYS_CARGO")" = "$before" ]
+}

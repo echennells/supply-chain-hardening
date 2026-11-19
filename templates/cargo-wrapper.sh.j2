@@ -106,8 +106,13 @@ fi
 # when the wrapper lives in a user's own ~/.cargo/bin, a ROOT-OWNED copy under
 # /usr/local/libexec/supply-chain-hardening/ when it sits at a system path.
 # PATH is never prepended, and use_cooldown below refuses a backend whose
-# owner is not the caller (or root).
-COOLDOWN_EXE='{{ cargo_cooldown_exe | default("") }}'
+# owner is not the caller (or root). What this vouches for is the path below;
+# which cargo-cooldown cargo then STARTS is cargo's own lookup (use_cooldown).
+#
+# Empty when the gate is off (cargo_cooldown_enforce=false): nothing below
+# reads it then, and tasks/cargo.yml decides whether any wrapper still runs the
+# root-owned copy by this one line.
+COOLDOWN_EXE='{{ (cargo_wrapper_backend | default(cargo_cooldown_exe | default(""))) if cargo_cooldown_enforce | bool else "" }}'
 
 # Recursion guard — same pattern as the bun, composer, deno, npm and pip
 # wrappers.
