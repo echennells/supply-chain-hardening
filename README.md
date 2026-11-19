@@ -33,13 +33,15 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
 | **Hash/integrity verification** | x | | | | | x | | x | | | x | | x |
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
-| **Lockfile enforcement** | | | | | | | x | x | | x | | | |
+| **Lockfile enforcement** | | | | | | | x | | | x | | | |
 
 `*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
 
 `‡` = **needs Composer ≥ 2.11.0 or Bundler ≥ 4.0.13, which no stock distro package ships.** The role writes both settings everywhere and the verifier reports a GAP until you upgrade; see [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md). Bundler's gate covers `gem install` only from RubyGems 4.1.0, which reads the same `BUNDLE_COOLDOWN`; below that, `gem install` has no age gate.
 
 `†` = **not implemented for Python.** Socket Firewall is wired only into the npm/npx and cargo PATH wrappers. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
+
+Go has no lockfile-enforcement tick because the role adds nothing there: Go's own default already refuses to change `go.mod`/`go.sum` during a build. Earlier versions wrote `GOFLAGS=-mod=readonly`, which restated that default and made Go ignore a project's `vendor/` directory.
 
 Each protection is delivered in up to three overlapping layers — system-wide env vars, on-disk config files, `/usr/local/bin` PATH wrappers — so one covers another's gaps. What each layer reaches, and what it doesn't, is in [docs/how-it-works.md](docs/how-it-works.md).
 
