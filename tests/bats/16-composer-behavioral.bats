@@ -174,6 +174,55 @@ hostile_install_fixture() {
   [ ! -f /tmp/marker-composer-script ]
 }
 
+# A checkout cannot take over a command the caller typed as package management
+# by naming a script after an abbreviation of a built-in: composer resolves an
+# exact command name before an abbreviation, and a script is a command. MEASURED
+# on 2.7.1 and 2.11.2 before the wrapper refused it: `composer req psr/log` ran
+# the checkout's "req" script with scripts enabled, and so did du, dump, up, upd,
+# ins and rem. A "scripts-aliases" alias spelled like a built-in ("i") did too.
+abbrev_fixture() {
+  ABB="$BATS_TEST_TMPDIR/abbrev"
+  mkdir -p "$ABB"
+  cat > "$ABB/composer.json" <<J
+{ "name": "test/abbrev-hijack",
+  "scripts": { "req": "echo req >> $ABB/HIJACK", "upd": "echo upd >> $ABB/HIJACK",
+               "check": "echo check >> $ABB/HIJACK", "foo": "echo foo >> $ABB/HIJACK" },
+  "scripts-aliases": { "foo": ["i"] } }
+J
+}
+
+@test "FIXTURE CONTROL: without the wrapper, composer runs an abbreviation-named script" {
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
+  abbrev_fixture
+  run bash -c 'cd "$1" && env -u COMPOSER_SKIP_SCRIPTS "$2" req psr/log --no-interaction' _ "$ABB" "$REAL"
+  # composer appends the arguments to the script's command, hence "req psr/log"
+  grep -q '^req' "$ABB/HIJACK" 2>/dev/null || { echo "composer-real req did not run the req script: $output"; return 1; }
+}
+
+@test "ATTACK: a script named after an abbreviation of a built-in is refused, not run" {
+  command -v php >/dev/null 2>&1 || skip "php not installed (the wrapper reads composer.json with php)"
+  abbrev_fixture
+  local args
+  for args in "req psr/log" "upd" "check" "i"; do
+    rm -f "$ABB/HIJACK"
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && env -u COMPOSER_SKIP_SCRIPTS composer "$@" --no-interaction' _ "$ABB" $args
+    [ ! -f "$ABB/HIJACK" ] || { echo "'composer $args' ran the checkout's script: $(cat "$ABB/HIJACK")"; return 1; }
+    [ "$status" -eq 2 ] || { echo "'composer $args' exited $status: $output"; return 1; }
+    [[ "$output" == *"[supply-chain-hardening] refusing"* && "$output" == *"composer run-script"* ]] \
+      || { echo "'composer $args' was not refused by name: $output"; return 1; }
+  done
+  # The unambiguous spelling still runs the script.
+  rm -f "$ABB/HIJACK"
+  run bash -c 'cd "$1" && composer run-script check --no-interaction' _ "$ABB"
+  [ "$status" -eq 0 ]
+  grep -q '^check' "$ABB/HIJACK"
+  # And in a project with no such script, an abbreviation is still the built-in.
+  explicit_fixture
+  run bash -c 'cd "$1" && composer req --help --no-interaction' _ "$EXP"
+  [[ "$output" == *"require [options]"* ]] || { echo "req --help: $output"; return 1; }
+}
+
 # --- publish-age gate ---------------------------------------------------------
 # These call the real binary with a scratch COMPOSER_HOME: the deployed wrapper
 # pins the 48h window, and "the newest release is older than 48h" is true of most

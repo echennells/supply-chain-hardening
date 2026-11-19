@@ -167,6 +167,77 @@ J
   [[ "$output" != *"--no-scripts"* ]] || { echo "COMPOSER=other.json other: $output"; return 1; }
 }
 
+# A name that is a script AND a built-in spelling. MEASURED on 2.7.1 and 2.11.2:
+# composer looks for an exact command name before it expands a unique prefix of a
+# built-in, and a script is a command, so a checkout defining "req", "du", "dump",
+# "up", "upd", "ins" or "rem" ran that script, with scripts enabled, on
+# `composer req psr/log` and the rest. A "scripts-aliases" alias spelled like a
+# built-in ("i", "upgrade") ran its script in place of the built-in. Adding
+# --no-scripts there only empties the run, so the wrapper refuses it, by name.
+hijack_setup() {
+  route_setup
+  HIJ="$BATS_TEST_TMPDIR/hijack"
+  mkdir -p "$HIJ"
+  cat > "$HIJ/composer.json" <<'J'
+{ "name": "t/h",
+  "scripts": { "req": "echo h", "du": "echo h", "dump": "echo h", "up": "echo h",
+               "upd": "echo h", "ins": "echo h", "rem": "echo h", "check": "echo h",
+               "Install": "echo h", "foo": "echo h", "lint": "echo l" },
+  "scripts-aliases": { "foo": ["i", "upgrade", "inst"], "lint": ["cs"] } }
+J
+}
+
+@test "wrapper-route: a script or alias that also names a built-in is refused, not run" {
+  hijack_setup
+  local args
+  for args in "req psr/log" "du" "dump" "up" "upd" "ins" "rem psr/log" "check" "Install" \
+              "i" "upgrade" "inst" "-n upd"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$HIJ" "$WRAPPER_DIR/route-2.11.sh" $args
+    [ "$status" -eq 2 ] || { echo "'$args' exited $status: $output"; return 1; }
+    [[ "$output" != *"ARGV:"* ]] || { echo "'$args' reached composer: $output"; return 1; }
+    [[ "$output" == *"[supply-chain-hardening] refusing 'composer "* && "$output" == *"composer run-script "* ]] \
+      || { echo "'$args' refusal does not name the control and the way out: $output"; return 1; }
+  done
+  run bash -c 'cd "$1" && "$2" req' _ "$HIJ" "$WRAPPER_DIR/route-2.11.sh"
+  [[ "$output" == *"built-in 'require'"* && "$output" == *"'composer run-script req'"* ]]
+  run bash -c 'cd "$1" && "$2" i' _ "$HIJ" "$WRAPPER_DIR/route-2.11.sh"
+  [[ "$output" == *"'composer run-script foo'"* ]]
+  # The unambiguous spellings: the script by run-script, a script and an alias
+  # that name no built-in, and the built-in by its full name.
+  for args in "run-script req" "run check" "lint" "cs"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$HIJ" "$WRAPPER_DIR/route-2.11.sh" $args
+    [[ "$output" == "ARGV: "* && "$output" != *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
+  for args in "require psr/log" "install" "update"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$HIJ" "$WRAPPER_DIR/route-2.11.sh" $args
+    [[ "$output" == "ARGV: "* && "$output" == *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
+}
+
+@test "wrapper-route: an abbreviation that is not a script is the built-in, with --no-scripts" {
+  route_setup
+  local args
+  for args in "req psr/log" "upd" "dump" "check"; do
+    # shellcheck disable=SC2086
+    route route-2.11 $args
+    [[ "$output" == "ARGV: "* && "$output" == *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
+}
+
+@test "wrapper-route: in -nd DIR the DIR is a value, and composer does not change to it" {
+  route_setup
+  # MEASURED on 2.5.5, 2.7.1 and 2.11.2: `composer -nd DIR test` runs the test
+  # script of the CURRENT directory. The wrapper parsed DIR as the subcommand,
+  # injected --no-scripts, and the test step exited 0 having run nothing.
+  run bash -c 'cd "$2" && "$1" -nd /tmp test' _ "$WRAPPER_DIR/route-2.11.sh" "$PROJ"
+  [[ "$output" == "ARGV: "* && "$output" != *"--no-scripts"* ]] || { echo "-nd in the project: $output"; return 1; }
+  run bash -c 'cd / && "$1" -nd "$2" test' _ "$WRAPPER_DIR/route-2.11.sh" "$PROJ"
+  [[ "$output" == *"--no-scripts"* ]] || { echo "-nd from /: $output"; return 1; }
+}
+
 @test "wrapper-route: composer <= 2.1 injects only on the subcommands that declare --no-scripts" {
   route_setup
   [ -x "$WRAPPER_DIR/route-2.1.sh" ] || skip "rendering failed"
