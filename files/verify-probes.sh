@@ -159,15 +159,20 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
   # `--version` per call; that is the honest cost.
   scv__wt="$1"
   scv__wh=""
+  # --no-plugins for composer: MEASURED on 2.11.2, an UNWRAPPED `composer
+  # --version` run inside a checkout activated the plugin the checkout's
+  # allow-plugins enables. The wrapper adds the flag itself; this covers the
+  # case the probe exists to find, where something else answers first.
+  scv__wa=""; case "${scv__wt##*/}" in composer) scv__wa="--no-plugins" ;; esac
   if scv__wp=$(mktemp 2>/dev/null); then
     # Bound the probe like the sibling verifiers (timeout 30): a hanging tool or
     # a hanging front-runner shim must not hang the whole verify. `timeout`
     # preserves the SCH_WRAPPER_PROBE env var for the tool; absent it (macOS),
     # fall back unbounded rather than skip the probe.
     if command -v timeout >/dev/null 2>&1; then
-      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version >/dev/null 2>&1 || true
+      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
     else
-      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version >/dev/null 2>&1 || true
+      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
     fi
     while IFS= read -r scv__wl; do
       [ -n "$scv__wl" ] || continue
@@ -1610,14 +1615,20 @@ fi
 # (MEASURED on 2.2.6 and 2.10.3). harden.sh hardcodes $HOME/.config/composer,
 # so the file can land somewhere composer never reads. Never stat that path as
 # evidence - ask composer where it reads from and compare.
+#
+# It runs from an empty directory with --no-plugins. MEASURED on composer 2.11.2
+# before that: `composer config --global <key>` run inside a checkout loaded the
+# checkout's composer.json, activated the plugin its allow-plugins enables
+# (committed to vendor/) and ran its root "pre-command-run" script, once per key.
+# --global does not stop composer from booting the project it is standing in.
 composer_implements() {
   ci_key="$1"; ci_tmp=$(mktemp -d 2>/dev/null) || return 1
   [ -n "$ci_tmp" ] && [ -d "$ci_tmp" ] || return 1
-  mkdir -p "$ci_tmp/h" "$ci_tmp/ch"
-  env -i PATH="$PATH" HOME="$ci_tmp/h" COMPOSER_HOME="$ci_tmp/ch" \
+  mkdir -p "$ci_tmp/h" "$ci_tmp/ch" "$ci_tmp/cwd"
+  ( cd "$ci_tmp/cwd" && env -i PATH="$PATH" HOME="$ci_tmp/h" COMPOSER_HOME="$ci_tmp/ch" \
       COMPOSER_CACHE_DIR="$ci_tmp/c" COMPOSER_DATA_DIR="$ci_tmp/d" \
       COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 \
-      composer config --global --no-ansi "$ci_key" >/dev/null 2>&1
+      composer config --global --no-plugins --no-ansi "$ci_key" ) >/dev/null 2>&1
   ci_rc=$?
   rm -rf "$ci_tmp"
   [ "$ci_rc" -eq 0 ]
@@ -1726,8 +1737,18 @@ if have composer; then
   # authoritative - composer resolves its own home - but the verifier has to
   # know the writer's path in order to report the two disagreeing.
   cwrote="$HOME/.config/composer/config.json"
-  CDUMP=$(composer config --global --list --source --no-ansi --no-plugins 2>&1); crc=$?
-  if [ "$crc" -ne 0 ] && composer config --global --list --no-ansi --no-plugins >/dev/null 2>&1; then
+  # The --global reads run from an empty directory: from inside a checkout,
+  # composer boots that project even for --global and dispatches pre-command-run
+  # to its root scripts (MEASURED, 2.2.6 -> 2.11.2, whenever COMPOSER_SKIP_SCRIPTS
+  # is not honoured: composer < 2.8.6, or no PAM env). -n stops the parent-dir walk.
+  cnone=$(mktemp -d 2>/dev/null) || cnone=/
+  CDUMP=$(cd "$cnone" && composer config --global --list --source --no-ansi --no-plugins --no-interaction 2>&1); crc=$?
+  clist=1
+  if [ "$crc" -ne 0 ]; then
+    (cd "$cnone" && composer config --global --list --no-ansi --no-plugins --no-interaction) >/dev/null 2>&1 && clist=0
+  fi
+  [ "$cnone" = / ] || rmdir "$cnone" 2>/dev/null
+  if [ "$crc" -ne 0 ] && [ "$clist" -eq 0 ]; then
     # --list works, --list --source does not: composer < 2.2 has no --source.
     row WEAK PARSED "composer config in effect" \
       "composer ${cv:-?} has no 'config --list --source' (needs >= 2.2); it reports values but not which file they came from, so nothing here proves our file is the one being read"
@@ -1785,10 +1806,13 @@ if have composer; then
     # PHP) unless --no-plugins is passed. A posture check must never run a
     # checkout's code. MEASURED (composer 2.11.1): without this flag a committed
     # vendor/ plugin runs; with it the identical config is reported and nothing
-    # runs. --no-plugins is a global option on every composer 2.x (unlike
-    # --no-scripts, which `composer config` rejects on 2.0/2.1). See
+    # runs. --no-plugins is a global option on every composer 2.x. --no-scripts
+    # is needed too: without it the checkout's root "pre-command-run" script runs
+    # (MEASURED, 2.2.6 -> 2.11.2, outside the reach of COMPOSER_SKIP_SCRIPTS).
+    # `composer config` rejects --no-scripts on 2.0/2.1, but those have no
+    # --source either, so this call fails there with or without it. See
     # tests/bats/51-verifier-composer-plugin-safety.bats.
-    PDUMP=$(composer config --list --source --no-ansi --no-plugins 2>/dev/null); prc=$?
+    PDUMP=$(composer config --list --source --no-ansi --no-plugins --no-scripts --no-interaction 2>/dev/null); prc=$?
     if [ "$prc" -eq 0 ]; then EDUMP="$PDUMP"; escope="effective config for $(cq "$PWD")"; fi
   fi
   # A checkout we could not read is a checkout that may be overriding us; that

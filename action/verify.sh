@@ -717,16 +717,19 @@ describe_binary() {
 # because it asks the wrapper instead of reasoning about its position.
 WRAPPER_RAN_PATH=""
 wrapper_ran() {
-  local w="$1" probe line
+  local w="$1" probe line wa
   WRAPPER_RAN_PATH=""
   probe=$(mktemp 2>/dev/null) || return 2
   # RUSTUP_AUTO_INSTALL=0: one of these tools is cargo, a rustup proxy that
   # downloads its toolchain to answer --version when it is not installed
   # (MEASURED: 757 MB). Only rustup reads the variable.
+  # --no-plugins for composer: an unwrapped `composer --version` inside a
+  # checkout activates the checkout's allowed plugin (MEASURED, 2.11.2).
+  wa=""; case "${w##*/}" in composer) wa="--no-plugins" ;; esac
   if have timeout; then
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version $wa >/dev/null 2>&1 || true
   else
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version $wa >/dev/null 2>&1 || true
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue

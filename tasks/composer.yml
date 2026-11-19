@@ -53,11 +53,16 @@
   # `command -v composer` short-circuits when Composer isn't on PATH —
   # `exit 0` then leaves stdout empty, which the template treats as "unknown
   # version, use safe baseline".
+  # --no-plugins and chdir /: composer boots the project in its working
+  # directory even for --version, and activates the plugins that project allows
+  # (MEASURED on 2.11.2, action/harden.sh run inside a checkout). Ansible runs
+  # this in whatever directory the play was started from, or the remote home.
   ansible.builtin.shell:
+    chdir: /
     cmd: |
       set -o pipefail
       command -v composer >/dev/null 2>&1 || exit 0
-      composer --version --no-ansi 2>/dev/null \
+      composer --version --no-ansi --no-plugins 2>/dev/null \
         | sed -nE 's/^Composer (version )?([0-9]+\.[0-9]+\.[0-9]+).*$/\2/p' \
         | head -1
     executable: /bin/bash
@@ -155,7 +160,10 @@
 # not guess — same "config-home" remedy as npm globalconfig / uv / gradle (see
 # docs/design-principles.md Axis 5).
 - name: Resolve composer's real global config home (invoking user)
-  ansible.builtin.command: composer config --global home
+  # From / with --no-plugins, for the reason given on the version probe above.
+  ansible.builtin.command:
+    cmd: composer config --global home --no-plugins --no-interaction
+    chdir: /
   register: composer_home_user
   changed_when: false
   check_mode: false
@@ -191,7 +199,9 @@
   # legacy/XDG variant). composer warns "Do not run as root" on stderr but
   # still prints the home on stdout, so the value is clean.
   become: true
-  ansible.builtin.command: composer config --global home
+  ansible.builtin.command:
+    cmd: composer config --global home --no-plugins --no-interaction
+    chdir: /
   register: composer_home_root
   changed_when: false
   check_mode: false

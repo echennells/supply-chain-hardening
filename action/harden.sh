@@ -1141,7 +1141,12 @@ harden_composer() {
   mkdir -p "$HOME/.config/composer"
 
   local composer_version
-  composer_version=$(detect_version composer "composer --version --no-ansi")
+  # --no-plugins, and the home lookup below runs from an empty directory:
+  # MEASURED on composer 2.11.2, run with a checkout as the working directory
+  # (the GitHub workspace), `composer --version` activated the plugin that
+  # checkout's allow-plugins enables, and `composer config --global home` also
+  # ran its root "pre-command-run" script, before any wrapper existed.
+  composer_version=$(detect_version composer "composer --version --no-ansi --no-plugins")
   # Tier-render:
   #   composer >= 2.9 : audit.block-insecure + block-abandoned + abandoned=fail
   #   composer 2.7-2.8: audit.abandoned=fail only
@@ -1217,9 +1222,10 @@ harden_composer() {
   # ~/.config/composer is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
   # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
-  local composer_home=""
-  if command -v composer >/dev/null 2>&1; then
-    composer_home=$(composer config --global home --no-ansi 2>/dev/null | tail -1)
+  local composer_home="" composer_cwd
+  if command -v composer >/dev/null 2>&1 && composer_cwd=$(mktemp -d 2>/dev/null); then
+    composer_home=$(cd "$composer_cwd" && composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
+    rmdir "$composer_cwd" 2>/dev/null || true
   fi
   case "$composer_home" in
     /*)
