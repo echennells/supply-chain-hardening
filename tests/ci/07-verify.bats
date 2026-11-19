@@ -267,6 +267,51 @@ exec '"$realpy"' "$@"'
   [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"[allow.global]"* ]]
 }
 
+@test "cargo threat-intel: a cold sfw cache says cargo runs unfiltered, not that every build fails" {
+  # With nothing cached, sfw cannot run for a non-root caller (it cannot
+  # create its root-owned cache), and the cargo wrapper then runs cargo
+  # WITHOUT sfw and warns. MEASURED in the role and the action: the crate
+  # downloaded, exit 0, while this row said "EVERY cargo build in this job is
+  # failing" and sent the operator after the wrong problem.
+  [ "$(id -u)" != 0 ] || skip "root can fill the cache itself, so the wrapper does not skip sfw"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.80.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$BATS_TEST_TMPDIR/proj"; touch "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  # sfw laid out like a global npm install. It fails the way the real one
+  # does when it cannot create its cache.
+  local pkg="$BATS_TEST_TMPDIR/prefix/lib/node_modules/sfw"
+  mkdir -p "$pkg/dist" "$pkg/.sfw-cache"
+  printf '{"name":"sfw","version":"2.0.6"}\n' > "$pkg/package.json"
+  printf '#!/bin/bash\n[ -e "%s/.sfw-cache/latest" ] && exec "$@"\necho "[sfw] Failed to prepare firewall binary: EACCES: permission denied, mkdir" >&2; exit 1\n' "$pkg" > "$pkg/dist/sfw.mjs"
+  chmod +x "$pkg/dist/sfw.mjs"
+  stub_symlink sfw "$pkg/dist/sfw.mjs"
+  ln -s "$pkg/dist/sfw.mjs" "$pkg/.sfw-cache/latest"
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
+  rm -f "$pkg/.sfw-cache/latest"
+  chmod a-w "$pkg/.sfw-cache"
+
+  # Ground truth first: the build runs, unfiltered, with the warning.
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fetch 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+
+  run verify_sourced --emit=plain
+  row=$(printf '%s\n' "$output" | grep 'cargo threat-intel filtering')
+  echo "$row"
+  [[ "$row" == "GAP    FUNCTIONAL  cargo threat-intel filtering"* ]]
+  [[ "$row" == *"runs cargo WITHOUT sfw"* ]]
+  [[ "$row" == *"sudo sfw true"* ]]
+  [[ "$row" != *"EVERY cargo build"* ]]
+
+  # An sfw that cannot execute with a binary cached is still the failing case.
+  chmod u+w "$pkg/.sfw-cache"
+  ln -s "$pkg/dist/sfw.mjs" "$pkg/.sfw-cache/latest"
+  printf '#!/bin/bash\nexit 1\n' > "$pkg/dist/sfw.mjs"
+  run verify_sourced --emit=plain
+  row=$(printf '%s\n' "$output" | grep 'cargo threat-intel filtering')
+  echo "$row"
+  [[ "$row" == *"CANNOT EXECUTE"* ]]
+}
+
 # uv_reporting <cutoff>: a uv that reports an absolute exclude-newer instant in
 # the Debug shape `uv pip list --show-settings` prints, so the age-gate row
 # can be driven without a real uv or a frozen clock.

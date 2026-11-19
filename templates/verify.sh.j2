@@ -786,11 +786,24 @@ fi
 
 # ------------------------------------------------- sfw (reputation layer) ----
 if have sfw; then
+  # The wrappers' sfw_ready test: a non-root caller, the npm shim, nothing
+  # cached, and a cache this caller cannot fill. The wrappers then run npm and
+  # cargo WITHOUT sfw and warn, which is not the same as an sfw that fails.
+  sfw_cold=""
+  if [ "$(id -u)" != 0 ]; then
+    _s=$(readlink -f "$(command -v sfw)" 2>/dev/null); _p=${_s%/*}; _p=${_p%/*}
+    if [ -n "$_s" ] && [ -f "$_p/package.json" ] && [ ! -e "$_p/.sfw-cache/latest" ]; then
+      if [ -e "$_p/.sfw-cache" ]; then [ -w "$_p/.sfw-cache" ] || sfw_cold="$_p/.sfw-cache"
+      else [ -w "$_p" ] || sfw_cold="$_p/.sfw-cache"; fi
+    fi
+  fi
   # SFW_SKIP_UPDATE_CHECK=1 because that is how the npm and cargo wrappers run
   # it. Without it, sfw run by a non-root account fails from one hour after the
   # apply (it tries to rewrite its root-owned .sfw-cache/next-check), and this
   # row reported a GAP for wrappers that were working.
-  if sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
+  if [ -n "$sfw_cold" ]; then
+    row GAP FUNCTIONAL "Socket Firewall" "sfw has no firewall binary cached that this account can run ($sfw_cold), and only root can fetch it, so the npm and cargo wrappers run without sfw and warn - installs work, unfiltered. Re-apply the role, or run 'sudo sfw true' once"
+  elif sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
     row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
   else
     row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully: $(printf '%s' "$sfw_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
