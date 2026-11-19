@@ -35,7 +35,7 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
 | **Lockfile enforcement** | | | | | | | x | x | | x | | | |
 
-`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
+`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md). Cargo 1.100.0 and later also have a native gate (`registry.global-min-publish-age`), which the role does not write yet.
 
 `‡` = **needs Composer ≥ 2.11.0 or Bundler ≥ 4.0.13, which no stock distro package ships.** The role writes both settings everywhere and the verifier reports a GAP until you upgrade; see [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md). Bundler's gate covers `gem install` only from RubyGems 4.1.0, which reads the same `BUNDLE_COOLDOWN`; below that, `gem install` has no age gate.
 
