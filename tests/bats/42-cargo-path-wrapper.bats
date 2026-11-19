@@ -318,3 +318,58 @@ cargo_home_dir() { echo "${CARGO_HOME:-$HOME/.cargo}"; }
   [ -f "$(cargo_home_dir)/cooldown.toml" ] || skip "cooldown gate not enabled"
   grep -qE 'incompatible-publish-age[[:space:]]*=[[:space:]]*"deny"' "$(cargo_home_dir)/cooldown.toml"
 }
+
+# ---- sfw runs read-only ----
+#
+# sfw's cache is root-owned, and by default sfw rewrites .sfw-cache/next-check
+# there once the last update check is an hour old. A non-root caller cannot,
+# and sfw treats that as fatal: VM#1 measured every non-root cargo build
+# failing with "[sfw] Failed to prepare firewall binary: EACCES ... next-check"
+# one hour after each apply. The wrapper must run sfw with
+# SFW_SKIP_UPDATE_CHECK=1, and must not hand a non-root caller to an sfw whose
+# cache is cold (only root can fill it).
+
+# An sfw laid out like a global npm install (bin -> lib/node_modules/sfw/dist),
+# so the wrapper can find its cache. The stub reports the variable and runs
+# the command it was given.
+make_sfw_pkg() {
+  local pkg="$PROBE_DIR/lib/node_modules/sfw"
+  mkdir -p "$pkg/dist" "$pkg/.sfw-cache"
+  printf '{"name":"sfw","version":"0.0.0"}\n' > "$pkg/package.json"
+  printf '#!/bin/sh\necho "SFW-STUB SKIP=${SFW_SKIP_UPDATE_CHECK:-unset}"\nexec "$@"\n' > "$pkg/dist/sfw.mjs"
+  chmod +x "$pkg/dist/sfw.mjs"
+  ln -s "$pkg/dist/sfw.mjs" "$PROBE_DIR/sfw"
+  SFW_CACHE_DIR="$pkg/.sfw-cache"
+}
+
+@test "cargo+sfw: the wrapper runs sfw with SFW_SKIP_UPDATE_CHECK=1" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  grep -q 'pfx="sfw"' "$(cargo_path)" || skip "wrapper rendered without the sfw route (cargo_socket_firewall=false)"
+  make_probe without-cooldown
+  make_sfw_pkg
+  ln -s "$PROBE_DIR/cargo-real" "$SFW_CACHE_DIR/latest"
+  run probe fetch
+  echo "$output"
+  [[ "$output" == *"SFW-STUB SKIP=1"* ]]
+  [[ "$output" == *"fetch --locked"* ]]
+}
+
+@test "cargo+sfw: a cold sfw cache warns a non-root caller and runs cargo, instead of failing in sfw" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to run the probe as another account"
+  grep -q 'pfx="sfw"' "$(cargo_path)" || skip "wrapper rendered without the sfw route (cargo_socket_firewall=false)"
+  make_probe without-cooldown
+  make_sfw_pkg
+  chmod -R a+rX "$PROBE_DIR"
+  run su -s /bin/bash nobody -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' fetch 2>&1"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" != *"SFW-STUB"* ]]
+  [[ "$output" == *"fetch --locked"* ]]
+  # Warm: the same caller is routed through sfw.
+  ln -s "$PROBE_DIR/cargo-real" "$SFW_CACHE_DIR/latest"
+  run su -s /bin/bash nobody -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' fetch 2>&1"
+  echo "$output"
+  [[ "$output" == *"SFW-STUB SKIP=1"* ]]
+}

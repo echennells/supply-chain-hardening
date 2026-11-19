@@ -137,3 +137,40 @@ refresh() { "$R" --system && "$R" --user; }
   run "$VERIFY" --json
   [ "$(printf '%s' "$output" | jq -r '.rows[] | select(.protection == "uv age gate") | .status')" = OK ]
 }
+
+# ---- Socket Firewall's update check ----
+#
+# The npm and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1, so a
+# non-root caller never writes sfw's root-owned cache (VM#1: without it every
+# non-root npm and cargo call failed an hour after each apply). The update
+# check they skip has to run somewhere: as root, from this refresher.
+
+@test "refresher --sfw runs sfw's update check as root, with the skip variable cleared and umask 022" {
+  grep -q -- '--sfw)' "$R" || skip "refresher rendered without the sfw step (socket_firewall_install=false)"
+  stub=$(mktemp -d)
+  cat > "$stub/sfw" <<STUB
+#!/bin/sh
+printf 'uid=%s skip=%s umask=%s args=%s\n' "\$(id -u)" "\${SFW_SKIP_UPDATE_CHECK:-unset}" "\$(umask)" "\$*" > "$stub/ran"
+STUB
+  chmod +x "$stub/sfw"
+  run env SFW_SKIP_UPDATE_CHECK=1 PATH="$stub:$PATH" sh -c "umask 077; '$R' --sfw"
+  echo "$output"
+  cat "$stub/ran"
+  [ "$status" -eq 0 ]
+  grep -q '^uid=0 skip=unset umask=0022 args=/.*/true$' "$stub/ran"
+  rm -rf "$stub"
+}
+
+@test "refresher --sfw keeps going when the update check fails" {
+  # A failed check leaves the cached binary in place, and it still works; the
+  # age-gate cutoffs in the same unit must not fail with it.
+  grep -q -- '--sfw)' "$R" || skip "refresher rendered without the sfw step (socket_firewall_install=false)"
+  stub=$(mktemp -d)
+  printf '#!/bin/sh\necho "[sfw] simulated failure" >&2\nexit 1\n' > "$stub/sfw"
+  chmod +x "$stub/sfw"
+  run env PATH="$stub:$PATH" "$R" --sfw
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not refresh its firewall binary: [sfw] simulated failure"* ]]
+  rm -rf "$stub"
+}

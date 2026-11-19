@@ -848,6 +848,97 @@ esac'
   assert_file_contains "$TEST_TMP/sfw-install-args" "PINNED-INSTALL"
 }
 
+# --- sfw runs read-only ----------------------------------------------------
+#
+# sfw keeps its cache in its own package directory, root-owned after the root
+# `npm install -g`, and by default rewrites .sfw-cache/next-check there once
+# the last update check is an hour old. A non-root caller cannot, and sfw
+# treats that as fatal. MEASURED (sfw 2.0.6, this action at 8281a6b, a
+# non-root user, next-check backdated): npm, npx and cargo through sfw all
+# failed with "[sfw] Failed to prepare firewall binary: EACCES ... next-check".
+# SFW_SKIP_UPDATE_CHECK=1 runs the cached binary without writing. The stubs
+# here record what sfw was handed.
+
+@test "sfw: the npm, npx and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1" {
+  sfw_stubs
+  stub_bin sfw 'echo "SFW SKIP=${SFW_SKIP_UPDATE_CHECK:-unset}"; exec "$@"'
+  stub_bin npx
+  cargo_sfw_stubs
+  stub_bin sfw 'echo "SFW SKIP=${SFW_SKIP_UPDATE_CHECK:-unset}"; exec "$@"'
+  harden ECOSYSTEMS=npm,cargo INSTALL_SFW=true -- --emit=plain >/dev/null
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [[ "$output" == *"SFW SKIP=1"* ]]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npx" cowsay
+  [[ "$output" == *"SFW SKIP=1"* ]]
+  [[ "$output" == *"STUB:npx"* ]]
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"SFW SKIP=1"* ]]
+  [[ "$output" == *"--locked"* ]]
+}
+
+@test "sfw: the hardening-time user check runs sfw the way the wrappers will" {
+  # An sfw that fails exactly as the real one does an hour after hardening:
+  # for a non-root caller that has not set SFW_SKIP_UPDATE_CHECK. The user
+  # check has to pass the variable, or it judges sfw by a call the wrappers
+  # never make.
+  [ "$(id -u)" != 0 ] || skip "the user check is only distinct from the root warm for a non-root caller"
+  sfw_stubs
+  stub_bin sfw 'if [ "$(id -u)" != 0 ] && [ -z "${SFW_SKIP_UPDATE_CHECK:-}" ]; then
+  echo "[sfw] Failed to prepare firewall binary: EACCES: permission denied, open next-check" >&2; exit 1
+fi
+exec "$@"'
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"could not prepare its firewall binary"* ]]
+  assert_file_contains "$TEST_BIN/npm" "supply-chain-harden"
+  assert_file_contains "$OUT_FILE" "sfw_installed=true"
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+}
+
+@test "sfw: a cold sfw cache warns a non-root caller and passes through, for npm, npx and cargo" {
+  # With nothing cached, sfw downloads the binary even with
+  # SFW_SKIP_UPDATE_CHECK=1, and only root can create the cache (MEASURED:
+  # "EACCES ... mkdir .sfw-cache"). A root reinstall of sfw leaves it cold.
+  # The wrappers must say so in our name and run the tool unfiltered, as they
+  # do when sfw is absent, rather than fail every call in sfw's words.
+  [ "$(id -u)" != 0 ] || skip "root can fill the cache itself, so the guard does not apply"
+  sfw_stubs
+  stub_bin npx
+  cargo_sfw_stubs
+  # sfw laid out like a global npm install, so the wrappers can find its cache.
+  local pkg="$BATS_TEST_TMPDIR/prefix/lib/node_modules/sfw"
+  mkdir -p "$pkg/dist" "$pkg/.sfw-cache"
+  printf '{"name":"sfw","version":"0.0.0"}\n' > "$pkg/package.json"
+  printf '#!/bin/bash\necho SFW-STUB\nexec "$@"\n' > "$pkg/dist/sfw.mjs"
+  chmod +x "$pkg/dist/sfw.mjs"
+  stub_symlink sfw "$pkg/dist/sfw.mjs"
+  ln -s "$pkg/dist/sfw.mjs" "$pkg/.sfw-cache/latest"
+  harden ECOSYSTEMS=npm,cargo INSTALL_SFW=true -- --emit=plain >/dev/null
+  assert_file_contains "$TEST_BIN/npm" "supply-chain-harden"
+  # Warm: routed through sfw.
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [[ "$output" == *"SFW-STUB"* ]]
+  # Cold.
+  rm -f "$pkg/.sfw-cache/latest"
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" != *"SFW-STUB"* ]]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npx" cowsay
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" == *"STUB:npx"* ]]
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" != *"SFW-STUB"* ]]
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+}
+
 # --- absence ---------------------------------------------------------------
 
 @test "a missing tool is reported, not fatal, and the run continues" {

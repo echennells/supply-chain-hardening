@@ -3,7 +3,8 @@
 # Runs as the unprivileged `dev` user inside tests/Dockerfile.nonroot, AFTER a
 # non-root apply. Each check maps to a bug this cell actually shipped:
 #   1  verify: no gaps        -> non-root apply left every protection in effect
-#   2  real install succeeds  -> the sfw cache is writable by dev (not root-owned EACCES)
+#   2  real install succeeds  -> sfw runs for dev against its root-owned cache,
+#                                also once its 1h update-check window has passed
 #   3  postinstall blocked    -> ignore-scripts is enforced for the ordinary user
 #   4  interactive no-loop     -> the npm->npq->npm re-entry guard terminates
 set -u
@@ -39,8 +40,10 @@ else
 fi
 
 # 2) A real install as dev must SUCCEED — guards the root-owned sfw cache EACCES
-#    that broke the first `npm install` for the invoking user.
-say "real npm install as dev (sfw cache writable?)"
+#    that broke the first `npm install` for the invoking user. The cache stays
+#    root-owned (a dev-owned one lets dev pick the binary root runs); the
+#    wrapper runs sfw with SFW_SKIP_UPDATE_CHECK=1 so dev never writes to it.
+say "real npm install as dev"
 d1=$(mktemp -d)
 ( cd "$d1" && npm init -y >/dev/null 2>&1 &&
   npm install lodash@4.17.21 --no-audit --no-fund </dev/null >install.log 2>&1 )
@@ -51,6 +54,29 @@ else
   grep -iE "eacces|permission denied|sfw|npm error" "$d1/install.log" 2>/dev/null | head -5
 fi
 rm -rf "$d1"
+
+# 2b) ...and still SUCCEED once sfw's hourly update check is due. sfw rewrites
+#     .sfw-cache/next-check when it is over an hour old, which dev cannot, and
+#     every check above runs inside that hour. VM#1: from one hour after each
+#     apply, every non-root npm and cargo call failed with "[sfw] Failed to
+#     prepare firewall binary: EACCES ... next-check". Backdate it and retry.
+say "real npm install as dev after sfw's 1h update-check window"
+sfw_pkg=$(readlink -f "$(command -v sfw 2>/dev/null)" 2>/dev/null); sfw_pkg=${sfw_pkg%/*}; sfw_pkg=${sfw_pkg%/*}
+if [ -e "$sfw_pkg/.sfw-cache/latest" ]; then
+  printf '2026-01-01T00:00:00.000Z' | sudo tee "$sfw_pkg/.sfw-cache/next-check" >/dev/null
+  d1=$(mktemp -d)
+  ( cd "$d1" && npm init -y >/dev/null 2>&1 &&
+    npm install lodash@4.17.21 --no-audit --no-fund </dev/null >install.log 2>&1 )
+  if [ -d "$d1/node_modules/lodash" ] && ! grep -q "Failed to prepare firewall binary" "$d1/install.log"; then
+    ok "npm install succeeded as dev with sfw's update check due"
+  else
+    no "npm install FAILED as dev once sfw's update check was due (wrapper not running sfw read-only?)"
+    grep -iE "eacces|permission denied|sfw|npm error" "$d1/install.log" 2>/dev/null | head -5
+  fi
+  rm -rf "$d1"
+else
+  echo "SKIP: no warm sfw cache (the apply-time fetch failed), nothing to backdate"
+fi
 
 # 3) ignore-scripts must block a postinstall for the non-root user.
 # npm >=12 blocks lifecycle scripts NATIVELY (allowScripts), so on npm >=12 a
