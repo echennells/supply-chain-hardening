@@ -1949,10 +1949,33 @@ fi
 # Guarded by `command -v sfw` rather than assumed: sfw is opt-in
 # (install_sfw), and a cargo wrapper that hard-required it would break every
 # build on a runner that did not install it. Absent sfw, this is a no-op.
+#
+# sfw runs READ-ONLY. Its cache sits in its own package directory, which a
+# root `npm install -g` makes root-owned, and by default it rewrites
+# .sfw-cache/next-check there once the last update check is an hour old; a
+# non-root caller cannot, and sfw treats that as fatal. MEASURED (sfw 2.0.6,
+# this action at 8281a6b, a non-root user): one hour after hardening, every
+# npm, npx and cargo call through sfw failed with "[sfw] Failed to prepare
+# firewall binary: EACCES ... next-check". SFW_SKIP_UPDATE_CHECK=1 runs the
+# cached binary without writing (MEASURED). A COLD cache still needs a
+# download only root can do, so it warns and runs cargo unfiltered.
+if [ "__CARGO_SFW__" = "true" ]; then
+  SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+fi
+sfw_ready() {
+  local s p
+  [ "$(id -u)" = 0 ] && return 0
+  s=$(readlink -f "$(command -v sfw)" 2>/dev/null) || return 0
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 0
+  [ -e "$p/.sfw-cache/latest" ] && return 0
+  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. cargo call not filtered through threat intel" >&2
+  return 1
+}
 run_real() {
   local pfx=""
   if [ "__CARGO_SFW__" = "true" ] && [ "${SCH_NET:-0}" = "1" ] \
-     && command -v sfw >/dev/null 2>&1; then
+     && command -v sfw >/dev/null 2>&1 && sfw_ready; then
     pfx="sfw"
   fi
   if [ -n "$pfx" ]; then
@@ -2851,8 +2874,10 @@ install_sfw_and_wrap() {
   # root-owned: a warm run as the user failed on a GitHub runner with "EACCES:
   # permission denied, mkdir '/usr/local/lib/node_modules/sfw/.sfw-cache'".
   #   1. warm with the install's privilege, so the download can land;
-  #   2. run as THIS user, exactly as the npm/npx wrappers will. Only if that
-  #      works is anything wrapped.
+  #   2. run as THIS user, exactly as the npm/npx wrappers will: with
+  #      SFW_SKIP_UPDATE_CHECK=1, so sfw never tries to write the root-owned
+  #      cache (see the wrappers below). Only if that works is anything
+  #      wrapped.
   # If either fails, sfw is MOVED ASIDE so `command -v sfw` fails for the cargo
   # wrapper too, no npm/npx wrapper is deployed, and sfw_installed stays false:
   # the job runs unfiltered, says so, and builds. The target is whichever
@@ -2866,9 +2891,12 @@ install_sfw_and_wrap() {
   fi
   true_bin=/usr/bin/true; [[ -x "$true_bin" ]] || true_bin=/bin/true
   sfw_rc=0
-  sfw_out=$(run_bounded 180 $SUDO "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  # umask 022 for the root warm: sudo applies the union of the caller's umask
+  # and its own, and a 077 caller would leave the binary in a 0700 directory
+  # that the user check below (and every other account) cannot reach.
+  sfw_out=$(run_bounded 180 $SUDO sh -c 'umask 022; exec "$@"' sh "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   if [[ "$sfw_rc" -eq 0 ]]; then
-    sfw_out=$(run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+    sfw_out=$(SFW_SKIP_UPDATE_CHECK=1 run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   fi
   if [[ "$sfw_rc" -ne 0 ]]; then
     $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
@@ -2892,6 +2920,36 @@ install_sfw_and_wrap() {
   real_npm=$(command -v npm)
   wrapper_target="$real_npm"
   require_privilege npm "$wrapper_target" || { end_section; return 0; }
+
+  # Shared by the npm and npx wrappers below; the cargo wrapper carries the
+  # same logic. Quoted here so nothing in it expands while harden writes it.
+  local sfw_guard
+  sfw_guard=$(cat <<'GUARD'
+# sfw runs READ-ONLY. Its cache sits in its own package directory, which a
+# root `npm install -g` makes root-owned, and by default it rewrites
+# .sfw-cache/next-check there once the last update check is an hour old; a
+# non-root caller cannot, and sfw treats that as fatal. MEASURED (sfw 2.0.6,
+# this action at 8281a6b, a non-root user): one hour after hardening, every
+# npm, npx and cargo call through sfw failed with "[sfw] Failed to prepare
+# firewall binary: EACCES ... next-check". SFW_SKIP_UPDATE_CHECK=1 runs the
+# cached binary without writing (MEASURED: no file under the cache changed).
+SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+# A COLD cache still needs a download that only root can do (MEASURED:
+# "EACCES ... mkdir .sfw-cache"); a root reinstall of sfw leaves it cold. That
+# warns and passes through, the way an absent sfw does, instead of failing.
+sfw_ready() {
+  local s p
+  command -v sfw >/dev/null 2>&1 || return 1
+  [ "$(id -u)" = 0 ] && return 0
+  s=$(readlink -f "$(command -v sfw)" 2>/dev/null) || return 0
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 0
+  [ -e "$p/.sfw-cache/latest" ] && return 0
+  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. Call not filtered through threat intel" >&2
+  return 1
+}
+GUARD
+)
 
   if grep -q "supply-chain-harden" "$real_npm" 2>/dev/null; then
     # Already wrapped in a previous run within this job — re-wrap the original.
@@ -2934,6 +2992,7 @@ if [ -z "\$REAL_NPM" ] || [ ! -x "\$REAL_NPM" ] || [ "\$REAL_NPM" = "$wrapper_ta
   echo "[supply-chain-harden] error: real npm not found at '\$REAL_NPM'; refusing to recurse" >&2
   exit 127
 fi
+${sfw_guard}
 # Find the npm subcommand. Reading argv[1] directly was wrong: any leading
 # global flag defeated it, so npm --registry <url> install <pkg> exec'd the
 # real npm with sfw skipped (ECH-197) — the registry-redirection shape from
@@ -2959,7 +3018,7 @@ case "\$subcmd" in
   # link/view/info/show/search/outdated also touch the registry and were routed
   # there but not here, so \`npm exec\`/\`npx\`-style fetch-and-run went unfiltered.
   install|i|add|ci|update|up|rebuild|exec|x|dedupe|link|audit|view|info|show|search|outdated)
-    if command -v sfw >/dev/null 2>&1; then
+    if sfw_ready; then
       exec sfw "\$REAL_NPM" "\$@"
     fi
     ;;
@@ -3017,9 +3076,10 @@ if [ -z "\$REAL_NPX" ] || [ ! -x "\$REAL_NPX" ] || [ "\$REAL_NPX" = "$npx_target
   echo "[supply-chain-harden] error: real npx not found at '\$REAL_NPX'; refusing to recurse" >&2
   exit 127
 fi
+${sfw_guard}
 # EVERY npx invocation may fetch. Unlike npm there is no local-only subcommand
 # to exempt, so there is no argv scan here and nothing to drift out of sync.
-if command -v sfw >/dev/null 2>&1; then
+if sfw_ready; then
   exec sfw "\$REAL_NPX" "\$@"
 fi
 exec "\$REAL_NPX" "\$@"
