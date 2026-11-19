@@ -289,8 +289,10 @@
   # account's builds were not gated at all. So a system-wide wrapper gets a
   # root-owned copy under /usr/local/libexec, rendered identically whoever
   # applies, and a wrapper in the deployer's own ~/.cargo/bin keeps the backend
-  # beside it. The wrapper refuses, at run time, a backend the caller does not
-  # own unless root owns it.
+  # beside it. At run time the wrapper refuses a backend another account could
+  # replace. It NAMES this copy; cargo starts cargo-cooldown by its own lookup
+  # ($CARGO_HOME/bin, then PATH), so where $CARGO_HOME/bin holds one, as in the
+  # rust images, that is what runs (templates/cargo-wrapper.sh.j2, use_cooldown).
   ansible.builtin.set_fact:
     cargo_cooldown_exe: >-
       {{ cargo_sys_cooldown_exe
