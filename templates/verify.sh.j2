@@ -864,7 +864,21 @@ describe_binary() {
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     *)
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      # A script is not necessarily a wrapper. Most of what PATH resolves to on
+      # a stock host is a launcher: Debian's /usr/bin/pip3 and a venv's bin/pip
+      # are python scripts, NodeSource's npm is npm-cli.js under node. Calling
+      # those "another wrapper script" sent a reader looking for a second
+      # security tool that does not exist. Name the interpreter instead.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+        interp=$(head -n 1 "$f" 2>/dev/null | sed 's/^#![[:space:]]*//' | awk '{
+          b = $1; sub(".*/", "", b)
+          if (b == "env") { b = ""; for (i = 2; i <= NF; i++) if ($i !~ /^-/) { b = $i; sub(".*/", "", b); break } }
+          print b }')
+        case "$interp" in
+          sh|bash|dash|zsh|ksh|mksh|ash|busybox) echo "a shell script that is not ours" ;;
+          '') echo "a script with no interpreter named" ;;
+          *) echo "an unwrapped $interp launcher" ;;
+        esac
       else echo "an unwrapped binary"; fi ;;
   esac
 }
