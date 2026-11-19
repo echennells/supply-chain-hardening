@@ -273,6 +273,141 @@ jvm_only_apply() { # $1 = PATH to use
   rm -rf "$t"
 }
 
+# ---- Per-user config files the role replaces whole (CMP 4.7) ----
+#
+# $CARGO_HOME/config.toml, ~/.m2/settings.xml and NuGet.Config are replaced,
+# not merged. MEASURED on 8281a6b: an apply replaced a corporate copy of all
+# three (registry mirror, private feed, credentials) with no copy and no
+# message. Preflight now refuses unless accept_user_config_overwrite=true.
+#
+# Isolated like the JDK-only tests: HOME and CARGO_HOME point into a temp dir,
+# and stub `java` / `dotnet` satisfy the maven and nuget gates. cargo.yml is
+# only let past preflight when no cargo is installed: with one, it would build
+# the gate backend into the temp CARGO_HOME and point the suite's real cargo
+# wrapper at it. A refusal stops in preflight, so that test always covers it.
+
+ucfg_setup() { # creates $T with stubs; plants corporate files unless $1=none
+  T=$(mktemp -d)
+  mkdir -p "$T/bin" "$T/home/.cargo" "$T/home/.m2" "$T/home/.nuget/NuGet" "$T/orig"
+  printf '#!/bin/sh\necho "openjdk version 21"\n' > "$T/bin/java"
+  printf '#!/bin/sh\necho 8.0.100\n' > "$T/bin/dotnet"
+  chmod +x "$T/bin/java" "$T/bin/dotnet"
+  [ "${1:-}" = none ] && return 0
+  printf '[source.crates-io]\nreplace-with = "corp"\n[source.corp]\nregistry = "sparse+https://cargo.corp.example/index/"\n' \
+    > "$T/home/.cargo/config.toml"
+  printf '<settings><servers><server><id>corp</id><password>s3cr3t</password></server></servers><mirrors><mirror><id>corp</id><mirrorOf>*</mirrorOf><url>https://maven.corp.example/</url></mirror></mirrors></settings>\n' \
+    > "$T/home/.m2/settings.xml"
+  printf '<?xml version="1.0" encoding="utf-8"?>\n<configuration><packageSources><add key="corp" value="https://nuget.corp.example/v3/index.json" /></packageSources></configuration>\n' \
+    > "$T/home/.nuget/NuGet/NuGet.Config"
+  cp "$T/home/.cargo/config.toml" "$T/orig/cargo"
+  cp "$T/home/.m2/settings.xml" "$T/orig/maven"
+  cp "$T/home/.nuget/NuGet/NuGet.Config" "$T/orig/nuget"
+}
+
+# 0 when cargo.yml would find no cargo (its own probe list), so it is safe to
+# run it against a temp CARGO_HOME
+ucfg_no_cargo() {
+  local p
+  for p in /usr/local/bin/cargo /usr/bin/cargo; do [ -x "$p" ] && return 1; done
+  ! PATH="/usr/local/bin:/usr/bin:/bin:$PATH" command -v cargo >/dev/null 2>&1
+}
+
+ucfg_apply() { # extra ansible args
+  cd "$ROLE_DIR"
+  env -u DOTNET_CLI_HOME HOME="$T/home" CARGO_HOME="$T/home/.cargo" PATH="$T/bin:$PATH" \
+    ansible-playbook site.yml --connection=local --limit localhost \
+      -e podman_enabled=false "$@" 2>&1
+}
+
+# a backup of $1 (path) that is byte-identical to $2 (the original)
+ucfg_backup_of() {
+  local b
+  for b in "$1".*~; do
+    [ -f "$b" ] && cmp -s "$b" "$2" && return 0
+  done
+  echo "no byte-identical backup of $1 among: $(ls -a "$(dirname "$1")" | tr '\n' ' ')" >&2
+  return 1
+}
+
+@test "preflight: refuses to replace per-user cargo/maven/nuget config it did not write, and changes nothing (CMP 4.7)" {
+  ucfg_setup
+  run ucfg_apply --tags cargo,maven,nuget
+  echo "$output" | grep -A12 'Refusing to overwrite existing per-user' | head -16
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q '\[supply-chain-hardening\] Refusing to overwrite existing per-user config'
+  echo "$output" | grep -q "$T/home/.cargo/config.toml"
+  echo "$output" | grep -q "$T/home/.m2/settings.xml"
+  echo "$output" | grep -q "$T/home/.nuget/NuGet/NuGet.Config"
+  echo "$output" | grep -q 'accept_user_config_overwrite=true'
+  cmp "$T/home/.cargo/config.toml" "$T/orig/cargo"
+  cmp "$T/home/.m2/settings.xml" "$T/orig/maven"
+  cmp "$T/home/.nuget/NuGet/NuGet.Config" "$T/orig/nuget"
+  rm -rf "$T"
+}
+
+@test "preflight: accept_user_config_overwrite=true replaces them and keeps a byte-identical backup of each" {
+  local tags=maven,nuget
+  ucfg_setup
+  ucfg_no_cargo && tags=cargo,$tags
+  run ucfg_apply --tags "$tags" -e accept_user_config_overwrite=true
+  echo "$output" | grep -E 'fatal|PLAY RECAP' -A1 | head -6
+  [ "$status" -eq 0 ]
+  grep -q 'Managed by ansible-supply-chain-security' "$T/home/.m2/settings.xml"
+  grep -q 'Managed by ansible-supply-chain-security' "$T/home/.nuget/NuGet/NuGet.Config"
+  ucfg_backup_of "$T/home/.m2/settings.xml" "$T/orig/maven"
+  ucfg_backup_of "$T/home/.nuget/NuGet/NuGet.Config" "$T/orig/nuget"
+  if [[ "$tags" == cargo,* ]]; then
+    grep -q 'Managed by ansible-supply-chain-security' "$T/home/.cargo/config.toml"
+    ucfg_backup_of "$T/home/.cargo/config.toml" "$T/orig/cargo"
+  fi
+  rm -rf "$T"
+}
+
+@test "preflight: files this project wrote (marker, or the role's pre-marker versions) and dotnet's first-run NuGet.Config do not stop the play" {
+  local tags=maven,nuget
+  ucfg_setup none
+  ucfg_no_cargo && tags=cargo,$tags
+  # the role's own files as 8281a6b wrote them, before they carried a marker
+  printf '# Cargo supply-chain hardening — system defaults.\n[net]\nretry = 3\n' > "$T/home/.cargo/config.toml"
+  printf '<settings><mirrors><mirror><id>central-https</id></mirror></mirrors><activeProfiles><activeProfile>strict-checksums</activeProfile></activeProfiles></settings>\n' \
+    > "$T/home/.m2/settings.xml"
+  # dotnet's first-run file as SDK 8.0.134 writes it (UTF-8 BOM, no final
+  # newline), which nobody chose
+  printf '\357\273\277<?xml version="1.0" encoding="utf-8"?>\n<configuration>\n  <packageSources>\n    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />\n  </packageSources>\n</configuration>' \
+    > "$T/home/.nuget/NuGet/NuGet.Config"
+  cp "$T/home/.nuget/NuGet/NuGet.Config" "$T/orig/nuget"
+  # (check mode writes nothing, so cargo.yml is safe here even with cargo)
+  run ucfg_apply --tags "cargo,maven,nuget" --check
+  echo "$output" | grep -E 'Refusing|fatal|PLAY RECAP' -A1 | head -6
+  echo "$output" | grep -q 'Detect per-user config files this run would replace'
+  ! echo "$output" | grep -q 'Refusing to overwrite existing per-user'
+  run ucfg_apply --tags "$tags"
+  echo "$output" | grep -E 'Refusing|fatal|PLAY RECAP' -A1 | head -6
+  [ "$status" -eq 0 ]
+  grep -q 'Managed by ansible-supply-chain-security' "$T/home/.m2/settings.xml"
+  grep -q 'Managed by ansible-supply-chain-security' "$T/home/.nuget/NuGet/NuGet.Config"
+  # the stock file is still kept, like any file this project did not write
+  ucfg_backup_of "$T/home/.nuget/NuGet/NuGet.Config" "$T/orig/nuget"
+  # our own files are replaced without a backup, and a re-apply over them
+  # neither stops nor backs anything up
+  run ucfg_apply --tags "$tags"
+  [ "$status" -eq 0 ]
+  [ "$(ls -a "$T/home/.m2" "$T/home/.cargo" | grep -c '~$')" -eq 0 ]
+  [ "$(ls -a "$T/home/.nuget/NuGet" | grep -c '~$')" -eq 1 ]
+  rm -rf "$T"
+}
+
+@test "preflight: only files this run would write are checked (--tags maven ignores a foreign cargo config and NuGet.Config)" {
+  ucfg_setup
+  rm -f "$T/home/.m2/settings.xml"
+  run ucfg_apply --tags maven
+  echo "$output" | grep -E 'Refusing|fatal|PLAY RECAP' -A1 | head -6
+  [ "$status" -eq 0 ]
+  cmp "$T/home/.cargo/config.toml" "$T/orig/cargo"
+  cmp "$T/home/.nuget/NuGet/NuGet.Config" "$T/orig/nuget"
+  rm -rf "$T"
+}
+
 # ---- Idempotency (#3) ----
 #
 # Apply twice, assert the second apply produces zero changed= count.

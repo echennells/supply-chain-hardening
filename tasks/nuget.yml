@@ -27,11 +27,17 @@
   when: dotnet_check.rc == 0
 
 - name: Deploy NuGet.Config with supply chain hardening
+  # Replaces the file whole. A NuGet.Config this project did not write
+  # (private feeds and their credentials) stops the play in preflight unless
+  # accept_user_config_overwrite=true; it, and dotnet's own first-run file,
+  # are backed up here first (tasks/preflight.yml, CMP 4.7).
   ansible.builtin.copy:
     dest: "{{ nuget_config_home }}/NuGet.Config"
     mode: "0644"
+    backup: "{{ (nuget_config_home ~ '/NuGet.Config') in (sch_user_cfg_backup | default([])) }}"
     content: |
       <?xml version="1.0" encoding="utf-8"?>
+      <!-- Managed by ansible-supply-chain-security -->
       <configuration>
         <!-- Clear inherited sources, only allow official nuget.org -->
         <packageSources>

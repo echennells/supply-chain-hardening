@@ -404,3 +404,57 @@ PY
   assert_file_lacks "$TEST_HOME/.config/pypoetry/config.toml" "min-release-age"
   assert_file_contains "$ENV_FILE" "POETRY_SOLVER_MIN_RELEASE_AGE=2"
 }
+
+# CMP 4.7: cargo config.toml, ~/.m2/settings.xml and NuGet.Config are replaced
+# whole. MEASURED on 8281a6b: a corporate copy of each (registry mirror,
+# private feed, credentials) was replaced with no copy and no message. This
+# script keeps replacing them in CI, but copies a file it did not write next to
+# itself first and names it in a warning. (The role refuses instead.)
+plant_user_configs() {
+  mkdir -p "$TEST_HOME/.cargo" "$TEST_HOME/.m2" "$TEST_HOME/.nuget/NuGet" "$BATS_TEST_TMPDIR/orig"
+  printf '[source.crates-io]\nreplace-with = "corp"\n' > "$TEST_HOME/.cargo/config.toml"
+  printf '<settings><servers><server><id>corp</id><password>s3cr3t</password></server></servers></settings>\n' \
+    > "$TEST_HOME/.m2/settings.xml"
+  printf '<?xml version="1.0" encoding="utf-8"?>\n<configuration><packageSources><add key="corp" value="https://nuget.corp.example/v3/index.json" /></packageSources></configuration>\n' \
+    > "$TEST_HOME/.nuget/NuGet/NuGet.Config"
+  cp "$TEST_HOME/.cargo/config.toml" "$BATS_TEST_TMPDIR/orig/cargo"
+  cp "$TEST_HOME/.m2/settings.xml" "$BATS_TEST_TMPDIR/orig/maven"
+  cp "$TEST_HOME/.nuget/NuGet/NuGet.Config" "$BATS_TEST_TMPDIR/orig/nuget"
+}
+
+# exactly one backup of $1, byte-identical to $2
+one_backup_of() {
+  local -a b=("$1".*~)
+  [ -f "${b[0]}" ] || { echo "no backup of $1" >&2; return 1; }
+  [ "${#b[@]}" -eq 1 ] || { echo "expected one backup of $1, got: ${b[*]}" >&2; return 1; }
+  cmp "${b[0]}" "$2"
+}
+
+@test "cargo/maven/nuget: a per-user config this project did not write is backed up and named in a warning (CMP 4.7)" {
+  plant_user_configs
+  run harden ECOSYSTEMS=cargo,maven,nuget -- --emit=plain
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "cargo: replaced $TEST_HOME/.cargo/config.toml, which this project did not write"
+  echo "$output" | grep -q "maven: replaced $TEST_HOME/.m2/settings.xml, which this project did not write"
+  echo "$output" | grep -q "nuget: replaced $TEST_HOME/.nuget/NuGet/NuGet.Config, which this project did not write"
+  one_backup_of "$TEST_HOME/.cargo/config.toml" "$BATS_TEST_TMPDIR/orig/cargo"
+  one_backup_of "$TEST_HOME/.m2/settings.xml" "$BATS_TEST_TMPDIR/orig/maven"
+  one_backup_of "$TEST_HOME/.nuget/NuGet/NuGet.Config" "$BATS_TEST_TMPDIR/orig/nuget"
+  assert_file_contains "$TEST_HOME/.m2/settings.xml" "Managed by supply-chain-harden"
+}
+
+@test "cargo/maven/nuget: files this project wrote are replaced silently, with no backup; dotnet's first-run NuGet.Config is kept without a warning" {
+  run harden ECOSYSTEMS=cargo,maven,nuget -- --emit=plain
+  [ "$status" -eq 0 ]
+  # the role's pre-marker cargo file, and dotnet's first-run NuGet.Config as
+  # SDK 8.0.134 writes it (UTF-8 BOM, no final newline)
+  printf '# Cargo supply-chain hardening — system defaults.\n[net]\nretry = 3\n' > "$TEST_HOME/.cargo/config.toml"
+  printf '\357\273\277<?xml version="1.0" encoding="utf-8"?>\n<configuration>\n  <packageSources>\n    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />\n  </packageSources>\n</configuration>' \
+    > "$TEST_HOME/.nuget/NuGet/NuGet.Config"
+  run harden ECOSYSTEMS=cargo,maven,nuget -- --emit=plain
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'which this project did not write'
+  [ -z "$(ls -a "$TEST_HOME/.cargo" "$TEST_HOME/.m2" | grep '~$')" ]
+  [ "$(ls -a "$TEST_HOME/.nuget/NuGet" | grep -c '~$')" -eq 1 ]
+  echo "$output" | grep -q "replaced dotnet's first-run"
+}

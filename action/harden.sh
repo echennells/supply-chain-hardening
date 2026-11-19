@@ -659,6 +659,58 @@ can_write() {
   return 1
 }
 
+# keep_user_copy <kind> <path> — call before REPLACING a per-user config file
+# whole (cargo config.toml, ~/.m2/settings.xml, NuGet.Config). Those files are
+# where a private registry or mirror and its credentials live, and the writers
+# below do not merge into them. MEASURED (8281a6b): the role replaced all three
+# with no copy and no message; this script did the same. The role now refuses
+# unless accept_user_config_overwrite=true (tasks/preflight.yml, CMP 4.7). This
+# script runs in CI jobs and keeps replacing, but it no longer does so
+# silently: a file this project did not write is copied next to itself first,
+# as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~ (the name ansible's backup uses), and
+# the replacement is a warning that names it. Recognition matches the role's
+# preflight: either project's marker, or what the role wrote before it had a
+# marker, counts as ours; dotnet's own first-run NuGet.Config (nuget.org and
+# nothing else; MEASURED on SDK 8.0.134 it opens with a UTF-8 BOM) is copied
+# without a warning.
+user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
+  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
+  case "$1" in
+    cargo)
+      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
+        && { echo ours; return 0; } ;;
+    maven)
+      grep -q '<id>central-https</id>' "$2" \
+        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
+        && { echo ours; return 0; } ;;
+    nuget)
+      grep -q 'key="signatureValidationMode" value="require"' "$2" \
+        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
+        && { echo ours; return 0; }
+      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+        echo stock; return 0
+      fi ;;
+  esac
+  echo foreign
+}
+keep_user_copy() {
+  local kind="$1" path="$2" cls bak
+  [[ -e "$path" ]] || return 0
+  cls=$(user_cfg_class "$kind" "$path")
+  [[ "$cls" == ours ]] && return 0
+  bak="${path}.$$.$(date +%Y-%m-%d@%H:%M:%S)~"
+  if ! cp -p "$path" "$bak"; then
+    err "$kind: could not copy $path to $bak before replacing it; refusing to replace a file this project did not write without a copy"
+    exit 1
+  fi
+  if [[ "$cls" == foreign ]]; then
+    warn "$kind: replaced $path, which this project did not write. Any registry mirror, private source or credentials in it no longer apply; the previous file is at $bak"
+  else
+    log "$kind: replaced dotnet's first-run $path (nuget.org only); copy at $bak"
+  fi
+}
+
 # require_privilege <tool> <target> — gate for wrapper deployment.
 #
 # Wrappers are the ONLY mechanism for deno's age gate, bun's --no-install,
@@ -1703,6 +1755,7 @@ harden_cargo() {
   local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   mkdir -p "$cargo_home"
 
+  keep_user_copy cargo "$cargo_home/config.toml"
   cat > "$cargo_home/config.toml" <<'EOF'
 # Managed by supply-chain-harden
 # Note: build.rs / proc-macro execution CANNOT be blocked by cargo config —
@@ -2592,6 +2645,7 @@ DENOWRAP
 harden_maven() {
   section "maven"
   mkdir -p "$HOME/.m2"
+  keep_user_copy maven "$HOME/.m2/settings.xml"
   cat > "$HOME/.m2/settings.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by supply-chain-harden action -->
@@ -2781,6 +2835,7 @@ harden_nuget() {
   # b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5).
   local nuget_home="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet"
   mkdir -p "$nuget_home"
+  keep_user_copy nuget "$nuget_home/NuGet.Config"
   cat > "$nuget_home/NuGet.Config" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Managed by supply-chain-harden action -->
