@@ -1,7 +1,12 @@
 #!/usr/bin/env bats
 # Adversarial tests: verify Go env vars can't be poisoned.
 # Simulates BufferZoneCorp: malicious init() sets GOSUMDB=off, GOPROXY to attacker.
-# Our hardening sets these in /etc/environment so they survive subprocess spawning.
+# Our hardening sets GOSUMDB, GOPROXY, GOFLAGS and GOTOOLCHAIN in both
+# /etc/environment and /etc/profile.d/supply-chain-hardening.sh. The bypass
+# knobs (GOPRIVATE, GONOPROXY, GOINSECURE, GONOSUMDB) are exported empty by
+# profile.d only: tasks/shell_env.yml drops an empty value from
+# /etc/environment, and never writes GONOSUMDB there. Most tests below source
+# profile.d for that reason.
 #
 # Note: the bypass knobs we defend are the actual Go env vars documented at
 # https://go.dev/ref/mod (GOPRIVATE, GONOPROXY, GOINSECURE, GONOSUMDB). An
