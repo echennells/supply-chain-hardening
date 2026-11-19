@@ -234,7 +234,23 @@ go_noproxy: ""
 go_insecure: ""
 # See templates/supply-chain-env.sh.j2 for why this one was missing.
 go_nosumdb: ""
-goflags_mod: "readonly"
+# GOFLAGS=-mod=<value>, written host-wide only when this is non-empty. Empty
+# (the default) leaves Go's own choice in place, which is already the strict one.
+# MEASURED on go1.22.12 and go1.27.4:
+#   - With no vendor/ directory, `-mod=readonly` IS Go's default (since 1.16).
+#     Setting it refused exactly the same builds as leaving it unset (a missing
+#     require, a missing go.sum entry), and `go get` / `go mod tidy` behaved the
+#     same. The only difference was the error text: it replaced Go's
+#     "to add it: go get <pkg>" hint with "import lookup disabled by -mod=readonly".
+#   - With a vendor/ directory, Go's default is `-mod=vendor`, and an explicit
+#     `-mod=readonly` makes Go IGNORE vendor/. Offline (--network none), the build
+#     failed with a proxy.golang.org dial error that names neither GOFLAGS nor this
+#     role. Online, it downloaded the module and compiled the proxy copy instead of
+#     the project's vendored copy, so a patched vendor/ was skipped without a word.
+# So the old default of "readonly" added nothing where it was harmless and broke
+# vendored projects where it was not. Set "vendor" or "readonly" only if every Go
+# project on the host wants that mode.
+goflags_mod: ""
 
 # pnpm settings
 # Strict mode: fail the install when an age-gate violation occurs instead of

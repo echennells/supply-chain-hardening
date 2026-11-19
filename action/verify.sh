@@ -949,17 +949,20 @@ else
   # go is the one ecosystem with no config FILE behind its settings unless
   # `go env -w` ran. Probing with the environment stripped is what separates
   # "hardened" from "hardened only while these variables happen to be set".
-  gf=$(env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN -u GOPRIVATE \
-           -u GONOPROXY -u GOINSECURE go env GOFLAGS 2>/dev/null | tr -d '\r')
-  if [ "$gf" = "-mod=readonly" ]; then
-    row OK FUNCTIONAL "go settings persisted" "go env -w values survive with the env layer stripped"
+  # GOTOOLCHAIN is the probe because it is the one setting harden.sh writes that
+  # differs from Go's default (auto); GOFLAGS was the probe until harden.sh
+  # stopped writing it (its -mod=readonly made go ignore vendor/).
+  gt=$(env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN -u GOPRIVATE \
+           -u GONOPROXY -u GOINSECURE -u GONOSUMDB go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')
+  if [ "$gt" = "local" ]; then
+    row OK FUNCTIONAL "go settings persisted" "GOTOOLCHAIN=local survives with the env layer stripped (go env -w)"
   else
-    live=$(go env GOFLAGS 2>/dev/null | tr -d '\r')
-    if [ "$live" = "-mod=readonly" ]; then
+    live=$(go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')
+    if [ "$live" = "local" ]; then
       row WEAK PRESENT "go settings persisted" \
-        "GOFLAGS is set in this environment but NOT persisted via go env -w — it will not survive a step that does not inherit the env layer"
+        "GOTOOLCHAIN=local is set in this environment but NOT persisted via go env -w — it will not survive a step that does not inherit the env layer"
     else
-      gap go.mod-readonly PARSED "go settings persisted" "go reports GOFLAGS='${live:-<unset>}'"
+      gap go.toolchain-local PARSED "go settings persisted" "go reports GOTOOLCHAIN='${live:-<unset>}', so a go.mod can make go download and run another toolchain"
     fi
   fi
 fi

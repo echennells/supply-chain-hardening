@@ -972,21 +972,39 @@ done
 if have go; then
   # `go env` is go's effective config, not our file.
   v=$(go env GOFLAGS 2>/dev/null)
+{% if goflags_mod | length > 0 %}
+  # goflags_mod was set, so the role wrote GOFLAGS=-mod={{ goflags_mod }}.
   case "$v" in
-    *-mod=readonly*)
-      row OK PARSED "go module integrity" "go env GOFLAGS contains -mod=readonly" ;;
+    *-mod={{ goflags_mod }}*)
+      row OK PARSED "go module mode" "go env GOFLAGS contains -mod={{ goflags_mod }} (goflags_mod)" ;;
     *)
       # The role delivers GOFLAGS through /etc/profile.d + /etc/environment,
       # which only a PAM-launched or login shell loads. An empty value in a
       # docker exec / systemd / CMD context is the DOCUMENTED non-PAM gap, not
       # a misconfiguration — and saying "not configured" would send an operator
       # to fix a file that is already correct. Distinguish the two.
-      if grep -qs -- "-mod=readonly" /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
-        row WEAK PRESENT "go module integrity" "GOFLAGS is empty in THIS process, but -mod=readonly is present in /etc/environment or /etc/profile.d — non-PAM contexts (docker exec, systemd, CMD) do not load it. Verify from a login shell."
+      if grep -qs -- "-mod={{ goflags_mod }}" /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
+        row WEAK PRESENT "go module mode" "GOFLAGS is empty in THIS process, but -mod={{ goflags_mod }} is present in /etc/environment or /etc/profile.d — non-PAM contexts (docker exec, systemd, CMD) do not load it. Verify from a login shell."
       else
-        row GAP PARSED "go module integrity" "GOFLAGS='${v:-<empty>}' and -mod=readonly is not in /etc/environment or /etc/profile.d either"
+        row GAP PARSED "go module mode" "GOFLAGS='${v:-<empty>}' and -mod={{ goflags_mod }} is not in /etc/environment or /etc/profile.d either"
       fi ;;
   esac
+{% else %}
+  # The role does not set GOFLAGS (goflags_mod is empty), so this row reports
+  # Go's own module mode rather than a protection of ours. Go's default already
+  # refuses to change go.mod/go.sum during a build: readonly, or vendor/ when the
+  # module vendors (MEASURED on go1.22.12 and go1.27.4; see defaults/main.yml).
+  # The one value that undoes that is -mod=mod, which lets `go build`/`go test`
+  # resolve a missing import and rewrite go.mod/go.sum with no `go get` (MEASURED
+  # on go1.27.4: it downloaded the latest uuid and wrote both files). The row
+  # is WEAK rather than GAP because the role never promised to override it.
+  case "$v" in
+    *-mod=mod*)
+      row WEAK PARSED "go module mode" "go env GOFLAGS='$v' contains -mod=mod: a build may add requirements and rewrite go.mod/go.sum without go get. The role does not set GOFLAGS; find where this comes from (go env GOENV, the environment)" ;;
+    *)
+      row OK PARSED "go module mode" "go env GOFLAGS='${v:-<empty>}' has no -mod=mod, so a build refuses to change go.mod/go.sum (Go's default: readonly, or vendor/ when the module vendors). Go's own behaviour; the role does not set GOFLAGS" ;;
+  esac
+{% endif %}
   v2=$(go env GOPRIVATE 2>/dev/null)
   if [ -z "$v2" ]; then
     row OK PARSED "go checksum verification" "GOPRIVATE empty — sumdb checks apply to all modules"

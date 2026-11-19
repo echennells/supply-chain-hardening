@@ -27,6 +27,13 @@ ROLE_ONLY = {
         "protection. A CI job's whole purpose is running code from a checkout, "
         "so the trade is wrong there in a way it is not on an agent host. "
         "Revisit if ECH-183 lands profiles.",
+    "GOFLAGS":
+        "written by the role only when goflags_mod is set; the default is empty "
+        "and the action has no such input, so by default neither side writes "
+        "it. MEASURED on go1.22.12 and go1.27.4: an explicit -mod=readonly is "
+        "go's own default without vendor/, and makes go ignore vendor/ when "
+        "there is one (offline the build fails on a proxy error that names "
+        "neither GOFLAGS nor this project).",
 }
 ACTION_ONLY = {
     "GRADLE_USER_HOME":

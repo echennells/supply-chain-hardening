@@ -55,8 +55,15 @@ setup() {
   assert_env_equals GOPROXY "https://proxy.golang.org,direct"
 }
 
-@test "env: GOFLAGS=-mod=readonly" {
-  assert_env_equals GOFLAGS "-mod=readonly"
+@test "env: GOFLAGS is not written by default (an explicit -mod=readonly makes go ignore vendor/)" {
+  # goflags_mod defaults to "". MEASURED on go1.22.12 / go1.27.4: -mod=readonly
+  # is go's own default without vendor/, and with vendor/ it makes go skip the
+  # vendored copy. 05-go.bats builds a vendored module to prove the effect.
+  # Counted, not `! grep`: bats does not fail a test on a negated command
+  # unless it is the last line.
+  [ "$(grep -c "^export GOFLAGS=" /etc/profile.d/supply-chain-hardening.sh)" = 0 ]
+  [ "$(grep -c "^GOFLAGS=" /etc/environment)" = 0 ]
+  [ -z "${GOFLAGS:-}" ]
 }
 
 @test "env: GOTOOLCHAIN=local" {

@@ -502,12 +502,13 @@ jobs:
         run: |
           test "$GOSUMDB" = "sum.golang.org"
           test "$GOPROXY" = "https://proxy.golang.org,direct"
-          test "$GOFLAGS" = "-mod=readonly"
+          # GOFLAGS is deliberately NOT set: -mod=readonly made go ignore vendor/.
+          test -z "${GOFLAGS:-}"
           test "$GOTOOLCHAIN" = "local"
           test -z "$GOPRIVATE"
           test -z "$GONOPROXY"
           test -z "$GOINSECURE"
-          echo "✓ all 7 Go env vars set as expected"
+          echo "✓ Go env vars set as expected (GOFLAGS left to go)"
 
   action-cargo-config:
     name: 'Action: cargo config has hardening keys'
@@ -1146,7 +1147,7 @@ jobs:
         run: |
           strip() { env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN \
                         -u GOPRIVATE -u GONOPROXY -u GOINSECURE "$@"; }
-          test "$(strip go env GOFLAGS)"     = "-mod=readonly"     || { echo "::error::GOFLAGS did not persist"; exit 1; }
+          test -z "$(strip go env GOFLAGS)"                        || { echo "::error::GOFLAGS was persisted; it makes go ignore vendor/"; exit 1; }
           test "$(strip go env GOSUMDB)"     = "sum.golang.org"    || { echo "::error::GOSUMDB did not persist"; exit 1; }
           test "$(strip go env GOTOOLCHAIN)" = "local"             || { echo "::error::GOTOOLCHAIN did not persist"; exit 1; }
           test -z "$(strip go env GOPRIVATE)"                      || { echo "::error::GOPRIVATE is non-empty — a sumdb bypass survived"; exit 1; }

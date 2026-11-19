@@ -43,7 +43,12 @@ export UV_LINK_MODE=copy
 # locks to the installed toolchain to prevent auto-download of alternatives.
 export GOSUMDB='{{ go_sumdb }}'
 export GOPROXY='{{ go_proxy }}'
+{% if goflags_mod | length > 0 %}
 export GOFLAGS='-mod={{ goflags_mod }}'
+{% endif %}
+# GOFLAGS is not written by default (goflags_mod: ""). Go's own default already
+# refuses to edit go.mod/go.sum during a build, and an explicit -mod=readonly makes
+# Go ignore a project's vendor/ directory (MEASURED; see defaults/main.yml).
 export GOPRIVATE='{{ go_private }}'
 export GONOPROXY='{{ go_noproxy }}'
 export GOINSECURE='{{ go_insecure }}'
