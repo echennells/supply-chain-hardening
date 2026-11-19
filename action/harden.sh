@@ -2730,20 +2730,30 @@ val rejectHttp: (org.gradle.api.artifacts.repositories.ArtifactRepository) -> Un
     throw GradleException("supply-chain-harden: refusing HTTP repo: $url (use HTTPS)")
   }
 }
+// Refuse dynamic / changing version selectors (1.+, latest.release, -SNAPSHOT)
+// in EVERY configuration gradle resolves code from (CMP 4.6). Plugins resolve
+// into a SCRIPT classpath - a project's buildscript.configurations for its
+// plugins{} / buildscript{}, the settings script's for the same blocks in
+// settings.gradle - which allprojects{configurations} does not reach. MEASURED
+// (gradle 8.14.3 and 9.1.0): with project configurations only, a 1.+ plugin in
+// any of those four places resolved and its code RAN.
+// When this fires gradle reports "Resolution strategy disallows usage of
+// dynamic versions" (or "... of changing versions"); that refusal comes from
+// this file.
+val refuseDynamic: (org.gradle.api.artifacts.Configuration) -> Unit = { conf ->
+  conf.resolutionStrategy.failOnDynamicVersions()
+  conf.resolutionStrategy.failOnChangingVersions()
+}
 beforeSettings {
   pluginManagement.repositories.all { rejectHttp(this) }
   dependencyResolutionManagement.repositories.all { rejectHttp(this) }
+  buildscript.configurations.all { refuseDynamic(this) }
 }
 allprojects {
   repositories.all { rejectHttp(this) }
   buildscript.repositories.all { rejectHttp(this) }
-  configurations.all {
-    resolutionStrategy {
-      // Refuse dynamic / changing version selectors (1.+, latest.release).
-      failOnDynamicVersions()
-      failOnChangingVersions()
-    }
-  }
+  configurations.all { refuseDynamic(this) }
+  buildscript.configurations.all { refuseDynamic(this) }
 }
 EOF
   # Layer 2 of the fix above. Written AFTER the file exists so the value we
@@ -2751,7 +2761,7 @@ EOF
   write_env GRADLE_USER_HOME "$gradle_home"
   HARDENED+=("gradle")
   set_tool_version "gradle" "$(detect_version gradle "gradle --version")"
-  log "gradle: HTTPS-only repos enforced, dynamic versions blocked (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
+  log "gradle: HTTPS-only repos enforced, dynamic versions blocked for dependencies and plugin classpaths (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
   end_section
 }
 

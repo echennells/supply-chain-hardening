@@ -230,3 +230,63 @@ X
   echo "$output" | grep -q 'No plugin descriptor found'
   ! echo "$output" | grep -q 'Checksum validation failed'
 }
+
+# Offline gradle probe (CMP 4.6): a 1.+ selector on a SCRIPT classpath,
+# resolved from a file:// repo that holds com.example:probe:1.0 with its
+# maven-metadata.xml, so 1.+ CAN resolve. Plugins resolve into script
+# classpaths: a project's buildscript.configurations for plugins{} /
+# buildscript{} in build.gradle, the settings script's for the same blocks in
+# settings.gradle. gradle loads harden.sh's init.gradle.kts from the gradle
+# user home it wrote. $1 = selector, $2 = project|settings
+gradle_script_classpath_run() {
+  local t r bs
+  t=$(mktemp -d "${BATS_TEST_TMPDIR}/gr.XXXXXX")
+  r="$t/repo/com/example/probe"
+  mkdir -p "$r/1.0" "$t/proj"
+  cat > "$r/maven-metadata.xml" <<'X'
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata><groupId>com.example</groupId><artifactId>probe</artifactId>
+<versioning><latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions><lastUpdated>20200101000000</lastUpdated></versioning></metadata>
+X
+  printf '%s' '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>probe</artifactId><version>1.0</version></project>' \
+    > "$r/1.0/probe-1.0.pom"
+  printf 'PK\005\006\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' \
+    > "$r/1.0/probe-1.0.jar"
+  bs="buildscript { repositories { maven { url = uri('file://$t/repo') } }
+  dependencies { classpath 'com.example:probe:$1' } }"
+  if [ "$2" = settings ]; then
+    printf "%s\nrootProject.name = 'p'\n" "$bs" > "$t/proj/settings.gradle"
+    : > "$t/proj/build.gradle"
+  else
+    echo "rootProject.name = 'p'" > "$t/proj/settings.gradle"
+    printf '%s\n' "$bs" > "$t/proj/build.gradle"
+  fi
+  ( cd "$t/proj" && GRADLE_USER_HOME="$TEST_HOME/.gradle" \
+      timeout 300 gradle --offline --no-daemon -q --console=plain help 2>&1 )
+}
+
+@test "gradle: a dynamic version on the plugin classpath is refused, in build and settings scripts (CMP 4.6)" {
+  # Before: failOn* covered allprojects{configurations} only. MEASURED (gradle
+  # 8.14.3 and 9.1.0, this script at 8281a6b): a 1.+ plugin resolved and its
+  # code RAN from plugins{}, buildscript{} and both blocks in settings.gradle.
+  have gradle || skip "gradle not installed"
+  harden ECOSYSTEMS=gradle -- --emit=plain >/dev/null
+  local where
+  for where in project settings; do
+    run gradle_script_classpath_run '1.+' "$where"
+    echo "[$where] $output" | grep -iE 'dynamic|wrong|error' | head -5
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'Resolution strategy disallows usage of dynamic versions'
+  done
+}
+
+@test "gradle: FIXTURE CONTROL — the same script classpath with a static 1.0 resolves" {
+  have gradle || skip "gradle not installed"
+  harden ECOSYSTEMS=gradle -- --emit=plain >/dev/null
+  local where
+  for where in project settings; do
+    run gradle_script_classpath_run '1.0' "$where"
+    echo "[$where] $output" | head -5
+    [ "$status" -eq 0 ]
+  done
+}

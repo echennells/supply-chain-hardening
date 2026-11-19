@@ -276,6 +276,11 @@ setup() { common_setup; }
   assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "buildscript.repositories"
   assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "pluginManagement.repositories"
   assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "IvyArtifactRepository"
+  # CMP 4.6: the dynamic-version refusal must reach the script classpaths
+  # plugins resolve into (project buildscript, settings buildscript), not only
+  # project configurations. Behavioural check: tests/ci/05, when gradle exists.
+  assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "buildscript.configurations.all { refuseDynamic(this) }"
+  [ "$(grep -c 'buildscript.configurations.all { refuseDynamic(this) }' "$TEST_HOME/.gradle/init.gradle.kts")" -eq 2 ]
 }
 
 @test "maven: settings.xml enforces strict checksums (fail), matching the role" {
