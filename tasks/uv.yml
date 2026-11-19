@@ -110,99 +110,23 @@
   check_mode: false
   failed_when: false
 
-- name: Deploy pip wrapper to /usr/local/bin (system-wide, delegates to uv)
+- name: Deploy pip and pip3 wrappers to /usr/local/bin (system-wide, delegate to uv)
+  # One template for both names (they differed only in the name they print).
+  # The wrapper re-resolves uv for each caller and runs only a uv that caller
+  # owns or that root owns with nothing above it writable by anyone else. The
+  # baked deploy-time path stays as one candidate, for the deploying user's own
+  # contexts with no ~/.local/bin on PATH (cron). See the template for the
+  # measurements behind it (ECH-191, VM#2).
   become: true
-  ansible.builtin.copy:
-    dest: /usr/local/bin/pip
+  ansible.builtin.template:
+    src: pip-wrapper.sh.j2
+    dest: "/usr/local/bin/{{ pip_wrapper_name }}"
     mode: "0755"
     owner: root
     group: root
-    content: |
-      #!/bin/sh
-      # Managed by ansible-supply-chain-security
-      # Belt-and-suspenders: resolve a reachable uv (see the loop below) and
-      # refuse to run if none is found, rather than recursing into ourselves
-      # and bricking pip.
-      UV='{{ uv_binary_path.stdout }}'
-      # RUN-PROBE. Record that this wrapper actually executed.
-      #
-      # Free on a real invocation (SCH_WRAPPER_PROBE is unset, so this is one test).
-      # supply-chain-verify sets it to a temp file, invokes the tool, and reads back
-      # which wrappers ran.
-      #
-      # It replaces inferring "did our wrapper run" from PATH position, which CANNOT
-      # tell a bypassed wrapper from one chained behind another wrap. MEASURED: with
-      # an Aikido safe-chain shim first on PATH the wrapper ran on every call while
-      # the verifier reported "shadowed and never runs". Every version manager
-      # (asdf, mise, volta, nodenv, pyenv) is shim-first and delegates the same way.
-      #
-      # The value is caller-controlled, so it is only ever a redirect target. Never
-      # interpolate it into a command.
-      if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
-        printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
-      fi
-      # ECH-191: this wrapper is SYSTEM-WIDE (/usr/local/bin, every account uses
-      # it) but $UV was resolved in the DEPLOYING user's context. If uv lives in
-      # that user's ~/.local/bin and their home is not traversable by others
-      # (0750/0700 is common on hardened hosts), every other non-root user hits
-      # the guard below and loses pip entirely. Resolve uv for THIS caller:
-      # prefer a root-owned system copy, then the deploy-time path, then the
-      # caller's PATH. Preferring the system copy also keeps a root `sudo pip`
-      # from execing an unprivileged user's uv. Resolving `uv` (never `pip`)
-      # cannot recurse into this wrapper.
-      for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
-        if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
-      done
-      if [ -z "$UV" ] || [ ! -x "$UV" ]; then
-        echo "[supply-chain-hardening] error: uv not found in /usr/local/bin, /usr/bin, the deploy-time path, or PATH; refusing to recurse" >&2
-        exit 127
-      fi
-      echo "[supply-chain-hardening] pip redirected through uv" >&2
-      exec "$UV" pip "$@"
-  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
-
-- name: Deploy pip3 wrapper to /usr/local/bin (system-wide, delegates to uv)
-  become: true
-  ansible.builtin.copy:
-    dest: /usr/local/bin/pip3
-    mode: "0755"
-    owner: root
-    group: root
-    content: |
-      #!/bin/sh
-      # Managed by ansible-supply-chain-security
-      UV='{{ uv_binary_path.stdout }}'
-      # RUN-PROBE. Record that this wrapper actually executed.
-      #
-      # Free on a real invocation (SCH_WRAPPER_PROBE is unset, so this is one test).
-      # supply-chain-verify sets it to a temp file, invokes the tool, and reads back
-      # which wrappers ran.
-      #
-      # It replaces inferring "did our wrapper run" from PATH position, which CANNOT
-      # tell a bypassed wrapper from one chained behind another wrap. MEASURED: with
-      # an Aikido safe-chain shim first on PATH the wrapper ran on every call while
-      # the verifier reported "shadowed and never runs". Every version manager
-      # (asdf, mise, volta, nodenv, pyenv) is shim-first and delegates the same way.
-      #
-      # The value is caller-controlled, so it is only ever a redirect target. Never
-      # interpolate it into a command.
-      if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
-        printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
-      fi
-      # ECH-191: see the pip wrapper above. $UV was resolved in the DEPLOYING
-      # user's context but this is SYSTEM-WIDE; if it points into a home other
-      # users cannot traverse they lose pip3. Prefer a root-owned system copy,
-      # then the deploy-time path, then the caller's PATH. Resolving `uv` (never
-      # `pip3`) cannot recurse into this wrapper.
-      for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
-        if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
-      done
-      if [ -z "$UV" ] || [ ! -x "$UV" ]; then
-        echo "[supply-chain-hardening] error: uv not found in /usr/local/bin, /usr/bin, the deploy-time path, or PATH; refusing to recurse" >&2
-        exit 127
-      fi
-      echo "[supply-chain-hardening] pip3 redirected through uv" >&2
-      exec "$UV" pip "$@"
+  loop: [pip, pip3]
+  loop_control:
+    loop_var: pip_wrapper_name
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
 - name: Install uv-managed tools
