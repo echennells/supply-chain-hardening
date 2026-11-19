@@ -182,6 +182,19 @@ FAKE
   grep -q "pip install download" "$FAKE_DIR/runs"
 }
 
+@test "pip wrapper: a root-owned uv in the caller's own directory is the caller's to run" {
+  [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
+  [ "$(id -u)" = 0 ] || skip "needs root to run as another account"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  [ -x /usr/local/bin/uv ] || [ -x /usr/bin/uv ] && skip "a system uv exists and would be used"
+  fake_uv_wrapper 0
+  chown 65534 "$FAKE_DIR"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups \
+    env -i PATH=/usr/bin:/bin HOME=/nonexistent "$FAKE_DIR/pip" list
+  [ "$status" -eq 0 ]
+  grep -q "fake-uv ran as 65534: pip list" "$FAKE_DIR/runs"
+}
+
 @test "pip wrapper: when uv refuses, the wrapper says it was this host's hardening, keeping uv's exit code" {
   [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
   [ "$(id -u)" = 0 ] || skip "fixture is root-owned"

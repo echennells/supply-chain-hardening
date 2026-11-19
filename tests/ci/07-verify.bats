@@ -268,17 +268,18 @@ exec '"$realpy"' "$@"'
 }
 
 @test "cargo publish-age gate: a backend the wrapper refuses for this account is its own GAP" {
-  # The wrapper runs cargo-cooldown only when the caller owns it, or root owns
-  # it with nothing above it writable by anyone else (VM#2). A refusal exits
-  # 126 before cargo is reached; the row must say so, not "no dispatch".
+  # The wrapper runs cargo-cooldown only when no other account can choose what
+  # runs there (VM#2). A refusal exits 126 before cargo is reached; the row
+  # must say so, not "no dispatch". The backend is given to ANOTHER account:
+  # a root-owned file in this user's own directory is this user's to run.
   [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
-  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to root"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to another account"
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
-  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown"
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
-  sudo chown 0 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  sudo chown 65534 "$TEST_HOME/.cargo/bin/cargo-cooldown"
   run verify_sourced --emit=plain
   sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
   [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"REFUSES its gate backend"* ]]

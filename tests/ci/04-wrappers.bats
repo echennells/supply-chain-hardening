@@ -385,22 +385,39 @@ path_stubs() {
   [ "$(printf '%s\n' "$output" | sed -n 's/^PATH=//p')" = "$TEST_BIN:/usr/bin:/bin:$TEST_HOME/.cargo/bin" ]
 }
 
-@test "cargo-cooldown: a backend the caller does not own and root does not own safely is refused" {
+@test "cargo-cooldown: a backend another account owns is refused" {
   [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
-  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to root"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to another account"
   path_stubs
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
-  # Root owns the file, but it sits in this user's directory, so this user
-  # could still swap it: exactly what a root caller must not run.
+  # Another account owns the file, so that account can rewrite it, even though
+  # it sits in this user's directory.
   chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown" "$TEST_HOME/.cargo/bin"
-  sudo chown 0 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  sudo chown 65534 "$TEST_HOME/.cargo/bin/cargo-cooldown"
   run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' '$TEST_BIN/cargo' build 2>&1"
   sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
   printf '%s\n' "$output"
   [ "$status" -eq 126 ]
   [[ "$output" == *"[supply-chain-harden] error: refusing to run the cargo publish-age gate backend"* ]]
-  [[ "$output" == *"directory $TEST_HOME/.cargo/bin is not owned by root"* ]]
+  [[ "$output" == *"cargo-cooldown is not owned by root or by $(id -un)"* ]]
   [[ "$output" != *"STUB:cargo"* ]]
+}
+
+@test "cargo-cooldown: a root-owned backend in the caller's own directory is the caller's to run" {
+  # Only this user and root can change what is in this user's directory, so
+  # refusing a root-owned file there (`sudo cargo install` into ~/.cargo/bin)
+  # was a false refusal. An earlier test here asserted that refusal.
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to root"
+  path_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown" "$TEST_HOME/.cargo/bin"
+  sudo chown 0 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build 2>&1"
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  printf '%s\n' "$output"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" != *"refusing"* ]]
 }
 
 @test "cargo: a manifest newer than the lockfile gets a note naming the wrapper's --locked" {

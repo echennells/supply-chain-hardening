@@ -34,19 +34,25 @@ fi
 #     after a second account applied the role, the baked path pointed into
 #     THEIR home and the first account's cron-style `pip` (no ~/.local/bin on
 #     PATH) found no uv at all.
-# So every candidate must pass sch_trusted: your own file when you are not
-# root, otherwise a root-owned file that nobody else can replace. The caller's
-# own default install location is a candidate, so a second deployer's apply no
-# longer takes pip away from the first. find(1), not stat(1): portable.
+# So every candidate must pass sch_trusted: no other account may be able to
+# choose what runs. Walking up from the file, one the caller owns (not root)
+# ends the walk, yes: your own uv, or a root-owned uv in your own directory. A
+# root-owned one must be writable by neither group nor others (a directory may
+# instead be sticky, like /tmp, where only an entry's owner can rename or
+# remove it), and the walk goes on. Anything else is no. The caller's own
+# default install location is a candidate, so a second deployer's apply no
+# longer takes pip away from the first. find(1), not stat(1): portable. Same
+# predicate as the cargo wrapper's backend_trusted.
 sch_trusted() {
   [ -x "$1" ] || return 1
-  if [ "$(id -u)" != 0 ] && [ -O "$1" ]; then return 0; fi
+  _me=""; [ "$(id -u)" != 0 ] && _me=1
   _p=$(readlink -f "$1" 2>/dev/null) || _p=$1
   case "$_p" in /*) ;; *) return 1 ;; esac
+  if [ -n "$_me" ] && [ -O "$_p" ]; then return 0; fi
   [ -n "$(find "$_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ] || return 1
   while [ "$_p" != "/" ]; do
     _p=$(dirname "$_p")
-    # A sticky directory (/tmp) lets only an entry's owner rename or remove it.
+    if [ -n "$_me" ] && [ -O "$_p" ]; then return 0; fi
     [ -n "$(find "$_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ] || return 1
   done
   return 0

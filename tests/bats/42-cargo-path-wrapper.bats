@@ -381,6 +381,50 @@ path_probe() {
   [[ "$output" != *"refusing"* ]]
 }
 
+@test "cargo: a root-owned backend in the caller's own directory is the caller's to run" {
+  # Only the caller (and root) can change what is in a directory the caller
+  # owns, so refusing there was a false refusal. Root still refuses it: that
+  # directory's owner could swap the file.
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to stage another account's directory"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  make_probe without-cooldown
+  chmod 755 "$PROBE_DIR"
+  mkdir -p "$PROBE_DIR/own"
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_DIR/own/cargo-cooldown"
+  chmod 755 "$PROBE_DIR/own/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/own"
+  chown -R 65534 "$PROBE_DIR/proj"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/own/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && HOME=/nonexistent PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [[ "$output" == *"cooldown build"* ]]
+  [[ "$output" != *"refusing"* ]]
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"directory $PROBE_DIR/own is not owned by root"* ]]
+}
+
+@test "cargo: a backend another account owns is refused even in the caller's own directory" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to stage other accounts' files"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  make_probe without-cooldown
+  chmod 755 "$PROBE_DIR"
+  mkdir -p "$PROBE_DIR/own"
+  printf '#!/bin/sh\ntouch "%s/backend-ran"\nexit 0\n' "$PROBE_DIR/own" > "$PROBE_DIR/own/cargo-cooldown"
+  chmod 755 "$PROBE_DIR/own/cargo-cooldown"
+  chown 1 "$PROBE_DIR/own/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/own"
+  chown -R 65534 "$PROBE_DIR/proj"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/own/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && HOME=/nonexistent PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"cargo-cooldown is not owned by root or by "* ]]
+  [ ! -e "$PROBE_DIR/own/backend-ran" ]
+}
+
 @test "cargo: a command that never runs the backend is not refused over it" {
   command -v cargo >/dev/null || skip "cargo not installed"
   [ "$(id -u)" = 0 ] || skip "needs root to give the backend to another account"

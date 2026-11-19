@@ -1992,23 +1992,29 @@ run_real() {
   exec -a cargo "$REAL_CARGO" "$@"
 }
 
-# May THIS caller run "$1" as the gate backend? Your own file when you are not
-# root; otherwise only a root-owned file, writable by neither group nor others,
-# under directories that are root-owned and likewise (or sticky, like /tmp).
-# find(1), not stat(1): `stat -c` is GNU-only and this runs on macOS runners.
+# May THIS caller run "$1" as the gate backend? Only when no other account can
+# choose what runs there. Walking up from the file: one the caller owns (not
+# root) ends the walk, yes (your own file, or a root-owned file in your own
+# directory); a root-owned one must be writable by neither group nor others, or
+# for a directory be sticky (/tmp), and the walk goes on; anything else is no.
+# Parity with the role's templates/cargo-wrapper.sh.j2. find(1), not stat(1):
+# `stat -c` is GNU-only and this runs on macOS runners.
 backend_trusted() {
   _bt_why=""
-  if [ "$(id -u)" != 0 ] && [ -O "$1" ]; then return 0; fi
+  _bt_me=""
+  [ "$(id -u)" != 0 ] && _bt_me=$(id -un 2>/dev/null || id -u)
   _bt_p=$(readlink -f "$1" 2>/dev/null) || _bt_p="$1"
   case "$_bt_p" in /*) ;; *) _bt_why="$1 is not an absolute path"; return 1 ;; esac
+  if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
   if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
-    _bt_why="$_bt_p is not owned by root, or is writable by its group or others"
+    _bt_why="$_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
     return 1
   fi
   while [ "$_bt_p" != "/" ]; do
     _bt_p=$(dirname "$_bt_p")
+    if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
     if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ]; then
-      _bt_why="directory $_bt_p is not owned by root, or is writable by its group or others"
+      _bt_why="directory $_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
       return 1
     fi
   done
