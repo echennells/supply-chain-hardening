@@ -2846,19 +2846,30 @@ install_sfw_and_wrap() {
   # firewall binary", while this script exited 0 and reported sfw installed.
   # The first successful use took 79 s and downloaded 137 MB.
   #
-  # So `sfw /bin/true` runs now, where a failure is visible, and is exactly what
-  # the wrappers do. If it fails, sfw is MOVED ASIDE so `command -v sfw` fails
-  # for the cargo wrapper too, no npm/npx wrapper is deployed, and
-  # sfw_installed stays false: the job runs unfiltered, says so, and builds.
-  local sfw_bin sfw_out sfw_rc
+  # So sfw runs now, where a failure is visible. TWICE, because the cache is
+  # inside sfw's own package directory, which the install above made
+  # root-owned: a warm run as the user failed on a GitHub runner with "EACCES:
+  # permission denied, mkdir '/usr/local/lib/node_modules/sfw/.sfw-cache'".
+  #   1. warm with the install's privilege, so the download can land;
+  #   2. run as THIS user, exactly as the npm/npx wrappers will. Only if that
+  #      works is anything wrapped.
+  # If either fails, sfw is MOVED ASIDE so `command -v sfw` fails for the cargo
+  # wrapper too, no npm/npx wrapper is deployed, and sfw_installed stays false:
+  # the job runs unfiltered, says so, and builds. The target is whichever
+  # `true` exists: macOS has /usr/bin/true and no /bin/true.
+  local sfw_bin sfw_out sfw_rc true_bin
   sfw_bin=$(command -v sfw 2>/dev/null || true)
   if [[ -z "$sfw_bin" ]]; then
     warn "sfw installed but not on PATH; skipping wrapper deployment"
     end_section
     return 0
   fi
+  true_bin=/usr/bin/true; [[ -x "$true_bin" ]] || true_bin=/bin/true
   sfw_rc=0
-  sfw_out=$(run_bounded 180 sfw /bin/true 2>&1) || sfw_rc=$?
+  sfw_out=$(run_bounded 180 $SUDO "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  if [[ "$sfw_rc" -eq 0 ]]; then
+    sfw_out=$(run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  fi
   if [[ "$sfw_rc" -ne 0 ]]; then
     $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
     warn "sfw could not prepare its firewall binary (rc=$sfw_rc: $(printf '%s' "$sfw_out" | grep -v '^[[:space:]]*$' | tail -n 1)); it was moved aside and NO npm/npx wrapper was deployed, so installs in this job are NOT threat-intel filtered. sfw downloads that binary from the GitHub API on first use; a 403 here is usually the shared runner's unauthenticated rate limit"

@@ -48,7 +48,13 @@ setup() { common_setup; }
   assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
   assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=esbuild'
   assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=@scope/native'
-  python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$TEST_HOME/.config/pnpm/config.yaml"
+  # Valid YAML, by whichever parser this host has (macOS runners have Ruby's
+  # YAML but no PyYAML). A scoped name used to be written unquoted here.
+  if python3 -c "import yaml" 2>/dev/null; then
+    python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$TEST_HOME/.config/pnpm/config.yaml"
+  elif command -v ruby >/dev/null 2>&1; then
+    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$TEST_HOME/.config/pnpm/config.yaml"
+  fi
 }
 
 @test "pnpm: with an allowlist on pnpm 11+, the action says where the allowlist must go" {

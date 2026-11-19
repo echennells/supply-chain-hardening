@@ -47,7 +47,7 @@ inputs:
       measured 79 s on first use) from GitHub, through an unauthenticated API
       call that shares the runner IP's rate limit. The action does that
       download during hardening: if it fails, sfw is set aside, npm is left
-      unwrapped, a warning is printed and the `sfw_installed` output is
+      unwrapped, a warning is printed and the `sfw-installed` output is
       false, so the job builds unfiltered and says so. Once sfw is running it
       fails open (if Socket is unreachable it warns and the install proceeds
       unfiltered). That is the right trade for a security-critical pipeline
