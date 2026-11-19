@@ -45,6 +45,12 @@ VERSION_CONDITIONAL = {
 
 # key -> why the CI action does not carry it
 EXCLUDED = {
+    "preferFrozenLockfile": (
+        "pnpm. The role writes it ONLY when pnpm_prefer_frozen_lockfile is set "
+        "explicitly (default null), and the action never does: an explicit value "
+        "turns OFF pnpm's own CI frozen-lockfile default on pnpm 10.x, 11 < 11.28.1 "
+        "and 12 < 12.8.0 (MEASURED: the lockfile was rewritten under CI=true)."
+    ),
     "scanner": (
         "bun [install.security] scanner. Off by default in the role too "
         "(bun_security_scanner=''). It needs the scanner package installed in "

@@ -62,11 +62,11 @@ export GOTOOLCHAIN=local
 # === PHP (Composer) ===
 # Belt-and-suspenders for `php composer.phar` callers that bypass our
 # /usr/local/bin/composer wrapper but inherit the system env. Composer
-# 2.8.0+ honors COMPOSER_SKIP_SCRIPTS=<event,list> by skipping dispatch
+# 2.8.6+ honors COMPOSER_SKIP_SCRIPTS=<event,list> by skipping dispatch
 # of any user-defined script registered for the named events. MEASURED:
-# silently ignored on 2.2.6 (Ubuntu 22.04) and 2.7.1 (Ubuntu 24.04),
-# honoured on 2.8.12+ — an earlier comment here said 2.9 and was wrong.
-# On 2.2-2.7 this export is inert and the composer PATH wrapper is the
+# silently ignored on 2.2.6 (Ubuntu 22.04), 2.7.1 (Ubuntu 24.04), 2.8.4 and
+# 2.8.5; honoured on 2.8.6+ — earlier comments here said 2.9, then 2.8.0.
+# Below 2.8.6 this export is inert and the composer PATH wrapper is the
 # only script-blocking layer; tasks/composer.yml records that in
 # skipped_protections so the end-of-run summary says so. Below is
 # the full enumeration from composer's ScriptEvents + PackageEvents +

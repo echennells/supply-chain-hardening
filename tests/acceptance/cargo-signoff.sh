@@ -28,7 +28,10 @@ echo "Preparing host (installing ansible + cargo-cooldown; a few minutes)..."
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq --no-install-recommends \
   ansible python3 curl ca-certificates gcc libc6-dev >/dev/null 2>&1
-cargo install cargo-cooldown >/dev/null 2>&1
+# The role's pin, not latest: unpinned took cargo-cooldown 0.4.2 (MSRV 1.97),
+# which fails to build on older rust and would make this script measure nothing.
+CC_VER=$(sed -n 's/^cargo_cooldown_version: *"\(.*\)"/\1/p' /role/defaults/main.yml)
+cargo install --locked "cargo-cooldown@${CC_VER:?cargo_cooldown_version not found in defaults/main.yml}" >/dev/null 2>&1
 
 # The gate is only meaningful if its backend can actually run. Say so up front
 # rather than reporting checks that silently measured nothing.

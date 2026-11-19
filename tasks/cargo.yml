@@ -125,7 +125,7 @@
     - cargo_cc_check.rc | default(1) != 0
 
 - name: Detect the rustc version (the gate backend needs >= 1.91.1 to build)
-  # cargo-cooldown 0.3.4 has MSRV 1.91.1. Distro cargo is older on every current
+  # cargo-cooldown 0.3.5 (the pinned cargo_cooldown_version) has MSRV 1.91.1. Distro cargo is older on every current
   # LTS — Ubuntu 24.04 ships 1.75.0, Debian 12 older still — so on those hosts
   # the source build cannot succeed. Detect it and skip cleanly, instead of
   # spending a minute compiling dependencies only to die on the MSRV check and
@@ -163,7 +163,7 @@
 - name: Record skipped protection — rustc too old for the gate backend
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['cargo publish-age gate — rustc ' ~ (cargo_rustc_version.stdout | trim) ~ ' is below cargo-cooldown 0.3.4 MSRV 1.91.1, so the backend cannot be built from source. Expected on distro cargo (Ubuntu 24.04 = 1.75.0). Use a rustup toolchain >= 1.91.1 and re-apply, or set cargo_cooldown_enforce=false. The wrapper degrades to --locked only.'] }}
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — rustc ' ~ (cargo_rustc_version.stdout | trim) ~ ' is below cargo-cooldown ' ~ cargo_cooldown_version ~ ' MSRV 1.91.1, so the backend cannot be built from source. Expected on distro cargo (Ubuntu 24.04 = 1.75.0). Use a rustup toolchain >= 1.91.1 and re-apply, or set cargo_cooldown_enforce=false. The wrapper degrades to --locked only.'] }}
   when:
     - cargo_check.rc == 0
     - cargo_cooldown_enforce | bool

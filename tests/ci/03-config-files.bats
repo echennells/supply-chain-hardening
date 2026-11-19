@@ -38,12 +38,31 @@ setup() { common_setup; }
   assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
 }
 
-@test "pnpm: a build allowlist flips to ignoreScripts false and names the packages" {
-  run harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild,sharp" -- --emit=plain
+@test "pnpm: a build allowlist flips to ignoreScripts false; the list goes to the pnpm 10 rc only" {
+  # pnpm 11+ ignores onlyBuiltDependencies in the global config.yaml (measured
+  # ERR_PNPM_IGNORED_BUILDS), so writing it there only produced warnings, and
+  # for a scoped name, invalid YAML.
+  run harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild,@scope/native" -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "esbuild"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "sharp"
+  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "ignoreScripts: false"
+  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
+  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=esbuild'
+  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=@scope/native'
+  # Valid YAML, by whichever parser this host has (macOS runners have Ruby's
+  # YAML but no PyYAML). A scoped name used to be written unquoted here.
+  if python3 -c "import yaml" 2>/dev/null; then
+    python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$TEST_HOME/.config/pnpm/config.yaml"
+  elif command -v ruby >/dev/null 2>&1; then
+    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$TEST_HOME/.config/pnpm/config.yaml"
+  fi
+}
+
+@test "pnpm: with an allowlist on pnpm 11+, the action says where the allowlist must go" {
+  stub_bin pnpm 'case "$1" in --version) echo "11.28.12" ;; *) echo "STUB:pnpm ARGS=[$*]" ;; esac'
+  run harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild" -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"takes effect on pnpm 10 only"* ]]
+  [[ "$output" == *"allowBuilds"* ]]
 }
 
 @test "pnpm: a control character in the allowlist is refused, not written" {
@@ -85,13 +104,14 @@ setup() { common_setup; }
   assert_file_lacks "$TEST_HOME/.yarnrc.yml" "enableHardenedMode"
 }
 
-@test "pnpm: store integrity and lockfile determinism are set" {
-  # Both default true in the role and were missing here entirely — the action
-  # predated them and nothing compared the two.
+@test "pnpm: store integrity is set; preferFrozenLockfile is NOT written" {
+  # verifyStoreIntegrity defaults true in the role and was missing here.
+  # preferFrozenLockfile must stay unset: an explicit value turns off pnpm's
+  # CI frozen-lockfile default on 11 < 11.28.1 and 12 < 12.8.0 (measured).
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "verifyStoreIntegrity: true"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "preferFrozenLockfile: true"
+  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "preferFrozenLockfile"
 }
 
 @test "yarn: HTTPS-only, via an empty unsafe-HTTP allowlist" {

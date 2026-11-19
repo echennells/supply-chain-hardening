@@ -207,7 +207,7 @@ trade is yours to make, not ours:
 - **It is a network dependency** on a third-party service.
 - **It is fail-open.** If Socket is unreachable, sfw warns and the install
   proceeds unfiltered. It raises the floor; it is not a boundary.
-- **It costs ~10–20s** of job startup and needs **Node ≥ 20**.
+- **It downloads a ~137 MB firewall binary from GitHub during hardening** (measured 79 s) and needs **Node ≥ 20**. If the download fails (often the runner IP's unauthenticated GitHub API rate limit), npm is left unwrapped with a warning rather than broken.
 - **A warm cache defeats it.** Measured: a second install served from
   `~/.npm` produced *zero* policy checks. If your job restores a dependency
   cache, intel inspects only what that cache missed. This applies to any
@@ -420,7 +420,7 @@ short green table.
 | `ecosystems` | `npm,pnpm,yarn,pip,uv,bun,composer,cargo,go,bundler,deno,maven,gradle,nuget` | Comma-separated subset. Unknown values emit a warning and are skipped. Specify a narrower list to opt out of specific ecosystems. |
 | `release_age_hours` | `48` | Minimum age (in hours) before a package version is allowed to install. Setting `0` is rejected — would silently disable the gate. |
 | `strict` | `true` | When `true`, age-gate violations fail the install. When `false`, the package manager falls back to an older satisfying version if available. |
-| `intel` | `none` | `none` or `sfw`. With `sfw`, installs Socket Firewall and wraps `npm` and `npx` to route fetches through threat-intel blocking; `cargo` too via `cargo_socket_firewall`. Adds ~10–20s to job startup. Requires Node ≥ 20. |
+| `intel` | `none` | `none` or `sfw`. With `sfw`, installs Socket Firewall and wraps `npm` and `npx` to route fetches through threat-intel blocking; `cargo` too via `cargo_socket_firewall`. Downloads a ~137 MB firewall binary from GitHub during hardening (measured 79 s); if that fails, npm is left unwrapped with a warning and the `sfw-installed` output is false. Requires Node ≥ 20. |
 | `install_sfw` | — | **Deprecated**, use `intel`. `true` is treated as `intel: sfw`. Setting both is an error rather than a silent precedence rule. |
 | `write_etc` | `true` | Write system-wide `/etc/*` config in addition to user-home config. Useful if any subsequent step uses `sudo npm install` etc. Requires passwordless sudo, which all stock GitHub runners have. |
 | `install_cargo_cooldown` | `false` | Install the `cargo-cooldown` backend that **enforces** the cargo publish-age gate. Compiles from source, costing minutes on a cold runner — hence off by default, same trade-off as `intel: sfw`. With it off the gate config is still written and `--locked` still injected, but `cargo update` can resolve a freshly published crate unchecked. Already-cached installs are picked up automatically. |

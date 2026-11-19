@@ -245,10 +245,13 @@ pnpm_minimum_release_age_strict: true
 # updates and want to install them immediately rather than wait for the gate.
 # Example: pnpm_minimum_release_age_exclude: ["@myorg/internal-pkg", "scoped/own"]
 pnpm_minimum_release_age_exclude: []
-# Build-script allowlist (pnpm 11+ `onlyBuiltDependencies` semantics).
+# Build-script allowlist (`only-built-dependencies`). TAKES EFFECT ON PNPM 10
+# ONLY: pnpm 11+ ignores it in the global config and has no global allowlist
+# (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, list the packages as
+# `allowBuilds` in the project's pnpm-workspace.yaml.
 # Empty list (default) → block all build scripts via ignore-scripts=true.
-# Non-empty list → switch to onlyBuiltDependencies semantics: only these
-# packages' build scripts are allowed to run; everything else is blocked.
+# Non-empty list → only these packages' build scripts may run (pnpm 10);
+# everything else is blocked.
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 #
 # IMPORTANT: this allowlist is user-scoped only. /etc/npmrc carries the
@@ -272,16 +275,15 @@ pnpm_built_dependencies: []
 # the lockfile before linking it into node_modules — catches store tampering
 # and lockfile/content mismatch. pnpm default true; we pin it true.
 pnpm_verify_store_integrity: true
-# prefer-frozen-lockfile: when the lockfile is present and up to date, install
-# straight from it (deterministic, pinned versions) instead of re-resolving,
-# so a freshly-published malicious version can't enter via resolution.
-# IMPORTANT: this does NOT hard-fail on lockfile drift — that is
-# `frozen-lockfile`, which the role deliberately does NOT force globally.
-# Forcing frozen-lockfile in a user's global config breaks the ordinary
-# edit-package.json-then-`pnpm install` dev loop ("Cannot proceed with the
-# frozen installation"). pnpm already turns frozen-lockfile on automatically
-# in CI; keep hard-freeze a CI / per-project concern, not a global default.
-pnpm_prefer_frozen_lockfile: true
+# prefer-frozen-lockfile: NOT WRITTEN by default (null). pnpm already defaults
+# it to true, and turns frozen-lockfile on by itself in CI. Writing it was
+# meant to pin that posture, but an explicit value turns OFF pnpm's own CI frozen-lockfile default on pnpm 10.x
+# (10.34.9 still), 11 before 11.28.1 and 12 before 12.8.0. MEASURED with CI=true
+# and an out-of-sync lockfile: those versions rewrote the lockfile with the key
+# set and refused without it (ERR_PNPM_OUTDATED_LOCKFILE).
+# Leaving the key unset keeps CI frozen on every pnpm version. Set true or false
+# only if you need to override a project setting; either is then written.
+pnpm_prefer_frozen_lockfile: null
 # What to do when a package appears on BOTH pnpm_built_dependencies (allowed
 # to run build scripts) AND pnpm_minimum_release_age_exclude (skips the age
 # gate). That combination strips every supply-chain gate from one package
@@ -358,7 +360,14 @@ bun_path_wrapper: true
 yarn_enable_scripts: false
 # yarn settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
 yarn_enable_immutable_installs: true    # refuse install if lockfile would change
-yarn_enable_immutable_cache: true       # prevent cache mutation during install
+# enableImmutableCache: FALSE (yarn's own default), written explicitly. True
+# made every install on a cold cache fail: MEASURED on Yarn 4.10.3 and 4.18.1,
+# "YN0056 Cache entry required but missing" (3.8.7: "Cache path does not
+# exist"), i.e. every fresh host, CI runner and new HOME. The error names the
+# cache, not this role, so it failed the attribution test (design-principles.md).
+# Cache tampering is still caught by checksumBehavior: throw against the
+# lockfile's checksums.
+yarn_enable_immutable_cache: false
 yarn_checksum_behavior: "throw"         # error on checksum mismatch (alternatives: ignore, update, reset)
 yarn_approved_git_repositories: []      # allowlist of git-URL globs; empty = block all git deps
 yarn_unsafe_http_whitelist: []          # allowlist of HTTP-allowed hosts; empty = HTTPS-only
@@ -569,7 +578,7 @@ pinact_version: "v5.0.0"
 # npm tools. npm verifies tarball integrity against the registry, so again the
 # pin is the missing half. Note sfw's npm package is a shim that downloads a
 # firewall binary at runtime, which this pin does NOT cover.
-npq_version: "3.27.2"
+npq_version: "3.27.4"   # GHSA-mcxv-wphc-7xjm (high): <3.27.4 could audit a different version than npm installs
 lockfile_lint_version: "5.1.0"
 sfw_version: "2.0.6"
 

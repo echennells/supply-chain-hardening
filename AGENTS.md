@@ -175,7 +175,7 @@ An agent fails closed. A person can vouch for a specific build they trust, and
 Say so when it matters to the task:
 
 - **It is not a sandbox.** Anything running as the same user can undo it.
-- **`gem install` has no age gate** on any OS.
+- **`gem install` has no age gate below RubyGems 4.1.0.** From 4.1.0 it reads the `BUNDLE_COOLDOWN` the role writes; no stock distro ships 4.1.0 yet.
 - **`python3 -m venv` can seed a pip that ignores the gate.** Prefer `uv venv --seed` or `uv pip`.
 - **PDM ignores the Python gates**, and the role doesn't set its own.
 - **Container image pulls have no age gate.** Pin digests rather than tags.

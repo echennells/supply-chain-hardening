@@ -228,7 +228,14 @@ bun_scripts_arm() {
   if [ "$home" = "-" ]; then
     ( cd "$proj" && bun install ) >/dev/null 2>&1
   else
-    ( cd "$proj" && env -u XDG_CONFIG_HOME HOME="$home" bun install ) >/dev/null 2>&1
+    # Isolated arms: ONLY the bunfig under test may speak. bun 1.4.4 also reads
+    # NPM_CONFIG_IGNORE_SCRIPTS / npm_config_ignore_scripts from the environment
+    # (MEASURED: =true blocks, =false runs; 1.4.3 and 1.3.14 ignore it), and the
+    # hardening exports it, so on a hardened host the ignoreScripts=false arm
+    # could never run the fixture and this row was stuck at WEAK "attribution
+    # control failed". The npmrc pointers go too, for the same reason.
+    ( cd "$proj" && env -u XDG_CONFIG_HOME -u NPM_CONFIG_IGNORE_SCRIPTS -u npm_config_ignore_scripts \
+        -u NPM_CONFIG_USERCONFIG -u npm_config_userconfig HOME="$home" bun install ) >/dev/null 2>&1
   fi
   rc=$?
   if   [ -f "$proj/preinstall-ran" ]; then printf 'ran\n'
@@ -289,7 +296,7 @@ if have bun; then
       elif [ -z "$b_on" ] || [ -z "$b_off" ]; then
        row WEAK PRESENT    "bun install scripts blocked" "probe infrastructure failed (temp dirs unavailable); the isolation arms did not run"
       elif [ "$b_off" != "ran" ]; then
-       row WEAK FUNCTIONAL "bun install scripts blocked" "attribution control failed: with an isolated HOME holding only $bcfg and ignoreScripts flipped to FALSE, bun $bver still reported '$b_off' instead of running the preinstall — either the fixture is dead on this bun or something outside that file (a system npmrc, an env var) is blocking. Enforcement cannot be attributed to our config"
+       row WEAK FUNCTIONAL "bun install scripts blocked" "attribution control failed: with an isolated HOME holding only $bcfg and ignoreScripts flipped to FALSE, bun $bver still reported '$b_off' instead of running the preinstall — either the fixture is dead on this bun or something outside that file and the npm env variables this probe clears (a system npmrc, another env var) is blocking. Enforcement cannot be attributed to our config"
       elif [ "$b_on" = "ran" ]; then
        row GAP  FUNCTIONAL "bun install scripts blocked" "bun $bver RAN a project's preinstall with $bcfg as its ONLY config — this bun does not honor ignoreScripts from a global bunfig. MEASURED inert on bun 1.1.38; honored 1.2.0+. Neither writer version-tiers this key"
       elif [ "$b_eff" = "ran" ]; then
@@ -397,11 +404,20 @@ if have bun; then
       braw=$(grep -E '^[[:space:]]*minimumReleaseAge[[:space:]]*=' "$bcfg" 2>/dev/null \
              | head -1 | sed 's/^[^=]*=[[:space:]]*//' | sed 's/[[:space:]]*#.*$//' \
              | tr -d '\r' | sed 's/[[:space:]]*$//')
+      # bun 1.4.4 also accepts a quoted DURATION ("2d", "48h"). MEASURED: 1.4.4
+      # loaded and enforced "2d", "48h" and "3650d"; 1.4.3 and 1.3.14 refused the
+      # whole file. So a quoted duration is only a GAP below 1.4.4.
+      b_dur_ok=0
       case "$braw" in
-        '')        row GAP  PRESENT "bun install age gate" "bun $bver implements minimumReleaseAge but $bcfg does not set it$bhint" ;;
-        \"*|\'*)   row GAP  PRESENT "bun install age gate" "minimumReleaseAge in $bcfg is QUOTED ($braw) — bun wants a bare number of seconds, refuses the WHOLE bunfig on a string, and takes ignoreScripts/frozenLockfile/auto down with it. MEASURED on bun 1.3.0/1.4.0: 'Invalid Bunfig: failed to load bunfig'" ;;
-        *[!0-9]*)  row GAP  PRESENT "bun install age gate" "minimumReleaseAge=$braw in $bcfg is not a number of seconds — bun rejects the WHOLE bunfig on a bad value, taking every other key down with it" ;;
-        0)         row GAP  PRESENT "bun install age gate" "minimumReleaseAge=0 in $bcfg disables the gate" ;;
+        \"[0-9]*[smhdw]\"|\'[0-9]*[smhdw]\')
+          [ -n "$bver" ] && [ "$(printf '1.4.4\n%s\n' "$bver" | sort -V | head -1)" = "1.4.4" ] && b_dur_ok=1 ;;
+      esac
+      case "$b_dur_ok:$braw" in
+        1:*)       row WEAK PRESENT "bun install age gate" "bun $bver implements the key and accepts the duration string $braw that $bcfg sets (bun 1.4.4+; older bun refuses the whole bunfig on a string) — but the value is read from OUR file, not from bun: bun has no config readback and the gate only fires against a registry, which a read-only verifier must not exercise" ;;
+        0:)        row GAP  PRESENT "bun install age gate" "bun $bver implements minimumReleaseAge but $bcfg does not set it$bhint" ;;
+        0:\"*|0:\'*) row GAP  PRESENT "bun install age gate" "minimumReleaseAge in $bcfg is QUOTED ($braw) — bun wants a bare number of seconds, refuses the WHOLE bunfig on a string, and takes ignoreScripts/frozenLockfile/auto down with it. MEASURED on bun 1.3.0/1.4.0: 'Invalid Bunfig: failed to load bunfig'" ;;
+        0:*[!0-9]*) row GAP  PRESENT "bun install age gate" "minimumReleaseAge=$braw in $bcfg is not a number of seconds — bun rejects the WHOLE bunfig on a bad value, taking every other key down with it" ;;
+        0:0)       row GAP  PRESENT "bun install age gate" "minimumReleaseAge=0 in $bcfg disables the gate" ;;
         *)         row WEAK PRESENT "bun install age gate" "bun $bver implements the key (measured by the type-check discriminator) and $bcfg sets ${braw}s — but the number is read from OUR file, not from bun: bun has no config readback and the gate only fires against a registry, which a read-only verifier must not exercise" ;;
       esac
     fi
@@ -785,6 +801,32 @@ deno_wrapper_probe() {
 
 deno_field() { printf '%s\n' "$1" | grep "^$2|" | head -1 | sed "s/^$2|//"; }
 
+# deno >= 2.8 reads npm's min-release-age from ~/.npmrc, and >= 2.9 also from
+# NPM_CONFIG_MIN_RELEASE_AGE. MEASURED: 2.7.14 honoured neither; 2.8.x the file;
+# 2.9.3 and 2.9.8 both. That gates npm: specifiers only, so an UNWRAPPED deno
+# with it set is partly gated, not ungated. The rows below used to say "deno
+# has no config file to fall back on", which is no longer true.
+deno_npm_fallback() { # prints the min-release-age value deno would read, or fails
+  [ -n "$dver" ] || return 1
+  [ "$(printf '2.8.0\n%s\n' "$dver" | sort -V | head -1)" = "2.8.0" ] || return 1
+  _dnf=""
+  if [ "$(printf '2.9.0\n%s\n' "$dver" | sort -V | head -1)" = "2.9.0" ]; then
+    _dnf="${NPM_CONFIG_MIN_RELEASE_AGE:-${npm_config_min_release_age:-}}"
+  fi
+  [ -n "$_dnf" ] || _dnf=$(sed -n 's/^[[:space:]]*min-release-age[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$HOME/.npmrc" 2>/dev/null | tail -1)
+  [ -n "$_dnf" ] && printf '%s' "$_dnf"
+}
+
+deno_unwrapped_row() { # <why it is not wrapped>
+  if _dnr=$(deno_npm_fallback); then
+    row WEAK PARSED "deno publish-age gate" \
+      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. Re-apply the role to restore the wrapper"
+  else
+    row GAP PRESENT "deno publish-age gate" \
+      "$1, so no invocation is age-gated${dver:+ (deno $dver reads no npm min-release-age here)}"
+  fi
+}
+
 if ! have deno; then
   row "N/A" - "deno publish-age gate" "deno not installed"
   row "N/A" - "deno age-gate flag support (precondition)" "deno not installed"
@@ -826,7 +868,11 @@ else
     # plant to make a flag appear here, which is what makes it the npm_implements
     # equivalent — but a help entry is deno's argument list, not evidence of
     # enforcement, so on its own it caps at WEAK/PARSED.
-    "$drb" run --help 2>/dev/null </dev/null | grep -q -- '--minimum-dependency-age' && dhelp=1
+    # From deno 2.9.6 the help lists only the short name --min-dep-age; the long
+    # name the wrapper injects is a hidden alias, still accepted and enforced
+    # (MEASURED on 2.9.6 and 2.9.8). Matching only the long name made both deno
+    # rows WEAK on every current deno.
+    "$drb" run --help 2>/dev/null </dev/null | grep -qE -- '--(minimum-dependency-age|min-dep-age)' && dhelp=1
     dstat=$(deno_flag_status "$drb" run)
     # Is the separate-word-value bypass actually REACHABLE on this deno?
     # Two signals, and the GAP requires the stronger one: deno's own top-level
@@ -843,7 +889,7 @@ else
         dsubscope=" of every subcommand the wrapper injects into"
         for dsub in $dsubs; do
           [ "$dsub" = run ] && continue
-          "$drb" "$dsub" --help 2>/dev/null </dev/null | grep -q -- '--minimum-dependency-age' \
+          "$drb" "$dsub" --help 2>/dev/null </dev/null | grep -qE -- '--(minimum-dependency-age|min-dep-age)' \
             || dbadsubs="$dbadsubs $dsub"
         done
       fi
@@ -866,11 +912,9 @@ else
       row GAP PRESENT "deno publish-age gate" \
         "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper; re-apply the role"
     elif [ -f /etc/profile.d/deno-cooldown.sh ] && grep -q 'minimum-dependency-age' /etc/profile.d/deno-cooldown.sh 2>/dev/null; then
-      row GAP PRESENT "deno publish-age gate" \
-        "no wrapper at $dp; only the /etc/profile.d/deno-cooldown.sh alias, which fires in interactive login shells ONLY — scripts, agents, CI and cron are ungated, and deno has no config file to fall back on"
+      deno_unwrapped_row "no wrapper at $dp; only the /etc/profile.d/deno-cooldown.sh alias, which fires in interactive login shells ONLY — scripts, agents, CI and cron are not wrapped"
     else
-      row GAP PRESENT "deno publish-age gate" \
-        "no wrapper and no alias; deno at $dp is unhardened and deno has no global config file to fall back on"
+      deno_unwrapped_row "no wrapper and no alias; deno at $dp is not wrapped"
     fi
   else
     # Wrapped. Check the real target BEFORE the dispatch probe: the probe
@@ -995,7 +1039,7 @@ else
     # run off a working host. (The wording-glob draft had no such guard and
     # turned a value-validation error into a GAP on a healthy deno.)
     row WEAK PARSED "deno age-gate flag support (precondition)" \
-      "deno $dver LISTS --minimum-dependency-age in its own \`deno run --help\` yet its parser answered the flag exactly as it answered an invented one — the two signals contradict, so neither is trusted. Not called a GAP on a build whose own argument table defines the flag"
+      "deno $dver LISTS --minimum-dependency-age (shown as --min-dep-age from 2.9.6) in its own \`deno run --help\` yet its parser answered the flag exactly as it answered an invented one — the two signals contradict, so neither is trusted. Not called a GAP on a build whose own argument table defines the flag"
   elif [ "$dstat" = rejects ]; then
     row GAP FUNCTIONAL "deno age-gate flag support (precondition)" \
       "deno $dver answers --minimum-dependency-age exactly as it answers a flag we invented, and does not list it in \`deno run --help\` — it does NOT implement it. The wrapper injects it anyway, so every gated subcommand (run/cache/install/test/compile/...) now FAILS. Upgrade deno or set deno_path_wrapper=false"
@@ -1005,11 +1049,11 @@ else
         "deno $dver implements --minimum-dependency-age on \`run\` (help-listed, and its parser distinguishes it from an invented flag) but its own --help does NOT list it on:$dbadsubs, which the wrapper injects into anyway — see the gate row"
     else
       row OK FUNCTIONAL "deno age-gate flag support (precondition)" \
-        "deno $dver lists --minimum-dependency-age in the --help${dsubscope:- of \`deno run\`}, and its parser distinguishes it from an invented flag. NOT proof the gate rejects a too-new dependency — that needs a registry fetch this probe deliberately does not make"
+        "deno $dver lists --minimum-dependency-age (shown as --min-dep-age from 2.9.6) in the --help${dsubscope:- of \`deno run\`}, and its parser distinguishes it from an invented flag. NOT proof the gate rejects a too-new dependency — that needs a registry fetch this probe deliberately does not make"
     fi
   elif [ "$dhelp" = 1 ]; then
     row WEAK PARSED "deno age-gate flag support (precondition)" \
-      "deno $dver lists --minimum-dependency-age in its own \`deno run --help\` output, but the parser discriminator was inconclusive ($dstat) — the control flag was not refused, or its refusal did not name it, so there was nothing to compare against. Capped at WEAK: help text is deno's argument table, not evidence it enforces"
+      "deno $dver lists --minimum-dependency-age (shown as --min-dep-age from 2.9.6) in its own \`deno run --help\` output, but the parser discriminator was inconclusive ($dstat) — the control flag was not refused, or its refusal did not name it, so there was nothing to compare against. Capped at WEAK: help text is deno's argument table, not evidence it enforces"
   elif [ "$dstat" = implements ]; then
     row WEAK PARSED "deno age-gate flag support (precondition)" \
       "deno $dver's parser treats --minimum-dependency-age differently from an invented flag, but it is absent from \`deno run --help\` — it may be hidden/unstable, or the help layout changed. Capped at WEAK: parser acceptance without a help entry is not proof it is implemented"
@@ -1484,6 +1528,21 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
   else
     pod=$(poetry config solver.min-release-age 2>/dev/null | tail -1)
     pox=$(poetry config solver.min-release-age-exclude 2>/dev/null | tail -1)
+    # exclude-SOURCE exempts whole package sources. MEASURED on Poetry 2.5.x with
+    # a 36500-day gate: ["pypi"] (repo poetry.toml, `poetry config --local`, or
+    # POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE_SOURCE=pypi) and the PyPI simple URL
+    # each installed `six` anyway, while this row printed OK because it never
+    # read the key. A bare string ("pypi", not a list) had no effect, and reads
+    # back without brackets.
+    poxs=$(poetry config solver.min-release-age-exclude-source 2>/dev/null | tail -1)
+    poxs_pypi=0; poxs_list=0
+    case "$poxs" in
+      \[\]|'') ;;
+      \[*) poxs_list=1
+            case "$(printf '%s' "$poxs" | tr '[:upper:]' '[:lower:]')" in
+              *'"pypi"'*|*"'pypi'"*|*pypi.org*) poxs_pypi=1 ;;
+            esac ;;
+    esac
     case "$pod" in
       ''|*[!0-9]*)
         row GAP PARSED "poetry publish-age gate" "poetry $pov reports min-release-age=$(cq "${pod:-<unset>}")" ;;
@@ -1491,9 +1550,15 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
         row GAP PARSED "poetry publish-age gate" \
           "poetry $pov reports min-release-age=0 in $(cq "$PWD"), which disables the gate - a repo's poetry.toml outranks the global config, though not POETRY_SOLVER_MIN_RELEASE_AGE" ;;
       *)
-        if [ -n "$pox" ] && [ "$pox" != "null" ] && [ "$pox" != "[]" ]; then
+        if [ "$poxs_pypi" -eq 1 ]; then
+          row GAP PARSED "poetry publish-age gate" \
+            "poetry $pov reports ${pod}d but exempts the PyPI source in $(cq "$PWD") (min-release-age-exclude-source=$(cq "$poxs")) - every package from PyPI skips the gate. An exported empty POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE_SOURCE= outranks a repo's list"
+        elif [ "$poxs_list" -eq 1 ]; then
           row WEAK PARSED "poetry publish-age gate" \
-            "poetry $pov enforces ${pod}d but exempts $(cq "$pox") in $(cq "$PWD") - no env var outranks a repo's exclude list"
+            "poetry $pov enforces ${pod}d but exempts the source(s) $(cq "$poxs") in $(cq "$PWD")"
+        elif [ -n "$pox" ] && [ "$pox" != "null" ] && [ "$pox" != "[]" ]; then
+          row WEAK PARSED "poetry publish-age gate" \
+            "poetry $pov enforces ${pod}d but exempts $(cq "$pox") in $(cq "$PWD") - an exported empty POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE= outranks a repo's exclude list (measured)"
         elif [ -n "$powant" ] && [ "$pod" -lt "$powant" ]; then
           row WEAK PARSED "poetry publish-age gate" \
             "poetry $pov reports ${pod}d, below the ${powant}d this host declared - something shortened the window"
@@ -1562,6 +1627,46 @@ composer_val() { printf '%s\n' "$1" | sed -n "s|^\[$2\] \(.*\) (\(.*\))\$|\1|p" 
 composer_src() { printf '%s\n' "$1" | sed -n "s|^\[$2\] \(.*\) (\(.*\))\$|\2|p" | head -1; }
 # every plugin a dump marks as allowed, space separated
 composer_allowed_plugins() { printf '%s\n' "$1" | sed -n 's|^\[allow-plugins\.\([^]]*\)\] true .*$|\1|p' | tr '\n' ' ' | sed 's/ *$//'; }
+# Is composer's policy layer (cooldown, advisory and malware blocking) switched
+# off? Prints the reason and succeeds if so. $1 = effective --list dump.
+#   [policy] false (./composer.json)  a checkout's "config":{"policy":false}.
+#     MEASURED on 2.11.2: it turns off the cooldown AND advisory blocking (a
+#     phpmailer 5.2.21 with a known advisory installed) and beats the exported
+#     COMPOSER_POLICY_COOLDOWN_PERIOD, while every composer row printed OK.
+#     An exported COMPOSER_POLICY=1 beats it again (measured: refused).
+#   COMPOSER_POLICY=0, COMPOSER_NO_BLOCKING, COMPOSER_NO_SECURITY_BLOCKING:
+#     the env forms. In 2.11.2 source either NO_* variable sets the same
+#     $noBlocking switch (src/Composer/Command/BaseCommand.php:485-486).
+composer_bool_env() { # <value>: 0 true, 1 false, 2 unset/unknown
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    0|false|no|off) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+composer_policy_off() {
+  _cpe=0; composer_bool_env "${COMPOSER_POLICY:-}" || _cpe=$?
+  if [ "$_cpe" -eq 1 ]; then
+    printf 'COMPOSER_POLICY=%s is exported' "$(cq "$COMPOSER_POLICY")"; return 0
+  fi
+  for _cpv in COMPOSER_NO_BLOCKING COMPOSER_NO_SECURITY_BLOCKING; do
+    if composer_bool_env "$(printenv "$_cpv" 2>/dev/null)"; then
+      printf '%s is exported (it turns composer'"'"'s blocking off)' "$_cpv"; return 0
+    fi
+  done
+  if [ "$(composer_val "$1" policy)" = "false" ] && [ "$_cpe" -ne 0 ]; then
+    printf '%s sets "policy": false (from %s), which turns off the cooldown and advisory/malware blocking and outranks COMPOSER_POLICY_COOLDOWN_*; only an exported COMPOSER_POLICY=1 beats it' \
+      "$escope" "$(cq "$(composer_src "$1" policy)")"
+    return 0
+  fi
+  return 1
+}
+# Cooldown ignore entries in MAP form ({"vendor/pkg": "reason"}, the docs' own
+# example), which --list prints one key per entry:
+#   [policy.cooldown.ignore.*] trusted (./composer.json)
+# composer_val only matched the bare list key, so `{"*": "..."}` read OK while
+# every package skipped the gate (MEASURED on 2.11.2: the install went through).
+composer_ignore_map() { printf '%s\n' "$1" | sed -n 's|^\[policy\.cooldown\.ignore\.\([^]]*\)\] .*$|\1|p' | tr '\n' ' ' | sed 's/ *$//'; }
 # PRINTF-FORMAT SAFETY. verify.sh's render() does `printf "$ROWS"` (line 420),
 # so ROWS is a FORMAT string: a bare % in any interpolated path silently
 # rewrites the row (MEASURED: a job in `/tmp/build 100%s/x` reported
@@ -1758,7 +1863,10 @@ if have composer; then
       "composer $cv supports audit blocking but cannot report its config (see the composer config in effect row)"
   else
     bi=$(composer_val "$EDUMP" audit.block-insecure); ba=$(composer_val "$EDUMP" audit.block-abandoned)
-    if [ "$bi" = "true" ] && [ "$ba" = "true" ]; then
+    if cpoff=$(composer_policy_off "$EDUMP"); then
+      row GAP PARSED "composer audit blocking" \
+        "composer $cv: $cpoff - packages with known advisories install"
+    elif [ "$bi" = "true" ] && [ "$ba" = "true" ]; then
       row "$estat" PARSED "composer audit blocking" \
         "composer $cv: $escope reports audit.block-insecure=true and block-abandoned=true from $(cq "$(composer_src "$EDUMP" audit.block-insecure)") — note this readback is an ECHO (composer prints ANY audit subkey verbatim with our file as the source, MEASURED on 2.7.1/2.8.12/2.10.3); the >= 2.9.0 version tier is what makes this a capability claim$eqal"
     else
@@ -1798,11 +1906,20 @@ if have composer; then
       *) cblk=true ;;
     esac
     csec=$(composer_period_seconds "$cper")
+    cisrc=$(composer_src "$EDUMP" policy.cooldown.ignore)
+    cignmap=$(composer_ignore_map "$EDUMP")
+    if [ -n "$cignmap" ]; then
+      cign="${cign:+$cign }$cignmap"
+      [ -n "$cisrc" ] || cisrc=$(printf '%s\n' "$EDUMP" | sed -n 's|^\[policy\.cooldown\.ignore\.[^]]*\] .* (\(.*\))$|\1|p' | head -1)
+    fi
     case " $(printf '%s' "$cign" | tr -d '[]' | tr ',' ' ') " in
       *" * "*) cignall=1 ;;
       *) cignall=0 ;;
     esac
-    if [ -z "$cper" ] || [ "$cper" = "null" ]; then
+    if cpoff=$(composer_policy_off "$EDUMP"); then
+      row GAP PARSED "composer publish-age gate" \
+        "composer $cv: $cpoff - a release published minutes ago resolves"
+    elif [ -z "$cper" ] || [ "$cper" = "null" ]; then
       row GAP PARSED "composer publish-age gate" \
         "composer $cv implements the cooldown but $escope sets no period - new releases resolve immediately"
     elif [ -z "$csec" ]; then
@@ -1816,10 +1933,10 @@ if have composer; then
         "$escope sets policy.cooldown.block=false - versions inside the window install anyway"
     elif [ "$cignall" -eq 1 ]; then
       row GAP PARSED "composer publish-age gate" \
-        "$escope sets policy.cooldown.ignore=$(cq "$cign") from $(cq "$(composer_src "$EDUMP" policy.cooldown.ignore)") - every package skips the gate, and no env var outranks a repo's ignore list"
+        "$escope sets policy.cooldown.ignore=$(cq "$cign") from $(cq "$cisrc") - every package skips the gate, and no env var outranks a repo's ignore list"
     elif [ -n "$cign" ]; then
       row WEAK PARSED "composer publish-age gate" \
-        "composer $cv enforces $(cq "$cper") but $escope exempts $(cq "$cign") from $(cq "$(composer_src "$EDUMP" policy.cooldown.ignore)")"
+        "composer $cv enforces $(cq "$cper") but $escope exempts $(cq "$cign") from $(cq "$cisrc")"
     elif [ -n "$cwantsec" ] && [ "$csec" -lt "$cwantsec" ]; then
       row WEAK PARSED "composer publish-age gate" \
         "composer $cv enforces ${csec}s from $(cq "$cpsrc"), below the ${cwanth}h this host declared - something shortened the window"
@@ -1857,8 +1974,12 @@ if have composer; then
       "composer exits $prc reading the effective config for $(cq "$PWD") (global dump rc=$crc); cannot tell whether this checkout overrides our settings"
   else
     povr=""
+    # `policy` and the cooldown keys: a checkout's "policy": false switched off
+    # the cooldown and advisory blocking while this row said "matches the global
+    # config on every key we harden" (MEASURED, 2.11.2).
     for pk in secure-http lock preferred-install allow-plugins \
-              audit.abandoned audit.block-insecure audit.block-abandoned; do
+              audit.abandoned audit.block-insecure audit.block-abandoned \
+              policy policy.cooldown.period policy.cooldown.block policy.cooldown.ignore; do
       pg=$(composer_val "$CDUMP" "$pk"); pe=$(composer_val "$PDUMP" "$pk")
       [ "$pg" = "$pe" ] && continue
       povr="${povr:+$povr, }$pk: ${pg:-<unset>} -> ${pe:-<unset>}"
@@ -2224,7 +2345,7 @@ cargo_delegate_err() { # <delegate>
     else RUSTUP_AUTO_INSTALL=0 "$1" --version; fi; } 2>&1 | head -1
 }
 
-# VERSION TIER. cargo-cooldown 0.3.4 (what the Ansible role pins) has MSRV
+# VERSION TIER. cargo-cooldown 0.3.5 (what the role AND the action pin) has MSRV
 # rustc 1.91.1; Ubuntu 24.04's distro rust is 1.75.0. Below the MSRV
 # `cargo install cargo-cooldown` cannot build, so "set install_cargo_cooldown:
 # true" is advice that cannot work and the row must say so instead.
@@ -2887,6 +3008,30 @@ else
       "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See docs/composer-bundler-cooldown-by-distro.md"
   else
     bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
+    # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
+    # and --parseable does not show that. MEASURED (4.1.0): with only ~/.gemrc
+    # `:cooldown: 3650` this row printed "none is set" while `bundle install`
+    # still resolved the older version, and with a repo "0" plus the gemrc it
+    # printed "cooldown=0 disables" while the gemrc value applied. Ask bundler
+    # for the window it will apply, pinned to the version `bundle` reported;
+    # bundler < 4.1 has no cooldown_for and keeps the --parseable answer.
+    bcd_src="reports"
+    bcd_eff=$(ruby -e 'begin; gem "bundler", ARGV[0]; require "bundler"; s = Bundler.settings; print(s.respond_to?(:cooldown_for) ? s.cooldown_for.to_s : ""); rescue Exception; end' "$bver" 2>/dev/null)
+    case "$bcd_eff" in
+      ''|*[!0-9]*) ;;
+      *) [ "$bcd_eff" != "${bcd:-}" ] && bcd_src="applies (raised by RubyGems' :cooldown:)"
+         bcd=$bcd_eff ;;
+    esac
+    # Does `gem install` share the window? RubyGems 4.1.0 added a cooldown that
+    # reads BUNDLE_COOLDOWN, ~/.bundle/config and gemrc `:cooldown:`, taking the
+    # larger. MEASURED: it installs an older version inside the window and
+    # refuses an exact pin to a too-new one.
+    bgv=$(gem --version 2>/dev/null | head -1 | tr -d '\r')
+    if [ -n "$bgv" ] && [ "$(printf '4.1.0\n%s\n' "$bgv" | sort -V | head -1)" = "4.1.0" ]; then
+      bgem="RubyGems $bgv applies the same window to \`gem install\`/\`gem update\` (it installs an older version; an exact pin to a newer one is refused)"
+    else
+      bgem="RubyGems ${bgv:-<unknown>} has no cooldown (added in 4.1.0), so \`gem install\` is not age-gated"
+    fi
     case "$bcd" in
       '')
         row GAP PARSED "bundler publish-age gate" \
@@ -2899,10 +3044,10 @@ else
       *)
         if [ -n "$bwant" ] && [ "$bcd" -lt "$bwant" ]; then
           row WEAK PARSED "bundler publish-age gate" \
-            "bundler $bver reports cooldown=${bcd}d, below the ${bwant}d this host declared - something shortened the window"
+            "bundler $bver $bcd_src cooldown=${bcd}d, below the ${bwant}d this host declared - something shortened the window"
         else
           row OK PARSED "bundler publish-age gate" \
-            "bundler $bver implements cooldown and reports ${bcd}d - bundler only: RubyGems has no equivalent, so \`gem install\` is not age-gated"
+            "bundler $bver implements cooldown and $bcd_src ${bcd}d - $bgem"
         fi ;;
     esac
   fi

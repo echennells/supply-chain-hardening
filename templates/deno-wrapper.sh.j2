@@ -72,19 +72,64 @@ done
 # both used to fail under the wrapper while `deno run` stayed gated. The eight
 # kept here all accept it (measured); read-only / non-fetching subcommands
 # (`deno fmt`, `deno lint`, `deno repl`, `deno --version`) are bypassed too.
+# Version of the REAL deno, read at run time, for the two subcommands whose
+# handling depends on it (a deno upgrade does not re-run the hardening). Pure
+# bash, no `sort -V`: the action's copy of this wrapper also runs on macOS.
+deno_ver_ge() { # <x.y.z>: is the real deno at least this version?
+  local v IFS=.
+  v=$("$REAL_DENO" --version 2>/dev/null | sed -n 's/^deno \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)
+  [ -n "$v" ] || return 1
+  local -a have=($v) want=($1)
+  local i
+  for i in 0 1 2; do
+    if [ "${have[$i]}" -gt "${want[$i]}" ]; then return 0; fi
+    if [ "${have[$i]}" -lt "${want[$i]}" ]; then return 1; fi
+  done
+  return 0
+}
+
+# exec the real deno with EXTRA[@] placed directly after the subcommand.
+exec_with_extra() {
+  local new_args=() inserted=0 arg
+  for arg in "$@"; do
+    new_args+=("$arg")
+    if [ "$inserted" = "0" ] && [ "$arg" = "$subcmd" ]; then
+      new_args+=("${EXTRA[@]}")
+      inserted=1
+    fi
+  done
+  exec "$REAL_DENO" "${new_args[@]}"
+}
+
 case "$subcmd" in
-  run|cache|install|test|compile|eval|info|bench)
-    # Build new arg array with the flag injected directly after the subcommand
-    new_args=()
-    inserted=0
-    for arg in "$@"; do
-      new_args+=("$arg")
-      if [ "$inserted" = "0" ] && [ "$arg" = "$subcmd" ]; then
-        new_args+=("--minimum-dependency-age=$MIN_AGE")
-        inserted=1
-      fi
-    done
-    exec "$REAL_DENO" "${new_args[@]}"
+  run|cache|install|test|compile|eval|bench)
+    EXTRA=("--minimum-dependency-age=$MIN_AGE")
+    exec_with_extra "$@"
+    ;;
+  info)
+    # `deno info` accepts the flag only from 2.8.3. MEASURED on 2.8.2: "error:
+    # unexpected argument '--minimum-dependency-age' found", so injecting it
+    # unconditionally broke `deno info` outright on older deno.
+    if deno_ver_ge 2.8.3; then
+      EXTRA=("--minimum-dependency-age=$MIN_AGE")
+      exec_with_extra "$@"
+    fi
+    exec "$REAL_DENO" "$@"
+    ;;
+  x)
+    # `deno x` fetches and EXECUTES a package, and runs its npm lifecycle
+    # scripts, and its dependencies', with no prompt. MEASURED on 2.7.14, 2.8.3,
+    # 2.9.3 and 2.9.8 (also under a pseudo-terminal): postinstall markers
+    # written, and neither ~/.npmrc ignore-scripts, NPM_CONFIG_IGNORE_SCRIPTS nor
+    # this wrapper (which did not handle `x`) stopped it. `--ignore-scripts`
+    # does, measured on 2.9.3 and 2.9.8. Below 2.9.3 that flag is unmeasured
+    # for `x`, so refuse rather than run the scripts.
+    if deno_ver_ge 2.9.3; then
+      EXTRA=("--ignore-scripts")
+      exec_with_extra "$@"
+    fi
+    echo "[supply-chain-hardening] refusing 'deno x' on this deno (below 2.9.3): it runs the package's install scripts with no prompt, and only deno 2.9.3+ has a measured --ignore-scripts for it. Upgrade deno, or run the package with 'deno run npm:<pkg>'." >&2
+    exit 1
     ;;
   *)
     exec "$REAL_DENO" "$@"

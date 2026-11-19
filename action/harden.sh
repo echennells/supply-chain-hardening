@@ -80,6 +80,13 @@ WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
+# Tool pins this script installs. Kept equal to the role's defaults/main.yml
+# (cargo_cooldown_version, sfw_version); tests/ci/06-role-parity.bats checks.
+# Unpinned, `cargo install cargo-cooldown` took 0.4.2 (MSRV 1.97): the install
+# FAILED on rust 1.93 with the error discarded, and on rust >= 1.97 every
+# later `cargo build` in an MSRV job died with "requires Cargo 1.97".
+CARGO_COOLDOWN_VERSION="0.3.5"
+SFW_NPM_VERSION="2.0.6"
 # Follows `intel` unless set explicitly. It used to default true on its own, so
 # with the default intel: none every cargo wrapper was rendered to route through
 # an sfw that was never installed: a no-op at runtime, and a GAP in verify,
@@ -221,6 +228,7 @@ suggest_for_repo() {
     found_any=1
     with_lines+=("          pnpm_built_dependencies: '$scripted'")
     notes+=("These packages run code at install time. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing. Allowlisting them restores their build scripts and nothing else.")
+    notes+=("On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
     if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ]; then
       notes+=("This list came from a known-names scan, not a lockfile — treat it as a floor, not the full set. Commit a package-lock.json or pnpm-lock.yaml and re-run for the exact answer.")
     fi
@@ -428,6 +436,17 @@ err() {
     azure)  echo "##vso[task.logissue type=error]$*" ;;
     *)      echo "[supply-chain-harden] error: $*" >&2 ;;
   esac
+}
+
+# run_bounded <seconds> <cmd...> — `timeout` where it exists. macOS runners
+# ship none (gtimeout only with coreutils), and a missing bound must not turn
+# into a missing command: without either, the command runs unbounded.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"
+  fi
 }
 
 # GitLab's collapsible sections require section_end to carry the SAME name
@@ -893,23 +912,23 @@ harden_pnpm() {
   # pnpm 11+ format (YAML, camelCase). This is the load-bearing file
   # for pnpm 11 — it ignores ~/.npmrc, ~/.config/pnpm/rc (the older
   # ini-format file), and /etc/npmrc for non-auth settings.
-  # NOTE (MEASURED pnpm 10.34 / 11.28 / 12.18, 2026-11-08): pnpm 11+ IGNORES
-  # onlyBuiltDependencies in this global config.yaml (it warns and tells you to
-  # move it to a project pnpm-workspace.yaml), so the allowlist written here is
-  # inert on pnpm 11+ — an allowlisted package is NOT built from this file; use
-  # pnpm-workspace.yaml per project. The pnpm-10 rc written below is where the
-  # allowlist actually takes effect. `ignoreScripts: false` here is NOT a
-  # fail-open: pnpm 10+ default-denies dependency build scripts regardless, so a
-  # non-allowlisted script stays blocked (the role keeps ignoreScripts: true as
-  # the stricter, clearer signal).
+  #
+  # THE ALLOWLIST IS NOT WRITTEN HERE. No pnpm version builds a package because
+  # this global file lists it: pnpm 10 reads the rc below, and pnpm 11 and 12
+  # ignore onlyBuiltDependencies here (MEASURED on 11.0.0, 11.28.12, 12.21.0:
+  # ERR_PNPM_IGNORED_BUILDS). `allowBuilds` is rejected in this file too, so on
+  # pnpm 11+ there is no global allowlist at all; it has to be the project's
+  # pnpm-workspace.yaml. Writing the list anyway was not just inert: a scoped
+  # name went out unquoted (`  - @scope/pkg`), which is invalid YAML, and every
+  # pnpm 11.0.0 command (even --version) then failed to load its config.
+  #
+  # `ignoreScripts: false` with an allowlist is NOT a fail-open: pnpm 10+
+  # default-denies dependency build scripts regardless (the approve-builds
+  # gate), and false is what lets a project's allowBuilds take effect.
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
       echo "ignoreScripts: false"
-      echo "onlyBuiltDependencies:"
-      for pkg in "${pnpm_allowlist[@]}"; do
-        echo "  - $pkg"
-      done
     else
       echo "ignoreScripts: true"
     fi
@@ -917,13 +936,13 @@ harden_pnpm() {
     echo "minimumReleaseAgeStrict: $STRICT"
     echo "minimumReleaseAgeExclude: []"
     echo "blockExoticSubdeps: true"
-    # Store integrity + lockfile determinism. Standard pnpm settings that ARE
-    # readable from the global config — unlike onlyBuiltDependencies, which
-    # pnpm 11 rejects here. verifyStoreIntegrity hash-checks the store against
-    # the lockfile; preferFrozenLockfile installs from an up-to-date lockfile
-    # without re-resolving. Neither hard-fails on drift.
+    # Store integrity: hash-checks the store against the lockfile. Readable
+    # from the global config, unlike onlyBuiltDependencies.
+    # preferFrozenLockfile is deliberately NOT written: pnpm defaults it to
+    # true, and an explicit value turns OFF pnpm's own CI frozen-lockfile
+    # default on pnpm 11 before 11.28.1 and 12 before 12.8.0 (MEASURED with
+    # CI=true and an out-of-sync lockfile: the lockfile was rewritten).
     echo "verifyStoreIntegrity: true"
-    echo "preferFrozenLockfile: true"
   } > "$HOME/.config/pnpm/config.yaml"
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
@@ -944,9 +963,14 @@ harden_pnpm() {
   } > "$HOME/.config/pnpm/rc"
 
   HARDENED+=("pnpm")
-  set_tool_version "pnpm" "$(detect_version pnpm "pnpm --version")"
+  local pnpm_version
+  pnpm_version=$(detect_version pnpm "pnpm --version")
+  set_tool_version "pnpm" "$pnpm_version"
   if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
-    log "pnpm: onlyBuiltDependencies=[${pnpm_allowlist[*]}], minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+    log "pnpm: onlyBuiltDependencies=[${pnpm_allowlist[*]}] (pnpm 10 rc), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
+    if [[ -z "$pnpm_version" ]] || version_ge "$pnpm_version" "11.0.0"; then
+      warn "pnpm_built_dependencies takes effect on pnpm 10 only. pnpm ${pnpm_version:-11+} has no global build allowlist: add the packages to the project's pnpm-workspace.yaml as allowBuilds (e.g. 'allowBuilds: {${pnpm_allowlist[0]}: true}'), or their install fails with ERR_PNPM_IGNORED_BUILDS"
+    fi
   else
     log "pnpm: ignoreScripts=true (blanket block), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
   fi
@@ -971,7 +995,7 @@ harden_yarn() {
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
     echo "enableImmutableInstalls: true"
-    echo "enableImmutableCache: true"
+    echo "enableImmutableCache: false"   # true fails every cold-cache install (YN0056); see the role default
     echo "checksumBehavior: throw"
     # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
     # absent key as "no restriction", so emitting [] is what closes it.
@@ -988,7 +1012,7 @@ harden_yarn() {
     echo "defaultSemverRangePrefix: \"\""
     echo "enableTelemetry: false"
     echo "enableImmutableInstalls: true"
-    echo "enableImmutableCache: true"
+    echo "enableImmutableCache: false"   # true fails every cold-cache install (YN0056); see the role default
     echo "checksumBehavior: throw"
     # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
     # absent key as "no restriction", so emitting [] is what closes it.
@@ -1211,8 +1235,8 @@ harden_composer() {
   # COMPOSER_SKIP_SCRIPTS env var: belt-and-suspenders for `php composer.phar`
   # callers that bypass the wrapper but inherit the action's env.
   #
-  # MEASURED: honoured from composer 2.8.0 — silently ignored on 2.2.6 and
-  # 2.7.1, honoured on 2.8.12+. (This comment said "2.9+" before; the number
+  # MEASURED: honoured from composer 2.8.6 — ignored on 2.2.6, 2.7.1, 2.8.4 and
+  # 2.8.5 (every script ran with it set), honoured on 2.8.6+. (This comment said "2.9+" before; the number
   # was wrong and it was the number everyone cited.) On 2.2-2.7 the var is
   # inert, so the notice below says so instead of leaving an env var in the
   # log that reads as coverage.
@@ -1229,8 +1253,8 @@ harden_composer() {
     notice "composer $composer_version ignores config.policy.cooldown (MEASURED: added in 2.11.0), so the publish-age gate is written and NOT enforced on this runner. Install a current composer before this step to activate it."
   fi
 
-  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.0"; then
-    notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.0). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
+  if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.6"; then
+    notice "composer $composer_version ignores COMPOSER_SKIP_SCRIPTS (MEASURED: honoured from 2.8.6). The env-var backup layer is INERT on this runner — the PATH wrapper below is the only thing blocking composer scripts, and \`php composer.phar\` callers that bypass it are not covered."
   fi
 
   # PATH wrapper at the DISCOVERED composer location (wrap in-place —
@@ -1744,12 +1768,18 @@ EOF
   local cooldown_bin=""
   if [[ "$INSTALL_CARGO_COOLDOWN" == "true" ]]; then
     if command -v cargo >/dev/null 2>&1; then
-      log "installing cargo-cooldown (compiles from source; this takes a few minutes)"
-      if cargo install cargo-cooldown --locked >/dev/null 2>&1; then
+      log "installing cargo-cooldown ${CARGO_COOLDOWN_VERSION} (compiles from source; this takes a few minutes)"
+      # Pinned (see CARGO_COOLDOWN_VERSION). stderr is KEPT for the warning:
+      # it used to go to /dev/null, which hid cargo's own explanation
+      # ("cargo-cooldown 0.4.2 requires rustc 1.97") of why the gate was absent.
+      local cc_err cc_rc=0
+      cc_err=$(cargo install --locked "cargo-cooldown@${CARGO_COOLDOWN_VERSION}" 2>&1 >/dev/null) || cc_rc=$?
+      if [[ "$cc_rc" -eq 0 ]]; then
         cooldown_bin="$cargo_home/bin"
-        log "cargo-cooldown installed at $cooldown_bin"
+        log "cargo-cooldown ${CARGO_COOLDOWN_VERSION} installed at $cooldown_bin"
+        set_tool_version "cargo-cooldown" "$CARGO_COOLDOWN_VERSION"
       else
-        warn "cargo-cooldown install failed — the age gate config is deployed but nothing enforces it; --locked injection still applies"
+        warn "cargo-cooldown ${CARGO_COOLDOWN_VERSION} install failed (rc=$cc_rc: $(printf '%s' "$cc_err" | grep -E '^(error|  )' | head -n 3 | tr '\n' ' ')) — the age gate config is deployed but nothing enforces it; --locked injection still applies"
       fi
     else
       warn "install_cargo_cooldown=true but cargo is not installed — skipping"
@@ -1860,6 +1890,11 @@ EOF
 set -u
 
 REAL_CARGO='__REAL_CARGO__'
+
+# cargo's internal test clock. Set to a future date it defeats cargo 1.100's
+# native publish-age gate (MEASURED: __CARGO_TEST_INVOCATION_TIME=2099-...
+# admitted a version the gate refused). Only cargo's own test suite needs it.
+unset __CARGO_TEST_INVOCATION_TIME
 # RUN-PROBE. Record that this wrapper actually executed.
 #
 # Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
@@ -2020,6 +2055,13 @@ exec_sub() {
 # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` committed next
 # to Cargo.toml still admits a crate published hours ago. Treat a cooldown.toml
 # in an untrusted repo as a bypass.
+# Does the real cargo have the native publish-age gate (stable since 1.100)?
+# RUSTUP_AUTO_INSTALL=0 so a version probe can never download a toolchain.
+cargo_has_native_gate() {
+  _ng_minor=$(RUSTUP_AUTO_INSTALL=0 "$REAL_CARGO" --version 2>/dev/null | sed -n 's/^cargo 1\.\([0-9][0-9]*\)\..*/\1/p')
+  [ -n "$_ng_minor" ] && [ "$_ng_minor" -ge 100 ]
+}
+
 sanitize_cooldown_env() {
   _sc_env=$(env)
   _sc_had=''
@@ -2059,6 +2101,17 @@ sanitize_cooldown_env() {
   # `now` / `skip_registries`.
   export COOLDOWN_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   export COOLDOWN_SKIP_REGISTRIES=
+  # cargo >= 1.100 has a NATIVE publish-age gate. When a config.toml sets it,
+  # cargo applies it to cargo-cooldown's own internal resolves as well, and an
+  # [[allow.exact]] pin then hard-fails inside cargo-cooldown's temporary
+  # workspace while a loose requirement is silently cooled. MEASURED on cargo
+  # 1.100.0 + cargo-cooldown 0.3.5. On this path cargo-cooldown IS the gate
+  # (it still denies and cools with this set, measured), so the native resolver
+  # is told to defer to it. Only on 1.100+: older cargo warns about the
+  # unknown setting.
+  if cargo_has_native_gate; then
+    export CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow
+  fi
 }
 
 case "$subcmd" in
@@ -2108,9 +2161,9 @@ case "$KIND" in
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
     if command -v cargo-cooldown >/dev/null 2>&1; then
-      sanitize_cooldown_env
       case "$subcmd" in
         update)
+          sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
         *)
@@ -2128,7 +2181,6 @@ case "$KIND" in
 
   RESOLVING)
     if command -v cargo-cooldown >/dev/null 2>&1; then
-      sanitize_cooldown_env
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -2137,6 +2189,14 @@ case "$KIND" in
         *)       SUB="" ;;
       esac
       if [ -n "$SUB" ]; then
+        # The environment is pinned ONLY on the path that hands off to
+        # cargo-cooldown. It used to be pinned for every resolving and writing
+        # command whenever cargo-cooldown was installed, which on cargo 1.100+
+        # STRIPPED a caller's native CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE from
+        # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
+        # and fetch then resolved a version real cargo refused, and add wrote
+        # it, while the note claimed this policy "applies instead".
+        sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
       fi
@@ -2150,7 +2210,7 @@ case "$KIND" in
     if has_lockfile; then
       SCH_NET=1 exec_with "--locked" "$@"
     fi
-    echo "[supply-chain-harden] warning: no Cargo.lock found and no publish-age gate available — 'cargo $subcmd' will resolve the newest matching versions unchecked" >&2
+    echo "[supply-chain-harden] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2
     SCH_NET=1 run_real "$@"
     ;;
 esac
@@ -2456,20 +2516,64 @@ done
 # invoke everything. MEASURED on deno 2.9.5: `deno doc` parses the flag as a
 # positional module path ("Module not found …/--minimum-dependency-age=…") and
 # `deno publish` rejects it — both broke under the wrapper, so both are dropped.
+# Version of the REAL deno, read at run time, for the two subcommands whose
+# handling depends on it (a deno upgrade does not re-run the hardening). Pure
+# bash, no `sort -V`: the action's copy of this wrapper also runs on macOS.
+deno_ver_ge() { # <x.y.z>: is the real deno at least this version?
+  local v IFS=.
+  v=$("$REAL_DENO" --version 2>/dev/null | sed -n 's/^deno \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)
+  [ -n "$v" ] || return 1
+  local -a have=($v) want=($1)
+  local i
+  for i in 0 1 2; do
+    if [ "${have[$i]}" -gt "${want[$i]}" ]; then return 0; fi
+    if [ "${have[$i]}" -lt "${want[$i]}" ]; then return 1; fi
+  done
+  return 0
+}
+
+# exec the real deno with EXTRA[@] placed directly after the subcommand.
+exec_with_extra() {
+  local new_args=() inserted=0 arg
+  for arg in "$@"; do
+    new_args+=("$arg")
+    if [ "$inserted" = "0" ] && [ "$arg" = "$subcmd" ]; then
+      new_args+=("${EXTRA[@]}")
+      inserted=1
+    fi
+  done
+  exec "$REAL_DENO" "${new_args[@]}"
+}
+
 case "$subcmd" in
-  run|cache|install|test|compile|eval|info|bench)
-    # Insert directly after the subcommand, never appended: deno passes
-    # everything after the script path to the script itself.
-    new_args=()
-    inserted=0
-    for arg in "$@"; do
-      new_args+=("$arg")
-      if [ "$inserted" = "0" ] && [ "$arg" = "$subcmd" ]; then
-        new_args+=("--minimum-dependency-age=__MIN_AGE__")
-        inserted=1
-      fi
-    done
-    exec "$REAL_DENO" "${new_args[@]}"
+  run|cache|install|test|compile|eval|bench)
+    EXTRA=("--minimum-dependency-age=__MIN_AGE__")
+    exec_with_extra "$@"
+    ;;
+  info)
+    # `deno info` accepts the flag only from 2.8.3. MEASURED on 2.8.2: "error:
+    # unexpected argument '--minimum-dependency-age' found", so injecting it
+    # unconditionally broke `deno info` outright on older deno.
+    if deno_ver_ge 2.8.3; then
+      EXTRA=("--minimum-dependency-age=__MIN_AGE__")
+      exec_with_extra "$@"
+    fi
+    exec "$REAL_DENO" "$@"
+    ;;
+  x)
+    # `deno x` fetches and EXECUTES a package, and runs its npm lifecycle
+    # scripts, and its dependencies', with no prompt. MEASURED on 2.7.14, 2.8.3,
+    # 2.9.3 and 2.9.8 (also under a pseudo-terminal): postinstall markers
+    # written, and neither ~/.npmrc ignore-scripts, NPM_CONFIG_IGNORE_SCRIPTS nor
+    # this wrapper (which did not handle `x`) stopped it. `--ignore-scripts`
+    # does, measured on 2.9.3 and 2.9.8. Below 2.9.3 that flag is unmeasured
+    # for `x`, so refuse rather than run the scripts.
+    if deno_ver_ge 2.9.3; then
+      EXTRA=("--ignore-scripts")
+      exec_with_extra "$@"
+    fi
+    echo "[supply-chain-harden] refusing 'deno x' on this deno (below 2.9.3): it runs the package's install scripts with no prompt, and only deno 2.9.3+ has a measured --ignore-scripts for it. Upgrade deno, or run the package with 'deno run npm:<pkg>'." >&2
+    exit 1
     ;;
   *)
     exec "$REAL_DENO" "$@"
@@ -2719,13 +2823,59 @@ install_sfw_and_wrap() {
   # resolves against root's secure_path, which on a setup-node runner does not
   # contain the toolcache npm at all — so this either failed outright or
   # installed sfw into a different node prefix than the one the job uses.
+  #
+  # Pinned and --ignore-scripts, like the role's own tool installs (ECH-185):
+  # a floating `sfw@2` gave this enforcement tool no age gate at all.
   local npm_bin
   npm_bin=$(command -v npm)
-  $SUDO "$npm_bin" install -g sfw@2 >/dev/null 2>&1 || {
+  $SUDO "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
   }
+
+  # WARM IT HERE, AND REFUSE TO WRAP IF IT CANNOT RUN. Parity with the role's
+  # "Warm the Socket Firewall binary cache" task (tasks/socket.yml).
+  #
+  # sfw's npm package is a shim: the firewall binary is downloaded from GitHub
+  # on first use, through an UNAUTHENTICATED API call (60 requests/hour per IP,
+  # shared by every job on a hosted runner's address). Left cold, that fetch
+  # happened inside the user's first `npm install`, and when it failed the shim
+  # exited 1 there. MEASURED on sfw 2.0.6 with api.github.com refused and with
+  # a 403 rate-limit reply: `npm install` rc=1, "[sfw] Failed to prepare
+  # firewall binary", while this script exited 0 and reported sfw installed.
+  # The first successful use took 79 s and downloaded 137 MB.
+  #
+  # So sfw runs now, where a failure is visible. TWICE, because the cache is
+  # inside sfw's own package directory, which the install above made
+  # root-owned: a warm run as the user failed on a GitHub runner with "EACCES:
+  # permission denied, mkdir '/usr/local/lib/node_modules/sfw/.sfw-cache'".
+  #   1. warm with the install's privilege, so the download can land;
+  #   2. run as THIS user, exactly as the npm/npx wrappers will. Only if that
+  #      works is anything wrapped.
+  # If either fails, sfw is MOVED ASIDE so `command -v sfw` fails for the cargo
+  # wrapper too, no npm/npx wrapper is deployed, and sfw_installed stays false:
+  # the job runs unfiltered, says so, and builds. The target is whichever
+  # `true` exists: macOS has /usr/bin/true and no /bin/true.
+  local sfw_bin sfw_out sfw_rc true_bin
+  sfw_bin=$(command -v sfw 2>/dev/null || true)
+  if [[ -z "$sfw_bin" ]]; then
+    warn "sfw installed but not on PATH; skipping wrapper deployment"
+    end_section
+    return 0
+  fi
+  true_bin=/usr/bin/true; [[ -x "$true_bin" ]] || true_bin=/bin/true
+  sfw_rc=0
+  sfw_out=$(run_bounded 180 $SUDO "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  if [[ "$sfw_rc" -eq 0 ]]; then
+    sfw_out=$(run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  fi
+  if [[ "$sfw_rc" -ne 0 ]]; then
+    $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
+    warn "sfw could not prepare its firewall binary (rc=$sfw_rc: $(printf '%s' "$sfw_out" | grep -v '^[[:space:]]*$' | tail -n 1)); it was moved aside and NO npm/npx wrapper was deployed, so installs in this job are NOT threat-intel filtered. sfw downloads that binary from the GitHub API on first use; a 403 here is usually the shared runner's unauthenticated rate limit"
+    end_section
+    return 0
+  fi
 
   # Wrap npm AT THE PATH IT ACTUALLY RESOLVES TO — same rule as the bun,
   # composer, deno and cargo wrappers.

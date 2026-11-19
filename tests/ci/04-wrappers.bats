@@ -349,7 +349,8 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
 # A stub cargo that reports the cooldown environment it was handed, plus a
 # cargo-cooldown where harden.sh looks for one, so builds route through it.
 cooldown_stubs() {
-  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}]";; esac'
+  local ver="${1:-1.99.0}"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo '"$ver"' (abc 2026-11-12)";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}] GLOBAL=[${CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE-unset}] RESOLVER=[${CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE-unset}] TESTTIME=[${__CARGO_TEST_INVOCATION_TIME-unset}]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\nexit 0\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
   chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
@@ -368,6 +369,49 @@ cooldown_stubs() {
   [[ "$output" == *"CRATES=48 hours "* ]]
   [[ "$output" == *"SKIP=[]"* ]]
   [[ "$output" != *"NOW=2099"* ]]
+}
+
+@test "cargo-cooldown: commands it never sees keep the caller's native publish-age gate" {
+  # Regression from v2.0.0. The environment was pinned for EVERY resolving or
+  # writing command whenever cargo-cooldown was installed, which stripped
+  # CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE from commands cargo-cooldown never
+  # runs. MEASURED on cargo 1.100.0: generate-lockfile, tree and fetch then
+  # resolved a version real cargo refused, and add wrote it.
+  cooldown_stubs 1.100.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  for sub in generate-lockfile tree fetch add; do
+    run bash -c "cd '$(lockdir)' && CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE='87600 hours' '$TEST_BIN/cargo' $sub 2>&1"
+    [[ "$output" == *"GLOBAL=[87600 hours]"* ]] || { echo "$sub lost the caller's gate: $output"; return 1; }
+    [[ "$output" != *"overriding caller"* ]]
+  done
+}
+
+@test "cargo-cooldown: the routed path defers cargo's native gate to cargo-cooldown on 1.100+ only" {
+  # MEASURED (cargo 1.100.0 + cargo-cooldown 0.3.5): cargo's native gate also
+  # applied to cargo-cooldown's internal resolves and broke [[allow.exact]];
+  # CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow on the routed call fixed it,
+  # and cargo-cooldown still denied. Older cargo warns about the setting.
+  cooldown_stubs 1.100.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" == *"RESOLVER=[allow]"* ]]
+  cooldown_stubs 1.99.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" == *"RESOLVER=[unset]"* ]]
+}
+
+@test "cargo: cargo's internal test clock is dropped on every path" {
+  # __CARGO_TEST_INVOCATION_TIME=2099-... defeats cargo 1.100's native gate
+  # (measured). Only cargo's own test suite needs it.
+  cooldown_stubs 1.100.0
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run bash -c "cd '$(lockdir)' && __CARGO_TEST_INVOCATION_TIME=2099-01-01T00:00:00Z '$TEST_BIN/cargo' tree 2>&1"
+  [[ "$output" == *"TESTTIME=[unset]"* ]]
+  run bash -c "cd '$(lockdir)' && __CARGO_TEST_INVOCATION_TIME=2099-01-01T00:00:00Z '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" == *"TESTTIME=[unset]"* ]]
 }
 
 @test "cargo-cooldown: a per-registry window under a name bash cannot unset is refused" {
@@ -647,6 +691,40 @@ cargo_sfw_stubs() {
   [[ "$output" == *"--minimum-dependency-age=P7D"* ]]
 }
 
+deno_stub_version() { # a deno stub that reports the given version
+  stub_bin deno 'case "${1:-}" in --version|-V) echo "deno '"$1"' (stable, release, x86_64-unknown-linux-gnu)" ;; *) echo "STUB:deno ARGS=[$*]" ;; esac'
+}
+
+@test "deno: info gets the age flag only from 2.8.3 (2.8.2 rejects it)" {
+  # MEASURED on deno 2.8.2: "error: unexpected argument
+  # '--minimum-dependency-age' found" -- injecting it broke `deno info`.
+  deno_stub_version 2.8.2
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" info npm:is-number
+  [[ "$output" == *"ARGS=[info npm:is-number]"* ]]
+  deno_stub_version 2.8.3
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" info npm:is-number
+  [[ "$output" == *"ARGS=[info --minimum-dependency-age=P2D npm:is-number]"* ]]
+}
+
+@test "deno: x runs with --ignore-scripts on 2.9.3+ and is refused below" {
+  # MEASURED on 2.7.14-2.9.8: `deno x` runs the package's lifecycle scripts
+  # with no prompt, and nothing in the role stopped it; --ignore-scripts does
+  # (2.9.3, 2.9.8).
+  deno_stub_version 2.9.3
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" x npm:cowsay hi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ARGS=[x --ignore-scripts npm:cowsay hi]"* ]]
+  deno_stub_version 2.9.2
+  harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
+  run "$TEST_BIN/deno" x npm:cowsay hi
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing 'deno x'"* ]]
+  [[ "$output" != *"STUB:deno"* ]]
+}
+
 @test "deno: refuses to recurse when the real binary is gone" {
   stub_bin deno
   harden ECOSYSTEMS=deno -- --emit=plain >/dev/null
@@ -659,14 +737,16 @@ cargo_sfw_stubs() {
 # --- socket firewall / npm -------------------------------------------------
 
 sfw_stubs() {
-  # An npm that reports a version and pretends the sfw install succeeds, plus
-  # a node new enough to clear the >= 20 gate.
+  # An npm that reports a version and pretends the PINNED, script-less sfw
+  # install succeeds, a node new enough to clear the >= 20 gate, and an sfw
+  # whose warm-up (`sfw /bin/true`) succeeds by running its argument.
   stub_bin npm 'case "$*" in
-  "install -g sfw@2") exit 0 ;;
+  "install -g --ignore-scripts sfw@2.0.6") exit 0 ;;
   "--version") echo "10.9.8" ;;
   *) echo "STUB:npm ARGS=[$*]" ;;
 esac'
   stub_bin node 'echo 22'
+  stub_bin sfw 'exec "$@"'
 }
 
 @test "sfw: the wrapper lands on the npm PATH resolves, not a hardcoded path" {
@@ -720,7 +800,7 @@ esac'
 
 @test "sfw: a failed install does not leave a wrapper claiming success" {
   stub_bin npm 'case "$*" in
-  "install -g sfw@2") exit 1 ;;
+  "install -g --ignore-scripts sfw@2.0.6") exit 1 ;;
   "--version") echo "10.9.8" ;;
   *) echo "STUB" ;;
 esac'
@@ -730,6 +810,42 @@ esac'
   [[ "$output" == *"sfw global install failed"* ]]
   assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
   assert_file_contains "$OUT_FILE" "sfw_installed=false"
+}
+
+@test "sfw: a warm-up failure moves sfw aside and deploys no wrapper" {
+  # MEASURED on sfw 2.0.6: on a cold cache with the GitHub API refused or
+  # rate-limited, the shim exits 1 INSIDE the user's npm install, while this
+  # script reported sfw installed. The warm-up surfaces that here instead.
+  sfw_stubs
+  stub_bin sfw 'echo "[sfw] Failed to prepare firewall binary" >&2; exit 1'
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not prepare its firewall binary"* ]]
+  [[ "$output" == *"Failed to prepare firewall binary"* ]]
+  assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
+  assert_file_contains "$OUT_FILE" "sfw_installed=false"
+  # Moved aside, so the cargo wrapper's `command -v sfw` guard fails too.
+  [ ! -e "$TEST_BIN/sfw" ]
+  [ -e "$TEST_BIN/sfw.broken" ]
+  run "$TEST_BIN/npm" --version
+  [ "$output" = "10.9.8" ]
+}
+
+@test "sfw: the npm install is pinned and runs no install scripts" {
+  # The role pins sfw_version and passes --ignore-scripts (ECH-185); the
+  # action floated sfw@2 with scripts on.
+  sfw_stubs
+  # The record path is baked in now: harden runs under `env -i`, so a
+  # $TEST_TMP read at stub run time would be empty.
+  local rec="$TEST_TMP/sfw-install-args"
+  stub_bin npm 'case "$*" in
+  "install -g --ignore-scripts sfw@2.0.6") echo "PINNED-INSTALL" > "'"$rec"'"; exit 0 ;;
+  "install -g"*) echo "UNPINNED: $*" > "'"$rec"'"; exit 0 ;;
+  "--version") echo "10.9.8" ;;
+  *) echo "STUB:npm ARGS=[$*]" ;;
+esac'
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  assert_file_contains "$TEST_TMP/sfw-install-args" "PINNED-INSTALL"
 }
 
 # --- absence ---------------------------------------------------------------

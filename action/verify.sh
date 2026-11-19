@@ -874,7 +874,28 @@ else
           ''|*[!0-9]*) ;;
           *) nwant=$((nwanth / 24)); [ "$nwant" -lt 1 ] && nwant=1 ;;
         esac
-        if [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
+        # Read from the working directory on purpose: a repo .npmrc can EXEMPT
+        # packages from the gate (min-release-age-exclude, npm 11.17) or pin a
+        # cutoff date (before, npm 11.15). MEASURED on npm 11.19.1 and 12.2.2:
+        # a project `min-release-age-exclude[]=*` let every package through even
+        # with the env layer exported, and exporting an empty exclude list does
+        # NOT override it, while this row printed OK. A repo `before=` wins only
+        # when no NPM_CONFIG_MIN_RELEASE_AGE pins the age.
+        nexcl=$(npm config get min-release-age-exclude 2>/dev/null | tr -d '\r')
+        case "$nexcl" in null|undefined) nexcl="" ;; esac
+        nbefore=$(npm config get before 2>/dev/null | tr -d '\r')
+        case "$nbefore" in null|undefined) nbefore="" ;; esac
+        case ",$(printf '%s' "$nexcl" | tr -d ' ')," in
+          *",*,"*) nexcl_all=1 ;;
+          *) nexcl_all=0 ;;
+        esac
+        if [ "$nexcl_all" -eq 1 ]; then
+          gap npm.age-gate PARSED "npm age gate" "npm $nv reports min-release-age=$v but min-release-age-exclude=* in $(pwd) - every package skips the gate, and no exported setting overrides a repo's exclude list"
+        elif [ -n "$nbefore" ] && [ -z "${NPM_CONFIG_MIN_RELEASE_AGE:-}${npm_config_min_release_age:-}" ]; then
+          gap npm.age-gate PARSED "npm age gate" "npm $nv reports before=$nbefore in $(pwd), which replaces the min-release-age window when no NPM_CONFIG_MIN_RELEASE_AGE is exported"
+        elif [ -n "$nexcl" ]; then
+          row WEAK PARSED "npm age gate" "npm $nv enforces $v day(s) but $(pwd) exempts: $nexcl (min-release-age-exclude)"
+        elif [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
           row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this job declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
         else
           row OK PARSED "npm age gate" "npm $nv implements min-release-age and reports $v day(s)"

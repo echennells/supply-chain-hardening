@@ -137,16 +137,16 @@ load setup
   assert_file_contains "$HOME/.config/pnpm/rc" "verify-store-integrity=true"
 }
 
-@test "pnpm rc: prefer-frozen-lockfile=true (default path; deterministic pins, no hard-freeze)" {
-  assert_file_contains "$HOME/.config/pnpm/rc" "prefer-frozen-lockfile=true"
+@test "pnpm rc: prefer-frozen-lockfile is NOT written by default (it would turn off pnpm's CI freeze)" {
+  ! grep -q "prefer-frozen-lockfile" "$HOME/.config/pnpm/rc"
 }
 
 @test "pnpm config.yaml: verifyStoreIntegrity true (pnpm 11+ store hash-check)" {
   assert_file_contains "$HOME/.config/pnpm/config.yaml" "verifyStoreIntegrity: true"
 }
 
-@test "pnpm config.yaml: preferFrozenLockfile true (pnpm 11+ deterministic pins)" {
-  assert_file_contains "$HOME/.config/pnpm/config.yaml" "preferFrozenLockfile: true"
+@test "pnpm config.yaml: preferFrozenLockfile is NOT written by default (it would turn off pnpm's CI freeze)" {
+  ! grep -q "preferFrozenLockfile" "$HOME/.config/pnpm/config.yaml"
 }
 
 # yarn
@@ -158,8 +158,8 @@ load setup
   assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableInstalls: true"
 }
 
-@test "yarnrc: enableImmutableCache true (prevent cache mutation during install)" {
-  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableCache: true"
+@test "yarnrc: enableImmutableCache false (true fails every cold-cache install with YN0056)" {
+  assert_file_contains "$HOME/.yarnrc.yml" "enableImmutableCache: false"
 }
 
 @test "yarnrc: checksumBehavior throw (error on hash mismatch)" {

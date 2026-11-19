@@ -40,8 +40,13 @@ Every release above ships a PHP new enough for Composer 2.11, so the same steps
 apply everywhere. Check the published checksum, then re-apply the role so the wrapper
 lands on the new binary:
 
+Use 2.11.2 or later, not just 2.11.0: Composer 2.10.0 to 2.11.1 can run arbitrary
+commands from a crafted `composer.lock` or `installed.json`
+([GHSA-jhfp-4ppm-crmm](https://github.com/composer/composer/security/advisories/GHSA-jhfp-4ppm-crmm),
+high, fixed in 2.11.2).
+
 ```sh
-V=2.11.1
+V=2.11.2
 curl -fsSLO "https://getcomposer.org/download/$V/composer.phar"
 curl -fsSL "https://getcomposer.org/download/$V/composer.phar.sha256sum" | sha256sum -c -
 sudo install -m 0755 composer.phar /usr/local/bin/composer
@@ -97,8 +102,11 @@ packages do on Ubuntu 22.04, 24.04, 26.04 and Debian 12.
 
 Read these before relying on either gate:
 
-- **`gem install` has no age gate on any OS.** RubyGems has no cooldown (checked in
-  rubygems-update 4.0.24). Bundler's setting only applies to Bundler.
+- **`gem install` has no age gate below RubyGems 4.1.0.** RubyGems 4.0.x has no
+  cooldown (checked in rubygems-update 4.0.24). RubyGems 4.1.0 (2026-11-16) added one
+  that reads the same `BUNDLE_COOLDOWN` (environment and `~/.bundle/config`) and a
+  gemrc `:cooldown:`, taking the larger. MEASURED: it installs an older version inside
+  the window and refuses an exact pin to a too-new one.
 - **The role's frozen mode already does most of Bundler's work.** It refuses `bundle
   install` without a lockfile, `bundle update` and `bundle add`. The cooldown adds
   `bundle lock`, and any project that turns frozen off. Bundler 2.3 and 2.4 refuse

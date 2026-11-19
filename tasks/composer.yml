@@ -9,7 +9,7 @@
 # name (composer ignores it); "scripts-are-disabled" is not in composer's
 # JSON schema. The only real primitives are --no-scripts (CLI flag) and
 # COMPOSER_SKIP_SCRIPTS=<event,list> (MEASURED: honoured from composer
-# 2.8.0 — silently ignored on 2.2.6 and 2.7.1, honoured on 2.8.12+; this
+# 2.8.6 — ignored on 2.2.6, 2.7.1 and 2.8.0-2.8.5, honoured on 2.8.6+; this
 # comment previously said 2.9 and that number was wrong. Requires
 # enumerating every event name). The /usr/local/bin/composer wrapper below
 # is the primary layer; the env var is the backup for callers that bypass
@@ -85,17 +85,18 @@
     - composer_detected_version | length > 0
     - composer_detected_version is version('2.9.0', '<')
 
-- name: Record skipped protection — COMPOSER_SKIP_SCRIPTS inert (Composer < 2.8)
-  # MEASURED: COMPOSER_SKIP_SCRIPTS is honoured from composer 2.8.0 — silently
+- name: Record skipped protection — COMPOSER_SKIP_SCRIPTS inert (Composer < 2.8.6)
+  # MEASURED: COMPOSER_SKIP_SCRIPTS is honoured from composer 2.8.6 (2.8.4 and 2.8.5
+  # ran every script with it set; 2.8.6 logged "Skipped script listeners") — silently
   # ignored on 2.2.6 (Ubuntu 22.04) and 2.7.1 (Ubuntu 24.04), honoured on
   # 2.8.12+. shell_env.yml writes the var on every host, so without this record
   # the run reports a belt-and-suspenders layer that does nothing here.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['COMPOSER_SKIP_SCRIPTS — Composer ' ~ composer_detected_version ~ ' ignores it (MEASURED: honoured from 2.8.0). The env-var backup layer in /etc/environment and /etc/profile.d is inert on this host, so the /usr/local/bin/composer wrapper is the ONLY layer blocking composer scripts; `php composer.phar` callers that bypass the wrapper are not covered. Upgrade Composer to >= 2.8 to close this.'] }}
+      {{ (skipped_protections | default([])) + ['COMPOSER_SKIP_SCRIPTS — Composer ' ~ composer_detected_version ~ ' ignores it (MEASURED: honoured from 2.8.6; 2.8.5 ignores it). The env-var backup layer in /etc/environment and /etc/profile.d is inert on this host, so the /usr/local/bin/composer wrapper is the ONLY layer blocking composer scripts; `php composer.phar` callers that bypass the wrapper are not covered. Upgrade Composer to >= 2.8.6 to close this.'] }}
   when:
     - composer_detected_version | length > 0
-    - composer_detected_version is version('2.8.0', '<')
+    - composer_detected_version is version('2.8.6', '<')
 
 - name: Record skipped protection — publish-age gate inert (Composer < 2.11)
   # MEASURED (2.0.9 → 2.11.1): config.policy.cooldown is ignored with exit 0

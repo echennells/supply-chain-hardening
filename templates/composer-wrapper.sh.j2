@@ -5,8 +5,8 @@
 # Composer has no host-wide config-file or env-var mechanism for disabling
 # script and plugin execution. The only real primitives are the --no-scripts
 # / --no-plugins CLI flags and COMPOSER_SKIP_SCRIPTS=<event,list>
-# (MEASURED: honoured from composer 2.8.0 — silently ignored on 2.2.6 and
-# 2.7.1, honoured on 2.8.12+; the older "2.9+" in this comment was wrong).
+# (MEASURED: honoured from composer 2.8.6 — ignored on 2.2.6, 2.7.1, 2.8.4 and
+# 2.8.5, honoured on 2.8.6+; the older "2.9+" and "2.8.0" here were wrong).
 # This wrapper injects --no-scripts (see the version note below).
 # --no-plugins is also injected by default, but the role var
 # composer_allow_plugins controls it: set composer_allow_plugins=true

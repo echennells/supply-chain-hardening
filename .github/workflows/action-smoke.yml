@@ -123,6 +123,44 @@ jobs:
           fi
           echo "✓ action correctly refused release_age_hours=0"
 
+  action-yarn-cold-cache-install:
+    name: 'Action: yarn install works on a cold cache with a committed lockfile'
+    runs-on: ubuntu-24.04
+    # enableImmutableCache: true made this exact case fail ("YN0056 Cache
+    # entry required but missing"): every fresh runner has a cold cache. A
+    # config-content test could not see it; only a real install can.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: Make a project with a committed lockfile, then empty the cache
+        run: |
+          corepack enable
+          mkdir -p /tmp/yarn-cold && cd /tmp/yarn-cold
+          printf '{"name":"cold","version":"1.0.0","packageManager":"yarn@4.10.3","dependencies":{"is-number":"7.0.0"}}\n' > package.json
+          COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn --version
+          # Yarn turns immutable installs on by itself under CI, which forbids
+          # CREATING the lockfile this setup step exists to create (YN0028).
+          COREPACK_ENABLE_DOWNLOAD_PROMPT=0 YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install
+          test -f yarn.lock
+          rm -rf node_modules .yarn "$(yarn config get cacheFolder)" "$HOME/.yarn/berry/cache"
+
+      - uses: ./action
+        with:
+          ecosystems: yarn
+
+      - name: Install from the lockfile on the cold cache must succeed
+        run: |
+          cd /tmp/yarn-cold
+          grep -q '^enableImmutableCache: false' "$HOME/.yarnrc.yml"
+          COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn install
+          # Yarn 4 defaults to Plug'n'Play: no node_modules, a .pnp.cjs instead.
+          test -f .pnp.cjs || test -d node_modules/is-number
+          echo "✓ hardened yarn installs from a committed lockfile on a cold cache"
+
   action-blocks-pnpm-project-script:
     name: 'Action: blocks pnpm project-level postinstall (pnpm 11 config.yaml is load-bearing)'
     runs-on: ubuntu-24.04
@@ -806,13 +844,12 @@ jobs:
           ecosystems: pnpm
           pnpm_built_dependencies: 'esbuild,sharp'
 
-      - name: config.yaml + rc reflect onlyBuiltDependencies allowlist
+      - name: config.yaml + rc reflect the allowlist
         run: |
-          # pnpm 11+ format: ignoreScripts=false + onlyBuiltDependencies list
+          # pnpm 11+ format: ignoreScripts=false, and NO onlyBuiltDependencies
+          # list (pnpm 11+ ignores it in the global file; MEASURED).
           grep -q '^ignoreScripts: false$' "$HOME/.config/pnpm/config.yaml"
-          grep -q '^onlyBuiltDependencies:$' "$HOME/.config/pnpm/config.yaml"
-          grep -q '^  - esbuild$' "$HOME/.config/pnpm/config.yaml"
-          grep -q '^  - sharp$' "$HOME/.config/pnpm/config.yaml"
+          ! grep -q 'onlyBuiltDependencies' "$HOME/.config/pnpm/config.yaml"
           # pnpm 10 format: ini-style allowlist entries
           grep -q '^ignore-scripts=false$' "$HOME/.config/pnpm/rc"
           grep -q '^only-built-dependencies\[\]=esbuild$' "$HOME/.config/pnpm/rc"
@@ -1172,6 +1209,23 @@ jobs:
             echo "::warning::npm is at /usr/local/bin here, so this job cannot detect shadowing"
           fi
 
+      - name: Can this runner reach the GitHub API? (sfw fetches its binary through it)
+        id: ghapi
+        # The sfw shim downloads its firewall binary through the UNAUTHENTICATED
+        # GitHub API, whose quota is shared by every job on the runner's IP. When
+        # it is used up the action correctly declines to wrap npm (sfw cannot
+        # run), which is not what these assertions test. Skip them with a
+        # warning in that one case only; any other failure still fails.
+        run: |
+          rem=$(curl -s https://api.github.com/rate_limit | python3 -c 'import sys,json; print(json.load(sys.stdin)["resources"]["core"]["remaining"])' 2>/dev/null || echo 0)
+          echo "unauthenticated GitHub API requests left for this runner IP: ${rem:-0}"
+          if [ "${rem:-0}" -gt 2 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::this runner IP's unauthenticated GitHub API quota is used up, so sfw cannot fetch its binary; the sfw assertions are skipped"
+          fi
+
       - uses: ./action
         id: harden
         with:
@@ -1179,6 +1233,7 @@ jobs:
           install_sfw: true
 
       - name: The npm PATH resolves to must be our wrapper
+        if: steps.ghapi.outputs.ok == 'true'
         run: |
           resolved=$(command -v npm)
           echo "npm now resolves to: $resolved"
@@ -1188,6 +1243,7 @@ jobs:
           }
 
       - name: And the original binary was preserved next to it
+        if: steps.ghapi.outputs.ok == 'true'
         run: |
           resolved=$(command -v npm)
           test -x "${resolved}-real" || {
@@ -1195,12 +1251,22 @@ jobs:
             exit 1
           }
 
-      - name: npm still works through the wrapper
+      - name: npm still works through the wrapper, AS THE RUNNER USER, through sfw
+        if: steps.ghapi.outputs.ok == 'true'
+        # A real install, not just `npm init`. sfw keeps its cache inside its
+        # own package directory, which `sudo npm install -g` makes root-owned;
+        # before the action warmed it as root, every install through the
+        # wrapper as the runner user failed with "EACCES ... mkdir
+        # '.../sfw/.sfw-cache'", and this job (which never installed anything)
+        # stayed green.
         run: |
           npm --version
-          mkdir -p /tmp/sfwproj && cd /tmp/sfwproj && npm init -y >/dev/null && echo "npm init OK"
+          mkdir -p /tmp/sfwproj && cd /tmp/sfwproj && npm init -y >/dev/null
+          npm install is-number@7.0.0
+          test -d node_modules/is-number && echo "npm install through sfw OK"
 
       - name: Output agrees with reality
+        if: steps.ghapi.outputs.ok == 'true'
         run: test "${{ steps.harden.outputs.sfw-installed }}" = "true"
 
   action-verify-catches-post-hardening-shadowing:
@@ -1220,12 +1286,30 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      - name: Can this runner reach the GitHub API? (sfw fetches its binary through it)
+        id: ghapi
+        # The sfw shim downloads its firewall binary through the UNAUTHENTICATED
+        # GitHub API, whose quota is shared by every job on the runner's IP. When
+        # it is used up the action correctly declines to wrap npm (sfw cannot
+        # run), which is not what these assertions test. Skip them with a
+        # warning in that one case only; any other failure still fails.
+        run: |
+          rem=$(curl -s https://api.github.com/rate_limit | python3 -c 'import sys,json; print(json.load(sys.stdin)["resources"]["core"]["remaining"])' 2>/dev/null || echo 0)
+          echo "unauthenticated GitHub API requests left for this runner IP: ${rem:-0}"
+          if [ "${rem:-0}" -gt 2 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::this runner IP's unauthenticated GitHub API quota is used up, so sfw cannot fetch its binary; the sfw assertions are skipped"
+          fi
+
       - uses: ./action
         with:
           ecosystems: npm
           install_sfw: true
 
       - name: Before — the npm wrapper is the binary PATH resolves to
+        if: steps.ghapi.outputs.ok == 'true'
         run: |
           echo "npm resolves to: $(command -v npm)"
           ./action/verify.sh --emit=plain > before.txt 2>&1 || true
@@ -1240,6 +1324,7 @@ jobs:
           node-version: '20'
 
       - name: After — the verifier must report the wrapper as shadowed
+        if: steps.ghapi.outputs.ok == 'true'
         run: |
           echo "npm now resolves to: $(command -v npm)"
           ./action/verify.sh --emit=plain > after.txt 2>&1 || true
