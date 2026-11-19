@@ -262,3 +262,29 @@ sfw_cache_dir() {
   # The reset task ran and found nothing to change.
   [[ "$st" == ok:* ]]
 }
+
+@test "upgrade: an sfw that root does not own is reported and left alone, and the play completes" {
+  # The reset refuses to judge or warm an sfw whose files another account
+  # could have written (root would run them). Its record used a regex
+  # back-reference written '\\1', which Ansible's templating turns into a
+  # literal backslash: the set_fact raised "'NoneType' object has no
+  # attribute 'group'" and failed the play (MEASURED with ansible-core 2.16).
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to change the owner of sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  pkg=${c%/.sfw-cache}
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+  before=$(stat -c %i "$(readlink -f "$c/latest")")
+
+  chown sfwprior "$pkg"
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false
+  chown root "$pkg"
+  echo "$output" | tail -25
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Socket Firewall — root resolves sfw to $pkg/"*"which root does not own"* ]]
+  # Neither reset nor re-downloaded.
+  [ "$(stat -c %i "$(readlink -f "$c/latest")")" = "$before" ]
+}

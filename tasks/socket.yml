@@ -311,7 +311,7 @@
 - name: Record skipped protection — Socket Firewall cannot run for a non-root caller
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — prepared as root, but ' ~ (preflight_invoking_user.stdout | trim) ~ ' cannot run it (exit ' ~ (sfw_user_check.rc | default("?") | string) ~ ': ' ~ (sfw_user_check.stderr | default('') | trim) ~ '). It was moved aside so npm and cargo keep working, unfiltered. Check the permissions on ' ~ (sfw_cache_reset.stdout | default('') | regex_search('/[^ :]*\\.sfw-cache') | default('the sfw cache', true)) ~ ' and its parents, then re-apply.'] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — prepared as root, but ' ~ (preflight_invoking_user.stdout | trim) ~ ' cannot run it (exit ' ~ (sfw_user_check.rc | default("?") | string) ~ ': ' ~ (sfw_user_check.stderr | default('') | trim) ~ '). It was moved aside so npm and cargo keep working, unfiltered. Check the permissions on ' ~ (sfw_cache_reset.stdout | default('') | regex_search('/[^ :]*\.sfw-cache') | default('the sfw cache', true)) ~ ' and its parents, then re-apply.'] }}
   when:
     - sfw_user_check is defined
     - sfw_user_check.stdout | default('') | trim == 'broken'
@@ -327,7 +327,7 @@
 - name: Record skipped protection — Socket Firewall resolves to a program root does not own
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — root resolves sfw to ' ~ (sfw_cache_reset.stdout | regex_search('^not-root-owned (.*)$', '\\1', multiline=True) | first) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), so its cache was not checked or warmed: the role does not run a user-writable program as root.'] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — root resolves sfw to ' ~ (sfw_cache_reset.stdout | regex_search('^not-root-owned (.*)$', '\1', multiline=True) | first) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), so its cache was not checked or warmed: the role does not run a user-writable program as root.'] }}
   when:
     - sfw_cache_reset is defined
     - sfw_cache_reset.stdout | default('') is search('^not-root-owned ', multiline=True)
