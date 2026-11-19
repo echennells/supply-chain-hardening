@@ -358,6 +358,93 @@ EOF
 # Each test below stages a failure shape that the verifier at 8281a6b reported
 # as OK (or mis-described), measured on the real tools in this image.
 
+# The rows the verifier prints for $1, from directory $2, with extra env $3...
+verify_from() { # dir [VAR=value ...]
+  local d="$1"; shift
+  run env "$@" bash -c 'cd "$1" && shift && exec "$@"' _ "$d" "$VERIFY" --verbose
+}
+
+@test "verify: a repo uv.toml that turns no-build off is a GAP from inside the repo" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  d="$BATS_TEST_TMPDIR/uvproj"; mkdir -p "$d"
+  # Control: no repo config, nothing to override.
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "N/A"
+  printf 'no-build = false\n' > "$d/uv.toml"
+  # uv's own answer in that directory is the ground truth the row must agree with.
+  ( cd "$d" && uv pip list --show-settings 2>/dev/null ) | grep -qE 'no_build: None'
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q "no-build: All -> None"
+  # The host rows still describe the host, from /: unchanged, never upgraded.
+  echo "$output" | grep "uv sdist builds blocked" | grep -q "no_build=All"
+  # And pip through the wrapper is uv in this directory too.
+  if [ -x /usr/local/bin/pip ]; then
+    echo "$output" | grep "pip source-build blocking" | grep -q "^GAP"
+  fi
+}
+
+@test "verify: a repo uv.toml that moves exclude-newer later is a GAP; a stricter one is OK" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  d="$BATS_TEST_TMPDIR/uvproj2"; mkdir -p "$d"
+  printf 'exclude-newer = "2099-01-01T00:00:00Z"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q -- "-> 2099-01-01T00:00:00Z"
+  printf 'no-build = true\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^OK"
+}
+
+# A project whose lockfile does not name its one gem: the same admission fixture
+# the bundler row uses, so `bundle install --local` either refuses (pinned) or
+# reports the gem missing (resolved past the lockfile).
+bundler_project() { # dir
+  mkdir -p "$1/.bundle"
+  printf 'source "https://rubygems.invalid"\ngem "sch-verify-probe-nonexistent-gem"\n' > "$1/Gemfile"
+  printf 'GEM\n  remote: https://rubygems.invalid/\n  specs:\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n' > "$1/Gemfile.lock"
+}
+
+@test "verify: a project .bundle/config that turns frozen off is a GAP from inside the project" {
+  command -v bundle >/dev/null 2>&1 || skip "bundler not installed"
+  d="$BATS_TEST_TMPDIR/rb"; bundler_project "$d"
+  verify_from "$d"
+  echo "$output" | grep "bundler lockfile pinning" | grep -q "^OK" || skip "frozen is not in effect at the user level on this host"
+  echo "$output" | grep "bundler local config override" | grep -q "N/A"
+  printf -- '---\nBUNDLE_FROZEN: "false"\n' > "$d/.bundle/config"
+  # Ground truth: with that file, bundler resolves past the lockfile here.
+  run bash -c "cd '$d' && BUNDLE_PATH='$BATS_TEST_TMPDIR/bp' bundle install --local 2>&1"
+  echo "$output" | grep -qi "could not find gem"
+  verify_from "$d"
+  echo "$output" | grep "bundler local config override" | grep -q "^GAP"
+  # Local config outranks the environment too, so exporting frozen does not help.
+  verify_from "$d" BUNDLE_FROZEN=true
+  echo "$output" | grep "bundler local config override" | grep -q "^GAP"
+  printf -- '---\nBUNDLE_FROZEN: "true"\n' > "$d/.bundle/config"
+  verify_from "$d"
+  echo "$output" | grep "bundler local config override" | grep -q "^OK"
+}
+
+@test "verify: the bundler override probe never evaluates a gemfile the checkout names" {
+  command -v bundle >/dev/null 2>&1 || skip "bundler not installed"
+  d="$BATS_TEST_TMPDIR/rbhostile"; bundler_project "$d"
+  m="$BATS_TEST_TMPDIR/gemfile-ran"
+  printf 'File.write(%s, "ran")\n' "'$m'" > "$d/evil.rb"
+  printf -- '---\nBUNDLE_FROZEN: "false"\nBUNDLE_GEMFILE: "%s/evil.rb"\n' "$d" > "$d/.bundle/config"
+  # FIXTURE CONTROL: handed that WHOLE config, bundler does evaluate the named
+  # file. Without this the assertion below could pass for a fixture that never
+  # fires.
+  mkdir -p "$BATS_TEST_TMPDIR/ctl"
+  printf 'source "https://rubygems.invalid"\n' > "$BATS_TEST_TMPDIR/ctl/Gemfile"
+  ( cd "$BATS_TEST_TMPDIR/ctl" && BUNDLE_APP_CONFIG="$d/.bundle" BUNDLE_PATH="$BATS_TEST_TMPDIR/bp" \
+      bundle install --local >/dev/null 2>&1 ) || true
+  [ -e "$m" ] || skip "this bundler does not read a gemfile from the local config; nothing to guard"
+  rm -f "$m"
+  verify_from "$d"
+  echo "$output" | grep "bundler local config override" | grep -q "^GAP"
+  [ ! -e "$m" ]
+}
+
 @test "verify: the footer counts PRESENT-only WEAK rows apart from caveated ones" {
   run "$VERIFY" --verbose
   all=$(echo "$output" | grep -cE '^WEAK ' || true)

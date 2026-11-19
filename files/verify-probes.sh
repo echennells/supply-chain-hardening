@@ -1407,6 +1407,92 @@ if have uv; then
         rm -rf "$uvtmp"
       fi
     fi
+
+# --- uv repo config override  [PARSED] ---
+    # ---- row 6: does a config HERE weaken what rows 1-5 saw? ----------------
+    # Rows 1-5 ask uv from "/" on purpose (see "probe cwd" above), which makes
+    # them blind to the override AGENTS.md tells people to look for when it
+    # says to run the verifier from the project. MEASURED (uv 0.13.9, role
+    # applied): in a directory whose uv.toml says no-build = false, uv reported
+    # no_build: None there and `uv pip install ./x.tar.gz` ran its setup.py,
+    # while row 2 printed OK; an exclude-newer in 2099 there left row 3 OK too.
+    # So ask once more, from the working directory, and compare the anchors.
+    # This row can only LOWER the verdict - OK when nothing here weakens rows
+    # 1-5, GAP when something does, WEAK when it cannot tell - and never
+    # upgrades a host row, so a uv.toml planted in a world-writable ancestor of
+    # $PWD still cannot forge an OK: it can only describe, truthfully, what uv
+    # does in this directory.
+    uvcand=""
+    uvd=$PWD
+    while [ -n "$uvd" ] && [ "$uvd" != / ]; do
+      if [ -f "$uvd/uv.toml" ]; then uvcand="$uvd/uv.toml"; break; fi
+      if [ -f "$uvd/pyproject.toml" ] && grep -qE '^[[:space:]]*(\[tool\.uv|tool\.uv\.)' "$uvd/pyproject.toml" 2>/dev/null; then
+        uvcand="$uvd/pyproject.toml"; break
+      fi
+      uvd=${uvd%/*}
+    done
+    if [ "$PWD" = / ]; then
+      row "N/A" - "uv repo config override" \
+        "the verifier ran from /, where rows 1-5 already asked uv - run it from a project to check that project's uv config"
+    elif [ -n "$uvforeign" ] || [ "${uvmode:-}" != ok ]; then
+      if [ -n "$uvcand" ]; then
+        row WEAK PRESENT "uv repo config override" \
+          "$uvcand may override the host config, but the host probe above could not read uv's settings, so there is nothing to compare it with"
+      else
+        row "N/A" - "uv repo config override" "no uv.toml or pyproject.toml uv config at or above $PWD"
+      fi
+    else
+      uvcdump=$(uv pip list --show-settings 2>&1); uvcrc=$?
+      if [ "$uvcrc" -ne 0 ]; then
+        uvcwhy=$(printf '%s' "$uvcdump" | grep -i 'failed to parse\|^error:' | head -1 | cut -c1-150)
+        row WEAK FUNCTIONAL "uv repo config override" \
+          "uv refuses to run in $PWD (${uvcwhy:-exit $uvcrc}) - nothing installs here, but whatever config uv found here could not be compared with the host's"
+      else
+        uvcnb=$(printf '%s\n' "$uvcdump" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
+        uvcix=$(printf '%s\n' "$uvcdump" | grep 'index_strategy:' | head -1 | sed 's/.*index_strategy:[ ]*//; s/,.*//')
+        uvcwin=$(printf '%s\n' "$uvcdump" | grep -A10 'exclude_newer:' | head -11)
+        case "$uvcwin" in
+          *Some*) uvccut=$(printf '%s\n' "$uvcwin" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]*Z' | head -1) ;;
+          *)      uvccut="" ;;
+        esac
+        uvcspan=""
+        case "$uvcwin" in
+          *ExcludeNewerSpan\(*)
+            uvcspan=$(printf '%s\n' "$uvcwin" \
+                      | sed -n 's/.*ExcludeNewerSpan([[:space:]]*\([^[:space:],)][^,)]*\).*/\1/p' | head -1)
+            [ -n "$uvcspan" ] || uvcspan=$(printf '%s\n' "$uvcwin" \
+                      | sed -n '/ExcludeNewerSpan(/{n;s/^[[:space:]]*//;s/[[:space:],)]*$//;p;}' | head -1) ;;
+        esac
+        uvweak=""; uvodd=""
+        if [ "$uvnb" = All ] && [ "$uvcnb" != All ]; then
+          uvweak="no-build: All -> ${uvcnb:-<absent>} (sdists build and run setup.py)"
+        fi
+        if [ -n "$uvcut$uvspan" ] && [ -z "$uvccut$uvcspan" ]; then
+          uvweak="${uvweak:+$uvweak; }exclude-newer: removed (a release published minutes ago resolves)"
+        elif [ -n "$uvcut" ] && [ -n "$uvccut" ]; then
+          [ "$uvccut" \> "$uvcut" ] && \
+            uvweak="${uvweak:+$uvweak; }exclude-newer: $uvcut -> $uvccut (later, so newer releases resolve)"
+        elif [ -n "$uvcut$uvspan" ] && [ "$uvcut|$uvspan" != "$uvccut|$uvcspan" ]; then
+          uvodd="exclude-newer: ${uvcut:-span $uvspan} -> ${uvccut:-span $uvcspan}"
+        fi
+        if [ "${uvix:-}" = FirstIndex ] && [ -n "$uvcix" ] && [ "$uvcix" != FirstIndex ]; then
+          uvweak="${uvweak:+$uvweak; }index-strategy: FirstIndex -> $uvcix (a secondary index can shadow a package name)"
+        fi
+        if [ -n "$uvweak" ]; then
+          row GAP PARSED "uv repo config override" \
+            "in $PWD uv reports weaker settings than the host probe: $uvweak. A uv.toml or pyproject.toml [tool.uv] at or above this directory${uvcand:+ (nearest: $uvcand)} outranks the host config, so every uv command run here, and pip through the wrapper, uses it"
+        elif [ -n "$uvodd" ]; then
+          row WEAK PARSED "uv repo config override" \
+            "in $PWD uv reports a setting this verifier cannot order against the host's: $uvodd${uvcand:+ (nearest uv config: $uvcand)}"
+        elif [ -n "$uvcand" ]; then
+          row OK PARSED "uv repo config override" \
+            "in $PWD uv reports no-build, exclude-newer and index-strategy no weaker than the host probe - $uvcand does not weaken them"
+        else
+          row "N/A" - "uv repo config override" \
+            "no uv.toml or pyproject.toml uv config at or above $PWD, and uv reports the same settings here as from /"
+        fi
+      fi
+    fi
   fi
 else
   row "N/A" - "uv" "uv not installed"
@@ -1417,7 +1503,7 @@ fi
 # ======================================================================
 
 # --- pip native age gate  [PARSED] ---
-# A DIFFERENT AXIS from the five uv rows above, and deliberately NOT nested
+# A DIFFERENT AXIS from the uv rows above, and deliberately NOT nested
 # inside any `have pip || have pip3` gate: the whole point of this row is the
 # `python3 -m pip` caller, which invokes the MODULE directly and so bypasses
 # both /usr/local/bin/pip and uv's exclude-newer. That caller exists on hosts
@@ -2779,7 +2865,7 @@ fi
 # resolves as its config home). BUNDLE_APP_CONFIG is redirected to an empty
 # temp path, so a checked-out project's own .bundle/config is deliberately
 # excluded — bundler gives that layer higher precedence and this row cannot
-# speak for it.
+# speak for it. The "bundler local config override" row below does.
 
 bundler_bin=""
 for bcand in bundle bundler; do
@@ -2995,6 +3081,88 @@ else
       esac
     fi
     rm -rf "$btmp" "$btmp2"
+  fi
+
+  # --- bundler local config override  [FUNCTIONAL] ---
+  # The row above points BUNDLE_APP_CONFIG at an empty temp dir, so it measures
+  # the user layer only (its LAYER SCOPE note). Bundler's LOCAL layer -
+  # <project>/.bundle/config, or $BUNDLE_APP_CONFIG/config - outranks the
+  # environment and ~/.bundle/config. MEASURED (bundler 2.4.20, role applied):
+  # in a project whose .bundle/config says BUNDLE_FROZEN: "false",
+  # `bundle install --local` resolved past a lockfile that does not name the
+  # gem, while the row above printed OK FUNCTIONAL from inside that project.
+  # So find the local config bundler would read from $PWD, and rerun the same
+  # admission fixture with it in force. Only its BUNDLE_FROZEN and
+  # BUNDLE_DEPLOYMENT lines are copied: a project config can also name a
+  # gemfile, bundler EVALUATES a Gemfile, and a verifier judging a checkout must
+  # not run that checkout's code. This row can only lower the verdict: OK when
+  # the local config leaves pinning on, GAP when it switches it off.
+  blgf=""; blcfg=""
+  if [ -n "${BUNDLE_GEMFILE:-}" ]; then
+    case "$BUNDLE_GEMFILE" in /*) blgf=$BUNDLE_GEMFILE ;; *) blgf="$PWD/$BUNDLE_GEMFILE" ;; esac
+  else
+    # Bundler searches up from the working directory, gems.rb then Gemfile in
+    # each directory (Bundler::SharedHelpers#find_gemfile).
+    bld=$PWD
+    while [ -n "$bld" ]; do
+      if [ -f "$bld/gems.rb" ]; then blgf="$bld/gems.rb"; break; fi
+      if [ -f "$bld/Gemfile" ]; then blgf="$bld/Gemfile"; break; fi
+      [ "$bld" = / ] && break
+      bld=${bld%/*}; [ -n "$bld" ] || bld=/
+    done
+  fi
+  blroot=""
+  if [ -n "$blgf" ]; then blroot=${blgf%/*}; [ -n "$blroot" ] || blroot=/; fi
+  if [ -n "${BUNDLE_APP_CONFIG:-}" ]; then
+    case "$BUNDLE_APP_CONFIG" in
+      /*) blcfg="$BUNDLE_APP_CONFIG/config" ;;
+      *)  [ -n "$blroot" ] && blcfg="$blroot/$BUNDLE_APP_CONFIG/config" ;;
+    esac
+  elif [ -n "$blroot" ]; then
+    blcfg="$blroot/.bundle/config"
+  fi
+  blhost=0
+  [ -n "${bout:-}" ] && [ -n "${brx:-}" ] && printf '%s\n' "$bout" | grep -qE "$brx" && blhost=1
+  if [ -z "$blcfg" ]; then
+    row "N/A" - "bundler local config override" \
+      "no Gemfile or gems.rb at or above $(cq "$PWD") and no BUNDLE_APP_CONFIG - bundler reads no local config here"
+  elif [ ! -f "$blcfg" ]; then
+    row "N/A" - "bundler local config override" \
+      "no local config at $(cq "$blcfg") - nothing here overrides the user config"
+  else
+    blkeys=$(grep -E "^[\"']?BUNDLE_(FROZEN|DEPLOYMENT)[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
+    blshow=$(printf '%s' "$blkeys" | tr '\n\t' '  ' | cut -c1-120)
+    if [ -z "$blkeys" ]; then
+      row "N/A" - "bundler local config override" \
+        "$(cq "$blcfg") sets neither BUNDLE_FROZEN nor BUNDLE_DEPLOYMENT, so it cannot switch lockfile pinning off"
+    elif [ "$blhost" -ne 1 ]; then
+      row "N/A" - "bundler local config override" \
+        "lockfile pinning was not shown in effect at the user level either (see bundler lockfile pinning), so there is nothing for $(cq "$blcfg") to switch off"
+    else
+      bl3=$(mktemp -d 2>/dev/null)
+      if [ -z "$bl3" ] || [ ! -d "$bl3" ] || ! bundler_fixture "$bl3" || ! mkdir -p "$bl3/app-config" \
+         || ! printf -- '---\n%s\n' "$blkeys" > "$bl3/app-config/config"; then
+        row WEAK PRESENT "bundler local config override" \
+          "$(cq "$blcfg") sets $(cq "$blshow"), but the probe fixture could not be built, so its effect was not measured"
+      else
+        blout=$(cd "$bl3" && env BUNDLE_GEMFILE="$bl3/Gemfile" \
+                                 BUNDLE_APP_CONFIG="$bl3/app-config" \
+                                 BUNDLE_PATH="$bl3/vendor" \
+                                 BUNDLE_RETRY=0 \
+                                 "$bundler_bin" install --local 2>&1) || true
+        if printf '%s\n' "$blout" | grep -qE "$brx"; then
+          row OK FUNCTIONAL "bundler local config override" \
+            "the local config at $(cq "$blcfg") ($(cq "$blshow")) leaves pinning on: with those lines in force bundler $bver still refused a gem the lockfile does not name"
+        elif printf '%s\n' "$blout" | grep -qiE 'could not find gem'; then
+          row GAP FUNCTIONAL "bundler local config override" \
+            "the local config at $(cq "$blcfg") switches lockfile pinning off ($(cq "$blshow")): with those lines in force bundler $bver resolved past a lockfile that does not name the gem. Bundler's local config outranks BUNDLE_FROZEN in the environment and ~/.bundle/config, so \`bundle install\` and \`bundle add\` in this project are not pinned"
+        else
+          row WEAK FUNCTIONAL "bundler local config override" \
+            "$(cq "$blcfg") sets $(cq "$blshow"), and the fixture run with those lines produced neither a refusal nor a resolution: $(printf '%s\n' "$blout" | grep -viE 'deprecat|didyoumean|warning:' | head -1 | tr '\t' ' ' | cut -c1-160)"
+        fi
+      fi
+      rm -rf "$bl3" 2>/dev/null
+    fi
   fi
 
   # --- bundler publish-age gate  [PARSED] ---
