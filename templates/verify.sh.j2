@@ -605,6 +605,79 @@ elif [ -n "$scv_hooks_k" ]; then
 fi
 # <<< python startup hooks
 
+# >>> npm exclude scope
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them). Both
+# npm rows live in the preambles, which run before the shared body, so this
+# cannot live in files/verify-probes.sh.
+#
+# WHICH NAMES DOES A min-release-age-exclude LIST EXEMPT? npm's own test is
+#   name === pattern || minimatch(name, pattern, {nonegate, nocomment, noext})
+# (@npmcli/arborist lib/release-age-exclude.js, read on npm 11.19.1), and the
+# rows used to compare entries with a literal '*' instead. MEASURED on npm
+# 11.19.1 with a repo .npmrc and a 99999-day window: '*' exempted lodash but
+# NOT @types/node (minimatch's '*' does not cross the '/' of a scoped name), so
+# "every package skips the gate" overstated it; '**' exempted both, and '@*/*'
+# and '*/*' every scoped package, while the row graded all three WEAK.
+#
+# So ask the minimatch npm itself loads, about two sentinel names of each kind:
+# a list that matches both members of a kind matches that whole kind. Prints
+# "unscoped", "scoped", "unscoped scoped" or nothing. When npm's matcher cannot
+# be found (a version-manager shim, an npm laid out differently) only '*' and
+# '**', whose meaning is fixed, are judged, and anything else prints "unknown".
+scv_npm_exclude_scope() { # <the list as `npm config get` prints it: comma-separated>
+  local npmjs npmdir out
+  npmjs=$(command -v npm 2>/dev/null)
+  # Our npm wrapper names the real npm it execs.
+  if [ -n "$npmjs" ] && grep -q 'supply-chain-harden' "$npmjs" 2>/dev/null; then
+    npmjs=$(grep -oE "^REAL_NPM='[^']*'" "$npmjs" 2>/dev/null | head -1 | sed "s/^REAL_NPM='//; s/'\$//")
+  fi
+  [ -n "$npmjs" ] && npmjs=$(readlink -f "$npmjs" 2>/dev/null)
+  npmdir=${npmjs%/bin/npm-cli.js}
+  out=unknown
+  if [ -n "$npmjs" ] && [ "$npmdir" != "$npmjs" ] && [ -d "$npmdir/node_modules/@npmcli/arborist/lib" ]; then
+    out=$(node -e '
+const path = require("path");
+const lib = path.join(process.argv[1], "node_modules", "@npmcli", "arborist", "lib");
+let mm;
+try { mm = require(require.resolve("minimatch", { paths: [lib] })).minimatch; } catch (e) { process.exit(3); }
+if (typeof mm !== "function") process.exit(3);
+const opts = { nonegate: true, nocomment: true, noext: true };
+const pats = process.argv[2].split(",").map(s => s.trim()).filter(Boolean);
+const hit = n => pats.some(p => n === p || mm(n, p, opts));
+const kinds = [];
+if (["a", "zz9-sch-sentinel"].every(hit)) kinds.push("unscoped");
+if (["@a/b", "@zz9-sch/sentinel"].every(hit)) kinds.push("scoped");
+process.stdout.write(kinds.join(" "));
+' "$npmdir" "$1" 2>/dev/null) || out=unknown
+  fi
+  if [ "$out" = unknown ]; then
+    case ",$(printf '%s' "$1" | tr -d ' ')," in
+      *",**,"*) out="unscoped scoped" ;;
+      *",*,"*)  out="unscoped" ;;
+    esac
+  fi
+  printf '%s\n' "$out"
+}
+
+# The age-gate row's verdict on an exclude list, as "STATUS<TAB>detail".
+scv_npm_exclude_verdict() { # <npm version> <window days> <list>
+  local where; where=$(pwd)
+  case "$(scv_npm_exclude_scope "$3")" in
+    "unscoped scoped")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches EVERY package name, scoped or not (asked of the matcher npm uses) - the gate is off for every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    unscoped)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name (asked of the matcher npm uses) - the gate is off for every package except scoped @org/name ones, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    scoped)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name (asked of the matcher npm uses) - the gate is off for every @org/name package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    unknown)
+      printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude). The matcher npm uses could not be loaded, so whether these patterns match every package was not tested' "$1" "$2" "$where" "$3" ;;
+    *)
+      printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude)' "$1" "$2" "$where" "$3" ;;
+  esac
+}
+# <<< npm exclude scope
+
 # ---------------------------------------------------------------- npm --------
 if have npm; then
   # `npm config get` is npm's own view after merging every config source. If it
@@ -665,7 +738,7 @@ if have npm; then
         # A repo .npmrc can exempt packages (min-release-age-exclude, npm 11.17)
         # or pin a cutoff date (before, npm 11.15), and both are read from the
         # working directory, as here. MEASURED on npm 11.19.1 and 12.2.2: a
-        # project `min-release-age-exclude[]=*` let every package through even
+        # project `min-release-age-exclude[]=*` let every UNSCOPED package through (scoped ones stayed gated on 11.19.1: see scv_npm_exclude_scope) even
         # with the env layer set (an exported empty list does NOT override it)
         # while this row printed OK. npm_age_gate_behaves below runs in a temp
         # dir and cannot see a repo file, so this check is not optional there.
@@ -674,16 +747,14 @@ if have npm; then
         case "$nexcl" in null|undefined) nexcl="" ;; esac
         nbefore=$(npm config get before 2>/dev/null | tr -d '\r')
         case "$nbefore" in null|undefined) nbefore="" ;; esac
-        case ",$(printf '%s' "$nexcl" | tr -d ' ')," in
-          *",*,"*) nexcl_all=1 ;;
-          *) nexcl_all=0 ;;
-        esac
-        if [ "$nexcl_all" -eq 1 ]; then
-          row GAP PARSED "npm age gate" "npm $nv reports min-release-age=$v but min-release-age-exclude=* in $(pwd) - every package skips the gate, and no exported setting overrides a repo's exclude list"
+        nxv=""
+        [ -n "$nexcl" ] && nxv=$(scv_npm_exclude_verdict "$nv" "$v" "$nexcl")
+        if [ "${nxv%%$'\t'*}" = GAP ]; then
+          row GAP PARSED "npm age gate" "${nxv#*$'\t'}"
         elif [ -n "$nbefore" ] && [ -z "${NPM_CONFIG_MIN_RELEASE_AGE:-}${npm_config_min_release_age:-}" ]; then
           row GAP PARSED "npm age gate" "npm $nv reports before=$nbefore in $(pwd), which replaces the min-release-age window when no NPM_CONFIG_MIN_RELEASE_AGE is set"
         elif [ -n "$nexcl" ]; then
-          row WEAK PARSED "npm age gate" "npm $nv enforces $v day(s) but $(pwd) exempts: $nexcl (min-release-age-exclude)"
+          row WEAK PARSED "npm age gate" "${nxv#*$'\t'}"
         elif [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
           row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this host declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
         elif [ "${SCV_BEHAVIORAL:-0}" = "1" ]; then

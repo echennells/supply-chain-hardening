@@ -445,6 +445,33 @@ bundler_project() { # dir
   [ ! -e "$m" ]
 }
 
+# Stage a project .npmrc with one exclude pattern and run the verifier there.
+npm_exclude_from() { # pattern
+  local d="$BATS_TEST_TMPDIR/np"
+  mkdir -p "$d"
+  printf '{"name":"np","version":"1.0.0"}\n' > "$d/package.json"
+  printf 'min-release-age-exclude[]=%s\n' "$1" > "$d/.npmrc"
+  verify_from "$d"
+}
+
+@test "verify: npm exclude patterns are judged by npm's own matcher (scoped and unscoped apart)" {
+  command -v npm >/dev/null 2>&1 || skip "npm not installed"
+  npm_exclude_from 'lodash'
+  echo "$output" | grep "npm age gate" | grep -q "does NOT implement" && skip "this npm predates the gate"
+  [ "$(cd "$BATS_TEST_TMPDIR/np" && npm config get min-release-age-exclude 2>/dev/null)" = lodash ] \
+    || skip "this npm predates min-release-age-exclude (11.17)"
+  echo "$output" | grep "npm age gate" | grep -q "^WEAK"
+  npm_exclude_from '**'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "EVERY package name, scoped or not"
+  npm_exclude_from '*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "every UNSCOPED package name"
+  npm_exclude_from '@*/*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "every SCOPED package name"
+}
+
 @test "verify: the footer counts PRESENT-only WEAK rows apart from caveated ones" {
   run "$VERIFY" --verbose
   all=$(echo "$output" | grep -cE '^WEAK ' || true)

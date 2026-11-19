@@ -944,3 +944,37 @@ esac"
   [[ "$output" != *"$weak_all row(s) verified only as PRESENT"* ]]
 }
 
+@test "npm exclude: the matcher block is byte-identical on both surfaces" {
+  block() { sed -n '/^# >>> npm exclude scope$/,/^# <<< npm exclude scope$/p' "$1"; }
+  role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+}
+
+# Stage a project .npmrc whose exclude list is $1, and run the verifier there.
+npm_exclude_run() {
+  mkdir -p "$BATS_TEST_TMPDIR/np"
+  printf '{"name":"np","version":"1.0.0"}\n' > "$BATS_TEST_TMPDIR/np/package.json"
+  printf 'min-release-age-exclude[]=%s\n' "$1" > "$BATS_TEST_TMPDIR/np/.npmrc"
+  cd "$BATS_TEST_TMPDIR/np"
+  run verify_sourced --emit=plain
+}
+
+@test "npm exclude: patterns are judged by npm's own matcher, scoped and unscoped apart" {
+  # MEASURED on npm 11.19.1, 99999-day window: '*' exempted lodash but not
+  # @types/node; '**' exempted both; '@*/*' every scoped package. The row
+  # compared entries with a literal '*': '*' read "every package", the rest WEAK.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_exclude_run 'lodash'
+  [[ "$output" == *"does NOT implement min-release-age"* ]] && skip "this npm predates the gate"
+  [ "$(npm config get min-release-age-exclude 2>/dev/null)" = lodash ] || skip "this npm predates min-release-age-exclude (11.17)"
+  [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: lodash"* ]]
+  npm_exclude_run '**'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches EVERY package name, scoped or not"* ]]
+  npm_exclude_run '*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every UNSCOPED package name"* ]]
+  [[ "$output" != *"EVERY package name"* ]]
+  npm_exclude_run '@*/*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every SCOPED package name"* ]]
+}
