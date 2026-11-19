@@ -267,7 +267,7 @@ suggest_for_repo() {
     fi
     if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
       found_any=1
-      notes+=("composer.json defines scripts. Lifecycle scripts (post-install-cmd, post-update-cmd, post-autoload-dump, ...) are skipped: the wrapper injects \`--no-scripts\`, COMPOSER_SKIP_SCRIPTS lists them as well, and there is no input to disable either. A script run by name still runs (\`composer test\`, \`composer run-script lint\`). Run a lifecycle event you need as its own step: \`COMPOSER_SKIP_SCRIPTS= composer run-script post-install-cmd\`.")
+      notes+=("composer.json defines scripts. Lifecycle scripts (post-install-cmd, post-update-cmd, post-autoload-dump, ...) are skipped: the wrapper injects \`--no-scripts\`, COMPOSER_SKIP_SCRIPTS lists them as well, and there is no input to disable either. A script run by name still runs (\`composer test\`, \`composer run-script lint\`); one whose name is also a prefix of a built-in command (\`check\`, \`req\`) is refused, so run it as \`composer run-script <name>\`. Run a lifecycle event you need as its own step: \`COMPOSER_SKIP_SCRIPTS= composer run-script post-install-cmd\`.")
     fi
   fi
 
@@ -1355,7 +1355,11 @@ EOF
 # "scripts-aliases") in the composer.json composer will read AND is not a
 # built-in command or a script event name; composer never lets a script shadow
 # a built-in, so a checkout with a script called "install" still gets
-# `composer install --no-scripts`. Full reasoning: templates/composer-wrapper.sh.j2.
+# `composer install --no-scripts`. A name that is a script AND a prefix of a
+# built-in (`req`, `upd`, `check`), or a "scripts-aliases" alias spelled like a
+# built-in (`i`, `upgrade`), is refused: composer runs the script there
+# (MEASURED on 2.7.1 and 2.11.2) although the caller typed a built-in.
+# Full reasoning: templates/composer-wrapper.sh.j2.
 
 # RUN-PROBE. Record that this wrapper actually executed.
 #
@@ -1392,33 +1396,60 @@ export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 
 # The subcommand is the first non-option token. -d/--working-dir is composer's
 # only value-taking global option, so its value is not the subcommand; it is
-# kept because it moves the composer.json composer reads.
+# kept because it moves the composer.json composer reads. In a cluster of short
+# options that ends in d (`-nd DIR`), d still takes the next token, but composer
+# does not change directory for it (MEASURED on 2.5.5, 2.7.1 and 2.11.2:
+# `composer -nd DIR test` ran the test script of the current directory), so
+# that value is skipped and not kept.
 SUBCOMMAND=""; WORKDIR=""; skip_next=0
 for arg in "$@"; do
   if [ "$skip_next" = 1 ]; then skip_next=0; WORKDIR="$arg"; continue; fi
+  if [ "$skip_next" = 2 ]; then skip_next=0; continue; fi
   case "$arg" in
     -d|--working-dir) skip_next=1; continue ;;
     --working-dir=*) WORKDIR="${arg#--working-dir=}"; continue ;;
     -d?*) WORKDIR="${arg#-d}"; continue ;;
+    --*) continue ;;
+    -?*d) case "${arg%d}" in *d*) ;; *) skip_next=2 ;; esac; continue ;;
     -*) continue ;;
   esac
   SUBCOMMAND="$arg"; break
 done
 
-# Names composer never runs as a script command. First every built-in command
-# and alias of composer 2.1.14, 2.2.6, 2.5.5, 2.7.1, 2.8.8, 2.9.5 and 2.11.2
-# (MEASURED: `composer list --format=json --no-plugins` in an empty directory),
-# which a script cannot shadow; then the twelve script event names
-# (Composer\Script\ScriptEvents, identical in 2.1.14, 2.2.6 and 2.11.2), which
-# composer never registers as commands.
-NOT_SCRIPT_COMMANDS=' _complete about archive audit browse bump cc check-platform-reqs clear-cache clearcache completion config create-project depends diagnose dump-autoload dumpautoload exec fund global help home i info init install licenses list outdated policy prohibits r reinstall remove repo repository require rm run run-script search self-update selfupdate show status suggests u uninstall update upgrade validate why why-not pre-install-cmd post-install-cmd pre-update-cmd post-update-cmd pre-status-cmd post-status-cmd pre-autoload-dump post-autoload-dump post-root-package-install post-create-project-cmd pre-archive-cmd post-archive-cmd '
+# Every built-in command and alias of composer 2.1.14, 2.2.6, 2.5.5, 2.7.1,
+# 2.8.8, 2.9.5 and 2.11.2 (MEASURED: `composer list --format=json --no-plugins`
+# in an empty directory). A script cannot shadow one of these names.
+# This is a fixed list, not an answer from the composer on this host. A built-in
+# added after 2.11.2 is missing from it, so a project script of that name would
+# not get --no-scripts while composer runs the built-in; and on a composer older
+# than a name here (audit and bump on 2.2), a script of that name gets
+# --no-scripts and runs nothing. Add new built-ins here when composer ships them.
+BUILTIN_COMMANDS=' _complete about archive audit browse bump cc check-platform-reqs clear-cache clearcache completion config create-project depends diagnose dump-autoload dumpautoload exec fund global help home i info init install licenses list outdated policy prohibits r reinstall remove repo repository require rm run run-script search self-update selfupdate show status suggests u uninstall update upgrade validate why why-not '
+# The twelve script event names (Composer\Script\ScriptEvents, identical in
+# 2.1.14, 2.2.6 and 2.11.2). Composer never registers them as commands.
+SCRIPT_EVENTS=' pre-install-cmd post-install-cmd pre-update-cmd post-update-cmd pre-status-cmd post-status-cmd pre-autoload-dump post-autoload-dump post-root-package-install post-create-project-cmd pre-archive-cmd post-archive-cmd '
 
-# The "scripts" keys and their "scripts-aliases" in the composer.json composer
-# will read: $COMPOSER (default composer.json) in the -d directory or the
-# current one, else the nearest parent below $HOME that has one (composer's
-# use-parent-dir walk). json_decode is what composer uses to register script
-# commands, so both read the file the same way. Nothing from the project runs.
-root_script_names() {
+# The built-ins whose name starts with $1, ignoring case: what composer's console
+# resolves a name to when no command has exactly that name (a unique prefix,
+# case-sensitive first, then case-insensitive).
+builtins_starting_with() {
+  local want b out=""
+  want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  for b in $BUILTIN_COMMANDS; do
+    case "$b" in "$want"*) out="${out:+$out, }$b" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# How the composer.json composer will read defines the name $1: prints "key"
+# for a "scripts" key, "alias<TAB><key>" for a "scripts-aliases" alias of a
+# key, and nothing otherwise. It finds the file the way composer does:
+# $COMPOSER (default composer.json) in the -d directory or the current one, else
+# the nearest parent below $HOME that has one (composer's use-parent-dir walk).
+# It decodes it with json_decode, as composer does when it registers script
+# commands, so the two read the same file the same way. php is whatever runs
+# composer itself. Nothing is executed from the project.
+root_script_def() {
   local f="${COMPOSER:-composer.json}" dir home
   case "$f" in
     /*) ;;
@@ -1437,16 +1468,22 @@ root_script_names() {
   [ -f "$f" ] && [ -r "$f" ] || return 0
   php -r '
     $j = json_decode((string) file_get_contents($argv[1]), true);
+    $n = $argv[2];
     if (!is_array($j) || !isset($j["scripts"]) || !is_array($j["scripts"])) exit(0);
-    $names = array_keys($j["scripts"]);
-    if (isset($j["scripts-aliases"]) && is_array($j["scripts-aliases"])) {
-      foreach ($j["scripts-aliases"] as $script => $aliases) {
-        if (isset($j["scripts"][$script])) foreach ((array) $aliases as $a) $names[] = $a;
+    if (array_key_exists($n, $j["scripts"])) { echo "key\n"; exit(0); }
+    if (!isset($j["scripts-aliases"]) || !is_array($j["scripts-aliases"])) exit(0);
+    foreach ($j["scripts-aliases"] as $script => $aliases) {
+      if (isset($j["scripts"][$script]) && in_array($n, (array) $aliases, true)) {
+        echo "alias\t", preg_replace("/[[:cntrl:]]/", "?", (string) $script), "\n"; exit(0);
       }
-    }
-    foreach ($names as $n) {
-      if ((is_string($n) || is_int($n)) && strpbrk((string) $n, "\r\n") === false) echo $n, "\n";
-    }' "$f" 2>/dev/null
+    }' "$f" "$1" 2>/dev/null
+}
+
+# A name composer may run as a project script while the caller typed a built-in
+# (see the header): refuse it, and say how to ask for each one unambiguously.
+refuse_script_name() { # $1 = what the project defines it as, $2 = the built-in(s), $3 = the script
+  echo "[supply-chain-harden] refusing 'composer $SUBCOMMAND': '$SUBCOMMAND' is $1 in this project's composer.json and also names composer's built-in '$2'. Composer would run the project's script, with scripts enabled, instead of the built-in. Run the script with 'composer run-script $3', or the built-in by its full name." >&2
+  exit 2
 }
 
 EXPLICIT_SCRIPT=false
@@ -1454,9 +1491,24 @@ case "$SUBCOMMAND" in
   run-script|run) EXPLICIT_SCRIPT=true ;;
   '') ;;
   *)
-    case "$NOT_SCRIPT_COMMANDS" in
-      *" $SUBCOMMAND "*) ;;
-      *) if root_script_names | grep -qxF -- "$SUBCOMMAND"; then EXPLICIT_SCRIPT=true; fi ;;
+    case "$SCRIPT_EVENTS" in *" $SUBCOMMAND "*) ;; *)
+      SCRIPT_DEF=$(root_script_def "$SUBCOMMAND")
+      case "$BUILTIN_COMMANDS" in
+        *" $SUBCOMMAND "*)
+          # composer skips a scripts KEY named after a built-in, not an alias
+          case "$SCRIPT_DEF" in
+            alias*) refuse_script_name "a scripts-aliases alias" "$SUBCOMMAND" "${SCRIPT_DEF#alias?}" ;;
+          esac ;;
+        *)
+          case "$SCRIPT_DEF" in
+            key|alias*)
+              also=$(builtins_starting_with "$SUBCOMMAND")
+              script="$SUBCOMMAND"; kind="a script"
+              case "$SCRIPT_DEF" in alias*) script="${SCRIPT_DEF#alias?}"; kind="a scripts-aliases alias" ;; esac
+              [ -z "$also" ] || refuse_script_name "$kind" "$also" "$script"
+              EXPLICIT_SCRIPT=true ;;
+          esac ;;
+      esac ;;
     esac ;;
 esac
 
