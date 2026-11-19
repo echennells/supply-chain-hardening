@@ -119,6 +119,16 @@ a Dockerfile.
 > `RUNNER_TEMP`, so it goes to the job user's `~/.cache/supply-chain-hardening/`
 > unless `HARDENING_ENV_FILE` says otherwise. Not tested on either.
 
+**The uv and pip cutoffs do not refresh.** Both gates are an absolute date that
+`harden.sh` computes when it runs (`release_age_hours` before now). A CI job
+re-hardens every run, so it never notices. A long-lived host hardened with
+`--emit=plain` keeps that date until `harden.sh` runs again, and the verifier
+starts calling it a freeze after 7 days. Re-run the two lines above (cron is
+fine), and re-source the env file in any shell that sourced the old one: it
+carries `PIP_UPLOADED_PRIOR_TO`, which outranks `pip.conf`. A plain run ends
+with a one-line reminder. The Ansible role installs
+`supply-chain-age-gate-refresh.timer` for this; the action has none.
+
 For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
 hardening into an image and skip the adapter question altogether.

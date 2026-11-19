@@ -82,6 +82,10 @@ This path was built for CI, so it is narrower than the role:
 
 - The env file only reaches shells that source it.
 - It wraps binaries and writes `/etc` with `sudo` where it can.
+- **Nothing refreshes the uv and pip cutoffs.** They are a fixed date, set when
+  `harden.sh` runs. On a host you keep, re-run the three lines above to move
+  them, and re-source the env file in any shell that sourced the old one. The
+  role installs a timer for this.
 - CI only exercises the GitHub path, so treat `plain` as less tested. GitLab and
   Buildkite shell runners are not tested at all.
 

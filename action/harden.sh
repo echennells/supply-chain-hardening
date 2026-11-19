@@ -3303,3 +3303,11 @@ if [ -n "$part_list$none_list" ]; then
 else
   log "done (emit=$PLATFORM). applied: ${eff_list:-none}"
 fi
+
+# The uv and pip gates are an ABSOLUTE cutoff computed above, so on a host that
+# keeps this hardening they freeze at this run (VM#16: the plain path has no
+# refresh, by design). A CI job re-hardens every run and never notices; a
+# long-lived host does, so plain mode says so once, at the end.
+if [[ "$PLATFORM" == "plain" ]] && [[ " ${HARDENED[*]:-} " == *" uv "* || " ${HARDENED[*]:-} " == *" pip "* ]]; then
+  notice "the uv/pip age-gate cutoff is fixed at $UV_EXCLUDE_NEWER and nothing advances it. On a long-lived host, re-run harden.sh (and re-source $HARDENING_ENV_FILE) to move it, or apply the Ansible role, which installs a refresh timer."
+fi

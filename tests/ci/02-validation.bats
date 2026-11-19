@@ -189,6 +189,17 @@ setup() { common_setup; }
   [[ "$output" == *"HARDENING_OUTPUT_FILE"* ]]
 }
 
+@test "plain mode says once that nothing refreshes the uv/pip cutoff" {
+  run harden ECOSYSTEMS=npm,pip -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"age-gate cutoff is fixed at"*"re-run harden.sh"* ]]
+  # A CI job re-hardens every run: the reminder is noise there.
+  run harden GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT="$TEST_TMP/ghout" \
+             GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum" ECOSYSTEMS=npm,pip
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"age-gate cutoff is fixed at"* ]]
+}
+
 @test "an unwritable env file path fails loudly with the path named" {
   run env -i PATH="$PATH" HOME="$TEST_HOME" \
     HARDENING_ENV_FILE=/proc/cannot/write.env \
