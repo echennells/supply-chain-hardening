@@ -905,3 +905,17 @@ echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   [ "$(table_rows "$output")" -eq "$base" ]
   [[ "$output" == *'ignore-scripts=x\c'* ]]
 }
+
+@test "go: 'settings persisted' is OK from go env -w alone, and a GAP when GOTOOLCHAIN=local did not persist" {
+  # The probe used to be GOFLAGS=-mod=readonly, which harden.sh no longer writes
+  # (it made go ignore vendor/). GOTOOLCHAIN=local is the persisted setting that
+  # differs from go's default, so it is what tells "persisted" from "not".
+  stub_go_env
+  harden ECOSYSTEMS=go -- --emit=plain >/dev/null
+  run verify -- --emit=plain
+  [[ "$output" == *"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
+
+  sed -i '/^GOTOOLCHAIN=/d' "$TEST_HOME/.config/go/env"
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP"*"go settings persisted"*"GOTOOLCHAIN='<unset>'"* ]]
+}

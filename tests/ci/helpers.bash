@@ -143,6 +143,26 @@ stub_symlink() {
   ln -s "$target" "${TEST_BIN}/${name}"
 }
 
+# stub_go_env
+#
+# A go that implements just `version` and `go env` (read, -w, -u, GOENV)
+# against a GOENV file under $HOME, with go's precedence: the environment wins
+# over the file. Enough to observe what harden.sh persists with `go env -w`
+# and what verify.sh reads back with the environment stripped.
+stub_go_env() {
+  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; touch "$f"
+case "${1:-}" in
+  version) echo "go version go1.27.4 linux/amd64" ;;
+  env) shift
+    case "${1:-}" in
+      -w) shift; for kv in "$@"; do k=${kv%%=*}; grep -v "^$k=" "$f" > "$f.t" || true; mv "$f.t" "$f"; echo "$kv" >> "$f"; done ;;
+      -u) shift; for k in "$@"; do grep -v "^$k=" "$f" > "$f.t" || true; mv "$f.t" "$f"; done ;;
+      GOENV) echo "$f" ;;
+      *) if v=$(printenv "$1"); then echo "$v"; else grep "^$1=" "$f" | cut -d= -f2-; fi ;;
+    esac ;;
+esac'
+}
+
 # The real binary harden.sh moved aside when it wrapped our stub.
 stub_real() { echo "${TEST_BIN}/${1}-real"; }
 
