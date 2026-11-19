@@ -27,6 +27,14 @@ scv_want_hours() {
   return 0
 }
 
+# cq() quotes a value for a row detail. It is a pass-through; the comment at the
+# composer section says why it stays. Defined HERE, before its first caller: the
+# poetry rows call it, and they run before the composer section. When it was
+# defined only down there, bash had not seen it yet, every poetry detail that
+# named a value or a directory printed blank fields, and stderr said
+# "cq: command not found" (MEASURED, action/verify.sh with a poetry exclude list).
+cq() { printf '%s' "$1"; }
+
 
 # ======================================================================
 # HOST TOOL DISCOVERY  (ECH-189, generalised)
@@ -1677,7 +1685,7 @@ composer_ignore_map() { printf '%s\n' "$1" | sed -n 's|^\[policy\.cooldown\.igno
 # kept as a PASS-THROUGH rather than deleted so its 24 call sites stay valid
 # and the intent stays greppable. If a renderer is ever reverted to using
 # $ROWS as a format string, restore the sed and revert BOTH renderers with it.
-cq() { printf '%s' "$1"; }
+# (cq() itself is defined at the top of this file, before the poetry rows use it.)
 # first useful line of a composer failure. The first line of composer's output
 # is often NOT the cause: MEASURED, a wrapper injecting a bogus flag leads with
 # "Composer could not detect the root package (a/b) version, defaulting to

@@ -600,6 +600,10 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"WEAK   PARSED      poetry publish-age gate"* ]]
   [[ "$output" == *"exempts"* ]]
+  # The detail must NAME what is exempt and where. These fields used to print
+  # blank: cq() was defined below the poetry rows, so bash had not seen it yet.
+  [[ "$output" == *'exempts ["six"] in '* ]]
+  [[ "$output" != *"cq: command not found"* ]]
   poetry_age_stub 2.5.1 1
   harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
