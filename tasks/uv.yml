@@ -205,6 +205,17 @@
       exec "$UV" pip "$@"
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
+- name: Record skipped protection — pip / pip3 wrapper (uv absent)
+  # The wrappers are deployed only when uv exists (they exec it; without it they
+  # would refuse every pip call). The summary used to say nothing when they were
+  # skipped, and pip.yml's age-gate entry even claimed "the deployed
+  # /usr/local/bin/pip already does" route installs through uv. MEASURED on the
+  # VM matrix: no stock image ships uv, so no wrapper on any of them.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — uv is not installed, so /usr/local/bin/pip and /usr/local/bin/pip3 were not deployed and `pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. Install uv and re-apply.'] }}
+  when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
+
 - name: Install uv-managed tools
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and

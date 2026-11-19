@@ -220,8 +220,11 @@
       {% for item in skipped_protections %}
         {{ loop.index }}. {{ item }}
       {% endfor %}
-      Everything else in the role applied normally. Install the missing
-      prerequisite and re-run to close these gaps.
+      This list is only what the role knew it skipped while applying; it does
+      not show that everything else is in effect.
+      {% if verify_protections | default(true) | bool %}The supply-chain-verify report that follows asks each tool: read its GAP and WEAK rows.{% else %}Run supply-chain-verify, which asks each tool, and read its GAP and WEAK rows.{% endif %}
+
+      Install the missing prerequisite and re-run to close the gaps listed here.
   when: skipped_protections | default([]) | length > 0
   tags: always
 

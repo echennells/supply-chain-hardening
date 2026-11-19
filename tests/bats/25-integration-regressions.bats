@@ -252,6 +252,94 @@ task_block() { # file, task-name substring
   [ "$changed" = "0" ]
 }
 
+# Runs after every test in this file. A no-op unless a test left uv hidden,
+# which must never outlive the test that hid it.
+teardown() {
+  restore_uv
+}
+
+UV_HIDDEN=""
+hide_uv() {
+  local p
+  p=$(command -v uv 2>/dev/null) || return 1
+  [ -w "$(dirname "$p")" ] || return 1
+  mv "$p" "$p.bats-hidden" && UV_HIDDEN="$p"
+  hash -r
+  # uv.yml also looks in these; the test only means something if none has one.
+  if command -v uv >/dev/null 2>&1 || [ -x /usr/local/bin/uv ] || [ -x /usr/bin/uv ] || [ -x "$HOME/.local/bin/uv" ]; then
+    restore_uv
+    return 1
+  fi
+}
+restore_uv() {
+  if [ -n "$UV_HIDDEN" ] && [ -e "$UV_HIDDEN.bats-hidden" ]; then mv -f "$UV_HIDDEN.bats-hidden" "$UV_HIDDEN"; fi
+}
+
+# ---- The end-of-run summary ----
+#
+# MEASURED on every stock VM: the "NOT applied" summary left out npm < 11.10
+# (no age gate), Yarn classic / Yarn < 4.10, and the pip wrapper when uv is
+# absent; told the operator the pip wrapper "already does" route through uv
+# when there was none; and closed with "Everything else in the role applied
+# normally". A stub yarn first on PATH stands in for each Yarn version.
+
+make_yarn_stub() { # make_yarn_stub <version>
+  YARN_STUB=$(mktemp -d /tmp/sch-yarn-stub.XXXXXX)
+  printf '#!/bin/sh\necho %s\n' "$1" > "$YARN_STUB/yarn"
+  chmod 755 "$YARN_STUB" "$YARN_STUB/yarn"
+}
+
+summary_of() { # the summary task's msg, one line per entry
+  echo "$1" | grep -A2 'Report protections that were NOT applied' | grep '"msg"' | sed 's/\\n/\n/g'
+}
+
+@test "summary: npm < 11.10, Yarn classic and a missing pip wrapper are listed, and nothing claims the rest applied" {
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "moves the image's uv aside"
+  hide_uv || skip "no uv this test can hide"
+  make_yarn_stub 1.22.22
+  cd "$ROLE_DIR"
+  run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npm,yarn,pip -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  restore_uv; rm -rf "$YARN_STUB"
+  local sum; sum=$(summary_of "$output")
+  echo "$sum"
+  [ "$status" -eq 0 ]
+  echo "$sum" | grep -q 'Yarn hardening — yarn 1.22.22 is Yarn classic, which never reads .yarnrc.yml'
+  echo "$sum" | grep -q 'pip / pip3 wrapper — uv is not installed, so /usr/local/bin/pip and /usr/local/bin/pip3 were not deployed'
+  if echo "$sum" | grep -qE 'deployed /usr/local/bin/pip already does|Everything else in the role applied normally'; then
+    echo "the summary still claims coverage it does not have" >&2
+    false
+  fi
+  echo "$sum" | grep -q 'supply-chain-verify'
+  local nv; nv=$(npm --version 2>/dev/null)
+  if [ -n "$nv" ] && [ "$(printf '%s\n11.10.0\n' "$nv" | sort -V | head -1)" != 11.10.0 ]; then
+    echo "$sum" | grep -q "npm publish-age gate — npm $nv does not implement min-release-age"
+  else
+    if echo "$sum" | grep -q 'npm publish-age gate'; then echo "npm $nv listed as lacking the gate" >&2; false; fi
+  fi
+}
+
+@test "summary: Yarn 2.x-4.9 is listed without its age gate; Yarn 4.10+ is not listed" {
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  cd "$ROLE_DIR"
+  make_yarn_stub 4.1.0
+  run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags yarn -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  rm -rf "$YARN_STUB"
+  [ "$status" -eq 0 ]
+  summary_of "$output" | grep -q 'Yarn publish-age gate — yarn 4.1.0 does not implement npmMinimalAgeGate (added in Yarn 4.10.0)'
+  make_yarn_stub 4.10.3
+  run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags yarn -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  rm -rf "$YARN_STUB"
+  [ "$status" -eq 0 ]
+  if echo "$output" | grep -qE 'Yarn (hardening|publish-age gate) — yarn 4.10.3'; then
+    echo "yarn 4.10.3 listed as missing a protection" >&2
+    false
+  fi
+}
+
 # --- check-mode support ---------------------------------------------------
 # QA found that `--check` was not merely imprecise but actively misleading:
 # the pre-flight GNU-date probe skipped, came back empty, and hard-aborted the

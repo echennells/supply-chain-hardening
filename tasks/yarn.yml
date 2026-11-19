@@ -29,6 +29,31 @@
   ansible.builtin.set_fact:
     yarn_detected_version: "{{ yarn_version_check.stdout | default('') | trim }}"
 
+# The template below is written whatever the version, so it is ready when Yarn
+# is upgraded. These two records stop the summary from reading as coverage on a
+# Yarn that ignores it. The verifier's yarn rows are the runtime check.
+- name: Record skipped protection — Yarn classic never reads .yarnrc.yml
+  # MEASURED (yarn 1.22.22 via corepack, node 24): a dependency postinstall RAN
+  # with ~/.yarnrc.yml enableScripts: false, ~/.npmrc ignore-scripts=true,
+  # NPM_CONFIG_IGNORE_SCRIPTS=true and npm_config_ignore_scripts=true each in
+  # place; only `yarn install --ignore-scripts` stopped it.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Yarn hardening — yarn ' ~ yarn_detected_version ~ ' is Yarn classic, which never reads .yarnrc.yml, so none of the yarn settings this role writes apply: dependency install scripts run and there is no age gate. The npm-side layers do not reach it either (MEASURED on 1.22.22: a postinstall ran with ~/.npmrc ignore-scripts=true and NPM_CONFIG_IGNORE_SCRIPTS=true; only `yarn install --ignore-scripts` stopped it). Move the project to Yarn >= 4.10 (corepack) and re-apply.'] }}
+  when:
+    - yarn_detected_version is match('^1[.]')
+
+- name: Record skipped protection — Yarn age gate (Yarn 2.x to 4.9)
+  # MEASURED via corepack: `yarn config get npmMinimalAgeGate` is a usage error
+  # (unknown setting) on 4.9.4 and reports the value on 4.10.0 and 4.10.3.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Yarn publish-age gate — yarn ' ~ yarn_detected_version ~ ' does not implement npmMinimalAgeGate (added in Yarn 4.10.0). The key is written and activates on upgrade; until then `yarn install` accepts a release published seconds ago.'] }}
+  when:
+    - yarn_detected_version is match('^[0-9]+[.][0-9]+')
+    - yarn_detected_version is version('2.0.0', '>=')
+    - yarn_detected_version is version('4.10.0', '<')
+
 - name: Deploy hardened global .yarnrc.yml
   ansible.builtin.template:
     src: yarnrc.yml.j2
