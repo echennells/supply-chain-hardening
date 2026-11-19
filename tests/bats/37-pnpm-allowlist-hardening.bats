@@ -59,7 +59,8 @@ setup_file() {
         mode: "0644"
       vars:
         pnpm_minimum_release_age_exclude: []
-    # Build-script allowlist set (the pnpm <= 10 path: ignore-scripts flips false).
+        pnpm_built_dependencies: []
+    # Build-script allowlist set: ignore-scripts flips false in BOTH files.
     - ansible.builtin.template:
         src: $ROLE_DIR/templates/pnpm-rc.j2
         dest: "$RENDER_DIR/allow-rc"
@@ -73,6 +74,7 @@ setup_file() {
         mode: "0644"
       vars:
         pnpm_minimum_release_age_exclude: ["@myorg/internal"]
+        pnpm_built_dependencies: ["esbuild"]
     # Explicit opt-in: an operator who sets the variable still gets the key.
     - ansible.builtin.template:
         src: $ROLE_DIR/templates/pnpm-rc.j2
@@ -186,9 +188,17 @@ EOF
   ! grep -q "prefer-frozen-lockfile" "$RENDER_DIR/allow-rc"
 }
 
-@test "render(allowlist): config.yaml stays strict (pnpm 11 allowlists per-project) and valid" {
+@test "render(allowlist): config.yaml flips ignoreScripts: false like the rc and the action, and stays valid" {
+  # pnpm 11+ has no global allowlist; a project names its builds in allowBuilds.
+  # MEASURED on 11.28.12 / 12.21.0: under a global ignoreScripts: true that
+  # allowBuilds is silently inert (rc=0, the approved postinstall never runs).
+  # The role kept true here while its rc and the action flipped to false, so an
+  # operator who set pnpm_built_dependencies got no approved build on pnpm 11+.
   assert_valid_yaml "$RENDER_DIR/allow-config.yaml"
-  grep -q "^ignoreScripts: true$" "$RENDER_DIR/allow-config.yaml"
+  grep -q "^ignoreScripts: false$" "$RENDER_DIR/allow-config.yaml"
+  [ "$(grep -c "^ignoreScripts" "$RENDER_DIR/allow-config.yaml")" = 1 ]
+  # The names are NOT written: pnpm 11 rejects onlyBuiltDependencies here.
+  [ "$(grep -v '^#' "$RENDER_DIR/allow-config.yaml" | grep -ci "esbuild")" = 0 ]
   grep -q "^verifyStoreIntegrity: true$" "$RENDER_DIR/allow-config.yaml"
 }
 

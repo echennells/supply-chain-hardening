@@ -261,19 +261,34 @@ pnpm_minimum_release_age_strict: true
 # updates and want to install them immediately rather than wait for the gate.
 # Example: pnpm_minimum_release_age_exclude: ["@myorg/internal-pkg", "scoped/own"]
 pnpm_minimum_release_age_exclude: []
-# Build-script allowlist (`only-built-dependencies`). TAKES EFFECT ON PNPM 10
-# ONLY: pnpm 11+ ignores it in the global config and has no global allowlist
-# (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, list the packages as
-# `allowBuilds` in the project's pnpm-workspace.yaml.
-# Empty list (default) → block all build scripts via ignore-scripts=true.
-# Non-empty list → only these packages' build scripts may run (pnpm 10);
-# everything else is blocked.
+# Build-script allowlist (`only-built-dependencies`). The NAMES take effect on
+# pnpm 10 only: pnpm 11+ ignores the list in the global config and has no
+# global allowlist (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, a project
+# lists the packages as `allowBuilds` in its own pnpm-workspace.yaml.
+# Empty list (default) → ignore-scripts=true / ignoreScripts: true: no build
+# script runs, for any package or project, on any pnpm.
+# Non-empty list → ignore-scripts=false in BOTH pnpm files (as the GitHub
+# Action does):
+#   pnpm 10: only these packages' build scripts may run.
+#   pnpm 11+: a dependency named in the project's `allowBuilds` builds, and any
+#     other is refused with ERR_PNPM_IGNORED_BUILDS. The project's own
+#     lifecycle scripts (package.json postinstall etc.) also run.
+# On pnpm 11+ with the DEFAULT empty list, `allowBuilds` alone does nothing:
+# MEASURED on 11.28.12 and 12.21.0, `allowBuilds: {esbuild: true}` under the
+# role's `ignoreScripts: true` installed with rc=0 and no message, and esbuild's
+# postinstall did not run. That project's pnpm-workspace.yaml needs
+#   ignoreScripts: false
+#   allowBuilds:
+#     esbuild: true
+# which re-enables scripts for that one project only (its own lifecycle scripts
+# included); every dependency it does not name is still refused, loudly.
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 #
 # IMPORTANT: this allowlist is user-scoped only. /etc/npmrc carries the
 # strict default (`ignore-scripts=true`) for sudo / other-user / cron
-# coverage. The allowlist is written to ~/.config/pnpm/rc (and pnpm 11's
-# ~/.config/pnpm/config.yaml) for the deploying user. Consequence:
+# coverage. The allowlist is written to ~/.config/pnpm/rc (and its
+# ignoreScripts: false to pnpm 11's ~/.config/pnpm/config.yaml) for the
+# deploying user. Consequence:
 # `sudo pnpm install` in a project requiring esbuild's postinstall will
 # hit /etc/npmrc's blanket block and the install will be broken, despite
 # the operator having configured the allowlist. This is intentional —

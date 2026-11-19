@@ -924,7 +924,9 @@ harden_pnpm() {
   #
   # `ignoreScripts: false` with an allowlist is NOT a fail-open: pnpm 10+
   # default-denies dependency build scripts regardless (the approve-builds
-  # gate), and false is what lets a project's allowBuilds take effect.
+  # gate), and false is what lets a project's allowBuilds take effect. It does
+  # let the project's own lifecycle scripts run (MEASURED on pnpm 11.28.12 and
+  # 12.21.0); the role's pnpm-config.yaml.j2 makes the same trade.
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
