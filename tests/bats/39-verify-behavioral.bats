@@ -352,3 +352,22 @@ EOF
   run "$VERIFY" --quiet
   [ "$j" -eq "$status" ]
 }
+
+@test "verify: a PATH wrapper that runs but refuses this account is GAP, not OK" {
+  # The row graded "the wrapper ran" as OK FUNCTIONAL. The pip-to-uv wrapper
+  # records that run and then REFUSES (exit 126) an account whose only uv
+  # belongs to another account (VM#2), so pip does not work for that account at
+  # all. Staged here for root: the copy's baked uv is owned by uid 1, and
+  # neither a system uv nor root's own ~/.local/bin is reachable.
+  [ "$(id -u)" = 0 ] || skip "needs root to stage another account's uv"
+  [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
+  [ -x /usr/local/bin/uv ] || [ -x /usr/bin/uv ] && skip "a system uv exists and would be used"
+  d=$(mktemp -d /tmp/sch-vpip.XXXXXX); chmod 755 "$d"
+  printf '#!/bin/sh\necho "uv 9.9.9"\n' > "$d/uv"; chmod 755 "$d/uv"; chown 1 "$d/uv"
+  sed "s#^UV=.*#UV='$d/uv'#" /usr/local/bin/pip > "$FAKEBIN/pip"; chmod 755 "$FAKEBIN/pip"
+  run env -i HOME=/nonexistent PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" "$VERIFY"
+  rm -rf "$d"
+  echo "$output" | grep -E 'pip PATH wrapper'
+  echo "$output" | grep -qE '^GAP +FUNCTIONAL +pip PATH wrapper .*REFUSES this account'
+  echo "$output" | grep -qE '^GAP +FUNCTIONAL +pip PATH wrapper .*pip-to-uv wrapper'
+}

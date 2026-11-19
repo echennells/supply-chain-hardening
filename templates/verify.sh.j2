@@ -888,18 +888,29 @@ describe_binary() {
 # can observe instead of infer — which is what upgrades the row from PRESENT
 # to genuine FUNCTIONAL evidence.
 SCV_WRAPPER_RAN_PATH=""
+SCV_WRAPPER_REFUSAL=""
 wrapper_ran() {
   w="$1"
   SCV_WRAPPER_RAN_PATH=""
+  SCV_WRAPPER_REFUSAL=""
   probe=$(mktemp 2>/dev/null) || return 2
   # RUSTUP_AUTO_INSTALL=0: one of these tools is cargo, a rustup proxy that
   # downloads its toolchain to answer --version when it is not installed
   # (MEASURED: 757 MB). Only rustup reads the variable.
   if have timeout; then
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+    _wr_err=$(RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version 2>&1 >/dev/null; echo "rc=$?")
   else
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+    _wr_err=$(RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version 2>&1 >/dev/null; echo "rc=$?")
   fi
+  # RAN IS NOT WORKS. The run-probe fires first thing, so a wrapper that then
+  # REFUSES this account still records a run. The pip-to-uv wrapper exits 126
+  # with a [supply-chain-hardening] error when the only uv it finds belongs to
+  # another account (VM#2): pip does not work for this account at all, yet this
+  # row read OK FUNCTIONAL for root on such a host. Exit 126 plus an attributed
+  # error line, so a shell's own 126 (not executable) is not mistaken for it.
+  case "$_wr_err" in
+    *"rc=126") SCV_WRAPPER_REFUSAL=$(printf '%s\n' "$_wr_err" | grep -m1 'supply-chain-harden[a-z]*\] error: ') ;;
+  esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if [ -f "$line" ] && grep -q "supply-chain-harden" "$line" 2>/dev/null; then
@@ -926,7 +937,9 @@ for w in $SCV_WRAPPERS; do
     # before the recursion guard, so an orphaned wrapper records a run and
     # then exits 127 on every call. Running is necessary, not sufficient.
     target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$SCV_WRAPPER_RAN_PATH" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
-    if [ -n "$target" ] && [ -x "$target" ]; then
+    if [ -n "$SCV_WRAPPER_REFUSAL" ]; then
+      row GAP FUNCTIONAL "$w PATH wrapper" "wrapper at $SCV_WRAPPER_RAN_PATH ran but REFUSES this account ($(id -un 2>/dev/null)), exit 126, so \`$w\` does not work here: ${SCV_WRAPPER_REFUSAL#*error: }"
+    elif [ -n "$target" ] && [ -x "$target" ]; then
       if [ "$SCV_WRAPPER_RAN_PATH" = "$p" ]; then
         row OK FUNCTIONAL "$w PATH wrapper" "observed running when $w was invoked (at $p); callers bypassing PATH are unaffected"
       else

@@ -2332,6 +2332,11 @@ cargo_embedded() { # <VAR> <wrapper>
   grep -oE "^$1='[^']*'" "$2" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//"
 }
 
+# Is directory $1 this caller's own, or root's? find(1), not stat(1): portable.
+cargo_dir_callers_or_roots() {
+  [ -O "$1" ] || [ -n "$(find "$1" -maxdepth 0 -user 0 2>/dev/null)" ]
+}
+
 cargo_positive_int() {
   case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
   [ "$1" -gt 0 ] 2>/dev/null
@@ -2543,6 +2548,17 @@ else
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper's delegate '$creal' does not execute at all (${cerr}) - \`cargo build\` is broken, not gated"
     fi
+  elif [ -n "$cw" ] && cprep=$(cargo_embedded COOLDOWN_BIN "$cw") && [ -n "$cprep" ] && [ -d "$cprep" ] \
+       && ! cargo_dir_callers_or_roots "$cprep"; then
+    # A WRAPPER FROM BEFORE THE BACKEND HAD A FIXED PATH, reached by an account
+    # that does not own the directory it prepends. MEASURED (VM#2, reproduced
+    # on Ubuntu 26.04 with apt cargo 1.93.1): such a /usr/bin/cargo made
+    # `sudo -H cargo build` and a second account's build run the deploying
+    # user's cargo-cooldown and ~/.cargo/bin/cargo. The dispatch probe below
+    # would still see `cooldown build` and credit the gate. The role re-renders
+    # these on apply; this row is for a host where that has not happened.
+    row GAP FUNCTIONAL "cargo publish-age gate" \
+      "the wrapper at $cw was rendered before the gate backend had a fixed path: it PREPENDS $cprep to PATH, a directory owned by $(ls -ld "$cprep" 2>/dev/null | awk '{print $3}'), not by $( [ "$(id -u)" = 0 ] && echo root || echo "$(id -un 2>/dev/null) or root"), so this account's \`cargo build\` runs that account's cargo-cooldown, and any cargo or rustc there, ahead of its own. Re-apply the role (or re-run harden.sh) to re-render it with a root-owned backend"
   elif [ -z "$cdisp" ] && crefuse=$(cargo_wrapper_refusal) && [ -n "$crefuse" ]; then
     row GAP FUNCTIONAL "cargo publish-age gate" \
       "the wrapper at $cw REFUSES its gate backend for this account ($(id -un 2>/dev/null)), so \`cargo build\` fails here rather than run a binary another account could replace. Its message: ${crefuse#*error: }"
