@@ -32,6 +32,23 @@
             <mirrorOf>*</mirrorOf>
           </mirror>
         </mirrors>
+        <!-- Refuse an artifact whose content does not match its published
+             checksum (Maven's default is 'warn', which installs it anyway).
+             Maven keeps TWO repository lists: <repositories> for dependencies
+             and <pluginRepositories> for plugins. The super POM declares
+             'central' in both, so redefining it only under <repositories>
+             left plugin jars - code that runs inside the build - on 'warn'.
+             MEASURED (maven 3.9.11, a plugin jar served with a wrong .sha1
+             through this file's mirror): two checksum WARNINGs and BUILD
+             SUCCESS; a dependency jar with a wrong .sha1 failed the build.
+             A mirror does not close that: it inherits the policy of the
+             repository it replaces, per list.
+             Both entries also restore the super POM's
+             <snapshots><enabled>false</enabled>: a redefinition without it
+             turned snapshot lookups on Central back on (MEASURED: a
+             1.0-SNAPSHOT dependency resolved from Central with this file and
+             was not looked up there with no settings at all). The plugin
+             entry keeps the super POM's releases updatePolicy=never. -->
         <profiles>
           <profile>
             <id>strict-checksums</id>
@@ -43,10 +60,23 @@
                   <checksumPolicy>fail</checksumPolicy>
                 </releases>
                 <snapshots>
-                  <checksumPolicy>fail</checksumPolicy>
+                  <enabled>false</enabled>
                 </snapshots>
               </repository>
             </repositories>
+            <pluginRepositories>
+              <pluginRepository>
+                <id>central</id>
+                <url>https://repo.maven.apache.org/maven2</url>
+                <releases>
+                  <updatePolicy>never</updatePolicy>
+                  <checksumPolicy>fail</checksumPolicy>
+                </releases>
+                <snapshots>
+                  <enabled>false</enabled>
+                </snapshots>
+              </pluginRepository>
+            </pluginRepositories>
           </profile>
         </profiles>
         <activeProfiles>

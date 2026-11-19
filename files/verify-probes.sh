@@ -3433,7 +3433,7 @@ fi
 if have mvn && ! requested maven; then
   row "N/A" - "maven strict checksums" "maven installed but not in the requested ecosystems"
 elif have mvn; then
-  # ---- row 3: strict checksums (role surface; the action omits them) ------
+  # ---- row 3: strict checksums (both surfaces write them) -----------------
   # Requires the maven preamble from the "maven settings honored" probe.
   # Which profile ids actually carry <checksumPolicy>fail. A file-level grep
   # would green-light a policy sitting in a profile that never activates.
@@ -3449,6 +3449,23 @@ elif have mvn; then
             if (k > 0) { r = substr(m, k + 4); e = index(r, "</id>"); if (e > 0) print substr(r, 1, e - 1) }
           }
         } }'
+  }
+  # Does any <pluginRepository> in this text carry <checksumPolicy>fail? Maven
+  # keeps TWO repository lists and the super POM declares central in both, so a
+  # policy under <repositories> alone leaves plugin jars - code that runs inside
+  # the build - on the default warn. MEASURED (maven 3.9.11): a plugin jar
+  # served under a wrong .sha1 was installed with two WARNINGs while a
+  # dependency jar under the same settings failed the build. $1 = file, or - for stdin
+  mvn_plugin_fail() {
+    if [ "${1:-}" = - ]; then cat; else [ -f "${1:-}" ] && cat "$1"; fi 2>/dev/null \
+      | tr -d '\r\n\t ' | awk '
+      { s = $0
+        while ((i = index(s, "</pluginRepository>")) > 0) {
+          m = substr(s, 1, i - 1); s = substr(s, i + 19)
+          if ((j = index(m, "<pluginRepository>")) > 0) m = substr(m, j)
+          if (index(m, "<checksumPolicy>fail") > 0) found = 1
+        } }
+      END { exit(found ? 0 : 1) }'
   }
 
   if [ "${MVN_STARTED:-0}" -eq 0 ]; then
@@ -3495,18 +3512,24 @@ elif have mvn; then
         fi
       done
     fi
+    mvn_plug_note=""
+    mvn_plugin_fail "${MVN_SETTINGS}" \
+      || mvn_plug_note="; that file also sets no <checksumPolicy>fail on any <pluginRepository>, so plugin jars - code that runs inside the build - keep maven's default warn"
     if [ "$erc" -ne 0 ]; then
       row WEAK PRESENT "maven strict checksums" \
-        "<checksumPolicy>fail is in the file maven reads and maven parsed that file, but maven-help-plugin could not run offline (exit $erc), so nothing reports the EFFECTIVE policy, and no read-only probe can stage a checksum mismatch"
+        "<checksumPolicy>fail is in the file maven reads and maven parsed that file, but maven-help-plugin could not run offline (exit $erc), so nothing reports the EFFECTIVE policy, and no read-only probe can stage a checksum mismatch${mvn_plug_note}"
     elif [ "$mvn_eff_fail" -eq 0 ]; then
       row GAP FUNCTIONAL "maven strict checksums" \
         "maven's own merged settings model, read back with help:effective-settings, carries no <checksumPolicy>fail even though ${mvn_disp:-the file maven reads} declares one - the policy did not survive maven's settings merge"
     elif [ -z "$mvn_prof_fail" ]; then
       row WEAK PRESENT "maven strict checksums" \
         "maven reports checksumPolicy=fail out of its merged settings model, but this probe could not tell which profile carries it, so it could not confirm that profile is active"
+    elif [ -n "$mvn_prof_active" ] && ! printf '%s\n' "$eff" | mvn_plugin_fail -; then
+      row WEAK PARSED "maven strict checksums" \
+        "DEPENDENCIES ONLY: maven reports checksumPolicy=fail out of its merged settings model and help:active-profiles names '$(mvn_safe "$mvn_prof_active")' active, but no <pluginRepository> in that model carries it - plugin jars, code that runs inside the build, keep maven's default warn and are installed despite a checksum mismatch"
     elif [ -n "$mvn_prof_active" ]; then
       row OK PARSED "maven strict checksums" \
-        "maven reports checksumPolicy=fail out of its own merged settings model and help:active-profiles names '$(mvn_safe "$mvn_prof_active")' active - SCOPE: this binds only the repository ids that profile declares (central); a repository a project declares itself keeps maven's default warn even after being mirrored, and nothing here observes a checksum mismatch aborting a build"
+        "maven reports checksumPolicy=fail for repositories AND plugin repositories out of its own merged settings model, and help:active-profiles names '$(mvn_safe "$mvn_prof_active")' active - SCOPE: this binds only the repository ids that profile declares (central). A repository a project declares itself keeps maven's default warn, and under a catch-all mirror (mirrorOf=*) maven merges it with central and keeps the WEAKER policy, so one extra project repository puts central back on warn (MEASURED, maven 3.9.11). Nothing here observes a checksum mismatch aborting a build"
     else
       row WEAK PRESENT "maven strict checksums" \
         "maven reports a checksumPolicy=fail in its merged settings, but help:effective-settings prints INACTIVE profiles too and maven did not confirm profile(s) '$(mvn_safe "$mvn_prof_fail")' active (help:active-profiles exit $arc), so the policy may bind nothing"

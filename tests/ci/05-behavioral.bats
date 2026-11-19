@@ -180,3 +180,53 @@ TOML
   [ "$status" -ne 2 ] || skip "local bundler predates cooldown (< 4.0.13); gate is INERT here, premise not testable"
   [ "$status" -eq 0 ]
 }
+
+# Offline maven probe: a plugin whose jar does not match its .sha1, served from
+# a file:// "Central". Maven validates checksums for file:// as for https
+# (MEASURED, 3.9.11), so no network or TLS is needed. The settings harden.sh
+# wrote are copied with every Central URL pointed at the fixture, which keeps
+# their structure exactly as deployed. $1 = settings.xml, $2 = good|bad
+maven_plugin_checksum_run() {
+  local t r
+  t=$(mktemp -d "${BATS_TEST_TMPDIR}/mvn.XXXXXX")
+  r="$t/central/com/example/fake-maven-plugin/1.0"
+  mkdir -p "$r" "$t/proj"
+  cat > "$r/fake-maven-plugin-1.0.pom" <<'X'
+<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
+<groupId>com.example</groupId><artifactId>fake-maven-plugin</artifactId><version>1.0</version><packaging>maven-plugin</packaging></project>
+X
+  printf 'PK\005\006\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' \
+    > "$r/fake-maven-plugin-1.0.jar"
+  sha1sum "$r/fake-maven-plugin-1.0.pom" | cut -d' ' -f1 > "$r/fake-maven-plugin-1.0.pom.sha1"
+  if [ "$2" = bad ]; then
+    echo 0000000000000000000000000000000000000000 > "$r/fake-maven-plugin-1.0.jar.sha1"
+  else
+    sha1sum "$r/fake-maven-plugin-1.0.jar" | cut -d' ' -f1 > "$r/fake-maven-plugin-1.0.jar.sha1"
+  fi
+  printf '%s' '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>x</groupId><artifactId>y</artifactId><version>1</version><packaging>pom</packaging></project>' \
+    > "$t/proj/pom.xml"
+  sed "s|https://repo.maven.apache.org/maven2|file://$t/central|g" "$1" > "$t/settings.xml"
+  ( cd "$t/proj" && mvn -B -s "$t/settings.xml" -Dmaven.repo.local="$t/lr" \
+      com.example:fake-maven-plugin:1.0:x 2>&1 )
+}
+
+@test "maven: a plugin jar with a wrong checksum is refused at download (CMP 4.4)" {
+  # Before: checksumPolicy=fail covered <repositories> only, and the super
+  # POM's separate pluginRepository central kept 'warn' — the jar installed
+  # with a WARNING. Assert the ERROR-level refusal for the plugin jar itself.
+  have mvn || skip "maven not installed"
+  harden ECOSYSTEMS=maven -- --emit=plain >/dev/null
+  run maven_plugin_checksum_run "$TEST_HOME/.m2/settings.xml" bad
+  echo "$output" | grep -E 'Checksum|ERROR' | head -5
+  echo "$output" | grep -qE '^\[ERROR\].*fake-maven-plugin:jar:1\.0.*Checksum validation failed'
+  ! echo "$output" | grep -q 'No plugin descriptor found'
+}
+
+@test "maven: FIXTURE CONTROL — the same plugin with a correct checksum gets past download" {
+  have mvn || skip "maven not installed"
+  harden ECOSYSTEMS=maven -- --emit=plain >/dev/null
+  run maven_plugin_checksum_run "$TEST_HOME/.m2/settings.xml" good
+  echo "$output" | grep -E 'Checksum|ERROR' | head -5
+  echo "$output" | grep -q 'No plugin descriptor found'
+  ! echo "$output" | grep -q 'Checksum validation failed'
+}

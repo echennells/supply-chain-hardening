@@ -2611,7 +2611,16 @@ harden_maven() {
        checksum (Maven's default is 'warn', which installs anyway). This covers
        Central-sourced artifacts; the role additionally routes ALL repos through
        Central (mirrorOf=*), which the action does not, to avoid breaking a
-       project's own HTTPS repositories. -->
+       project's own HTTPS repositories.
+       Maven keeps TWO repository lists, and the super POM declares 'central'
+       in both: <repositories> for dependencies, <pluginRepositories> for
+       plugins. Redefining it only under <repositories> left plugin jars, code
+       that runs inside the build, on 'warn'. MEASURED (maven 3.9.11, a plugin
+       jar served with a wrong .sha1): two checksum WARNINGs and BUILD SUCCESS,
+       while a dependency jar with a wrong .sha1 failed the build.
+       Both entries restore the super POM's <snapshots><enabled>false</enabled>
+       too: without it the redefinition turned snapshot lookups on Central back
+       on (MEASURED). The plugin entry keeps the super POM's updatePolicy=never. -->
   <profiles>
     <profile>
       <id>strict-checksums</id>
@@ -2620,9 +2629,17 @@ harden_maven() {
           <id>central</id>
           <url>https://repo.maven.apache.org/maven2</url>
           <releases><checksumPolicy>fail</checksumPolicy></releases>
-          <snapshots><checksumPolicy>fail</checksumPolicy></snapshots>
+          <snapshots><enabled>false</enabled></snapshots>
         </repository>
       </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><updatePolicy>never</updatePolicy><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
     </profile>
   </profiles>
   <activeProfiles>
@@ -2632,7 +2649,7 @@ harden_maven() {
 EOF
   HARDENED+=("maven")
   set_tool_version "maven" "$(detect_version maven "mvn --version")"
-  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central"
+  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central, for dependencies and plugins"
   end_section
 }
 

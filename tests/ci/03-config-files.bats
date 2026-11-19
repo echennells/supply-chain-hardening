@@ -290,6 +290,39 @@ setup() { common_setup; }
   [ "$status" -eq 0 ]
 }
 
+@test "maven: checksum policy covers plugin repositories too, and Central snapshots stay off (CMP 4.4)" {
+  # Maven keeps two repository lists and the super POM declares central in
+  # both. checksumPolicy=fail under <repositories> alone left plugin jars, code
+  # that runs inside the build, on 'warn'. MEASURED on maven 3.9.11: a plugin
+  # jar served under a wrong .sha1 gave two WARNINGs and BUILD SUCCESS. The
+  # redefinition also dropped the super POM's <snapshots><enabled>false</enabled>.
+  run harden ECOSYSTEMS=maven -- --emit=plain
+  [ "$status" -eq 0 ]
+  run python3 -I - "$TEST_HOME/.m2/settings.xml" <<'PY'
+import sys, xml.etree.ElementTree as E
+root = E.parse(sys.argv[1]).getroot()
+for el in root.iter():
+    el.tag = el.tag.split('}')[-1]
+active = {a.text.strip() for a in root.findall('activeProfiles/activeProfile') if a.text}
+bad = []
+for kind in ('repositories/repository', 'pluginRepositories/pluginRepository'):
+    hits = [r for p in root.findall('profiles/profile')
+            if (p.findtext('id') or '').strip() in active
+            for r in p.findall(kind) if (r.findtext('id') or '').strip() == 'central']
+    if not hits:
+        bad.append(kind + ': no central entry in an active profile')
+    for r in hits:
+        if (r.findtext('releases/checksumPolicy') or '').strip() != 'fail':
+            bad.append(kind + ': central releases checksumPolicy is not fail')
+        if (r.findtext('snapshots/enabled') or '').strip() != 'false':
+            bad.append(kind + ': central snapshots are not disabled')
+print('\n'.join(bad))
+sys.exit(1 if bad else 0)
+PY
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "nuget: single trusted source with signature validation" {
   # The path is the assertion. This test used to grep the same
   # $HOME/.config/NuGet path harden.sh wrote to, so it passed for months while
