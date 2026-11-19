@@ -365,9 +365,11 @@ EOF
   d=$(mktemp -d /tmp/sch-vpip.XXXXXX); chmod 755 "$d"
   printf '#!/bin/sh\necho "uv 9.9.9"\n' > "$d/uv"; chmod 755 "$d/uv"; chown 1 "$d/uv"
   sed "s#^UV=.*#UV='$d/uv'#" /usr/local/bin/pip > "$FAKEBIN/pip"; chmod 755 "$FAKEBIN/pip"
-  run env -i HOME=/nonexistent PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" "$VERIFY"
+  # --verbose: the default compact view truncates the detail column.
+  run env -i HOME=/nonexistent PATH="$FAKEBIN:/usr/local/bin:/usr/bin:/bin" "$VERIFY" --verbose
   rm -rf "$d"
-  echo "$output" | grep -E 'pip PATH wrapper'
-  echo "$output" | grep -qE '^GAP +FUNCTIONAL +pip PATH wrapper .*REFUSES this account'
-  echo "$output" | grep -qE '^GAP +FUNCTIONAL +pip PATH wrapper .*pip-to-uv wrapper'
+  row=$(echo "$output" | grep -A3 -E '^GAP +FUNCTIONAL +pip PATH wrapper' | tr -s ' \n' ' ')
+  echo "$row"
+  [[ "$row" == *"REFUSES this account"* ]]
+  [[ "$row" == *"pip-to-uv wrapper"* ]]
 }
