@@ -944,6 +944,25 @@ esac"
   [[ "$output" != *"$weak_all row(s) verified only as PRESENT"* ]]
 }
 
+@test "cargo lockfile writers: a tool limit, not a config gap, and the detail says the wrapper warns" {
+  # cargo-cooldown has no verb for add/generate-lockfile/vendor/remove, so no
+  # re-run routes them. Counted as "fixable by re-running", it made
+  # --fail-on=config fail every job that installed cargo-cooldown.
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo lockfile writers routed"* ]]
+  [[ "$output" == *"writes Cargo.lock and is NOT age-gated' warning"* ]]
+  [[ "$output" != *"this state is SILENT"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  # The wrapper really does warn on a writer, with the backend present.
+  run env -i PATH="${TEST_BIN}:${TEST_HOME}/.cargo/bin:${PATH}" HOME="$TEST_HOME" cargo add serde
+  [[ "$output" == *"'cargo add' writes Cargo.lock and is NOT age-gated"* ]]
+}
+
 @test "doc pointers are absolute URLs pinned to the ref GitHub reports, never repo-relative paths" {
   bundler_age_stub 2.4.20 2
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null

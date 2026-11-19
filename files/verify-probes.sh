@@ -2491,12 +2491,14 @@ cargo_dispatch_differs() {
 # MEASURED against both shipping wrappers with the backend installed:
 #   cargo build             -> cooldown build       (gated)
 #   cargo update            -> cooldown update      (gated)
-#   cargo add serde         -> add serde            (UNGATED, and SILENT)
-#   cargo generate-lockfile -> generate-lockfile    (UNGATED, and SILENT)
+#   cargo add serde         -> add serde            (UNGATED)
+#   cargo generate-lockfile -> generate-lockfile    (UNGATED)
 #   cargo vendor / remove   -> likewise
-# Silent because the wrapper's "not age-gated" warning lives in the branch
-# taken when cargo-cooldown is ABSENT: the hardened runner says less about the
-# hole than the unhardened one.
+# These were once SILENT too, because the wrapper's "not age-gated" warning
+# lived only in the branch taken when cargo-cooldown is ABSENT. Both wrappers
+# now warn in the backend-present branch as well ("'cargo add' writes
+# Cargo.lock and is NOT age-gated"), but a warning is not a gate, and
+# cargo-cooldown has no subcommand to route them through.
 cargo_ungated_writers() {
   local sub wd list=""
   for sub in update add generate-lockfile vendor remove; do
@@ -2924,8 +2926,18 @@ else
       row WEAK PRESENT "cargo lockfile writers routed" \
         "could not dispatch-probe the writer subcommands - unverified, not credited"
     elif [ -n "$cungated" ]; then
-      row GAP FUNCTIONAL "cargo lockfile writers routed" \
-        "\`cargo build\` is routed through the age gate but these lockfile WRITERS are not: ${cungated}. cooldown.toml sets lockfile-baseline='floor', so every later gated build ACCEPTS whatever they pinned - one \`cargo ${cungated%% *}\` switches the gate off for every build after it. The wrapper's 'not age-gated' warning fires only when the backend is ABSENT, so this state is SILENT. design-principles.md Axis 3"
+      # A TOOL LIMIT, NOT A CONFIG GAP. cargo-cooldown has no subcommand for
+      # these writers (both wrappers say so), so no re-run of the hardening
+      # routes them: as a plain row() the action counted this "fixable by
+      # re-running", and `fail-on: config` failed every job that installed
+      # cargo-cooldown, permanently. Classed like a toolchain gap instead. The
+      # role has no classes, so there it is an ordinary GAP.
+      # The old detail said this state was SILENT. It is not: both wrappers
+      # print "'cargo <writer>' writes Cargo.lock and is NOT age-gated" on every
+      # such call with the backend installed (MEASURED: `cargo add` on the role
+      # wrapper). A warning is not a gate, so it stays a GAP.
+      scv_toolchain_gap cargo.lockfile-writers FUNCTIONAL "cargo lockfile writers routed" \
+        "\`cargo build\` is routed through the age gate but these lockfile WRITERS are not: ${cungated}. cooldown.toml sets lockfile-baseline='floor', so every later gated build ACCEPTS whatever they pinned - one \`cargo ${cungated%% *}\` switches the gate off for every build after it. The wrapper prints a 'writes Cargo.lock and is NOT age-gated' warning for each of them, but a warning is not a gate. No configuration closes this: cargo-cooldown has no subcommand for these writers. See $(scv_doc docs/design-principles.md#gated-the-entry-points-missed-the-state-writers)"
     else
       row OK FUNCTIONAL "cargo lockfile writers routed" \
         "update, add, generate-lockfile, vendor and remove all dispatch through \`cargo cooldown\` - no ungated path writes the lockfile the gated builds then trust. (Routing only; whether cooldown refuses is the gate row's caveat)"
