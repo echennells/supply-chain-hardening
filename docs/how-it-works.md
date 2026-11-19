@@ -63,7 +63,7 @@ User-level configs override these **per-key**: a setting *present* in the user f
 
 ## pip-to-uv redirect
 
-Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement, hash verification) applies even when an agent or script calls `pip install` directly.
+Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement) applies even when an agent or script calls `pip install` directly.
 
 ## Pre-install reputation checks (npq)
 
