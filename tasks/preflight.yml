@@ -99,6 +99,67 @@
           ansible-playbook site.yml -e accept_root_home_targeting=true
     success_msg: "Privilege context OK — per-user config targets {{ ansible_env.HOME }}."
   when: not (accept_root_home_targeting | default(false) | bool)
+
+# --- sudo-rs vs ansible-core's become prompt ---------------------------------
+# MEASURED on Ubuntu 26.04 (sudo-rs 0.2.13, the default /usr/bin/sudo there),
+# with a user whose sudo needs a password and ansible run with -K (or
+# --become-password-file, the same code path): every become task stops with
+#   "Timed out waiting for become success or become password prompt"
+# and rc=4, after 10s and having changed nothing. sudo-rs wraps the prompt
+# ansible asks for (`-p "[sudo via ansible, key=...] password:"`) as
+# "[sudo: <that>] Password:", so ansible never sees the exact string it is
+# waiting for. Measured per ansible-core release, same container:
+#   FAIL: 2.19.9, 2.19.14, 2.19.15, 2.20.0, 2.20.1 (apt on 26.04), 2.20.2,
+#         2.20.5, 2.20.8, 2.20.10, 2.21.0, 2.21.1, 2.21.3, 2.21.5
+#   OK:   2.20.11, 2.21.6, 2.22.0
+# NOPASSWD sudo has no prompt to answer: on 2.20.1 it worked both with and
+# without a become password supplied. So the refusal needs all three: sudo-rs,
+# a password prompt, and an affected ansible-core. It runs before the first `become: true` task below;
+# without it the operator gets ansible's timeout, which names neither sudo-rs
+# nor this role. `sudo -n true` never prompts and never attempts a password,
+# so the probe cannot count as a failed login.
+- name: Probe for sudo-rs with a password prompt (affected ansible-core cannot answer it)
+  become: false
+  ansible.builtin.shell:
+    cmd: |
+      v=$(sudo --version 2>/dev/null | head -1)
+      case "$v" in sudo-rs*) ;; *) exit 0 ;; esac
+      if sudo -n true >/dev/null 2>&1; then exit 0; fi
+      printf '%s\n' "$v"
+    executable: /bin/sh
+  register: preflight_sudo_rs
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - (ansible_become_method | default(lookup('ansible.builtin.config', 'DEFAULT_BECOME_METHOD'))) == 'sudo'
+    - >-
+      ansible_version.full is version('2.20.11', '<')
+      or (ansible_version.full is version('2.21.0', '>=')
+          and ansible_version.full is version('2.21.6', '<'))
+
+- name: Refuse sudo-rs password prompts on an ansible-core that cannot answer them
+  ansible.builtin.fail:
+    msg: |
+      [supply-chain-hardening] preflight: ansible-core {{ ansible_version.full }} cannot answer the sudo-rs password prompt.
+
+      This host's sudo is {{ preflight_sudo_rs.stdout | trim }} and it asks for a password.
+      Every task that needs root would stop with "Timed out waiting for become
+      success or become password prompt" and change nothing.
+
+      Fix, either one:
+        - Run a fixed ansible-core (2.20.11+, 2.21.6+ or 2.22+) for your user,
+          leaving the system package alone (`sudo apt install pipx` first if needed):
+              pipx install 'ansible-core>=2.21.6'
+              ~/.local/bin/ansible-playbook site.yml --limit localhost -K
+        - Or give this user NOPASSWD sudo for the duration of the apply and
+          drop -K (with no prompt to answer, the become succeeds; measured on 2.20.1).
+
+      Measured on Ubuntu 26.04 (sudo-rs 0.2.13, apt ansible-core 2.20.1).
+  when:
+    - preflight_sudo_rs.stdout is defined
+    - preflight_sudo_rs.stdout | trim | length > 0
+
 - name: Probe GNU date on the controller for the rolling uv/pip cutoff
   # defaults/main.yml computes the rolling cutoff (sch_uv_cutoff, sch_pip_cutoff) via
   #   lookup('pipe', 'date -u -d @<epoch> +%Y-%m-%dT00:00:00Z')
