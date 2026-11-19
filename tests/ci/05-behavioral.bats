@@ -238,7 +238,7 @@ J
   composer_hostile_checkout
   ( cd "$CH/app" && env -i PATH="$TEST_BIN:$PATH" HOME="$TEST_HOME" COMPOSER_ALLOW_SUPERUSER=1 \
       composer config --global home --no-ansi ) >/dev/null 2>&1 || true
-  [ -f "$PLUGIN_MARK" ] || skip "this composer ($("$REAL_COMPOSER" --version --no-ansi 2>/dev/null | head -1)) does not activate a checkout plugin on 'config --global' (MEASURED: 2.2.6 and 2.7.1 do not; 2.11.2 does)"
+  [ -f "$PLUGIN_MARK" ] || skip "this composer ($("$REAL_COMPOSER" --version --no-ansi 2>/dev/null | head -1)) does not activate a checkout plugin on 'config --global' (MEASURED: 2.2.6 through 2.11.2 all do)"
 }
 
 @test "composer: harden.sh run inside a checkout runs none of its plugins or scripts" {

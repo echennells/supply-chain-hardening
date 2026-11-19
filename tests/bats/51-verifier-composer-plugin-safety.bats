@@ -93,8 +93,8 @@ J
   ( cd "$root/app" && env -u COMPOSER_SKIP_SCRIPTS COMPOSER_ALLOW_SUPERUSER=1 \
       "$shim/composer" config --global --no-ansi secure-http ) >/dev/null 2>&1 || true
   if [ ! -f "$MARKER" ]; then
-    # MEASURED: composer 2.2.6 and 2.7.1 did not activate the plugin on this
-    # command; 2.5.5, 2.8.8 and 2.11.2 did (the VM run and this repo's own runs).
+    # MEASURED: 2.2.6, 2.5.5, 2.7.1, 2.8.8, 2.9.5 and 2.11.2 all activate it.
+    # A composer that stops doing so leaves the test below nothing to prove.
     skip "this composer ($("$REAL_COMPOSER" --version --no-ansi 2>/dev/null | head -1)) does not activate a checkout plugin on 'config --global'; nothing for the test below to prove"
   fi
 }
