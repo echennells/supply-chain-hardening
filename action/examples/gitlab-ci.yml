@@ -7,8 +7,9 @@
 # The config files and PATH wrappers it deploys need no such step.
 
 variables:
-  # Where harden.sh writes the sourceable env file. Defaults to
-  # $RUNNER_TEMP/$TMPDIR; pinning it makes the source line below explicit.
+  # Where harden.sh writes the sourceable env file. GitLab sets no RUNNER_TEMP,
+  # so the default is the job user's ~/.cache/supply-chain-hardening/; pinning
+  # it makes the source line below explicit. Not tested on a real GitLab runner.
   HARDENING_ENV_FILE: "$CI_PROJECT_DIR/.supply-chain-hardening.env"
 
 .harden: &harden

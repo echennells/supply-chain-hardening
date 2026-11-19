@@ -67,16 +67,23 @@ Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/
 ## Apply without Ansible
 
 ```bash
-./action/harden.sh --emit=plain
-source "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env"
-./action/verify.sh --emit=plain
+./action/harden.sh --emit=plain &&
+  source "${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env" &&
+  ./action/verify.sh --emit=plain
 ```
+
+Keep the `&&`. If `harden.sh` fails, nothing after it should run, least of all
+the `source`. Outside a CI runner the env file goes in
+`~/.cache/supply-chain-hardening/` (mode 0700), never a shared directory;
+`HARDENING_ENV_FILE` moves it, and `harden.sh` refuses a path where another user
+could have placed or could replace the file.
 
 This path was built for CI, so it is narrower than the role:
 
 - The env file only reaches shells that source it.
 - It wraps binaries and writes `/etc` with `sudo` where it can.
-- CI only exercises the GitHub path, so treat `plain` as less tested.
+- CI only exercises the GitHub path, so treat `plain` as less tested. GitLab and
+  Buildkite shell runners are not tested at all.
 
 ## If you copy settings anyway
 

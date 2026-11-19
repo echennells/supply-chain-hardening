@@ -81,13 +81,25 @@ sources the env file — `harden.sh` runs as a subprocess and its own exports
 do not reach the calling shell. The config-file and wrapper layers need no
 such step on any target; they are already on disk.
 
-Every target writes that canonical sourceable env file
-(`$HARDENING_ENV_FILE`, default `$RUNNER_TEMP/supply-chain-hardening.env`):
+Every target writes that canonical sourceable env file. Its path is
+`$HARDENING_ENV_FILE` if you set it, otherwise
+`$RUNNER_TEMP/supply-chain-hardening.env` on a runner that sets `RUNNER_TEMP`
+(GitHub's per-job directory), otherwise
+`~/.cache/supply-chain-hardening/supply-chain-hardening.env`:
 
 ```bash
-./action/harden.sh --emit=plain
-source "${TMPDIR:-/tmp}/supply-chain-hardening.env"
+./action/harden.sh --emit=plain &&
+  source "${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env"
 ```
+
+Keep the `&&`: a failed `harden.sh` must not be followed by a `source`. The run
+record (`supply-chain-hardening.outputs`) sits beside the env file. Neither ever
+defaults to a shared directory such as `/tmp`, where another local user could
+plant a file for you to source. `harden.sh` creates the per-user directory with
+mode 0700, writes each file through `mktemp` and a rename, and refuses an
+existing file that is not yours or that group or others can write, and a
+world-writable directory without the sticky bit, where anyone could replace it. `verify.sh` ignores a record or env
+file owned by anyone but you or root, and says so.
 
 Worked examples for each platform live in [`examples/`](examples/).
 
@@ -102,7 +114,10 @@ a Dockerfile.
 > on those platforms runs against this yet — treat them as working code with
 > untested integration, not as supported targets, until `action-smoke.yml`
 > has siblings. Layers 1 and 2 are platform-independent by construction, so
-> what is unverified is env propagation, not the hardening itself.
+> what is unverified is env propagation, not the hardening itself. That
+> includes where the env file lands: GitLab and Buildkite set no
+> `RUNNER_TEMP`, so it goes to the job user's `~/.cache/supply-chain-hardening/`
+> unless `HARDENING_ENV_FILE` says otherwise. Not tested on either.
 
 For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
@@ -452,7 +467,8 @@ Use sparingly. The whole point of the action is to harden subsequent steps; opti
 | `tool-versions` | `{"npm":"10.5.0","bun":"1.2.0","composer":"2.9.8",...}` | JSON map of detected tool versions per ecosystem. Empty string means the tool wasn't installed in this runner. Useful for conditional downstream steps. |
 
 Alongside these, the harden step writes a private record next to the env file
-(`…/supply-chain-hardening.outputs`) that only the verify step reads:
+(`…/supply-chain-hardening.outputs`, overridable with `HARDENING_OUTPUT_FILE`)
+that only the verify step reads:
 `wrappers_deployed` (which PATH wrappers actually landed), `job_id` (so a
 leftover record on a self-hosted runner is ignored rather than silently
 scoping the next job), and `hardening_complete`, written last. That marker is

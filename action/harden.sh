@@ -351,15 +351,6 @@ case "$PLATFORM" in
     ;;
 esac
 
-# The canonical, platform-neutral artifact. Written on EVERY platform, so
-# there is always one sourceable file containing the full env layer even
-# when the platform has no native step-to-step mechanism:
-#
-#   source /tmp/supply-chain-hardening.env
-#
-# On Drone/Woodpecker and other per-step-container runners this file is
-# the only way the env layer survives a step boundary (config files and
-# wrappers still work via the shared workspace volume).
 # ---- privilege: resolve ONCE, never assume ----
 #
 # MEASURED DEFECT. This script called `sudo` unconditionally in 24 places with
@@ -397,19 +388,6 @@ else
   SUDO=""
   CAN_ESCALATE=0
 fi
-
-HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
-HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
-# The chosen temp dir is not guaranteed to exist — a caller can point TMPDIR
-# at a path it has not created yet, and the bare redirect below would then
-# fail with an opaque "no such file or directory" before any hardening ran.
-mkdir -p "$(dirname "$HARDENING_ENV_FILE")" "$(dirname "$HARDENING_OUTPUT_FILE")" 2>/dev/null || true
-if ! : > "$HARDENING_ENV_FILE" 2>/dev/null; then
-  echo "[supply-chain-harden] error: cannot write the env file at '$HARDENING_ENV_FILE'" >&2
-  echo "  set HARDENING_ENV_FILE to a writable path" >&2
-  exit 2
-fi
-: > "$HARDENING_OUTPUT_FILE"
 
 # ---- Log annotations (platform-specific markup, identical semantics) ----
 log()  { echo "[supply-chain-harden] $*"; }
@@ -475,6 +453,113 @@ end_section() {
   CURRENT_SECTION=""
 }
 
+if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
+  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
+  exit 2
+fi
+
+# ---- The env file and the run record: where they go, and who else can touch them ----
+#
+# The env file is the canonical, platform-neutral artifact. It is written on
+# EVERY platform, so there is always one sourceable file holding the whole env
+# layer even where the platform has no step-to-step mechanism. On
+# Drone/Woodpecker and other per-step-container runners it is the only way the
+# env layer survives a step boundary. The run record (.outputs) beside it is
+# what verify.sh reads to learn what this job promised.
+#
+# MEASURED DEFECT (VM#3, Ubuntu 26.04, --emit=plain). Both used a FIXED NAME
+# under ${RUNNER_TEMP:-${TMPDIR:-/tmp}}, which outside a CI runner is /tmp, a
+# directory every local user can write. Another user pre-created
+# /tmp/supply-chain-hardening.env holding a payload. harden.sh refused to
+# overwrite it (rc=2), the documented recipe's next line sourced it anyway, and
+# the payload ran as the person hardening. A forged .outputs beside it scoped
+# the verifier down to "this job hardened: npm". Where fs.protected_regular=0, a
+# 0666 file the other user owned was even written INTO, because `: >` keeps an
+# existing file's owner, and they appended to it afterwards.
+#
+# Three changes:
+#   1. With no RUNNER_TEMP the default directory is per-user,
+#      $HOME/.cache/supply-chain-hardening, created 0700. Not $TMPDIR, which is
+#      often /tmp itself. Not $XDG_RUNTIME_DIR, which cron, `su` and most
+#      containers do not set, so a later verify.sh could look somewhere else.
+#      RUNNER_TEMP is GitHub's per-job directory, owned by the runner user, so
+#      that path is unchanged. action/verify.sh resolves the same default.
+#   2. A file that already exists must be a regular file we own that group and
+#      others cannot write, in a directory other users cannot replace it in
+#      (world-writable only with the sticky bit). Anything else is refused
+#      before a byte is written, with the reason.
+#   3. Each file is created by mktemp in its own directory and renamed over the
+#      target. An existing inode, and any descriptor someone holds on it, is
+#      never written through.
+SCH_STATE_DIR="${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}"
+HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-$SCH_STATE_DIR/supply-chain-hardening.env}"
+HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-$SCH_STATE_DIR/supply-chain-hardening.outputs}"
+
+# The 10-character mode string, as `ls -ld` prints it on GNU and BSD alike.
+_sch_mode() { ls -ld -- "$1" 2>/dev/null | cut -c1-10; }
+
+# _sch_unsafe_target <file>: prints why <file> must not be (re)created; silent when it may.
+_sch_unsafe_target() {
+  local f="$1" d m
+  d=$(dirname -- "$f")
+  if [ -L "$f" ]; then echo "is a symbolic link"; return 0; fi
+  if [ -e "$f" ]; then
+    [ -f "$f" ] || { echo "exists and is not a regular file"; return 0; }
+    [ -O "$f" ] || { echo "already exists and belongs to another user ($(ls -ld -- "$f" | awk '{print $3}'))"; return 0; }
+    m=$(_sch_mode "$f")
+    case "$m" in ?????w*|????????w*) echo "already exists and is writable by group or others ($m)"; return 0 ;; esac
+  fi
+  # The directory: world-writable needs the sticky bit, or anyone could replace
+  # the file after it is written. Group-writable is not refused: with per-user
+  # groups and umask 002 (the Ubuntu default) every project directory is 0775,
+  # and the group is a trust grant somebody made on purpose.
+  m=$(_sch_mode "$d")
+  case "$m" in
+    ????????w[tT]) ;;
+    ????????w*) echo "is in $d, which every user can write to and which has no sticky bit ($m), so anyone could replace the file after it is written"; return 0 ;;
+  esac
+  return 0
+}
+
+# _sch_create <file> <what> <override var>: <file> now exists, empty, 0644, ours. Exits 2 otherwise.
+_sch_create() {
+  local f="$1" what="$2" var="$3" d why tmp=""
+  d=$(dirname -- "$f")
+  # The directory is not guaranteed to exist: a caller can point the override
+  # at a path it has not created yet.
+  if [ "$d" = "$HOME/.cache/supply-chain-hardening" ]; then
+    # -m on the leaf only; `mkdir -p -m` would leave it to the leaf anyway.
+    [ -d "$d" ] || { mkdir -p "$(dirname -- "$d")" && mkdir -m 0700 "$d"; } 2>/dev/null || true
+  else
+    mkdir -p "$d" 2>/dev/null || true
+  fi
+  why=$(_sch_unsafe_target "$f")
+  if [ -n "$why" ]; then
+    err "refusing to write the $what: '$f' $why. Another user may control what a later step sources or trusts. Remove it, or set $var to a path in a directory only you can write."
+    exit 2
+  fi
+  # 0644, not mktemp's 0600: the file holds no secret, and a profile.d line
+  # that sources it for every user (action/examples/Dockerfile) must be able to
+  # read it. What matters is who can WRITE it.
+  if ! tmp=$(mktemp "$d/.supply-chain-hardening.XXXXXX" 2>/dev/null) \
+     || ! chmod 644 "$tmp" 2>/dev/null \
+     || ! mv -f -- "$tmp" "$f" 2>/dev/null; then
+    [ -n "$tmp" ] && rm -f -- "$tmp" 2>/dev/null
+    err "cannot write the $what at '$f'"
+    echo "  set $var to a writable path" >&2
+    exit 2
+  fi
+  if [ "$what" = "env file" ]; then
+    case "$(_sch_mode "$d")" in
+      ????????w*)
+        warn "the $what is in $d, which every user can write to. It is safe as written, but a later \`source\` of that path, in a shell where this harden.sh run did not just succeed, can run a file another user put there after a reboot or a cleanup. Prefer a per-user directory." ;;
+    esac
+  fi
+  return 0
+}
+_sch_create "$HARDENING_ENV_FILE"    "env file"    HARDENING_ENV_FILE
+_sch_create "$HARDENING_OUTPUT_FILE" "run record"  HARDENING_OUTPUT_FILE
+
 # ---- Validation ----
 if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   err "release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
@@ -487,10 +572,6 @@ fi
 RELEASE_AGE_HOURS=$((10#$RELEASE_AGE_HOURS))
 if [[ "$RELEASE_AGE_HOURS" -lt 1 ]]; then
   err "release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
-  exit 2
-fi
-if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
-  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
   exit 2
 fi
 
@@ -512,8 +593,9 @@ write_env() {
     # calling job shell does not inherit it. On these targets the env file is
     # the mechanism and the caller must source it:
     #
-    #   ./harden.sh --emit=gitlab
-    #   source "${RUNNER_TEMP:-/tmp}/supply-chain-hardening.env"
+    #   ./harden.sh --emit=gitlab && source "$HARDENING_ENV_FILE"
+    #
+    # (default path: see "The env file and the run record" above)
     #
     # The config-file and wrapper layers need no such step; they are already
     # on disk. Buildkite conventionally does the source in a pre-command hook.

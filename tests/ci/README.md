@@ -24,7 +24,7 @@ silently inert.
 | File | Covers |
 |---|---|
 | `01-emit-targets.bats` | The platform adapter. Each `--emit` target writes to its own sink and no other; the canonical env file round-trips through `source`. |
-| `02-validation.bats` | Input validation and the fail-loud guards — rejected age windows, missing `HOME`, the skip path, unknown ecosystems, unwritable paths. |
+| `02-validation.bats` | Input validation and the fail-loud guards — rejected age windows, missing `HOME`, the skip path, unknown ecosystems, unwritable paths, and where the env file and run record may go (per-user by default; refused when another user could have placed or could replace them). |
 | `03-config-files.bats` | Per-ecosystem config content, asserted **by key name**. |
 | `04-wrappers.bats` | Wrapper deployment and behavior, via stub binaries that get really wrapped. Needs passwordless sudo; skips without it. |
 | `05-behavioral.bats` | The attacks themselves, run for real against whatever package managers are installed. |

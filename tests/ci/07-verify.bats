@@ -905,3 +905,46 @@ echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   [ "$(table_rows "$output")" -eq "$base" ]
   [[ "$output" == *'ignore-scripts=x\c'* ]]
 }
+
+# ---- VM#3: a record or env file someone else can write is not believed ----
+
+forge_record() { # a COMPLETE-looking record scoped to npm only
+  mkdir -p "$STATE_DIR"
+  printf 'ecosystems_hardened=npm\nrelease_age_hours=48\njob_id=\nhardening_complete=true\n' > "$OUT_FILE"
+}
+
+@test "record: one writable by group or others is ignored, and the scope is not narrowed" {
+  # MEASURED on old main: a planted record made the verifier say "this job
+  # hardened: npm" and report 1 gap instead of 5.
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  forge_record; chmod 666 "$OUT_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  hardening run record"*"writable by group or others"*"NOT read"* ]]
+  [[ "$output" != *"this job hardened: npm"* ]]
+}
+
+@test "record: one owned by another user is ignored" {
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo"
+  local other=nobody; id -u "$other" >/dev/null 2>&1 || skip "no 'nobody' user"
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  forge_record; chmod 644 "$OUT_FILE"; sudo -n chown "$other" "$OUT_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"hardening run record"*"belongs to uid"*"NOT read"* ]]
+  [[ "$output" != *"this job hardened: npm"* ]]
+}
+
+@test "record: our own record still scopes the run (the check is not a blanket refusal)" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"this job hardened: npm"* ]]
+  [[ "$output" != *"hardening run record"* ]]
+}
+
+@test "env file: one writable by others is reported as a GAP, not read and not compared" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  chmod 666 "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PRESENT     env layer propagation"*"NOT read. Do not source it"* ]]
+  [ "$status" -eq 1 ]
+}
+

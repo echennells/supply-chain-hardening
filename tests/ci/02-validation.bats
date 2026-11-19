@@ -96,11 +96,97 @@ setup() { common_setup; }
   assert_file_contains "$OUT_FILE" "ecosystems_hardened=npm,pip"
 }
 
-@test "a TMPDIR that does not exist yet is created, not fatal" {
-  run env -i PATH="$PATH" HOME="$TEST_HOME" TMPDIR="$TEST_TMP/deep/nested" \
-    WRITE_ETC=false ECOSYSTEMS=npm bash "$HARDEN_SH" --emit=plain
+@test "an env file directory that does not exist yet is created, not fatal" {
+  run harden HARDENING_ENV_FILE="$TEST_TMP/deep/nested/h.env" ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
-  [ -f "$TEST_TMP/deep/nested/supply-chain-hardening.env" ]
+  [ -f "$TEST_TMP/deep/nested/h.env" ]
+}
+
+# ---- VM#3: the env file and the run record are not attacker-placeable ----
+#
+# MEASURED on old main (Ubuntu 26.04, --emit=plain): another local user
+# pre-created /tmp/supply-chain-hardening.env with a payload; harden.sh exited 2,
+# the AGENTS.md recipe's next line sourced it anyway, and the payload ran as the
+# person hardening. A planted .outputs beside it scoped verify.sh down to
+# "this job hardened: npm".
+
+@test "env file: with no RUNNER_TEMP the default is per-user and 0700, never TMPDIR" {
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$ENV_FILE" ] && [ -f "$OUT_FILE" ]
+  [ ! -e "$TEST_TMP/supply-chain-hardening.env" ]
+  [ ! -e "$TEST_TMP/supply-chain-hardening.outputs" ]
+  # `ls -ld`, not GNU stat: this suite also runs on macOS.
+  [ "$(ls -ld "$STATE_DIR" | cut -c1-10)" = drwx------ ]
+  # 0644, not mktemp's 0600: a profile.d line for every user may source it.
+  [ "$(ls -ld "$ENV_FILE" | cut -c1-10)" = -rw-r--r-- ]
+  assert_file_contains "$OUT_FILE" "env_file=$ENV_FILE"
+}
+
+@test "env file: RUNNER_TEMP, when set, is still where it goes" {
+  mkdir -p "$TEST_TMP/runner"
+  run harden RUNNER_TEMP="$TEST_TMP/runner" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/runner/supply-chain-hardening.env" ]
+  [ -f "$TEST_TMP/runner/supply-chain-hardening.outputs" ]
+}
+
+@test "env file: an existing file writable by others is refused, and a chained source never runs" {
+  mkdir -p "$STATE_DIR"
+  printf 'touch %s/planted-ran\n' "$TEST_TMP" > "$ENV_FILE"
+  chmod 666 "$ENV_FILE"
+  # The recipe as AGENTS.md now writes it.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" WRITE_ETC=false ECOSYSTEMS=npm \
+    bash -c "bash '$HARDEN_SH' --emit=plain && source '$ENV_FILE'"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to write the env file"* ]]
+  [[ "$output" == *"$ENV_FILE"* ]]
+  [[ "$output" == *"writable by group or others"* ]]
+  [ ! -e "$TEST_TMP/planted-ran" ]
+}
+
+@test "env file: one owned by another user is refused before anything is written" {
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo to create a file owned by someone else"
+  local other=nobody
+  id -u "$other" >/dev/null 2>&1 || skip "no 'nobody' user"
+  mkdir -p "$TEST_TMP/shared"
+  echo "touch $TEST_TMP/planted-ran" > "$TEST_TMP/shared/h.env"
+  chmod 644 "$TEST_TMP/shared/h.env"
+  sudo -n chown "$other" "$TEST_TMP/shared/h.env"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/shared/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"belongs to another user"* ]]
+  [ ! -f "$TEST_HOME/.npmrc" ]          # refused at admission: nothing hardened, nothing half-written
+  [ "$(ls -ld "$TEST_TMP/shared/h.env" | awk '{print $3}')" = "$other" ]   # and not replaced either
+}
+
+@test "env file: a world-writable directory without the sticky bit is refused" {
+  mkdir -p "$TEST_TMP/open" && chmod 777 "$TEST_TMP/open"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/open/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no sticky bit"* ]]
+}
+
+@test "env file: an existing file is replaced, never written through" {
+  # `: >` kept the inode, so whoever held it (a hard link, an open descriptor)
+  # saw every line harden.sh wrote, and the other user appended to it after.
+  mkdir -p "$STATE_DIR"
+  echo OLD > "$ENV_FILE"
+  chmod 644 "$ENV_FILE"     # under umask 002 it would be 0664, which is refused
+  ln "$ENV_FILE" "$TEST_TMP/held-link"
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TMP/held-link")" = OLD ]
+  assert_file_contains "$ENV_FILE" "NPM_CONFIG_IGNORE_SCRIPTS"
+}
+
+@test "the run record gets the same protection as the env file" {
+  mkdir -p "$STATE_DIR"
+  : > "$OUT_FILE"; chmod 666 "$OUT_FILE"
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to write the run record"* ]]
+  [[ "$output" == *"HARDENING_OUTPUT_FILE"* ]]
 }
 
 @test "an unwritable env file path fails loudly with the path named" {
