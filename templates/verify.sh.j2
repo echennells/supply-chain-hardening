@@ -7,10 +7,11 @@
 #   00-context.sh   templates/verify.sh.j2         (this file)
 #                   the CONTEXT PREAMBLE, the row/expectation API, and the
 #                   probes that are still host-only (npm, yarn, pnpm, npq,
-#                   sfw, PATH wrappers, go, pip)
+#                   sfw, PATH wrappers, go GOFLAGS, pip)
 #   50-probes.sh    files/verify-probes.sh         (SHARED, byte-identical
-#                   with the CI surface: bun, deno, uv, composer, cargo,
-#                   bundler, maven, gradle, nuget)
+#                   with the CI surface: bun, deno, uv, pip age gates, go
+#                   checksum db + toolchain, composer, cargo, bundler,
+#                   maven, gradle, nuget)
 #   90-report.sh    templates/verify-report.sh.j2  (renderer + exit code)
 #
 # The shared body is plain bash with no Jinja in it, which is what lets it be
@@ -1077,12 +1078,9 @@ if have go; then
         row GAP PARSED "go module integrity" "GOFLAGS='${v:-<empty>}' and -mod=readonly is not in /etc/environment or /etc/profile.d either"
       fi ;;
   esac
-  v2=$(go env GOPRIVATE 2>/dev/null)
-  if [ -z "$v2" ]; then
-    row OK PARSED "go checksum verification" "GOPRIVATE empty — sumdb checks apply to all modules"
-  else
-    row GAP PARSED "go checksum verification" "GOPRIVATE='$v2' exempts modules from sumdb verification"
-  fi
+  # "go checksum verification" and "go toolchain switching" are in the shared
+  # body (files/verify-probes.sh), so the action reports them too. The row that
+  # was here read only GOPRIVATE, and printed OK under GOSUMDB=off.
 else
   row "N/A" - "go" "go not installed"
 fi
@@ -1217,6 +1215,7 @@ else
 fi
 
 # =========================================================================
-# Fragment 50 (files/verify-probes.sh) follows: bun, deno, uv, composer,
-# cargo, bundler, maven, gradle, nuget. Fragment 90 renders the table.
+# Fragment 50 (files/verify-probes.sh) follows: bun, deno, uv, pip age gates,
+# go checksum db + toolchain, composer, cargo, bundler, maven, gradle, nuget.
+# Fragment 90 renders the table.
 # =========================================================================

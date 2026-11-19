@@ -1664,6 +1664,132 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
 fi
 
 # ======================================================================
+# go (checksum database, toolchain switching)
+# ======================================================================
+
+# --- go checksum verification  [PARSED] ---
+# --- go toolchain switching  [PARSED] ---
+# SHARED by both surfaces. The role used to check only GOPRIVATE, so GOSUMDB=off
+# and GONOSUMDB='*' both read OK, and the action did not check the checksum
+# database at all. `go env` is Go's own merged answer (environment > the per-user
+# `go env -w` file > $GOROOT/go.env), so these rows are PARSED. Asked from "/":
+# with GOTOOLCHAIN=auto, a go.mod in the working directory that names a newer
+# toolchain makes even `go env` download and run it.
+#
+# MEASURED on go1.24.2 and go1.27.4, fetching rsc.io/quote with a checksum
+# database that refuses connections (a lookup fails the fetch, so a fetch that
+# succeeds proves the lookup was skipped):
+#   GOSUMDB=off             fetched, no lookup
+#   GONOSUMDB='*'           fetched, no lookup
+#   GOPRIVATE='*'           fetched, no lookup (GONOSUMDB defaults to GOPRIVATE,
+#                           and `go env GONOSUMDB` reports that default)
+#   GOINSECURE='*'          lookup made, fetch failed: NOT a sumdb bypass
+#   GONOSUMDB=example.com   lookup made for rsc.io: a narrow list exempts only
+#                           what it matches
+# And the layer trap, same versions: after `go env -w GONOSUMDB='*'`, an EXPORTED
+# EMPTY GONOSUMDB (what the role's profile.d exports) still reads back '*' and
+# the lookup is still skipped. Go treats an empty variable as unset and falls
+# back to its env file, so the env layer's blanks cannot clear a `go env -w`
+# value. Each detail says where a value came from for exactly that reason.
+scv_go_env() { (cd / && go env "$1") 2>/dev/null | head -1 | tr -d '\r'; }
+scv_go_src() { # KEY -> where Go got its value, in words; empty when unknown
+  local k="$1" gf gr
+  if [ -n "${!k:-}" ]; then
+    printf 'from the %s environment variable' "$k"; return 0
+  fi
+  gf=$(scv_go_env GOENV)
+  if [ -n "$gf" ] && [ -f "$gf" ] && grep -q "^$k=." "$gf" 2>/dev/null; then
+    if [ "${!k+set}" = set ]; then
+      printf 'from %s, written by `go env -w` - the EMPTY %s exported here does not override it, because Go treats an empty variable as unset (MEASURED); `go env -u %s` removes it' "$gf" "$k" "$k"
+    else
+      printf 'from %s, written by `go env -w` (`go env -u %s` removes it)' "$gf" "$k"
+    fi
+    return 0
+  fi
+  gr=$(scv_go_env GOROOT)
+  if [ -n "$gr" ] && grep -q "^$k=." "$gr/go.env" 2>/dev/null; then
+    printf "from %s/go.env, the Go distribution's own default" "$gr"; return 0
+  fi
+  if [ "$k" = GONOSUMDB ] && [ -n "$(scv_go_env GOPRIVATE)" ]; then
+    printf '(GONOSUMDB is unset, so Go uses GOPRIVATE='"'"'%s'"'"' %s)' "$(scv_go_env GOPRIVATE)" "$(scv_go_src GOPRIVATE)"
+  fi
+  return 0
+}
+if ! have go; then
+  row "N/A" - "go checksum verification" "go not installed"
+  row "N/A" - "go toolchain switching"   "go not installed"
+elif command -v requested >/dev/null 2>&1 && ! requested go; then
+  row "N/A" - "go checksum verification" "go installed but not in the requested ecosystems"
+  row "N/A" - "go toolchain switching"   "go installed but not in the requested ecosystems"
+else
+  gosdb=$(scv_go_env GOSUMDB)
+  # The EFFECTIVE exemption list: go env reports GONOSUMDB with its GOPRIVATE
+  # default already applied (MEASURED), so GOPRIVATE needs no separate test.
+  gonos=$(scv_go_env GONOSUMDB)
+  if [ "$gosdb" = off ]; then
+    row GAP PARSED "go checksum verification" \
+      "go reports GOSUMDB=off $(scv_go_src GOSUMDB) - no module download is checked against the checksum database"
+  elif [ -n "$gonos" ]; then
+    # Go matches each comma-separated glob against module path PREFIXES, so a
+    # '*' element covers every first path element, which is every module.
+    case ",$gonos," in
+      *",*,"*)
+        row GAP PARSED "go checksum verification" \
+          "go reports GONOSUMDB='$gonos' $(scv_go_src GONOSUMDB) - the '*' matches every module path, so EVERY module skips the checksum database" ;;
+      *)
+        row GAP PARSED "go checksum verification" \
+          "go reports GONOSUMDB='$gonos' $(scv_go_src GONOSUMDB) - modules matching it skip the checksum database" ;;
+    esac
+  else
+    case "$gosdb" in
+      sum.golang.org|sum.golang.org+*|"sum.golang.org "*|sum.golang.google.cn|sum.golang.google.cn+*|"sum.golang.google.cn "*)
+        row OK PARSED "go checksum verification" \
+          "go reports GOSUMDB='$gosdb' and no GONOSUMDB/GOPRIVATE exemption - every module download is checked against the checksum database" ;;
+      '')
+        row WEAK PARSED "go checksum verification" "go did not report a GOSUMDB value" ;;
+      *)
+        row WEAK PARSED "go checksum verification" \
+          "go reports GOSUMDB='$gosdb' $(scv_go_src GOSUMDB) - a checksum database other than sum.golang.org, which this verifier cannot vouch for" ;;
+    esac
+  fi
+
+  # GOTOOLCHAIN (go1.21+). Unset, it comes from $GOROOT/go.env, which says `auto`
+  # in the go.dev tarballs AND in Ubuntu 24.04's golang-1.22 package (both
+  # MEASURED): go then downloads and runs whatever toolchain a go.mod or go.work
+  # names. `local` refuses instead. `path` and `+path` switch only to a toolchain
+  # already on PATH and never download.
+  gotc=$(scv_go_env GOTOOLCHAIN)
+  gov=$(scv_go_env GOVERSION)
+  [ -n "$gov" ] || gov=$( (cd / && go version) 2>/dev/null | awk '{print $3}')
+  gonum=${gov#go}
+  if [ -n "$gonum" ] && [ "$(printf '1.21\n%s\n' "$gonum" | sort -V | head -1)" != "1.21" ]; then
+    row OK PARSED "go toolchain switching" \
+      "$gov predates toolchain switching (GOTOOLCHAIN, added in go1.21), so it never downloads a toolchain a go.mod asks for"
+  else
+    case "$gotc" in
+      local)
+        row OK PARSED "go toolchain switching" \
+          "go reports GOTOOLCHAIN=local - a go.mod that asks for a newer toolchain is refused, not downloaded and run" ;;
+      path|*+path)
+        row WEAK PARSED "go toolchain switching" \
+          "go reports GOTOOLCHAIN=$gotc $(scv_go_src GOTOOLCHAIN) - go switches to a newer toolchain it finds on PATH when a go.mod asks for one; it never downloads one" ;;
+      *)
+        if [ -z "${GOTOOLCHAIN:-}" ] && grep -qs '^[^#]*GOTOOLCHAIN=local' /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
+          # Same shape as the role's GOFLAGS row: the env layer reaches only
+          # PAM-launched and login shells, so THIS process may just not have it.
+          # Only when nothing in this environment set it: an exported
+          # GOTOOLCHAIN=auto is an override, not a missing env layer.
+          row WEAK PRESENT "go toolchain switching" \
+            "GOTOOLCHAIN is '${gotc:-<empty>}' in THIS process $(scv_go_src GOTOOLCHAIN), but GOTOOLCHAIN=local is in /etc/environment or /etc/profile.d - non-PAM contexts (docker exec, systemd, cron, a container CMD) do not load it, and there go downloads and runs whatever toolchain a go.mod asks for. Verify from a login shell"
+        else
+          row GAP PARSED "go toolchain switching" \
+            "go reports GOTOOLCHAIN='${gotc:-<empty>}' $(scv_go_src GOTOOLCHAIN) - go downloads and runs the toolchain a go.mod or go.work names, a binary fetched at build time"
+        fi ;;
+    esac
+  fi
+fi
+
+# ======================================================================
 # composer
 # ======================================================================
 

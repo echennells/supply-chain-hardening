@@ -445,6 +445,41 @@ bundler_project() { # dir
   [ ! -e "$m" ]
 }
 
+@test "verify: GOSUMDB=off and a match-all GONOSUMDB are GAPs, not OK" {
+  command -v go >/dev/null 2>&1 || skip "go not installed"
+  verify_from /tmp GOSUMDB=off
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  echo "$output" | grep "go checksum verification" | grep -q "GOSUMDB=off"
+  verify_from /tmp 'GONOSUMDB=*'
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  echo "$output" | grep "go checksum verification" | grep -q "EVERY module"
+  verify_from /tmp 'GOPRIVATE=*'
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  verify_from /tmp GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE=
+  echo "$output" | grep "go checksum verification" | grep -q "^OK"
+}
+
+@test "verify: a go env -w exemption survives the env layer's empty export, and the row says so" {
+  command -v go >/dev/null 2>&1 || skip "go not installed"
+  ge="$BATS_TEST_TMPDIR/goenv"
+  GOENV="$ge" go env -w 'GONOSUMDB=*'
+  # Ground truth: the empty export the role ships does not clear it.
+  [ "$(GOENV="$ge" GONOSUMDB= go env GONOSUMDB)" = '*' ]
+  verify_from /tmp GOENV="$ge" GONOSUMDB=
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  echo "$output" | grep "go checksum verification" | grep -q "$ge"
+  echo "$output" | grep "go checksum verification" | grep -q "does not override it"
+}
+
+@test "verify: GOTOOLCHAIN is reported - local is OK, an exported auto is a GAP" {
+  command -v go >/dev/null 2>&1 || skip "go not installed"
+  verify_from /tmp GOTOOLCHAIN=local
+  echo "$output" | grep "go toolchain switching" | grep -q "^OK"
+  verify_from /tmp GOTOOLCHAIN=auto
+  echo "$output" | grep "go toolchain switching" | grep -q "^GAP"
+  echo "$output" | grep "go toolchain switching" | grep -q "downloads and runs"
+}
+
 # Stage a project .npmrc with one exclude pattern and run the verifier there.
 npm_exclude_from() { # pattern
   local d="$BATS_TEST_TMPDIR/np"

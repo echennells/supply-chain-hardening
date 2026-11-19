@@ -1080,8 +1080,8 @@ done
 
 # ============================================================ shared probes ==
 #
-# bun, deno, uv, composer, cargo, bundler, maven, gradle, nuget — the same
-# bytes the Ansible role installs at /usr/local/bin/supply-chain-verify. The
+# bun, deno, uv, pip age gates, go checksum db + toolchain, composer, cargo,
+# bundler, maven, gradle, nuget — the same bytes the Ansible role installs at /usr/local/bin/supply-chain-verify. The
 # body needs row(), have() and requested(), all defined above. It never exits.
 if [ ! -r "$SCV_PROBES" ]; then
   echo "[supply-chain-verify] error: shared probe body not found at $SCV_PROBES" >&2
