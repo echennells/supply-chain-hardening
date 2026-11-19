@@ -1878,7 +1878,14 @@ EOF
          && $SUDO install -d -o 0 -g 0 -m 0755 "$(dirname "$sys_cooldown")" \
          && $SUDO install -o 0 -g 0 -m 0755 "$cooldown_exe" "$sys_cooldown"; then
         cooldown_exe="$sys_cooldown"
-        log "cargo: $wrapper_target is shared, so its gate backend is a root-owned copy at $sys_cooldown"
+        log "cargo: $wrapper_target is shared, so its wrapper names a root-owned copy of the gate backend, $sys_cooldown"
+        # cargo, not the wrapper, starts the backend, and it looks in
+        # $CARGO_HOME/bin before the directory the wrapper appends to PATH.
+        # MEASURED (rust:1.100.0-slim-trixie): root's builds there ran
+        # /usr/local/cargo/bin/cargo-cooldown, not the copy above.
+        if [[ -x "$cooldown_bin/cargo-cooldown" ]]; then
+          log "cargo: note: cargo starts the first cargo-cooldown in \$CARGO_HOME/bin, then PATH, so $(id -un)'s builds run $cooldown_bin/cargo-cooldown (or one earlier on PATH), not that copy; see docs/limitations.md"
+        fi
       else
         warn "cargo: $wrapper_target is shared, but no root-owned copy of cargo-cooldown could be installed; the wrapper gates builds for $(id -un) and refuses the backend for root and other accounts"
       fi
@@ -2032,9 +2039,15 @@ cooldown_installed() {
 # Pick the backend for a gated command or REFUSE (exit 126); a quiet degrade
 # would leave the command ungated exactly when it runs as someone else. cargo
 # still starts the backend (`cargo-real cooldown build`), because cargo is what
-# consumes a leading +toolchain / -C / --config. It searches $CARGO_HOME/bin,
-# then PATH, so the backend's directory is APPENDED to PATH when neither covers
-# it: appending cannot change what any name already on PATH resolves to.
+# consumes a leading +toolchain / -C / --config, so the backend's directory is
+# APPENDED to PATH when neither $CARGO_HOME/bin nor PATH covers it: appending
+# cannot change what any name already on PATH resolves to. What is vouched for
+# here is not always what runs: cargo looks in $CARGO_HOME/bin first (unless it
+# is on PATH, where PATH order decides), then along PATH, and starts any other
+# cargo-cooldown it finds there unchecked. MEASURED in rust:1.100.0-slim-trixie:
+# root's build ran /usr/local/cargo/bin/cargo-cooldown (a 0777 directory), not
+# the root-owned libexec copy this wrapper named. See the role template and
+# docs/limitations.md.
 use_cooldown() {
   local c d refused=""
   COOLDOWN=""

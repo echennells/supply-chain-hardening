@@ -194,11 +194,25 @@ cooldown_installed() {
 #
 # cargo still starts the backend itself (`cargo-real cooldown build`) rather
 # than this wrapper exec'ing it by path, because cargo is what consumes a
-# leading +toolchain, -C or --config and sets $CARGO for it. cargo searches
-# $CARGO_HOME/bin, then PATH. When neither covers the backend's directory it is
-# APPENDED to PATH, which cannot change what any name already on PATH resolves
-# to; prepending did. The backend cargo runs is therefore the one vouched for
-# here, or one the caller's own CARGO_HOME or PATH put first.
+# leading +toolchain, -C or --config and sets $CARGO for it. When neither
+# $CARGO_HOME/bin nor PATH covers the backend's directory it is APPENDED to
+# PATH, which cannot change what any name already on PATH resolves to;
+# prepending did.
+#
+# WHAT IS VOUCHED FOR IS NOT ALWAYS WHAT RUNS. cargo looks for cargo-cooldown
+# in $CARGO_HOME/bin first (unless that directory is on PATH, where PATH order
+# decides), then along PATH. The copy checked here is the one cargo starts only
+# when neither holds another cargo-cooldown ahead of it; otherwise cargo starts
+# THAT file, and nothing here checked it. MEASURED (rust:1.100.0-slim-trixie,
+# where CARGO_HOME=/usr/local/cargo is on PATH and 0777; this role and
+# harden.sh alike): with COOLDOWN_EXE the root-owned libexec copy, root's
+# `cargo build` ran /usr/local/cargo/bin/cargo-cooldown, including after
+# another account had replaced it; that directory also holds this wrapper and
+# cargo-real, so in that image any account can replace the toolchain itself.
+# MEASURED likewise (Ubuntu 26.04, apt cargo): root with another account's
+# ~/.cargo/bin late on its own PATH (`sudo env PATH=...`) ran that account's
+# cargo-cooldown. Checking or steering cargo's lookup would refuse root in the
+# stock rust images, so it is left as a decision (docs/limitations.md).
 use_cooldown() {
   local c d refused=""
   COOLDOWN=""
