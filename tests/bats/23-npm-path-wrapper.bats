@@ -75,6 +75,7 @@ load setup
   # rename it temporarily, run wrapper, restore.
   sfw_path=$(command -v sfw 2>/dev/null) || skip "sfw not present"
   [ -x "$sfw_path" ] || skip "sfw at $sfw_path not executable"
+  [ -w "$(dirname "$sfw_path")" ] || skip "needs write access to $(dirname "$sfw_path") to move sfw aside (the container suite runs as root)"
 
   mv "$sfw_path" "${sfw_path}.bats-hidden"
   run timeout 10 /usr/local/bin/npm --version
@@ -123,6 +124,7 @@ load setup
   # warning. If the warning is absent, the install bypassed sfw entirely
   # (allowlist regression in the wrong direction).
   sfw_path=$(command -v sfw 2>/dev/null) || skip "sfw not present"
+  [ -w "$(dirname "$sfw_path")" ] || skip "needs write access to $(dirname "$sfw_path") to move sfw aside (the container suite runs as root)"
 
   mv "$sfw_path" "${sfw_path}.bats-hidden"
   cd /tmp && rm -rf wrapper-route-test && mkdir wrapper-route-test && cd wrapper-route-test

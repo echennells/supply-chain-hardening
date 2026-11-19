@@ -157,10 +157,13 @@ task_block() { # file, task-name substring
   # Simulate a host with a pre-existing corporate /etc/npmrc (registry
   # auth, internal mirror, etc.) and verify the role refuses to clobber
   # it without explicit operator opt-in.
+  require_root "writes /etc/npmrc"
+  # cp -p: mktemp creates the backup 0600, and a plain cp into it keeps 0600, so
+  # the mv below used to leave /etc/npmrc unreadable by every non-root user.
   backup=""
   if [ -f /etc/npmrc ]; then
     backup=$(mktemp)
-    cp /etc/npmrc "$backup"
+    cp -p /etc/npmrc "$backup"
   fi
   echo "registry=https://malicious-corporate-stand-in.example.invalid/" > /etc/npmrc
 
@@ -183,10 +186,13 @@ task_block() { # file, task-name substring
 @test "preflight: accept_etc_overwrite=true bypasses the refuse-to-clobber check" {
   # The opt-in escape hatch must work — operators who knowingly want to
   # overwrite their existing /etc files need a documented path forward.
+  require_root "writes /etc/npmrc"
+  # cp -p: mktemp creates the backup 0600, and a plain cp into it keeps 0600, so
+  # the mv below used to leave /etc/npmrc unreadable by every non-root user.
   backup=""
   if [ -f /etc/npmrc ]; then
     backup=$(mktemp)
-    cp /etc/npmrc "$backup"
+    cp -p /etc/npmrc "$backup"
   fi
   echo "registry=https://unmarked-corporate-stand-in.example.invalid/" > /etc/npmrc
 

@@ -30,6 +30,12 @@ fi
 TEST_USER=pfguard
 
 setup_file() {
+  # Every test here runs the preflight as a second account, which this creates
+  # with a sudoers drop-in. As a normal user that fails at useradd and bats
+  # reports one "setup_file failed" line in place of all seven tests, which is
+  # how they went unreported on every VM run of the suite. In the container
+  # suite (root) they run.
+  require_root "creates the $TEST_USER account and an /etc/sudoers.d drop-in"
   id "$TEST_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$TEST_USER"
   echo "$TEST_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$TEST_USER"
   chmod 440 "/etc/sudoers.d/$TEST_USER"
@@ -45,6 +51,10 @@ EOF
 }
 
 teardown_file() {
+  # Nothing was created when setup_file skipped (not root), and /etc/sudoers.d
+  # is not searchable by a normal user, so rm -f would fail and turn the skip
+  # into a "teardown_file failed".
+  [ "$(id -u)" = 0 ] || return 0
   rm -f /tmp/pf-guard.yml "/etc/sudoers.d/$TEST_USER"
 }
 

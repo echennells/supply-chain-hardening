@@ -71,8 +71,13 @@ setup() {
 @test "grammar (real parser): systemd-environment-d-generator accepts the managed block" {
   local gen=""
   local c
+  # Debian and Ubuntu ship it only as a user environment generator. With the
+  # first two paths alone this test skipped as "no systemd" on every real host
+  # the suite ran on (MEASURED: Ubuntu 24.04 and 26.04, Debian 12 and 13).
   for c in /usr/lib/systemd/systemd-environment-d-generator \
-           /lib/systemd/systemd-environment-d-generator; do
+           /lib/systemd/systemd-environment-d-generator \
+           /usr/lib/systemd/user-environment-generators/30-systemd-environment-d-generator \
+           /lib/systemd/user-environment-generators/30-systemd-environment-d-generator; do
     [ -x "$c" ] && { gen="$c"; break; }
   done
   [ -n "$gen" ] || skip "systemd-environment-d-generator not present (no systemd on this host)"
