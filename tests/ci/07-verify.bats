@@ -481,6 +481,95 @@ esac"
   [[ "$output" == *"acme/*"* ]]
 }
 
+# MEASURED on 2.11.2 (VM run): ["*/*"] exempts every package (`composer require`
+# resolved a release inside the window) but read WEAK, because only a literal
+# "*" was recognised. Composer's only wildcard is *, so any pattern made of *
+# and the one slash matches every vendor/name.
+@test "composer: an ignore pattern that matches every vendor/name is a GAP, not just *" {
+  local pat
+  for pat in '*/*' '**' '*/**'; do
+    composer_age_stub 2.11.1 "[policy.cooldown.ignore] [acme/*, $pat] (./composer.json)"
+    harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+    run verify_sourced --emit=plain
+    [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]] || { echo "'$pat' was not a GAP" >&2; return 1; }
+    [[ "$output" == *"every package skips the gate"* ]]
+  done
+}
+
+@test "composer: a map-form ignore entry is read, and a constrained match-all is WEAK" {
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore.*.constraint] <1.0 (./composer.json)
+[policy.cooldown.ignore.*.reason] legacy (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"for the versions its constraint names"* ]]
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore.*] legacy (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+}
+
+# The writers put "allow-plugins": {} there, never false (false is a hard fatal
+# below 2.2.15). Composer lists no [allow-plugins] line for {} (MEASURED 2.2.6,
+# 2.7.1, 2.11.2), so the row was WEAK on every host, blaming a `false` nothing
+# writes.
+@test "composer: the empty allowlist the writers write reads OK, an allowed plugin a GAP" {
+  composer_age_stub 2.11.1 '[secure-http] true (/x/config.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer plugin execution blocked"* ]]
+  [[ "$output" == *"empty allowlist"* ]]
+  [[ "$output" != *"allow-plugins=false is NOT"* ]]
+  composer_age_stub 2.11.1 '[allow-plugins.evil/probe] true (/x/config.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer plugin execution blocked"* ]]
+  [[ "$output" == *"evil/probe"* ]]
+}
+
+# composer_override_stub <effective-only lines>: the --global dump is the
+# hardened one; the dump without --global (run inside the checkout) adds lines.
+composer_override_stub() {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *--global*--list*) echo '[secure-http] true (/x/config.json)'
+                     echo '[policy.cooldown.period] 172800 (/x/config.json)'
+                     echo '[policy.cooldown.block] true (/x/config.json)' ;;
+  *--list*) echo '[secure-http] true (/x/config.json)'
+            echo '[policy.cooldown.period] 172800 (/x/config.json)'
+            echo '[policy.cooldown.block] true (/x/config.json)'
+            echo '$1' ;;
+  *) echo STUB ;;
+esac"
+  CHECKOUT="$BATS_TEST_TMPDIR/checkout"; mkdir -p "$CHECKOUT"
+  echo '{"name":"t/t"}' > "$CHECKOUT/composer.json"
+}
+
+# MEASURED on 2.11.2 (VM run): a checkout's "policy": false with COMPOSER_POLICY=1
+# exported is listed as `[policy] true (./composer.json)`; the gate rows were
+# right (OK) but this row said GAP "policy: <unset> -> true ... composer uses
+# the repo's value", crediting the env's value to the repo.
+@test "composer: a repo key the exported env outranks is not reported as an override" {
+  composer_override_stub '[policy] true (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  echo 'export COMPOSER_POLICY=1' >> "$ENV_FILE"
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer repo config override"* ]]
+  [[ "$output" == *"outranked by the exported COMPOSER_POLICY=1"* ]]
+}
+
+# MEASURED on 2.11.2 (VM run): with {"*": "x"} the gate row was GAP while this
+# row said OK, "matches the global config on every key we harden".
+@test "composer: a map-form ignore entry in the checkout is an override" {
+  composer_override_stub '[policy.cooldown.ignore.*] x (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer repo config override"* ]]
+  [[ "$output" == *"policy.cooldown.ignore entries"* ]]
+}
+
 @test "bundler below 4.0.13 is a toolchain GAP even though it echoes the key" {
   bundler_age_stub 2.4.20 2
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null

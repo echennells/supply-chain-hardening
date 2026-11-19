@@ -1678,6 +1678,43 @@ composer_policy_off() {
 # composer_val only matched the bare list key, so `{"*": "..."}` read OK while
 # every package skipped the gate (MEASURED on 2.11.2: the install went through).
 composer_ignore_map() { printf '%s\n' "$1" | sed -n 's|^\[policy\.cooldown\.ignore\.\([^]]*\)\] .*$|\1|p' | tr '\n' ' ' | sed 's/ *$//'; }
+# Every cooldown ignore entry in a --list dump, one per line as "<pattern> <c>",
+# <c> = 1 when the entry carries a version constraint (it then exempts only the
+# versions that match it). The list form prints one line,
+#   [policy.cooldown.ignore] [*/*, acme/*] (./composer.json)
+# and the map form prints one line per key, and per field of a rule object:
+#   [policy.cooldown.ignore.psr/log] trusted (./composer.json)
+#   [policy.cooldown.ignore.*.constraint] <1.0 (./composer.json)
+#   [policy.cooldown.ignore.*.0.reason] x (./composer.json)   (a list of rules)
+# (MEASURED on 2.11.2.)
+composer_ignore_entries() {
+  printf '%s\n' "$1" | sed -n 's|^\[policy\.cooldown\.ignore\] \[\(.*\)\] (.*)$|\1|p' \
+    | tr ',' '\n' | sed 's/^ *//; s/ *$//; /^$/d; s/$/ 0/'
+  printf '%s\n' "$1" | sed -n 's|^\[policy\.cooldown\.ignore\.\([^]]*\)\] .*$|\1|p' \
+    | awk '{ n = $0; c = 0
+             if (match(n, /(\.[0-9]+)?\.(reason|constraint|on-block|on-audit)$/)) {
+               if (substr(n, RSTART) ~ /constraint$/) c = 1
+               n = substr(n, 1, RSTART - 1)
+             }
+             if (!(n in seen)) order[++k] = n
+             if (c || !(n in seen)) seen[n] = c }
+           END { for (i = 1; i <= k; i++) print order[i], seen[order[i]] }'
+}
+# Does a cooldown ignore pattern exempt EVERY package? Composer turns the pattern
+# into a regex in which only * is a wildcard, anchored and case-insensitive
+# (BasePackage::packageNameToRegexp). Every package is vendor/name, and "a/b" and
+# "x/y" share no character but the slash, so a pattern that matches both can
+# only be made of * and that one slash: it matches every name. A literal "*"
+# test missed "*/*" (MEASURED on 2.11.2: ["*/*"] read WEAK while `composer
+# require` resolved a release inside the window).
+composer_ignore_all() {
+  _cia=$(printf '%s' "$1" | sed 's/[][?\\]/\\&/g')
+  # shellcheck disable=SC2254  # the pattern is meant to glob; only * is left special
+  case a/b in $_cia) ;; *) return 1 ;; esac
+  # shellcheck disable=SC2254
+  case x/y in $_cia) return 0 ;; esac
+  return 1
+}
 # PRINTF-FORMAT SAFETY. verify.sh's render() does `printf "$ROWS"` (line 420),
 # so ROWS is a FORMAT string: a bare % in any interpolated path silently
 # rewrites the row (MEASURED: a job in `/tmp/build 100%s/x` reported
@@ -1755,7 +1792,7 @@ if have composer; then
   elif [ "$crc" -ne 0 ]; then
     hint=""
     if [ -n "$cmaj" ] && [ "$cmaj" -eq 2 ] && [ "$cmin" -eq 2 ] && [ "${cpat:-99}" -lt 15 ] 2>/dev/null; then
-      hint=' — composer < 2.2.15 dies with a PHP TypeError on "allow-plugins": false, which is exactly what we write'
+      hint=' — composer < 2.2.15 dies with a PHP TypeError on "allow-plugins": false in any config file it reads (this hardening writes {} for that reason)'
     fi
     row GAP FUNCTIONAL "composer config in effect" \
       "composer ${cv:-?} exits $crc on 'composer config --global --list': $(composer_err "$CDUMP") — every composer command here is broken$hint"
@@ -1840,20 +1877,28 @@ if have composer; then
     row GAP PARSED "composer plugin execution blocked" \
       "composer cannot report its config (see the composer config in effect row), so allow-plugins is unverifiable"
   else
+    # What the writers put there is the EMPTY allowlist, "allow-plugins": {},
+    # never `false` (a hard fatal below 2.2.15, see the config row). Composer
+    # flattens an empty map to no line at all, and {} is also its built-in
+    # default (MEASURED on 2.2.6, 2.7.1, 2.11.2: no [allow-plugins] line for {};
+    # `[allow-plugins] false` for false), so "no line and no allowed plugin" IS
+    # the hardened state. It used to read WEAK on every host, blaming a
+    # `false` nothing writes. Under {} an unlisted plugin is refused with an
+    # error in a non-interactive run, and prompted for in an interactive one.
     ap=$(composer_val "$EDUMP" allow-plugins)
     case "$ap" in
       false) row "$estat" PARSED "composer plugin execution blocked" \
-               "composer's $escope reports allow-plugins=false from $(cq "$(composer_src "$EDUMP" allow-plugins)")$eqal" ;;
+               "composer's $escope reports allow-plugins=false from $(cq "$(composer_src "$EDUMP" allow-plugins)"), which refuses every plugin$eqal" ;;
       true)  row GAP PARSED "composer plugin execution blocked" \
                "composer's $escope reports allow-plugins=true from $(cq "$(composer_src "$EDUMP" allow-plugins)") — every plugin a checkout declares runs" ;;
       '')
         allowed=$(composer_allowed_plugins "$EDUMP")
         if [ -n "$allowed" ]; then
           row GAP PARSED "composer plugin execution blocked" \
-            "composer's $escope allows these plugins: $(cq "$allowed") — allow-plugins=false is not in effect"
+            "composer's $escope allows these plugins: $(cq "$allowed") — they run whenever composer does, unless --no-plugins is passed"
         else
-          row WEAK PARSED "composer plugin execution blocked" \
-            "composer reports no allow-plugins value; its built-in empty allowlist blocks plugins, but our allow-plugins=false is NOT what is doing it"
+          row "$estat" PARSED "composer plugin execution blocked" \
+            "composer's $escope allows no plugin: allow-plugins is the empty allowlist {} (what this hardening writes, and composer's default), so an unlisted plugin is refused in a non-interactive run and prompted for in an interactive one$eqal"
         fi ;;
       *) row GAP PARSED "composer plugin execution blocked" "composer's $escope reports allow-plugins=$(cq "$ap")" ;;
     esac
@@ -1919,7 +1964,6 @@ if have composer; then
   else
     cper=$(composer_val "$EDUMP" policy.cooldown.period)
     cblk=$(composer_val "$EDUMP" policy.cooldown.block)
-    cign=$(composer_val "$EDUMP" policy.cooldown.ignore)
     cpsrc=$(composer_src "$EDUMP" policy.cooldown.period)
     if [ -n "${COMPOSER_POLICY_COOLDOWN_PERIOD:-}" ]; then
       cper=$COMPOSER_POLICY_COOLDOWN_PERIOD; cpsrc="COMPOSER_POLICY_COOLDOWN_PERIOD"
@@ -1931,15 +1975,20 @@ if have composer; then
     esac
     csec=$(composer_period_seconds "$cper")
     cisrc=$(composer_src "$EDUMP" policy.cooldown.ignore)
-    cignmap=$(composer_ignore_map "$EDUMP")
-    if [ -n "$cignmap" ]; then
-      cign="${cign:+$cign }$cignmap"
-      [ -n "$cisrc" ] || cisrc=$(printf '%s\n' "$EDUMP" | sed -n 's|^\[policy\.cooldown\.ignore\.[^]]*\] .* (\(.*\))$|\1|p' | head -1)
-    fi
-    case " $(printf '%s' "$cign" | tr -d '[]' | tr ',' ' ') " in
-      *" * "*) cignall=1 ;;
-      *) cignall=0 ;;
-    esac
+    [ -n "$cisrc" ] || cisrc=$(printf '%s\n' "$EDUMP" | sed -n 's|^\[policy\.cooldown\.ignore\.[^]]*\] .* (\(.*\))$|\1|p' | head -1)
+    # cign: every pattern, for the text. cignall: one of them exempts every
+    # package at every version. cignpart: matches every package but only the
+    # versions its constraint names.
+    cign=""; cignall=0; cignpart=""
+    while read -r _cip _cic; do
+      [ -n "$_cip" ] || continue
+      cign="${cign:+$cign, }$_cip"
+      if composer_ignore_all "$_cip"; then
+        if [ "$_cic" = 1 ]; then cignpart="${cignpart:+$cignpart, }$_cip"; else cignall=1; fi
+      fi
+    done <<CIGN
+$(composer_ignore_entries "$EDUMP")
+CIGN
     if cpoff=$(composer_policy_off "$EDUMP"); then
       row GAP PARSED "composer publish-age gate" \
         "composer $cv: $cpoff - a release published minutes ago resolves"
@@ -1957,10 +2006,12 @@ if have composer; then
         "$escope sets policy.cooldown.block=false - versions inside the window install anyway"
     elif [ "$cignall" -eq 1 ]; then
       row GAP PARSED "composer publish-age gate" \
-        "$escope sets policy.cooldown.ignore=$(cq "$cign") from $(cq "$cisrc") - every package skips the gate, and no env var outranks a repo's ignore list"
+        "$escope sets policy.cooldown.ignore=$(cq "$cign") from $(cq "$cisrc") - a pattern there matches every vendor/name, so every package skips the gate, and no env var outranks a repo's ignore list"
     elif [ -n "$cign" ]; then
+      cpartnote=""
+      [ -n "$cignpart" ] && cpartnote="; $(cq "$cignpart") matches every package, for the versions its constraint names"
       row WEAK PARSED "composer publish-age gate" \
-        "composer $cv enforces $(cq "$cper") but $escope exempts $(cq "$cign") from $(cq "$cisrc")"
+        "composer $cv enforces $(cq "$cper") but $escope exempts $(cq "$cign") from $(cq "$cisrc")$cpartnote"
     elif [ -n "$cwantsec" ] && [ "$csec" -lt "$cwantsec" ]; then
       row WEAK PARSED "composer publish-age gate" \
         "composer $cv enforces ${csec}s from $(cq "$cpsrc"), below the ${cwanth}h this host declared - something shortened the window"
@@ -1997,29 +2048,59 @@ if have composer; then
     row WEAK PARSED "composer repo config override" \
       "composer exits $prc reading the effective config for $(cq "$PWD") (global dump rc=$crc); cannot tell whether this checkout overrides our settings"
   else
-    povr=""
+    povr=""; penv=""
     # `policy` and the cooldown keys: a checkout's "policy": false switched off
     # the cooldown and advisory blocking while this row said "matches the global
     # config on every key we harden" (MEASURED, 2.11.2).
+    #
+    # Three of these keys have an env form that outranks the checkout, and the
+    # dump does not say so. MEASURED on 2.11.2: with COMPOSER_POLICY=1 exported,
+    # a checkout's "policy": false is listed as `[policy] true (./composer.json)`
+    # (the env value, credited to the repo), and a checkout's "period": null /
+    # "block": false are listed as-is although COMPOSER_POLICY_COOLDOWN_PERIOD /
+    # _BLOCK replace them (CooldownPolicyConfig, PolicyConfig). A difference
+    # on a key whose env form is exported is the env's doing, not an override
+    # in effect, so it goes in penv instead.
     for pk in secure-http lock preferred-install allow-plugins \
               audit.abandoned audit.block-insecure audit.block-abandoned \
               policy policy.cooldown.period policy.cooldown.block policy.cooldown.ignore; do
       pg=$(composer_val "$CDUMP" "$pk"); pe=$(composer_val "$PDUMP" "$pk")
       [ "$pg" = "$pe" ] && continue
-      povr="${povr:+$povr, }$pk: ${pg:-<unset>} -> ${pe:-<unset>}"
+      pev=""
+      case "$pk" in
+        policy) composer_bool_env "${COMPOSER_POLICY:-}" && pev="COMPOSER_POLICY=${COMPOSER_POLICY}" ;;
+        policy.cooldown.period) [ -n "${COMPOSER_POLICY_COOLDOWN_PERIOD:-}" ] && pev="COMPOSER_POLICY_COOLDOWN_PERIOD=${COMPOSER_POLICY_COOLDOWN_PERIOD}" ;;
+        policy.cooldown.block) _pbe=0; composer_bool_env "${COMPOSER_POLICY_COOLDOWN_BLOCK:-}" || _pbe=$?
+                               [ "$_pbe" -ne 2 ] && pev="COMPOSER_POLICY_COOLDOWN_BLOCK=${COMPOSER_POLICY_COOLDOWN_BLOCK}" ;;
+      esac
+      if [ -n "$pev" ]; then
+        penv="${penv:+$penv, }$pk (outranked by the exported $pev)"
+      else
+        povr="${povr:+$povr, }$pk: ${pg:-<unset>} -> ${pe:-<unset>}"
+      fi
     done
+    # Map-form ignore entries are one line per key, which composer_val above
+    # never matches: {"*": "x"} switched the gate off while this row said
+    # "matches the global config" (VM run, 2.11.2).
+    pig=$(composer_ignore_map "$CDUMP"); pie=$(composer_ignore_map "$PDUMP")
+    [ "$pig" != "$pie" ] && povr="${povr:+$povr, }policy.cooldown.ignore entries: ${pig:-<none>} -> ${pie:-<none>}"
     plg=$(composer_allowed_plugins "$CDUMP"); ple=$(composer_allowed_plugins "$PDUMP")
     [ "$plg" != "$ple" ] && povr="${povr:+$povr, }plugins the checkout allows: ${ple:-<none>}"
+    penvnote=""
+    [ -n "$penv" ] && penvnote=" (it also sets $(cq "$penv"), so those stay ours)"
     psrc=$(composer_src "$PDUMP" secure-http)
     if [ -z "$psrc" ]; then
       row WEAK PARSED "composer repo config override" \
         "composer returned no usable [secure-http] line for $(cq "$PWD"); cannot tell whether this checkout overrides our settings"
     elif [ -n "$povr" ]; then
       row GAP PARSED "composer repo config override" \
-        "the composer.json in $(cq "$PWD") overrides our hardening (global -> effective): $(cq "$povr") — composer uses the repo's value, not ours"
+        "the composer.json in $(cq "$PWD") overrides our hardening (global -> effective): $(cq "$povr") — composer uses the repo's value, not ours$penvnote"
     elif [ "$psrc" = "default" ]; then
       row WEAK PARSED "composer repo config override" \
         "the composer.json in $(cq "$PWD") weakens no key we harden — but composer names its OWN default as the source of secure-http here, so no hardening of ours is in effect either (see the composer config in effect row)"
+    elif [ -n "$penv" ]; then
+      row OK PARSED "composer repo config override" \
+        "composer's effective config for $(cq "$PWD") takes secure-http from $(cq "$psrc"); the checkout sets $(cq "$penv"), and on every other key we harden it matches the global config"
     else
       row OK PARSED "composer repo config override" \
         "composer's effective config for $(cq "$PWD") takes secure-http from $(cq "$psrc") and matches the global config on every key we harden"
