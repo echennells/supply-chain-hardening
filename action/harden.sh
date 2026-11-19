@@ -1248,7 +1248,11 @@ harden_composer() {
   # log that reads as coverage.
   write_env COMPOSER_SKIP_SCRIPTS \
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
-  write_env COMPOSER_ALLOW_SUPERUSER 1
+  # No COMPOSER_ALLOW_SUPERUSER here: the wrapper sets it for its own run only.
+  # In the job's environment it switched off composer's root guard for every
+  # caller that bypasses the wrapper (MEASURED 2.7.1/2.11.2: without it a
+  # non-interactive root run disables plugins; with it a checkout-allowed plugin
+  # ran). See templates/supply-chain-env.sh.j2.
   # The env form outranks a checked-out composer.json (MEASURED on 2.11.1: a
   # repo's "period": null or "block": false turns off the config.json gate and
   # not these). A repo's "ignore" list still wins; verify.sh reports that.
@@ -1376,6 +1380,9 @@ if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = 
   echo "[supply-chain-harden] error: real composer not found at '$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
 fi
+# Only here, not in the job's environment: wrapped runs carry --no-plugins, and
+# composer's own root guard (a non-interactive root run disables plugins) stays
+# on for anything that bypasses this wrapper.
 export COMPOSER_ALLOW_SUPERUSER=1
 # Publish-age gate (composer >= 2.11.0). Set unconditionally so a step's own env
 # cannot shorten the window; `composer --no-cooldown` still gets through, on

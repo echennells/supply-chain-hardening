@@ -111,10 +111,13 @@ if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = 
   exit 127
 fi
 
-# Suppress the "Do not run Composer as root" warning when invoked in
-# CI/container/agent contexts where running as root is intentional and
-# unavoidable. Doesn't change any security posture — composer already
-# runs as the caller's UID regardless.
+# Suppress the "Do not run Composer as root" warning and composer's root guard
+# for THIS invocation only, in CI/container/agent contexts where running as root
+# is intentional. The guard disables plugins for a non-interactive root run;
+# this wrapper already injects --no-plugins unless composer_allow_plugins=true,
+# in which case the operator has opted in to plugins. It is deliberately not
+# exported host-wide any more (see templates/supply-chain-env.sh.j2): there it
+# switched the guard off for every caller that bypasses this wrapper.
 export COMPOSER_ALLOW_SUPERUSER=1
 
 # Publish-age gate, composer >= 2.11.0 (ignored below that). Exported here for
