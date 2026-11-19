@@ -379,13 +379,16 @@ yarn_enable_hardened_mode: true         # lockfile-tampering defense (Yarn 4.0+)
 # socket firewall
 socket_firewall_install: true
 
-# Refresh auditing tools (cargo-audit, govulncheck, pip-audit, etc.) on this run.
-# Default false: installs only happen on first run (idempotent via `creates:`).
-# Set to true via CLI — `ansible-playbook site.yml -e refresh_tools=true` — to
-# re-install everything regardless of whether the binary already exists. Useful
+# Re-install the pinned auditing tools on this run: govulncheck, pinact, zizmor,
+# pip-audit, uv-secure, and cargo-audit/cargo-vet when cargo_audit_tools is on
+# (it is off by default). Default false: each is installed only when its binary
+# is missing (`creates:`), so a bumped *_version pin is not picked up on its own.
+# Set to true via CLI — `ansible-playbook site.yml -e refresh_tools=true` —
 # after a toolchain upgrade (Go, Rust, etc.) where existing binaries are valid
-# but built against an older compiler, or when you want the latest @latest
-# versions of @latest-pinned tools.
+# but built against an older compiler, or after changing a pin. Every tool is
+# pinned below; nothing installs @latest. Not covered: lockfile-lint, npq and
+# sfw (installed only when missing). cargo-cooldown is rebuilt whenever its
+# installed version differs from cargo_cooldown_version, refresh or not.
 refresh_tools: false
 
 # npm PATH wrapper (default on; the agent-relevant protection layer)

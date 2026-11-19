@@ -57,13 +57,13 @@ Pinned tool versions (`npq_version`, `sfw_version`, `zizmor_version`,
 
 ## Refreshing auditing tools
 
-The role installs auditing tools (`govulncheck`, `cargo-audit`, `pip-audit`, `zizmor`, `pinact`, etc.) on first run and skips re-installs on subsequent runs for idempotency. After a toolchain upgrade (new Go, new Rust) or when you want the latest `@latest`-pinned versions of these tools, force a refresh:
+The role installs auditing tools at the versions pinned in `defaults/main.yml`: `govulncheck`, `pinact`, `zizmor`, `pip-audit`, `uv-secure` and `lockfile-lint`, plus `cargo-audit` and `cargo-vet` only when `cargo_audit_tools: true` (off by default). There is no `@latest`: every one is pinned. Each is installed only when its binary is missing, so a later run, or a bumped pin, does not reinstall it. After a toolchain upgrade (new Go, new Rust) or a pin change, force a refresh:
 
 ```bash
 ansible-playbook site.yml -e refresh_tools=true
 ```
 
-This re-installs every auditing tool regardless of whether the binary already exists. Slow (10–30 s per tool) but always produces fresh builds against the current toolchain.
+This re-installs `govulncheck`, `pinact`, `zizmor`, `pip-audit` and `uv-secure`, and `cargo-audit` and `cargo-vet` when enabled, at their pinned versions whether or not the binary exists. It does not cover `lockfile-lint`, `npq` or `sfw`, which are installed only when missing. `cargo-cooldown` needs no refresh: the role rebuilds it whenever the installed version differs from `cargo_cooldown_version`. The cargo tools build from source, so expect minutes rather than seconds (`defaults/main.yml` records 1m53s for cargo-cooldown alone).
 
 ## Inventory
 
