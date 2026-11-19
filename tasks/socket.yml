@@ -284,7 +284,13 @@
       umask 022
       # Whichever `true` exists, as the action does (macOS has no /bin/true).
       true_bin=/usr/bin/true; [ -x "$true_bin" ] || true_bin=/bin/true
-      if out=$(timeout 120 sfw "$true_bin" 2>&1); then
+      # 600 s, as supply-chain-age-gate-refresh --sfw allows for the same
+      # download. The binary is 137 MB; MEASURED from one test host the
+      # download alone took 81.6 s (1.68 MB/s), and with other downloads
+      # running at the same time it ran out at 120 s four times and at 180 s
+      # once (rc=124). Each time a working sfw was moved aside until the next
+      # apply. Waiting longer costs only time when GitHub hangs.
+      if out=$(timeout 600 sfw "$true_bin" 2>&1); then
         echo ok
       else
         rc=$?
