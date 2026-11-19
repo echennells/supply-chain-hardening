@@ -449,11 +449,53 @@ cooldown_stubs() {
 
 # --- composer --------------------------------------------------------------
 
-@test "composer: --no-scripts is injected on every invocation" {
+@test "composer: --no-scripts is injected on lifecycle invocations" {
   stub_bin composer
   harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
   run "$TEST_BIN/composer" install
   [[ "$output" == *"--no-scripts"* ]]
+}
+
+# MEASURED before this routing (composer 2.2.6 -> 2.11.2, this action's wrapper
+# included): with --no-scripts injected, `composer test` exited 0 having run
+# nothing and `composer run-script test` said 'Script "test" is not defined'.
+composer_route_project() {
+  have php || skip "php not installed (the wrapper reads composer.json with php)"
+  PROJ="$BATS_TEST_TMPDIR/proj"
+  mkdir -p "$PROJ/sub"
+  cat > "$PROJ/composer.json" <<'J'
+{ "name": "t/t",
+  "scripts": { "test": "echo t", "install": "echo x", "post-install-cmd": "echo p" },
+  "scripts-aliases": { "test": ["t"] } }
+J
+  stub_bin composer
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+}
+
+@test "composer: a root script run by name gets no --no-scripts" {
+  composer_route_project
+  local args
+  for args in "test" "t" "run-script test" "run test" "-n test"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$PROJ" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* ]] || { echo "'$args': $output"; return 1; }
+    [[ "$output" != *"--no-scripts"* ]] || { echo "'$args' got --no-scripts: $output"; return 1; }
+    [[ "$output" == *"--no-plugins"* ]] || { echo "'$args' lost --no-plugins: $output"; return 1; }
+  done
+  run bash -c 'cd / && "$1" -d "$2" test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  run bash -c 'cd "$2/sub" && "$1" test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+}
+
+@test "composer: a script named after a built-in, or an event, does not lift --no-scripts" {
+  composer_route_project
+  local args
+  for args in "install" "post-install-cmd" "show" "nosuchscript" ""; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$PROJ" "$TEST_BIN/composer" $args
+    [[ "$output" == *"--no-scripts"* ]] || { echo "'$args' did not get --no-scripts: $output"; return 1; }
+  done
 }
 
 @test "composer: --no-plugins is conditional on the input" {

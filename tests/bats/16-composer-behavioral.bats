@@ -104,6 +104,72 @@ setup() {
   [ "$marker_present" = "no" ]
 }
 
+# --- a script asked for by name runs; lifecycle scripts do not ---------------
+# MEASURED before the wrapper learned the difference (composer 2.2.6 -> 2.11.2,
+# role and action): `composer test` exited 0 with no output while the script
+# says `exit 3`, and `composer run-script test` failed with 'Script "test" is
+# not defined in this package'. A CI test step went green having run nothing.
+
+explicit_fixture() {
+  EXP="$BATS_TEST_TMPDIR/explicit"
+  mkdir -p "$EXP"
+  cat > "$EXP/composer.json" <<'J'
+{ "name": "test/explicit-scripts",
+  "scripts": { "test": "echo SCH-RAN-TEST; exit 3", "lint": ["@test"] } }
+J
+}
+
+@test "EXPLICIT SCRIPT: composer <name> runs the root script and returns its exit code" {
+  explicit_fixture
+  run bash -c 'cd "$1" && composer test --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+  run bash -c 'cd "$1" && composer lint --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+}
+
+@test "EXPLICIT SCRIPT: composer run-script <name> and composer run <name> run it" {
+  explicit_fixture
+  run bash -c 'cd "$1" && composer run-script test --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+  run bash -c 'cd "$1" && composer run test --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+}
+
+# A checkout cannot turn `composer install` into an "explicit run" by naming a
+# script "install": composer skips such a script ("would override a Composer
+# command") and runs the built-in, which must still get --no-scripts.
+hostile_install_fixture() {
+  HOST="$BATS_TEST_TMPDIR/hostile"
+  mkdir -p "$HOST"
+  php -r '
+    $j = json_decode(file_get_contents($argv[1]), true);
+    $j["scripts"]["install"] = "echo named-install";
+    file_put_contents($argv[2], json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  ' /opt/test-fixtures/composer-postinstall/composer.json "$HOST/composer.json"
+}
+
+@test "FIXTURE CONTROL: the hostile-install fixture fires its lifecycle script without the wrapper" {
+  command -v php >/dev/null 2>&1 || skip "php not installed"
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
+  hostile_install_fixture
+  run bash -c 'cd "$1" && env -u COMPOSER_SKIP_SCRIPTS "$2" install --no-interaction' _ "$HOST" "$REAL"
+  [ -f /tmp/marker-composer-script ]
+  rm -f /tmp/marker-composer-script
+}
+
+@test "ATTACK: a script named install does not lift --no-scripts from composer install" {
+  command -v php >/dev/null 2>&1 || skip "php not installed"
+  hostile_install_fixture
+  run bash -c 'cd "$1" && composer install --no-interaction' _ "$HOST"
+  [ "$status" -eq 0 ]
+  [ -f "$HOST/vendor/autoload.php" ]
+  [ ! -f /tmp/marker-composer-script ]
+}
+
 # --- publish-age gate ---------------------------------------------------------
 # These call the real binary with a scratch COMPOSER_HOME: the deployed wrapper
 # pins the 48h window, and "the newest release is older than 48h" is true of most

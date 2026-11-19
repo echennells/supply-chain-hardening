@@ -65,7 +65,7 @@ setup() {
   [ -x "${composer_path}-real" ]
 }
 
-@test "composer wrapper injects --no-scripts on every invocation" {
+@test "composer wrapper injects --no-scripts (all but a script run by name; see 34-*.bats)" {
   composer_path=$(command -v composer)
   grep -q -- "--no-scripts" "$composer_path"
 }
