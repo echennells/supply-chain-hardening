@@ -1,8 +1,23 @@
 ---
 # Maven supply chain hardening
 
-- name: Check if mvn is installed
-  ansible.builtin.command: which mvn
+- name: Check for mvn, or a JDK a ./mvnw build would run on
+  # Many maven builds run the project's ./mvnw instead of an `mvn` on PATH. The
+  # wrapper downloads a maven distribution and runs it on the host's java, and
+  # that maven reads the same ~/.m2/settings.xml. Gating on `which mvn` alone
+  # (CMP 4.5) left such hosts with no settings at all. MEASURED (8281a6b, JDK
+  # 21 on PATH, no mvn): nothing was deployed and nothing was recorded, and
+  # maven 3.9.11 then read "user settings from ~/.m2/settings.xml", which did
+  # not exist. A wrapper cannot start without java, so java on PATH or
+  # $JAVA_HOME/bin/java is the trigger.
+  ansible.builtin.shell:
+    cmd: |
+      for t in mvn java; do command -v "$t" && exit 0; done
+      if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        echo "$JAVA_HOME/bin/java"; exit 0
+      fi
+      exit 1
+    executable: /bin/bash
   register: mvn_check
   changed_when: false
   check_mode: false
@@ -84,3 +99,9 @@
         </activeProfiles>
       </settings>
   when: mvn_check.rc == 0
+
+- name: Record skipped protection — neither mvn nor a JDK
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['maven settings.xml — neither mvn nor a JDK (java on PATH, or $JAVA_HOME/bin/java) was found, so no settings were deployed. Installing either later will NOT pick up this hardening; re-run the role.'] }}
+  when: mvn_check.rc != 0

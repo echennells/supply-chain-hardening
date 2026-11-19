@@ -208,6 +208,71 @@ task_block() { # file, task-name substring
   [ "$status" -eq 0 ]
 }
 
+# ---- JDK-only hosts: ./gradlew and ./mvnw (CMP 4.5) ----
+#
+# Most JVM builds run the project's wrapper, not a gradle/mvn on PATH. The
+# wrapper's distribution reads the same gradle user home and ~/.m2, so the role
+# must deploy there when a JDK is present. MEASURED on 8281a6b (JDK 21 on PATH,
+# no gradle or mvn): nothing was deployed, and a 1.+ plugin resolved and ran
+# under gradle 8.14.3.
+#
+# Isolated: HOME and GRADLE_USER_HOME point into a temp dir (the role resolves
+# both from the target's environment), so the files this run writes cannot
+# leak into the suite's own hardened home. `java` is a stub: the gate only asks
+# whether a wrapper could start, it never runs java.
+
+# PATH with every directory that holds gradle, mvn or java removed, then $1
+# (if given) in front. Prints nothing when a needed system dir holds one of
+# them, so the caller can skip instead of testing the wrong thing.
+jvm_free_path() {
+  local d out="" IFS=:
+  for d in $PATH; do
+    if [ -x "$d/gradle" ] || [ -x "$d/mvn" ] || [ -x "$d/java" ]; then
+      case "$d" in /usr/bin|/bin|/usr/sbin|/sbin) return 1 ;; esac
+      continue
+    fi
+    out="${out:+$out:}$d"
+  done
+  printf '%s\n' "${1:+$1:}$out"
+}
+
+jvm_only_apply() { # $1 = PATH to use
+  local t=$2
+  cd "$ROLE_DIR"
+  env -u JAVA_HOME HOME="$t/home" GRADLE_USER_HOME="$t/home/.gradle" PATH="$1" \
+    ansible-playbook site.yml --connection=local --limit localhost \
+      -e podman_enabled=false --tags maven,gradle 2>&1
+}
+
+@test "JDK-only host: a java with no gradle/mvn still gets the init script and settings.xml (CMP 4.5)" {
+  local t p
+  t=$(mktemp -d); mkdir -p "$t/bin" "$t/home"
+  printf '#!/bin/sh\necho "openjdk version \"21\""\n' > "$t/bin/java"
+  chmod +x "$t/bin/java"
+  p=$(jvm_free_path "$t/bin") || { rm -rf "$t"; skip "gradle, mvn or java lives in a system bin dir here"; }
+  run jvm_only_apply "$p" "$t"
+  echo "$output" | grep -E 'fatal|neither|PLAY RECAP' -A1 | head -8
+  [ "$status" -eq 0 ]
+  assert_file_exists "$t/home/.gradle/init.d/supply-chain-security.gradle"
+  assert_file_exists "$t/home/.m2/settings.xml"
+  ! echo "$output" | grep -q 'neither gradle nor a JDK'
+  ! echo "$output" | grep -q 'neither mvn nor a JDK'
+  rm -rf "$t"
+}
+
+@test "JDK-only host: FIXTURE CONTROL — with no java either, nothing is deployed and both skips are recorded" {
+  local t p
+  t=$(mktemp -d); mkdir -p "$t/home"
+  p=$(jvm_free_path) || { rm -rf "$t"; skip "gradle, mvn or java lives in a system bin dir here"; }
+  run jvm_only_apply "$p" "$t"
+  [ "$status" -eq 0 ]
+  [ ! -e "$t/home/.gradle/init.d/supply-chain-security.gradle" ]
+  [ ! -e "$t/home/.m2/settings.xml" ]
+  echo "$output" | grep -q 'neither gradle nor a JDK'
+  echo "$output" | grep -q 'neither mvn nor a JDK'
+  rm -rf "$t"
+}
+
 # ---- Idempotency (#3) ----
 #
 # Apply twice, assert the second apply produces zero changed= count.

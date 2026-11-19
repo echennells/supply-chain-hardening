@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 # Behavioral tests for Gradle supply-chain hardening.
 #
-# The role's tasks/gradle.yml gates on `which gradle`, then deploys
-# ~/.gradle/init.d/supply-chain-security.gradle — an init script that
+# The role's tasks/gradle.yml gates on gradle OR a JDK (a ./gradlew build
+# needs only java; CMP 4.5, tested in 25-integration-regressions.bats), then
+# deploys ~/.gradle/init.d/supply-chain-security.gradle — an init script that
 # throws GradleException on any HTTP (non-HTTPS) repository. Matrix
 # mode runs these per (java, gradle) cell to confirm the init script
 # is loaded across gradle versions (gradle's init.d discovery has been

@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # Behavioral tests for Maven supply-chain hardening.
 #
-# The role's tasks/maven.yml is config-only — gates on `which mvn`,
-# then deploys ~/.m2/settings.xml with an HTTPS-only central mirror
+# The role's tasks/maven.yml is config-only — gates on mvn OR a JDK (a
+# ./mvnw build needs only java; CMP 4.5, tested in
+# 25-integration-regressions.bats), then deploys ~/.m2/settings.xml with an
+# HTTPS-only central mirror
 # and strict (`fail`) checksum policy. These tests verify the config
 # was deployed correctly and that mvn can still execute. Matrix mode
 # runs these per (java, maven) cell to confirm the config is read

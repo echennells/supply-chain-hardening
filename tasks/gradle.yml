@@ -1,8 +1,24 @@
 ---
 # Gradle supply chain hardening
 
-- name: Check if gradle is installed
-  ansible.builtin.command: which gradle
+- name: Check for gradle, or a JDK a ./gradlew build would run on
+  # Most gradle builds never touch a `gradle` on PATH: they run the project's
+  # ./gradlew, which downloads its own distribution into the gradle user home
+  # and runs it on the host's java. That distribution loads init.d from the
+  # same gradle user home. Gating on `which gradle` alone (CMP 4.5) left
+  # such hosts with no init script at all. MEASURED (8281a6b, JDK 21 on PATH,
+  # no gradle or mvn): the apply reported "gradle is not installed", deployed
+  # nothing, and a 1.+ plugin resolved and ran under gradle 8.14.3.
+  # A wrapper cannot start without java, so java on PATH or $JAVA_HOME/bin/java
+  # is the trigger; a host with neither cannot run a gradle build yet.
+  ansible.builtin.shell:
+    cmd: |
+      for t in gradle java; do command -v "$t" && exit 0; done
+      if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        echo "$JAVA_HOME/bin/java"; exit 0
+      fi
+      exit 1
+    executable: /bin/bash
   register: gradle_check
   changed_when: false
   check_mode: false
@@ -159,8 +175,8 @@
     - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
     - ansible_user_dir | default('', true) | length == 0
 
-- name: Record skipped protection — gradle absent
+- name: Record skipped protection — neither gradle nor a JDK
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['gradle init script — gradle is not installed, so no init script was deployed. Installing gradle later will NOT pick up this hardening; re-run the role.'] }}
+      {{ (skipped_protections | default([])) + ['gradle init script — neither gradle nor a JDK (java on PATH, or $JAVA_HOME/bin/java) was found, so no init script was deployed. Installing either later will NOT pick up this hardening; re-run the role.'] }}
   when: gradle_check.rc != 0
