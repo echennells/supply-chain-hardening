@@ -279,7 +279,7 @@ git clone https://github.com/echennells/supply-chain-hardening
 ./supply-chain-hardening/action/harden.sh --suggest=/path/to/your/repo
 ```
 
-It reads your manifests and prints the block you need:
+It reads your manifests and prints the block you need. For a pnpm repo:
 
 ```
 Add this to your workflow:
@@ -290,14 +290,25 @@ Add this to your workflow:
 
 Why, and what else to know:
 
-  - These packages run code at install time. `ignore-scripts` blocks that by
-    default, which for native modules means the install 'succeeds' and the
-    binding is missing. Allowlisting them restores their build scripts and
-    nothing else.
+  - These packages run code at install time: esbuild,sharp. `ignore-scripts`
+    blocks that by default, which for native modules means the install
+    'succeeds' and the binding is missing.
+  - pnpm: allowlisting them restores their build scripts and nothing else. [...]
   - Your own package.json defines: prepare — `npm ci` will NOT run these while
     ignore-scripts is on. If one of them is load-bearing (husky,
     patch-package), run it explicitly as its own step.
 ```
+
+An npm repo (`package-lock.json`) gets no input, because `pnpm_built_dependencies`
+only changes pnpm's config and npm has no per-package allowlist that survives
+`ignore-scripts`. It gets a step instead: `npm rebuild <pkgs> --ignore-scripts=false`
+after the install, and on npm 12 an `npm approve-scripts <pkgs>` first, because
+npm 12 also skips unapproved install scripts. MEASURED under the hardening with a
+dependency whose install script writes a marker: plain `npm rebuild <pkg>` built
+nothing on npm 9.2.0, 11.19.1 or 12.2.3; adding `--ignore-scripts=false` built it on
+9.2.0 and 11.19.1; npm 12.2.3 built it only after `npm approve-scripts`, and
+`ignore-scripts` stayed `true` for the next install on all three. A `yarn.lock` or
+bun lockfile is told that the action has no per-package allowlist for them.
 
 It reports and changes nothing — no config is written, no tool is installed.
 

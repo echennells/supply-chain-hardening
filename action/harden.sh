@@ -224,13 +224,37 @@ suggest_for_repo() {
   # --- npm/pnpm/yarn/bun: packages whose install runs code ---
   local scripted
   scripted=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//') || true
+  # THE FIX DEPENDS ON THE PACKAGE MANAGER. pnpm_built_dependencies writes
+  # pnpm's config and nothing else. MEASURED (VM#9): a package-lock.json repo
+  # with sqlite3 was told to set it, did, and the binding was still missing,
+  # because only ~/.config/pnpm changed. npm has no per-package allowlist that
+  # survives ignore-scripts=true; what works is an explicit rebuild step.
+  # MEASURED 2026-11-19 with a dependency whose install script writes a
+  # marker, under ~/.npmrc + NPM_CONFIG_IGNORE_SCRIPTS=true:
+  #   npm rebuild <pkg>                         did nothing    9.2.0, 11.19.1, 12.2.3
+  #   npm rebuild <pkg> --ignore-scripts=false  ran it         9.2.0, 11.19.1
+  #                                             did nothing    12.2.3 (allowScripts gate)
+  #   npm approve-scripts <pkg>, then the same  ran it         12.2.3
+  # and npm config get ignore-scripts still answered true afterwards.
+  local scripted_sp="${scripted//,/ }"
+  local npm_fix="\`- run: npm rebuild ${scripted_sp} --ignore-scripts=false\` as its own step after the install. On npm 12, run \`npm approve-scripts ${scripted_sp}\` once and commit the allowScripts entry it adds to package.json, or that rebuild skips them too"
   if [ -n "$scripted" ]; then
     found_any=1
-    with_lines+=("          pnpm_built_dependencies: '$scripted'")
-    notes+=("These packages run code at install time. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing. Allowlisting them restores their build scripts and nothing else.")
-    notes+=("On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
+    notes+=("These packages run code at install time: ${scripted}. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing.")
+    if [ -f "$dir/pnpm-lock.yaml" ]; then
+      with_lines+=("          pnpm_built_dependencies: '$scripted'")
+      notes+=("pnpm: allowlisting them restores their build scripts and nothing else. On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
+    fi
+    if [ -f "$dir/package-lock.json" ]; then
+      notes+=("npm (package-lock.json): there is no per-package build allowlist for npm here; \`pnpm_built_dependencies\` changes pnpm's config only. To build the ones you trust, add ${npm_fix}.")
+    fi
     if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ]; then
       notes+=("This list came from a known-names scan, not a lockfile — treat it as a floor, not the full set. Commit a package-lock.json or pnpm-lock.yaml and re-run for the exact answer.")
+      if [ -f "$dir/yarn.lock" ] || [ -f "$dir/bun.lock" ] || [ -f "$dir/bun.lockb" ]; then
+        notes+=("yarn and bun: this action has no per-package build allowlist for either, so these builds stay blocked under it. \`pnpm_built_dependencies\` changes pnpm's config only.")
+      else
+        notes+=("With no lockfile it is not known which package manager installs these. pnpm: set \`pnpm_built_dependencies: '$scripted'\` (and \`allowBuilds\` on pnpm 11+). npm: add ${npm_fix}.")
+      fi
     fi
   fi
 
@@ -303,7 +327,7 @@ suggest_for_repo() {
     printf '%s\n' "${with_lines[@]}"
     echo ""
   else
-    echo "No inputs need changing — the defaults fit this repo."
+    echo "No action inputs need changing. Read the notes below before your first build."
     echo ""
   fi
 

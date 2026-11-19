@@ -57,22 +57,53 @@ suggest() { harden -- "--suggest=$FIX"; }
 EOF
   run suggest
   [ "$status" -eq 0 ]
-  [[ "$output" == *"pnpm_built_dependencies: 'esbuild'"* ]]
+  [[ "$output" == *"run code at install time: esbuild."* ]]
   [[ "$output" != *"lodash"* ]]
   # A lockfile answer is exact, so it must NOT carry the floor caveat.
   [[ "$output" != *"floor, not the full set"* ]]
 }
 
-@test "the emitted with: block is indented to sit under with:" {
+@test "an npm project gets an npm fix, not pnpm_built_dependencies (VM#9)" {
+  # MEASURED on old main: a package-lock.json repo with sqlite3 was told to set
+  # pnpm_built_dependencies. Applying it changed ~/.config/pnpm only, and the
+  # binding was still missing. The steps below were measured under the
+  # hardening on npm 9.2.0, 11.19.1 and 12.2.3 (see suggest_for_repo).
+  cat > "$FIX/package-lock.json" <<'EOF'
+{ "packages": { "node_modules/sqlite3": { "hasInstallScript": true },
+                "node_modules/sharp":   { "hasInstallScript": true } } }
+EOF
+  run suggest
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"pnpm_built_dependencies: '"* ]]
+  [[ "$output" == *"no per-package build allowlist for npm"* ]]
+  [[ "$output" == *"npm rebuild sharp sqlite3 --ignore-scripts=false"* ]]
+  [[ "$output" == *"npm approve-scripts sharp sqlite3"* ]]
+}
+
+@test "a pnpm project still gets the pnpm input, and the with: block sits under with:" {
   # The whole point is copy-paste. At 4 spaces it is not valid YAML under the
   # `with:` line printed directly above it, and the first thing the adopter
   # sees is a workflow parse error attributed to us.
-  cat > "$FIX/package-lock.json" <<'EOF'
-{ "packages": { "node_modules/sharp": { "hasInstallScript": true } } }
+  cat > "$FIX/pnpm-lock.yaml" <<'EOF'
+lockfileVersion: '9.0'
+packages:
+  sharp@0.33.0:
+    resolution: {integrity: sha512-aaa}
+    requiresBuild: true
 EOF
   run suggest
   [[ "$output" == *"        with:"* ]]
-  [[ "$output" == *"          pnpm_built_dependencies:"* ]]
+  [[ "$output" == *"          pnpm_built_dependencies: 'sharp'"* ]]
+  [[ "$output" != *"npm rebuild"* ]]
+}
+
+@test "a yarn project is told there is no allowlist for it, not handed the pnpm input" {
+  echo '{"dependencies":{"sharp":"^0.33"}}' > "$FIX/package.json"
+  : > "$FIX/yarn.lock"
+  run suggest
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"pnpm_built_dependencies: '"* ]]
+  [[ "$output" == *"no per-package build allowlist for either"* ]]
 }
 
 @test "a scoped pnpm package survives the version strip intact" {
