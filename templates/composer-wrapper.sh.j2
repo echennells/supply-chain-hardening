@@ -1,24 +1,51 @@
 #!/bin/bash
-# /usr/local/bin/composer — supply-chain-hardening wrapper
-# Managed by ansible-supply-chain-security.
+# composer — supply-chain-hardening wrapper
+# Managed by ansible-supply-chain-security. It sits at the path composer was
+# found at: /usr/local/bin/composer for the upstream installer, /usr/bin/composer
+# for the distro package. The real binary is {{ composer_real_path }}.
 #
 # Composer has no host-wide config-file or env-var mechanism for disabling
 # script and plugin execution. The only real primitives are the --no-scripts
 # / --no-plugins CLI flags and COMPOSER_SKIP_SCRIPTS=<event,list>
 # (MEASURED: honoured from composer 2.8.6 — ignored on 2.2.6, 2.7.1, 2.8.4 and
 # 2.8.5, honoured on 2.8.6+; the older "2.9+" and "2.8.0" here were wrong).
-# This wrapper injects --no-scripts (see the version note below).
+# This wrapper injects --no-scripts (see the two notes below).
 # --no-plugins is also injected by default, but the role var
 # composer_allow_plugins controls it: set composer_allow_plugins=true
 # to drop --no-plugins here AND write "allow-plugins": true to config.json
 # so users with legitimate plugin needs (e.g. composer/installers in CI)
 # get a real opt-in without disabling the whole wrapper.
 #
-# --no-scripts is injected wherever composer accepts it. Script execution is
-# much higher-risk than plugin execution (arbitrary shell on every composer
-# op vs. composer Plugin classes loaded by composer.json), so there's no
-# matching opt-in for scripts. Users who need scripts run composer-real with
-# cleared env.
+# LIFECYCLE SCRIPTS ARE BLOCKED; A SCRIPT YOU ASK FOR BY NAME RUNS.
+# Composer only ever runs scripts from the ROOT composer.json — never a
+# dependency's — and dependency code reaches composer through plugins, which
+# --no-plugins and allow-plugins block separately. A root script runs in one of
+# two ways:
+#   lifecycle events  post-install-cmd, post-update-cmd, post-autoload-dump,
+#                     post-create-project-cmd, pre-command-run, ... fired as a
+#                     side effect of install, update, require, create-project
+#                     and the rest. --no-scripts is injected for all of these.
+#   explicit runs     `composer run-script <name>`, `composer run <name>`, and
+#                     `composer <name>` for a name under "scripts". The caller
+#                     asked for that script by name, exactly like `npm test`,
+#                     which npm still runs under ignore-scripts.
+# --no-scripts does not refuse an explicit run, it empties it. MEASURED on
+# composer 2.2.6, 2.5.5, 2.7.1, 2.8.8, 2.9.5 and 2.11.2: `composer test` exited
+# 0 having run nothing, and `composer run-script test` failed with 'Script
+# "test" is not defined in this package'. A CI test step went green without
+# running a test, and the message named neither this wrapper nor the flag: the
+# attribution test in docs/design-principles.md. So an explicit run gets no
+# --no-scripts. A name counts as a script only when it is a key under "scripts"
+# (or a "scripts-aliases" alias of one) in the composer.json composer itself
+# will read, AND is not a built-in command or a script event name, neither of
+# which composer ever runs as a script command. It refuses to let a script
+# shadow a built-in ("A script named install would override a Composer command
+# and has been skipped"), so a checkout that defines a script called "install"
+# still gets `composer install` with --no-scripts.
+# Residual: a script that itself calls `@composer install` runs that nested
+# composer as {{ composer_real_path }}, without this wrapper's flags (composer
+# resolves @composer to its own binary). That is the project's own script doing
+# it, after the caller asked to run that script.
 #
 # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
 # MEASURED (composer 2.0.14 → 2.10.3): on 2.0/2.1 only install, update,
@@ -38,11 +65,11 @@
 # Re-run the role after upgrading composer to move to the >= 2.2 tier.
 #
 # Bypass (per-invocation, for users who know what they need):
-#   COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install
-# On composer >= 2.8 both halves are required: just `composer-real install`
+#   COMPOSER_SKIP_SCRIPTS= {{ composer_real_path }} install
+# On composer >= 2.8.6 both halves are required: just `composer-real install`
 # alone is still blocked by COMPOSER_SKIP_SCRIPTS in /etc/environment +
 # /etc/profile.d (belt-and-suspenders layer for PAM-loaded shells,
-# intentional). On composer 2.2-2.7 that env var is inert (MEASURED), so
+# intentional). Below composer 2.8.6 that env var is inert (MEASURED), so
 # going around the wrapper is by itself enough to run scripts there.
 # Clearing the env var AND going around the wrapper is the documented bypass.
 #
@@ -105,28 +132,94 @@ export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 # silently removes the shell lint that covers the wrapper body.
 NO_SCRIPTS_IS_GLOBAL="{{ 'true' if (composer_detected_version | default('', true)) != '' and (composer_detected_version | default('0', true)) is version('2.2.0', '>=') else 'false' }}"
 
+# The subcommand is the first non-option token. -d/--working-dir is composer's
+# only value-taking global option, so its value is not the subcommand; it is
+# kept because it moves the composer.json composer reads.
+SUBCOMMAND=""; WORKDIR=""; skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; WORKDIR="$arg"; continue; fi
+  case "$arg" in
+    -d|--working-dir) skip_next=1; continue ;;
+    --working-dir=*) WORKDIR="${arg#--working-dir=}"; continue ;;
+    -d?*) WORKDIR="${arg#-d}"; continue ;;
+    -*) continue ;;
+  esac
+  SUBCOMMAND="$arg"; break
+done
+
+# Names composer never runs as a script command. First every built-in command
+# and alias of composer 2.1.14, 2.2.6, 2.5.5, 2.7.1, 2.8.8, 2.9.5 and 2.11.2
+# (MEASURED: `composer list --format=json --no-plugins` in an empty directory),
+# which a script cannot shadow; then the twelve script event names
+# (Composer\Script\ScriptEvents, identical in 2.1.14, 2.2.6 and 2.11.2), which
+# composer never registers as commands.
+NOT_SCRIPT_COMMANDS=' _complete about archive audit browse bump cc check-platform-reqs clear-cache clearcache completion config create-project depends diagnose dump-autoload dumpautoload exec fund global help home i info init install licenses list outdated policy prohibits r reinstall remove repo repository require rm run run-script search self-update selfupdate show status suggests u uninstall update upgrade validate why why-not pre-install-cmd post-install-cmd pre-update-cmd post-update-cmd pre-status-cmd post-status-cmd pre-autoload-dump post-autoload-dump post-root-package-install post-create-project-cmd pre-archive-cmd post-archive-cmd '
+
+# The script names the composer.json composer will read declares, one per line:
+# the "scripts" keys and the "scripts-aliases" of those keys. It finds the file
+# the way composer does: $COMPOSER (default composer.json) in the -d directory or
+# the current one, else the nearest parent below $HOME that has one (composer's
+# use-parent-dir walk). It decodes it with json_decode, as composer does when it
+# registers script commands, so the two read the same file the same way. php is
+# whatever runs composer itself. Nothing is executed from the project.
+root_script_names() {
+  local f="${COMPOSER:-composer.json}" dir home
+  case "$f" in
+    /*) ;;
+    *)
+      if [ -n "$WORKDIR" ]; then
+        f="$WORKDIR/$f"
+      elif [ ! -e "$f" ]; then
+        home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P)
+        dir=$(dirname "$(pwd -P)")
+        while [ "$dir" != "/" ] && [ "$dir" != "$home" ]; do
+          if [ -e "$dir/$f" ]; then f="$dir/$f"; break; fi
+          dir=$(dirname "$dir")
+        done
+      fi ;;
+  esac
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  php -r '
+    $j = json_decode((string) file_get_contents($argv[1]), true);
+    if (!is_array($j) || !isset($j["scripts"]) || !is_array($j["scripts"])) exit(0);
+    $names = array_keys($j["scripts"]);
+    if (isset($j["scripts-aliases"]) && is_array($j["scripts-aliases"])) {
+      foreach ($j["scripts-aliases"] as $script => $aliases) {
+        if (isset($j["scripts"][$script])) foreach ((array) $aliases as $a) $names[] = $a;
+      }
+    }
+    foreach ($names as $n) {
+      if ((is_string($n) || is_int($n)) && strpbrk((string) $n, "\r\n") === false) echo $n, "\n";
+    }' "$f" 2>/dev/null
+}
+
+EXPLICIT_SCRIPT=false
+case "$SUBCOMMAND" in
+  run-script|run) EXPLICIT_SCRIPT=true ;;
+  '') ;;
+  *)
+    case "$NOT_SCRIPT_COMMANDS" in
+      *" $SUBCOMMAND "*) ;;
+      *) if root_script_names | grep -qxF -- "$SUBCOMMAND"; then EXPLICIT_SCRIPT=true; fi ;;
+    esac ;;
+esac
+
 FLAGS=()
-if [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
+if [ "$EXPLICIT_SCRIPT" = "true" ]; then
+  # The caller named a root script: run it (see the header). Every other script
+  # event this invocation fires still belongs to the same root composer.json.
+  :
+elif [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
   FLAGS+=(--no-scripts)
 else
-  # Safe baseline: find the subcommand (first non-option token, skipping the
-  # value of composer's own value-taking global -d/--working-dir) and inject
-  # --no-scripts only where composer <= 2.1 declares it. Aliases included:
-  # they are the same command object with the same option definition, and an
-  # alias a given composer doesn't know fails on the command name, not on us.
-  skip_next=0
-  for arg in "$@"; do
-    if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
-    case "$arg" in
-      -d|--working-dir) skip_next=1; continue ;;
-      -*) continue ;;
-    esac
-    case "$arg" in
-      install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
-        FLAGS+=(--no-scripts) ;;
-    esac
-    break
-  done
+  # Safe baseline: inject --no-scripts only where composer <= 2.1 declares it.
+  # Aliases included: they are the same command object with the same option
+  # definition, and an alias a given composer doesn't know fails on the command
+  # name, not on us.
+  case "$SUBCOMMAND" in
+    install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+      FLAGS+=(--no-scripts) ;;
+  esac
 fi
 {% if composer_allow_plugins | bool %}
 # composer_allow_plugins=true → omit --no-plugins. The JSON config also

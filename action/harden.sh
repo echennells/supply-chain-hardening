@@ -267,7 +267,7 @@ suggest_for_repo() {
     fi
     if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
       found_any=1
-      notes+=("composer.json defines scripts — the wrapper injects \`--no-scripts\` unconditionally and there is no input to disable it. Run any required script as its own explicit step.")
+      notes+=("composer.json defines scripts. Lifecycle scripts (post-install-cmd, post-update-cmd, post-autoload-dump, ...) are skipped: the wrapper injects \`--no-scripts\`, COMPOSER_SKIP_SCRIPTS lists them as well, and there is no input to disable either. A script run by name still runs (\`composer test\`, \`composer run-script lint\`). Run a lifecycle event you need as its own step: \`COMPOSER_SKIP_SCRIPTS= composer run-script post-install-cmd\`.")
     fi
   fi
 
@@ -1287,10 +1287,8 @@ harden_composer() {
     real_composer="${real_composer}-real"
   fi
 
-  local plugins_flag_line="FLAGS+=(--no-plugins)"
-  if [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]]; then
-    plugins_flag_line="# composer_allow_plugins=true — --no-plugins deliberately not injected"
-  fi
+  local inject_no_plugins=true
+  [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] && inject_no_plugins=false
 
   # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
   # MEASURED (2.0.14 -> 2.10.3): on 2.0/2.1 only install, update, require,
@@ -1307,7 +1305,12 @@ harden_composer() {
     no_scripts_is_global=true
   fi
 
-  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
+  # Two heredocs: the first is UNQUOTED and carries only the values decided
+  # here; the second is QUOTED, so the wrapper's own $variables, $(...) and
+  # backticks reach the file as written (tests/ci/heredoc-scan.py). The body
+  # is the same logic as templates/composer-wrapper.sh.j2.
+  {
+    cat <<EOF
 #!/bin/bash
 # Managed by supply-chain-harden action
 #
@@ -1319,6 +1322,31 @@ harden_composer() {
 # injecting it elsewhere there fails with
 #     The "--no-scripts" option does not exist.
 REAL_COMPOSER='$real_composer'
+WRAPPER_PATH='$wrapper_target'
+NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+# false when the composer_allow_plugins input is true.
+INJECT_NO_PLUGINS=$inject_no_plugins
+COOLDOWN_SECONDS=$COMPOSER_COOLDOWN_SECONDS
+EOF
+    cat <<'EOF'
+#
+# LIFECYCLE SCRIPTS ARE BLOCKED; A SCRIPT YOU ASK FOR BY NAME RUNS.
+# Composer only ever runs scripts from the ROOT composer.json, never a
+# dependency's; dependency code reaches composer through plugins, which
+# --no-plugins and allow-plugins block separately. Lifecycle events
+# (post-install-cmd, post-update-cmd, post-autoload-dump, pre-command-run, ...)
+# fire as a side effect of install, update, require and the rest, and get
+# --no-scripts. `composer run-script <name>`, `composer run <name>` and
+# `composer <name>` for a name under "scripts" are explicit runs, like
+# `npm test`, and get none: --no-scripts does not refuse them, it empties them.
+# MEASURED on composer 2.2.6 -> 2.11.2: `composer test` exited 0 having run
+# nothing, and `composer run-script test` said 'Script "test" is not defined'.
+# A name counts as a script only when it is a "scripts" key (or one of its
+# "scripts-aliases") in the composer.json composer will read AND is not a
+# built-in command or a script event name; composer never lets a script shadow
+# a built-in, so a checkout with a script called "install" still gets
+# `composer install --no-scripts`. Full reasoning: templates/composer-wrapper.sh.j2.
+
 # RUN-PROBE. Record that this wrapper actually executed.
 #
 # Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
@@ -1334,52 +1362,114 @@ REAL_COMPOSER='$real_composer'
 #
 # The value is caller-controlled, so it is only ever a redirect target. Never
 # interpolate it into a command.
-if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
-  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
 fi
 
-if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "$wrapper_target" ]; then
-  echo "[supply-chain-harden] error: real composer not found at '\$REAL_COMPOSER'; refusing to recurse" >&2
+if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = "$WRAPPER_PATH" ]; then
+  echo "[supply-chain-harden] error: real composer not found at '$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
 fi
 export COMPOSER_ALLOW_SUPERUSER=1
 # Publish-age gate (composer >= 2.11.0). Set unconditionally so a step's own env
-# cannot shorten the window; \`composer --no-cooldown\` still gets through, on
+# cannot shorten the window; `composer --no-cooldown` still gets through, on
 # purpose, as composer's escape hatch for an urgent fix.
-export COMPOSER_POLICY_COOLDOWN_PERIOD=$COMPOSER_COOLDOWN_SECONDS
+export COMPOSER_POLICY_COOLDOWN_PERIOD="$COOLDOWN_SECONDS"
 export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 
-NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+# The subcommand is the first non-option token. -d/--working-dir is composer's
+# only value-taking global option, so its value is not the subcommand; it is
+# kept because it moves the composer.json composer reads.
+SUBCOMMAND=""; WORKDIR=""; skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; WORKDIR="$arg"; continue; fi
+  case "$arg" in
+    -d|--working-dir) skip_next=1; continue ;;
+    --working-dir=*) WORKDIR="${arg#--working-dir=}"; continue ;;
+    -d?*) WORKDIR="${arg#-d}"; continue ;;
+    -*) continue ;;
+  esac
+  SUBCOMMAND="$arg"; break
+done
+
+# Names composer never runs as a script command. First every built-in command
+# and alias of composer 2.1.14, 2.2.6, 2.5.5, 2.7.1, 2.8.8, 2.9.5 and 2.11.2
+# (MEASURED: `composer list --format=json --no-plugins` in an empty directory),
+# which a script cannot shadow; then the twelve script event names
+# (Composer\Script\ScriptEvents, identical in 2.1.14, 2.2.6 and 2.11.2), which
+# composer never registers as commands.
+NOT_SCRIPT_COMMANDS=' _complete about archive audit browse bump cc check-platform-reqs clear-cache clearcache completion config create-project depends diagnose dump-autoload dumpautoload exec fund global help home i info init install licenses list outdated policy prohibits r reinstall remove repo repository require rm run run-script search self-update selfupdate show status suggests u uninstall update upgrade validate why why-not pre-install-cmd post-install-cmd pre-update-cmd post-update-cmd pre-status-cmd post-status-cmd pre-autoload-dump post-autoload-dump post-root-package-install post-create-project-cmd pre-archive-cmd post-archive-cmd '
+
+# The "scripts" keys and their "scripts-aliases" in the composer.json composer
+# will read: $COMPOSER (default composer.json) in the -d directory or the
+# current one, else the nearest parent below $HOME that has one (composer's
+# use-parent-dir walk). json_decode is what composer uses to register script
+# commands, so both read the file the same way. Nothing from the project runs.
+root_script_names() {
+  local f="${COMPOSER:-composer.json}" dir home
+  case "$f" in
+    /*) ;;
+    *)
+      if [ -n "$WORKDIR" ]; then
+        f="$WORKDIR/$f"
+      elif [ ! -e "$f" ]; then
+        home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P)
+        dir=$(dirname "$(pwd -P)")
+        while [ "$dir" != "/" ] && [ "$dir" != "$home" ]; do
+          if [ -e "$dir/$f" ]; then f="$dir/$f"; break; fi
+          dir=$(dirname "$dir")
+        done
+      fi ;;
+  esac
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  php -r '
+    $j = json_decode((string) file_get_contents($argv[1]), true);
+    if (!is_array($j) || !isset($j["scripts"]) || !is_array($j["scripts"])) exit(0);
+    $names = array_keys($j["scripts"]);
+    if (isset($j["scripts-aliases"]) && is_array($j["scripts-aliases"])) {
+      foreach ($j["scripts-aliases"] as $script => $aliases) {
+        if (isset($j["scripts"][$script])) foreach ((array) $aliases as $a) $names[] = $a;
+      }
+    }
+    foreach ($names as $n) {
+      if ((is_string($n) || is_int($n)) && strpbrk((string) $n, "\r\n") === false) echo $n, "\n";
+    }' "$f" 2>/dev/null
+}
+
+EXPLICIT_SCRIPT=false
+case "$SUBCOMMAND" in
+  run-script|run) EXPLICIT_SCRIPT=true ;;
+  '') ;;
+  *)
+    case "$NOT_SCRIPT_COMMANDS" in
+      *" $SUBCOMMAND "*) ;;
+      *) if root_script_names | grep -qxF -- "$SUBCOMMAND"; then EXPLICIT_SCRIPT=true; fi ;;
+    esac ;;
+esac
 
 FLAGS=()
-if [ "\$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
+if [ "$EXPLICIT_SCRIPT" = "true" ]; then
+  :  # the caller named a root script: run it
+elif [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
   FLAGS+=(--no-scripts)
 else
-  # First non-option token is the subcommand. -d/--working-dir takes a value,
-  # so its argument must not be mistaken for the subcommand.
-  skip_next=0
-  for arg in "\$@"; do
-    if [ "\$skip_next" = 1 ]; then skip_next=0; continue; fi
-    case "\$arg" in
-      -d|--working-dir) skip_next=1; continue ;;
-      -*) continue ;;
-    esac
-    case "\$arg" in
-      install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
-        FLAGS+=(--no-scripts) ;;
-    esac
-    break
-  done
+  case "$SUBCOMMAND" in
+    install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+      FLAGS+=(--no-scripts) ;;
+  esac
 fi
-$plugins_flag_line
+if [ "$INJECT_NO_PLUGINS" = "true" ]; then
+  FLAGS+=(--no-plugins)
+fi
 
-exec "\$REAL_COMPOSER" \${FLAGS[@]+"\${FLAGS[@]}"} "\$@"
+exec "$REAL_COMPOSER" ${FLAGS[@]+"${FLAGS[@]}"} "$@"
 EOF
+  } | $SUDO tee "$wrapper_target" >/dev/null
   $SUDO chmod 755 "$wrapper_target"
-  local wrap_desc="--no-scripts on every invocation"
+  local wrap_desc="--no-scripts on every invocation except a script run by name"
   if [[ "$no_scripts_is_global" != "true" ]]; then
     wrap_desc="--no-scripts on install/update/require/remove/dump-autoload only"
-    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project, run-script and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
+    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
   fi
   [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] || wrap_desc="$wrap_desc, --no-plugins"
   log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"
