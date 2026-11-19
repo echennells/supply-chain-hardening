@@ -1017,30 +1017,81 @@ if have pip3 || have pip; then
   # wrapper, which has NO `config` subcommand — so `pip config list` errored and
   # this row false-GAP'd while the protection was actually in effect. Two paths,
   # two sources of truth; do NOT shell `config` through a wrapper:
-  #   - pip is our wrapper  -> the source-build block is uv's `no-build`, read
-  #     from the uv config FILE (pip.conf is inert for uv pip).
-  #   - pip is a real pip   -> read `only-binary` from the pip config FILES pip
-  #     actually consults.
+  #   - pip is our wrapper  -> the source-build block is uv's `no-build`. Ask the
+  #     uv the wrapper execs, not the uv.toml we wrote: this row used to grep
+  #     /etc/uv/uv.toml and print OK PARSED, and from inside a repo whose uv.toml
+  #     says no-build = false it still printed OK while `uv pip install` there
+  #     ran a setup.py (MEASURED, uv 0.13.9). So it asks twice, from "/" (the
+  #     host config, where nobody but root can plant an ancestor uv.toml) and
+  #     from the working directory (where a repo's config outranks the host's),
+  #     and is OK only when both say no_build=All.
+  #   - pip is a real pip   -> ask pip (`config list`) for `only-binary`. Even
+  #     :all: is WEAK, never OK: only-binary refuses an sdist pip RESOLVES from
+  #     an index or --find-links, and not one named by path or URL, which still
+  #     runs setup.py (MEASURED on pip 22.0.2, 23.0.1, 24.0, 25.1.1 and 26.0.1,
+  #     in a venv and with system pip). This row was OK PARSED from a grep.
   PIPBIN=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
   if grep -q 'supply-chain-hardening' "$PIPBIN" 2>/dev/null; then
-    uv_nb=""
-    for f in "${UV_CONFIG_FILE:-}" /etc/uv/uv.toml "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" "$HOME/.config/uv/uv.toml"; do
-      [ -n "$f" ] && [ -f "$f" ] && grep -qiE '^[[:space:]]*no-build[[:space:]]*=[[:space:]]*true' "$f" && { uv_nb="$f"; break; }
-    done
-    if [ -n "$uv_nb" ]; then
-      row OK PARSED "pip source-build blocking" "pip delegates to uv; no-build=true in $uv_nb"
+    pipuv=$(grep -oE "^UV='[^']*'" "$PIPBIN" 2>/dev/null | head -1 | sed "s/^UV='//; s/'\$//")
+    { [ -n "$pipuv" ] && [ -x "$pipuv" ]; } || pipuv=$(command -v uv 2>/dev/null)
+    pipnbr=""; pipnbc=""; piprr=1; piprc=1; pipwhy=""
+    if [ -n "$pipuv" ]; then
+      pipdr=$( (cd / && "$pipuv" pip list --show-settings) 2>&1 ); piprr=$?
+      pipnbr=$(printf '%s\n' "$pipdr" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
+      pipdc=$("$pipuv" pip list --show-settings 2>&1); piprc=$?
+      pipnbc=$(printf '%s\n' "$pipdc" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
+      pipwhy=$(printf '%s' "$pipdc" | grep -i 'failed to parse\|^error:' | head -1 | cut -c1-150)
+    fi
+    if [ "$piprr" -eq 0 ] && [ -n "$pipnbr" ]; then
+      if [ "$pipnbr" != All ]; then
+        row GAP PARSED "pip source-build blocking" "pip delegates to uv ($pipuv), but uv reports no_build=$pipnbr - no config uv reads sets no-build, so every sdist pip installs runs its setup.py"
+      elif [ "$piprc" -ne 0 ]; then
+        row WEAK PARSED "pip source-build blocking" "pip delegates to uv, and the host config sets no-build, but in $PWD uv refuses to run (${pipwhy:-exit $piprc}) - nothing installs here, and whatever config uv found here could not be compared"
+      elif [ "$pipnbc" = All ]; then
+        row OK PARSED "pip source-build blocking" "pip delegates to uv ($pipuv), which reports no_build=All from / and from $PWD - it refuses every sdist, one named by path or URL included"
+      else
+        row GAP PARSED "pip source-build blocking" "pip delegates to uv, and the host config sets no-build, but in $PWD uv reports no_build=${pipnbc:-<absent>} - a uv.toml or pyproject.toml [tool.uv] at or above this directory outranks the host config, so a pip install run here builds sdists and runs setup.py"
+      fi
     else
-      row GAP PARSED "pip source-build blocking" "pip delegates to uv but no-build=true is not set in any uv config"
+      # This uv cannot report its settings back: the file grep is all there
+      # is, and a grep is PRESENT evidence, whatever this row used to call it.
+      uv_nb=""
+      for f in "${UV_CONFIG_FILE:-}" /etc/uv/uv.toml "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" "$HOME/.config/uv/uv.toml"; do
+        [ -n "$f" ] && [ -f "$f" ] && grep -qiE '^[[:space:]]*no-build[[:space:]]*=[[:space:]]*true' "$f" && { uv_nb="$f"; break; }
+      done
+      if [ -n "$uv_nb" ]; then
+        row WEAK PRESENT "pip source-build blocking" "pip delegates to uv; no-build=true is in $uv_nb, but ${pipuv:-uv} does not report its settings back, so nothing confirms uv reads that file or that no repo config overrides it"
+      else
+        row GAP PRESENT "pip source-build blocking" "pip delegates to uv but no-build=true is not set in any uv config"
+      fi
     fi
   else
-    pip_ob=""
-    for f in "${PIP_CONFIG_FILE:-}" /etc/pip.conf "${XDG_CONFIG_HOME:-$HOME/.config}/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf"; do
-      [ -n "$f" ] && [ -f "$f" ] && grep -qi 'only-binary' "$f" && { pip_ob="$f"; break; }
-    done
-    if [ -n "$pip_ob" ]; then
-      row OK PARSED "pip source-build blocking" "only-binary set in $pip_ob"
+    pipv=$("$PIPBIN" --version 2>/dev/null | awk '{print $2}')
+    pipcl=$("$PIPBIN" config list 2>/dev/null); pipclrc=$?
+    if [ "$pipclrc" -eq 0 ]; then
+      # Environment beats a [install] section, which beats [global].
+      pipcl=$(printf '%s\n' "$pipcl" | tr -d " '\"\r")
+      pipob=$(printf '%s\n' "$pipcl" | sed -n 's/^:env:\.only-binary=//p' | tail -1)
+      [ -n "$pipob" ] || pipob=$(printf '%s\n' "$pipcl" | sed -n 's/^install\.only-binary=//p' | tail -1)
+      [ -n "$pipob" ] || pipob=$(printf '%s\n' "$pipcl" | sed -n 's/^global\.only-binary=//p' | tail -1)
+      case "$pipob" in
+        :all:)
+          row WEAK PARSED "pip source-build blocking" "pip ${pipv:-?} ($PIPBIN) reports only-binary=:all: - it refuses an sdist it resolves from an index or --find-links, but NOT one named by path or URL (pip install ./x.tar.gz), which still runs setup.py (MEASURED on pip 22.0.2 to 26.0.1). uv's no-build refuses both: prefer uv pip" ;;
+        '')
+          row GAP PARSED "pip source-build blocking" "pip ${pipv:-?} ($PIPBIN) reports no only-binary - every sdist it installs runs its setup.py" ;;
+        *)
+          row GAP PARSED "pip source-build blocking" "pip ${pipv:-?} ($PIPBIN) reports only-binary=$pipob, not :all: - sdists of every other package build and run setup.py" ;;
+      esac
     else
-      row GAP PARSED "pip source-build blocking" "no only-binary in any pip config file pip reads"
+      pip_ob=""
+      for f in "${PIP_CONFIG_FILE:-}" /etc/pip.conf "${XDG_CONFIG_HOME:-$HOME/.config}/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf"; do
+        [ -n "$f" ] && [ -f "$f" ] && grep -qi 'only-binary' "$f" && { pip_ob="$f"; break; }
+      done
+      if [ -n "$pip_ob" ]; then
+        row WEAK PRESENT "pip source-build blocking" "only-binary is in $pip_ob, but '$PIPBIN config list' failed, so pip never confirmed it; and even :all: does not cover an sdist named by path or URL"
+      else
+        row GAP PRESENT "pip source-build blocking" "no only-binary in any pip config file pip reads"
+      fi
     fi
   fi
 else

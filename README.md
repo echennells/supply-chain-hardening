@@ -5,7 +5,7 @@
 [![Ansible Galaxy](https://img.shields.io/badge/Ansible%20Galaxy-echennells.supply__chain__hardening-blue?logo=ansible)](https://galaxy.ansible.com/ui/standalone/roles/echennells/supply_chain_hardening/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Safe defaults for 14 package managers, so a careless `npm install` or `pip install` gets age-gated and script-blocked without the caller knowing about it.**
+**Safe defaults for 14 package managers, so a careless `npm install` or `pip install` of a registry package gets age-gated and script-blocked without the caller knowing about it.**
 
 Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use.
 
@@ -27,7 +27,7 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | Protection | npm | pnpm | Yarn | Bun | Deno | pip/uv | Cargo | Go | Composer | Bundler | Maven | Gradle | NuGet |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **48h release age gate** | x | x | x | x | x | x | * | | ‡ | ‡ | | | |
-| **Install script blocking** | x | x | x | x | x | x | | | x | | | | x |
+| **Install script blocking** | x | x | x | x | x | x§ | | | x | | | | x |
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
 | **Socket Firewall** | x | | | | | † | x | | | | | | |
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
@@ -40,6 +40,8 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 `‡` = **needs Composer ≥ 2.11.0 or Bundler ≥ 4.0.13, which no stock distro package ships.** The role writes both settings everywhere and the verifier reports a GAP until you upgrade; see [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md). Bundler's gate covers `gem install` only from RubyGems 4.1.0, which reads the same `BUNDLE_COOLDOWN`; below that, `gem install` has no age gate.
 
 `†` = **not implemented for Python.** Socket Firewall is wired only into the npm/npx and cargo PATH wrappers. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
+
+`§` = uv's `no-build` refuses every sdist. Where pip runs without the redirect to uv (no uv on the host, `python3 -m pip`, a venv's own `pip`), pip's `only-binary = :all:` refuses an sdist it resolves from an index or `--find-links`, but **not one named by path or URL**: `pip install ./x.tar.gz` still runs its `setup.py`. `supply-chain-verify` grades that row WEAK.
 
 Each protection is delivered in up to three overlapping layers — system-wide env vars, on-disk config files, `/usr/local/bin` PATH wrappers — so one covers another's gaps. What each layer reaches, and what it doesn't, is in [docs/how-it-works.md](docs/how-it-works.md).
 

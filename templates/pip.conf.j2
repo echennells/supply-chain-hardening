@@ -13,9 +13,11 @@ uploaded-prior-to = {{ sch_pip_cutoff }}
 {% if pip_only_binary | bool %}
 
 [install]
-; Refuses sdists (source distributions). Blocks the March-2026 LiteLLM /
-; BufferZoneCorp-class attack where setup.py executes arbitrary code at
-; install time. NOTE: this does NOT cover the October-2026 LiteLLM
+; Refuses sdists (source distributions) that pip RESOLVES, from an index or
+; --find-links. Blocks the March-2026 LiteLLM / BufferZoneCorp-class attack
+; where setup.py executes arbitrary code at install time. NOT an sdist named
+; by path or URL: `pip install ./x.tar.gz` still runs its setup.py (MEASURED on
+; pip 22.0.2 to 26.0.1); uv's no-build refuses that one too. NOTE: this does NOT cover the October-2026 LiteLLM
 ; compromise, which shipped its payload inside the WHEEL (.pth +
 ; sitecustomize.py startup hooks) and was unaffected by only-binary. Trade-off:
 ; sdist-only packages (rare for popular libs, common for niche/old/pre-release)

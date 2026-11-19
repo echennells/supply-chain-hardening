@@ -909,3 +909,21 @@ echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   [ "$(table_rows "$output")" -eq "$base" ]
   [[ "$output" == *'ignore-scripts=x\c'* ]]
 }
+
+# ---- verifier cluster (VM#7, #8, #11, #14; CMP 4.8) --------------------------
+
+@test "pip: only-binary=:all: is WEAK, never OK - a path or URL sdist still runs setup.py" {
+  # MEASURED on pip 22.0.2 to 26.0.1: only-binary refuses an sdist pip resolves
+  # from an index or --find-links and builds one named by path. This row was OK.
+  stub_bin pip3 "case \"\$*\" in
+  --version) echo 'pip 24.0 from /x (python 3.12)' ;;
+  'config list') echo \"install.only-binary=':all:'\" ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip sdist execution blocked"* ]]
+  [[ "$output" == *"NOT one named by path or URL"* ]]
+  [[ "$output" != *"OK     PARSED      pip sdist execution blocked"* ]]
+}
+

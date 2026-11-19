@@ -947,8 +947,13 @@ else
   # corporate CI as well as the config-poisoning attack in arXiv:2607.15143 R10.
   # Strip spaces/quotes/CR so `install.only-binary = ':all:'` normalises.
   v=$("$pipbin" config list 2>/dev/null | tr -d " '\"\r" | sed -n 's/^install\.only-binary=//p' | tail -1)
+  # WEAK, never OK: only-binary refuses an sdist pip RESOLVES from an index or
+  # --find-links, not one named by path or URL, which still runs setup.py
+  # (MEASURED on pip 22.0.2, 23.0.1, 24.0, 25.1.1 and 26.0.1; README "Known
+  # limitations" and the action-pip-only-binary-limitation smoke job say the
+  # same). The role's row grades it the same way.
   if [ "$v" = ":all:" ]; then
-    row OK PARSED "pip sdist execution blocked" "pip reports only-binary=:all:"
+    row WEAK PARSED "pip sdist execution blocked" "pip reports only-binary=:all: - it refuses an sdist it resolves from an index or --find-links, but NOT one named by path or URL (pip install ./x.tar.gz), which still runs setup.py. uv's no-build refuses both: prefer uv pip"
   else
     gap pip.only-binary PARSED "pip sdist execution blocked" "pip reports only-binary='${v:-<unset>}'"
   fi
