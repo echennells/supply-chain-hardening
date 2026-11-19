@@ -78,9 +78,26 @@ control *is*. `only-binary = :all:` breaks every sdist-only dependency;
 `--locked` breaks the legitimate lockfile update. We ship all three.
 
 What makes those survivable is not that they break less. It is that they break
-**loudly, at the moment of admission, with the tool naming the reason**. pip
-says "no binary distribution available"; the operator can find this role in one
-grep and make an informed choice about the trade.
+**at the moment of admission**, in the command that asked for the package, so
+the cause is one step away. How well the tool then names the reason varies,
+and where it does not, the docs have to:
+
+- uv names it: "Wheels are required for `X` because building from source is
+  disabled". pip does not: pip 24.0, 25.1.1 and 26.3 all print only `Could not
+  find a version that satisfies the requirement X (from versions: none)`
+  (MEASURED), naming neither `only-binary` nor this role.
+- `--locked` fails with cargo's `cannot update the lock file ... because
+  --locked was passed to prevent this` (MEASURED, cargo 1.100.0), which names
+  the flag but not the wrapper that injected it.
+- `ignore-scripts` is the uncomfortable one. npm skips a blocked install
+  script without printing anything, so a package that builds its native
+  binding in that script installs with exit 0 and fails when it is first
+  loaded (MEASURED: sqlite3 5.1.7 on npm 11.19.1, `Could not locate the
+  bindings file`). By this test it is badly attributed. It ships on by
+  default regardless: an install script is the execution path the Scope
+  section opens with, and npm 12 now blocks dependency scripts by default too
+  ([limitations.md](limitations.md)). What it owes in return is the route,
+  which [day-one.md](day-one.md) gives.
 
 A control that fails at *runtime* gets diagnosed as a broken toolchain, and the
 fix an operator reaches for is deleting the file we wrote — which takes every
@@ -224,10 +241,15 @@ A defense fires in some execution contexts and not others. Knowing
 
 ### PAM-loaded vs non-PAM
 
-`/etc/environment` and `/etc/profile.d/` load via pam_env at session
-start (login shells, interactive sudo with `env_reset`, `su -`). They do
-NOT load for: cron, systemd `ExecStart`, container CMD, non-interactive
-`bash -c`, most automation. An env-var-only defense (e.g. the old
+`/etc/environment` loads via pam_env at session start, and `/etc/profile.d/`
+when a login shell sources it (login shells, interactive sudo with
+`env_reset`, `su -`). They do NOT load for: systemd `ExecStart`, container
+CMD, non-interactive `bash -c` outside such a session, most automation. Cron
+is a split case: Debian's and Ubuntu's cron open a PAM session, so a job gets
+`/etc/environment` but not `/etc/profile.d/`, and it runs with
+`PATH=/usr/bin:/bin`, which skips the `/usr/local/bin` wrappers (MEASURED on
+cron 3.0pl1-197 on Debian 13 and 3.0pl1-184ubuntu2 on Ubuntu 24.04, and on
+the Debian 12 and 13 VMs). An env-var-only defense (e.g. the old
 `GOTOOLCHAIN=local` story) silently doesn't cover those contexts.
 
 **Principle**: env-var-only defense is incomplete. Pair with a config

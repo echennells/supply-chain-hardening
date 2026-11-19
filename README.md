@@ -7,7 +7,7 @@
 
 **Safe defaults for 14 package managers, so a careless `npm install` or `pip install` gets age-gated and script-blocked without the caller knowing about it.**
 
-Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use.
+Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use. (A PATH wrapper only reaches a caller whose `PATH` includes it: Debian and Ubuntu cron run jobs with `PATH=/usr/bin:/bin`, which skips the `/usr/local/bin` wrappers, so a cron job gets the config files and `/etc/environment` but not the wrappers. See [docs/how-it-works.md](docs/how-it-works.md).)
 
 Then it **proves the policy is in effect.** Writing a config file is not the same as a protection being on: every real failure this project has shipped was a file that was exactly right and a tool that quietly ignored it. So the role asks the tools what they ended up believing, on the real host, against the real installed versions:
 

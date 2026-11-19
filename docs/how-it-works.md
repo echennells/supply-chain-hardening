@@ -25,7 +25,8 @@ Deployed to `/etc/profile.d/supply-chain-hardening.sh` (sourced by login shells)
 | Caller | Sees these env vars? |
 |---|---|
 | Login shell (ssh, sudo -i, su -, getty) | ✓ (PAM loads /etc/environment + shell sources profile.d) |
-| Cron job, ssh session, any process inherited from a PAM-launched parent | ✓ (env propagation through fork/exec) |
+| ssh session, any process inherited from a PAM-launched parent | ✓ (env propagation through fork/exec) |
+| Cron job (Debian and Ubuntu cron) | `/etc/environment` only: cron opens its own PAM session, but no shell sources profile.d. Its `PATH=/usr/bin:/bin` also skips the `/usr/local/bin` wrappers (MEASURED on cron 3.0pl1, Debian 13 and Ubuntu 24.04) |
 | `bash -c "..."` from inside a PAM-launched shell | ✓ (inherited) |
 | Container `CMD ["python", "app.py"]` started by Docker | ✗ (no PAM, no shell sourcing) |
 | systemd service without `Environment=` directives | ✗ |
