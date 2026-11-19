@@ -256,9 +256,13 @@
 # the verifier then reports GAP on the wrapper and lifecycle rows, and the next
 # apply re-wraps. dpkg-divert would survive package operations; not done yet.
 #
-# Self-update caveat: `composer self-update` overwrites the wrapper.
-# Detection below sees a fresh real binary at the wrap location and
+# Re-install caveat: writing a new composer.phar to the wrap location (re-running
+# the upstream installer, or `install composer.phar /usr/local/bin/composer`)
+# replaces the wrapper. Detection below sees a fresh real binary there and
 # re-wraps on the next role apply. Same pattern as deno's wrapper.
+# `composer self-update` is different: it replaces the file it runs from,
+# composer-real, so the wrapper survives (MEASURED, 2.8.8 -> 2.9.5 through the
+# wrapper). Re-apply anyway, so the version-tiered settings follow.
 
 - name: Find current composer path for wrapping
   ansible.builtin.shell:
@@ -305,9 +309,9 @@
     - composer_binary_path.rc == 0
     - composer_binary_path.stdout | length > 0
 
-- name: Rename real composer to composer-real (refresh backup if self-update overwrote wrapper)
-  # No gate on `not composer_real_backup.stat.exists`: if composer
-  # self-update overwrote our wrapper, the existing backup is stale and
+- name: Rename real composer to composer-real (refresh backup if a re-install overwrote wrapper)
+  # No gate on `not composer_real_backup.stat.exists`: if a re-install
+  # overwrote our wrapper, the existing backup is stale and
   # the freshly-installed binary is what we want to preserve. Overwriting
   # a stale backup with the current binary is the correct semantics.
   become: true

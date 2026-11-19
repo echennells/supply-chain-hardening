@@ -92,10 +92,13 @@
 #   path on next apply). The env-var layer remains active unless you also
 #   remove the role's /etc/environment + /etc/profile.d entries.
 #
-# Self-update caveat: `composer self-update` writes a new composer.phar
-# to wherever composer is invoked from — overwriting this wrapper. After a
-# self-update, re-apply the role to restore wrapping. (Same caveat applies
-# to the deno wrapper after a deno installer re-run.)
+# Re-install caveat: anything that writes a new composer to this path (the
+# upstream installer re-run, a distro package reinstall or upgrade) overwrites
+# this wrapper; re-apply the role to restore wrapping. (Same caveat applies to
+# the deno wrapper after a deno installer re-run.) `composer self-update`
+# replaces the file it runs from, {{ composer_real_path }}, so this wrapper
+# survives it (MEASURED, 2.8.8 -> 2.9.5); re-apply anyway so the
+# version-tiered settings follow the new version.
 
 REAL_COMPOSER='{{ composer_real_path }}'
 # RUN-PROBE. Record that this wrapper actually executed.
