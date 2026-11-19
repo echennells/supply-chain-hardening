@@ -252,9 +252,39 @@ task_block() { # file, task-name substring
   [ "$changed" = "0" ]
 }
 
-# Runs after every test in this file. A no-op unless a test left uv hidden,
-# which must never outlive the test that hid it.
+# ---- Optional tool installs: the Go floor ----
+#
+# The idempotency test above cannot see this bug, because this image's Go is
+# new enough.
+
+# Stand a fake Go 1.18 in for the real one: `version` reports 1.18.1, and every
+# other subcommand logs its argv and fails, as `go install ...@v5` does there.
+# The image's pinact is hidden too: a real Go 1.18 host never got one, and with
+# it present the old `creates:` guard skipped the install and hid the bug.
+GO_REAL=/usr/local/go/bin/go
+PINACT_BIN="$HOME/go/bin/pinact"
+hide_real_go() {
+  [ -x "$GO_REAL" ] || return 1
+  [ -w "$(dirname "$GO_REAL")" ] || return 1
+  if [ -e "$PINACT_BIN" ]; then mv "$PINACT_BIN" "$PINACT_BIN.bats-hidden"; fi
+  mv "$GO_REAL" "$GO_REAL.bats-hidden"
+  cat > "$GO_REAL" <<'EOF'
+#!/bin/sh
+if [ "$1" = version ]; then echo "go version go1.18.1 linux/amd64"; exit 0; fi
+echo "$*" >> /tmp/fake-go-calls.log
+exit 1
+EOF
+  chmod 755 "$GO_REAL"
+}
+restore_real_go() {
+  if [ -e "$GO_REAL.bats-hidden" ]; then mv -f "$GO_REAL.bats-hidden" "$GO_REAL"; fi
+  if [ -e "$PINACT_BIN.bats-hidden" ]; then mv -f "$PINACT_BIN.bats-hidden" "$PINACT_BIN"; fi
+}
+
+# Runs after every test in this file. A no-op unless a test left the real Go
+# or uv hidden, which must never outlive the test that hid it.
 teardown() {
+  restore_real_go
   restore_uv
 }
 
@@ -273,6 +303,34 @@ hide_uv() {
 }
 restore_uv() {
   if [ -n "$UV_HIDDEN" ] && [ -e "$UV_HIDDEN.bats-hidden" ]; then mv -f "$UV_HIDDEN.bats-hidden" "$UV_HIDDEN"; fi
+}
+
+@test "pinact: Go < 1.21 skips the install and records why, so a re-apply changes nothing" {
+  # MEASURED on stock Ubuntu 22.04 (Go 1.18.1) and Debian 12 (Go 1.19.8): the
+  # pinact install had no Go floor, failed on every apply, and with
+  # failed_when: false and no changed_when it reported `changed` each time, so
+  # a second apply was never changed=0. govulncheck in go.yml had the floor.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "swaps $GO_REAL for a fake Go 1.18"
+  rm -f /tmp/fake-go-calls.log
+  hide_real_go || skip "no tarball Go at $GO_REAL to stand in for"
+  cd "$ROLE_DIR"
+  local rc1=0 rc2=0
+  ansible-playbook site.yml --connection=local --limit localhost --tags github \
+    -e podman_enabled=false -e verify_protections=false >/tmp/pinact-go118-1.log 2>&1 || rc1=$?
+  ansible-playbook site.yml --connection=local --limit localhost --tags github \
+    -e podman_enabled=false -e verify_protections=false >/tmp/pinact-go118-2.log 2>&1 || rc2=$?
+  restore_real_go
+  echo "rc1=$rc1 rc2=$rc2; fake go calls: $(cat /tmp/fake-go-calls.log 2>/dev/null)"
+  grep -E '^localhost' /tmp/pinact-go118-2.log | tail -1
+  [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]
+  # The install never ran: the fake logged no `install` call.
+  if grep -q '^install ' /tmp/fake-go-calls.log 2>/dev/null; then
+    echo "the role ran go install on a Go older than 1.21" >&2
+    false
+  fi
+  grep -E '^localhost' /tmp/pinact-go118-2.log | tail -1 | grep -q 'changed=0'
+  grep -q 'pinact — Go 1.18.1 is older than 1.21' /tmp/pinact-go118-2.log
 }
 
 # ---- The end-of-run summary ----
