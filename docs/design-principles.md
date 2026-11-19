@@ -638,9 +638,14 @@ need explicit pinning if reproducibility matters.
 ### Stale auditing tools
 
 `refresh_tools` is a single coarse flag — all-or-none reinstall of
-cargo-audit, govulncheck, pip-audit, etc.
+cargo-audit, govulncheck, pip-audit, etc. Pinning alone did not fix it: the
+installs were guarded by `creates:` (or `which`), which checks only that a
+binary exists, so a bumped pin never reached a host that already had the
+tool. The guards now compare the installed version with the pin
+(`go version -m`, `uv tool list`, the package's own `package.json`).
 
-**Principle**: per-tool refresh signal, or version-pin tools we install.
+**Principle**: version-pin tools we install, and make the idempotence check
+compare versions, not existence.
 
 ---
 

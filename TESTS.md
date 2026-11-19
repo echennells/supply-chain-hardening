@@ -30,7 +30,7 @@
 | 22-pip-wrapper-safety.bats | 5 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
 | 24-deno-path-wrapper.bats | 12 | Deno in-place PATH wrapper plumbing + end-to-end |
-| 25-integration-regressions.bats | 15 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency |
+| 25-integration-regressions.bats | 15 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency; the end-of-run summary lists what it skipped and claims nothing more (stub yarn, uv moved aside); optional tool installs respect the Go 1.21 floor (fake Go 1.18) and reinstall when a pin moves |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
 | 34-composer-wrapper-tier-rendering.bats | 5 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts unconditional) |

@@ -252,10 +252,10 @@ task_block() { # file, task-name substring
   [ "$changed" = "0" ]
 }
 
-# ---- Optional tool installs: the Go floor ----
+# ---- Optional tool installs: Go floor and version pins ----
 #
-# The idempotency test above cannot see this bug, because this image's Go is
-# new enough.
+# The idempotency test above cannot see either bug below, because this image's
+# Go is new enough and its tools sit at their pins.
 
 # Stand a fake Go 1.18 in for the real one: `version` reports 1.18.1, and every
 # other subcommand logs its argv and fails, as `go install ...@v5` does there.
@@ -330,7 +330,58 @@ restore_uv() {
     false
   fi
   grep -E '^localhost' /tmp/pinact-go118-2.log | tail -1 | grep -q 'changed=0'
-  grep -q 'pinact — Go 1.18.1 is older than 1.21' /tmp/pinact-go118-2.log
+  grep -q 'pinact (optional audit tool; nothing in the role runs it, so no install is blocked either way) — Go 1.18.1 is older than 1.21' /tmp/pinact-go118-2.log
+}
+
+@test "tool pins: an installed version that differs from the pin is reinstalled, not left in place" {
+  # `creates:` (and lockfile-lint's `which`) only checked that a binary existed,
+  # so bumping a pin in defaults/main.yml never reinstalled anything. Offline
+  # by design: each pin is pointed at a version that does not exist, so the
+  # reinstall the role must now attempt fails, and the summary has to say so.
+  # Before the fix the install tasks were skipped and the summary said nothing.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "reinstalls the role's global tools"
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
+    -e socket_firewall_install=false \
+    -e zizmor_version=99.99.99 -e pinact_version=v99.99.99 \
+    -e govulncheck_version=v99.99.99 -e pip_audit_version=99.99.99 \
+    -e uv_secure_version=99.99.99 -e lockfile_lint_version=99.99.99
+  echo "$output" | grep -E 'NOT applied|optional audit tool' | head -20
+  [ "$status" -eq 0 ]
+  local t checked=0
+  for t in zizmor pinact govulncheck 'uv-secure / pip-audit' lockfile-lint; do
+    command -v "${t%% *}" >/dev/null 2>&1 || [ -x "$HOME/go/bin/$t" ] || continue
+    checked=$((checked + 1))
+    echo "$output" | grep -q "$t (optional audit tool[^)]*) — install failed" \
+      || { echo "no reinstall attempt recorded for $t" >&2; false; }
+  done
+  [ "$checked" -gt 0 ] || skip "none of the role's optional tools is installed here"
+}
+
+@test "tool pins: tools already at their pins are not reinstalled" {
+  # The other half: the version probes must recognise a tool that IS at its pin
+  # (`uv tool list`, `go version -m`, lockfile-lint's package.json). A probe
+  # that misreads its tool would reinstall on every apply.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
+    -e socket_firewall_install=false
+  echo "$output" | grep -E '^(changed|TASK \[.*Install)' | head -20
+  [ "$status" -eq 0 ]
+  local task
+  for task in 'Install zizmor' 'Install pinact' 'Install govulncheck' 'Install uv-managed tools' 'Install lockfile-lint globally'; do
+    # Look only at the result lines between this task's header and the next.
+    if echo "$output" | awk -v pat="$task" '
+         /^TASK \[/ { inblk = index($0, pat) > 0; next }
+         inblk && /^changed:/ { found = 1 }
+         END { exit !found }'; then
+      echo "$task reinstalled a tool that is already at its pin" >&2
+      false
+    fi
+  done
 }
 
 # ---- The end-of-run summary ----

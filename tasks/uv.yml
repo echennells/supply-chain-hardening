@@ -216,6 +216,18 @@
       {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — uv is not installed, so /usr/local/bin/pip and /usr/local/bin/pip3 were not deployed and `pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. Install uv and re-apply.'] }}
   when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
 
+- name: Detect installed uv tool versions (reinstall when a pin moves)
+  # `creates:` checked only that a binary existed, so bumping uv_secure_version
+  # or pip_audit_version never reinstalled anything unless refresh_tools was
+  # set. `uv tool list` prints "<name> v<version>" per tool (MEASURED uv
+  # 0.13.9), and `uv tool install name==<other>` replaces the installed version.
+  ansible.builtin.command: "{{ uv_binary_path.stdout }} tool list"
+  register: uv_tools_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+
 - name: Install uv-managed tools
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and
@@ -234,21 +246,31 @@
     # Pinned: an unpinned `uv tool install` takes the newest release at apply
     # time, which is the same always-newest exposure the role's age gates exist
     # to close for users. PyPI provides integrity; the pin is the other half.
-    # Looped over name/version pairs so `creates:` still names the binary
-    # rather than the versioned requirement string.
+    # Looped over name/version pairs so the skip test can compare each pin with
+    # the version `uv tool list` reported above.
     cmd: "{{ uv_binary_path.stdout }} tool install {{ item.name }}=={{ item.version }}"
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/' + item.name }}"
   loop:
     - { name: uv-secure, version: "{{ uv_secure_version }}" }
     - { name: pip-audit, version: "{{ pip_audit_version }}" }
-  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+  when:
+    - uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+    - refresh_tools | bool or (item.name ~ ' v' ~ item.version) not in (uv_tools_installed.stdout_lines | default([]))
+  # A failed install changed nothing, so it must not report `changed`: with
+  # failed_when: false and no changed_when, a persistently failing install broke
+  # idempotency on every re-apply.
   register: uv_tools_install
+  changed_when: uv_tools_install.rc | default(1) == 0
   failed_when: false
 
 - name: Record skipped protection — uv-managed tools (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['uv-managed audit tools (uv-secure / pip-audit) — install failed. Python dependency scanning is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['uv-secure / pip-audit (optional audit tools; nothing in the role runs them, so no install is blocked either way) — install failed, so the Python dependency scanners are not available to run by hand.'] }}
   when:
+    # A looped task registers `results`, one entry per item, and no top-level
+    # rc, so the old `uv_tools_install.rc | default(0) != 0` was always false
+    # and a failed install was never recorded.
     - uv_tools_install is defined
-    - uv_tools_install.rc | default(0) != 0
+    - >-
+      uv_tools_install.results | default([]) | selectattr('rc', 'defined')
+      | rejectattr('rc', 'equalto', 0) | list | length > 0
