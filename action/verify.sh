@@ -85,7 +85,7 @@ same shape: the file was exactly what we meant to write, the tool ignored it,
 and nothing said so.
 
   npm  MINIMUM_RELEASE_AGE   a key npm does not read — gate absent
-  yarn npmMinimalAgeGate     "2d" read as 2 minutes on yarn 4.10 — gate absent
+  yarn npmMinimalAgeGate     "2d" read as 2 minutes on yarn 4.10 — a 2-minute gate
   bun  ignoreScripts         bunfig not loaded for `bun run`
   sfw  npm wrapper           written to a path PATH never resolves
   bunx wrapper               overwrote the bun wrapper through a symlink
@@ -408,11 +408,11 @@ _neg() { # class, id, evidence, protection, detail
     if [ "$1" = config ]; then GAPS_CONFIG=$((GAPS_CONFIG + 1)); else GAPS_TOOLCHAIN=$((GAPS_TOOLCHAIN + 1)); fi
     row GAP "$3" "$4" "$5"
   else
-    local why="${SCV_EXPECT_WHY:-no declared expectations for this surface}"
+    local why="${SCV_EXPECT_WHY:-no declared expectations for this surface}" sfw_in
     case "$2" in
       wrapper.npm|wrapper.npx)
-        case "$PLATFORM" in github) _sfw_in="intel: sfw" ;; *) _sfw_in="INTEL=sfw" ;; esac
-        why="${SCV_WRAPPERS_WHY:-$why}. harden.sh deploys the npm and npx wrappers only with $_sfw_in" ;;
+        case "$PLATFORM" in github) sfw_in="intel: sfw" ;; *) sfw_in="INTEL=sfw" ;; esac
+        why="${SCV_WRAPPERS_WHY:-$why}. harden.sh deploys the npm and npx wrappers only with $sfw_in" ;;
       wrapper.*) why="${SCV_WRAPPERS_WHY:-$why}" ;;
     esac
     row "N/A" BYDESIGN "$4" "$5 — not required here: $why"
