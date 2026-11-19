@@ -44,7 +44,7 @@ not set the derived values individually. The unit trap is spelled out in
 | `cargo_socket_firewall` | `true` | Filter cargo downloads through Socket Firewall (needs Node ≥ 20). |
 | `socket_firewall_install` | `true` | Install `sfw` at all. |
 | `python_safe_path` | `false` | Export `PYTHONSAFEPATH=1` (Python 3.11+). Off because it breaks `python script.py` importing a sibling module — see [limitations.md](limitations.md). |
-| `pnpm_built_dependencies` | `[]` | Packages allowed to run build scripts under pnpm 10. Per-user, not system-wide. |
+| `pnpm_built_dependencies` | `[]` | Packages allowed to run build scripts under pnpm 10. Non-empty also writes `ignoreScripts: false` to pnpm 11+'s global `config.yaml` (as the action does), so a project's `allowBuilds` takes effect; that also lets each project's own lifecycle scripts run. Per-user, not system-wide. See [limitations.md](limitations.md). |
 | `cargo_audit_tools` | `false` | Also install `cargo-audit`, `cargo-vet`, `cargo-deny`. Detection tools the role does not run itself. |
 | `podman_enabled` | `false` | Install podman and deploy `/etc/containers/policy.json`. See [how-it-works.md](how-it-works.md#container-image-hardening-podman). |
 | `podman_disable_docker` | `false` | Stop and disable the Docker daemon. Independent of `podman_enabled`. |
