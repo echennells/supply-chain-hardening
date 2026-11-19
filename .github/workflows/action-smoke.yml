@@ -157,7 +157,8 @@ jobs:
           cd /tmp/yarn-cold
           grep -q '^enableImmutableCache: false' "$HOME/.yarnrc.yml"
           COREPACK_ENABLE_DOWNLOAD_PROMPT=0 yarn install
-          test -d node_modules/is-number
+          # Yarn 4 defaults to Plug'n'Play: no node_modules, a .pnp.cjs instead.
+          test -f .pnp.cjs || test -d node_modules/is-number
           echo "✓ hardened yarn installs from a committed lockfile on a cold cache"
 
   action-blocks-pnpm-project-script:
