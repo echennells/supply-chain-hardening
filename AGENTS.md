@@ -31,7 +31,8 @@ the user hasn't already agreed to that, tell them first:
 - Releases newer than 48 hours are refused, wherever the tool supports it.
 - Install scripts are blocked, so a package that depends on one fails to build.
 - Source distributions are refused, and `pip` is redirected to `uv` where `uv` exists.
-- `composer` runs with `--no-scripts` and `--no-plugins`, and `bundle` runs frozen.
+- `composer` runs with `--no-plugins`, and with `--no-scripts` except for a script
+  named on the command line (`composer test`); `bundle` runs frozen.
 - Several package managers are replaced by wrappers at their current path.
 - There is no single uninstall command.
 
