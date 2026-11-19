@@ -1146,7 +1146,14 @@ harden_composer() {
   # (the GitHub workspace), `composer --version` activated the plugin that
   # checkout's allow-plugins enables, and `composer config --global home` also
   # ran its root "pre-command-run" script, before any wrapper existed.
-  composer_version=$(detect_version composer "composer --version --no-ansi --no-plugins")
+  # The version probe also gives composer no project (COMPOSER names a file that
+  # cannot exist; reading a version needs none, and a step that only looks must
+  # not boot the checkout it runs in), and both probes run with
+  # COMPOSER_ALLOW_SUPERUSER=1 and -n, so a root run on a terminal does not stop
+  # at composer's hidden "Continue as root/super user?" prompt. See the composer
+  # version probe in files/verify-probes.sh.
+  composer_version=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 \
+    detect_version composer "composer --version --no-ansi --no-plugins --no-interaction")
   # Tier-render:
   #   composer >= 2.9 : audit.block-insecure + block-abandoned + abandoned=fail
   #   composer 2.7-2.8: audit.abandoned=fail only
@@ -1224,7 +1231,7 @@ harden_composer() {
   # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
   local composer_home="" composer_cwd
   if command -v composer >/dev/null 2>&1 && composer_cwd=$(mktemp -d 2>/dev/null); then
-    composer_home=$(cd "$composer_cwd" && composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
+    composer_home=$(cd "$composer_cwd" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
     rmdir "$composer_cwd" 2>/dev/null || true
   fi
   case "$composer_home" in

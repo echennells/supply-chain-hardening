@@ -114,3 +114,41 @@ J
   [[ "$output" == *"composer plugin execution blocked"* ]]
   [[ "$output" == *"evil/probe"* ]]
 }
+
+# What every composer probe hands composer, recorded by a shim that then execs the
+# real binary. Two properties, each MEASURED broken before:
+#   * root on a terminal: a composer that is not our wrapper stops at its hidden
+#     "Continue as root/super user [yes]?" prompt unless COMPOSER_ALLOW_SUPERUSER
+#     is set, and only answers it with -n by also running `sudo -K`. With the
+#     wrapper reverted on 2.2.6, `sudo supply-chain-verify` never finished.
+#   * the version probes (the version read and the run-probe) ran with the
+#     checkout's composer.json as the project. Reading a version needs no project,
+#     and a posture probe must never boot the checkout it is standing in, so they
+#     must name one that cannot exist.
+@test "verify: every composer probe is non-interactive, root-safe, and reads a version with no project" {
+  stage_hostile_checkout
+  local log="$BATS_TEST_TMPDIR/composer-calls" rec="$BATS_TEST_TMPDIR/rec"
+  mkdir -p "$rec"
+  cat > "$rec/composer" <<S
+#!/bin/bash
+printf '%s|%s|%s|%s\n' "\$PWD" "\${COMPOSER-<unset>}" "\${COMPOSER_ALLOW_SUPERUSER-<unset>}\${COMPOSER_NO_INTERACTION:+ NI}" "\$*" >> '$log'
+exec '$REAL_COMPOSER' "\$@"
+S
+  chmod 0755 "$rec/composer"
+  run env -u COMPOSER_ALLOW_SUPERUSER -u COMPOSER_NO_INTERACTION PATH="$rec:$PATH" bash -c "cd '$root/app' && '$VERIFY' --verbose"
+  [ -s "$log" ] || { echo "the verifier never ran composer through the shim" >&2; return 1; }
+  local pwd comp su args nver=0
+  while IFS='|' read -r pwd comp su args; do
+    [[ "$su" == 1* ]] || { echo "no COMPOSER_ALLOW_SUPERUSER=1: composer $args (in $pwd)" >&2; return 1; }
+    [[ " $args " == *" --no-interaction "* || " $args " == *" -n "* || "$su" == *" NI" ]] \
+      || { echo "interactive: composer $args (in $pwd)" >&2; return 1; }
+    if [[ " $args " == *" --version "* ]]; then
+      nver=$((nver + 1))
+      [ "$comp" = /dev/null/composer.json ] || { echo "version probe with COMPOSER=$comp: composer $args (in $pwd)" >&2; return 1; }
+    fi
+  done < "$log"
+  [ "$nver" -ge 1 ] || { echo "no version probe went through the shim" >&2; cat "$log" >&2; return 1; }
+  # The probes still read what they need.
+  [[ "$output" != *"could not parse a version out of 'composer --version'"* ]]
+  [[ "$output" == *"evil/probe"* ]]
+}

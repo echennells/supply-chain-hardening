@@ -570,6 +570,43 @@ esac"
   [[ "$output" == *"policy.cooldown.ignore entries"* ]]
 }
 
+# What every composer call in harden.sh and verify.sh hands composer, recorded by
+# an UNWRAPPED stub (the wrapper sets COMPOSER_ALLOW_SUPERUSER itself, which would
+# hide the probe's own environment). MEASURED before: run as root on a terminal,
+# a composer that is not the wrapper waits at a hidden "Continue as root/super
+# user [yes]?" prompt unless COMPOSER_ALLOW_SUPERUSER is set (with the wrapper
+# reverted on 2.2.6 the verifier never finished), and the version probes ran
+# with the checkout's composer.json as the project. Reading a version needs no
+# project, and a probe must never boot the checkout it runs in.
+@test "composer: every composer probe is non-interactive, root-safe, and reads a version with no project" {
+  local log="$BATS_TEST_TMPDIR/composer-calls" body
+  CHECKOUT="$BATS_TEST_TMPDIR/checkout"; mkdir -p "$CHECKOUT"
+  echo '{"name":"t/t","require":{}}' > "$CHECKOUT/composer.json"
+  body="printf '%s|%s|%s|%s\\n' \"\$PWD\" \"\${COMPOSER-<unset>}\" \"\${COMPOSER_ALLOW_SUPERUSER-<unset>}\${COMPOSER_NO_INTERACTION:+ NI}\" \"\$*\" >> '$log'
+case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *--list*) echo '[secure-http] true (/x/config.json)' ;;
+esac"
+  stub_bin composer "$body"
+  cd "$CHECKOUT"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  stub_bin composer "$body"
+  run verify_sourced --emit=plain
+  [ -s "$log" ]
+  local pwd comp su args nver=0
+  while IFS='|' read -r pwd comp su args; do
+    [[ "$su" == 1* ]] || { echo "no COMPOSER_ALLOW_SUPERUSER=1: composer $args (in $pwd)" >&2; return 1; }
+    [[ " $args " == *" --no-interaction "* || " $args " == *" -n "* || "$su" == *" NI" ]] \
+      || { echo "interactive: composer $args (in $pwd)" >&2; return 1; }
+    if [[ " $args " == *" --version "* ]]; then
+      nver=$((nver + 1))
+      [ "$comp" = /dev/null/composer.json ] || { echo "version probe with COMPOSER=$comp: composer $args (in $pwd)" >&2; return 1; }
+    fi
+  done < "$log"
+  # harden's probe, the verifier's version read and its run-probe(s)
+  [ "$nver" -ge 3 ] || { echo "only $nver version probes recorded" >&2; cat "$log" >&2; return 1; }
+}
+
 @test "bundler below 4.0.13 is a toolchain GAP even though it echoes the key" {
   bundler_age_stub 2.4.20 2
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null

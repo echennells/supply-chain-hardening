@@ -163,16 +163,21 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
   # --version` run inside a checkout activated the plugin the checkout's
   # allow-plugins enables. The wrapper adds the flag itself; this covers the
   # case the probe exists to find, where something else answers first.
-  scv__wa=""; case "${scv__wt##*/}" in composer) scv__wa="--no-plugins" ;; esac
+  # --no-interaction, COMPOSER_ALLOW_SUPERUSER=1 and COMPOSER (a file that cannot
+  # exist) for the reasons given at the composer version probe: an unwrapped
+  # composer run as root on a terminal otherwise waits at a hidden prompt, and a
+  # version probe must not boot the checkout it is standing in. Only composer
+  # reads those two variables.
+  scv__wa=""; case "${scv__wt##*/}" in composer) scv__wa="--no-plugins --no-interaction" ;; esac
   if scv__wp=$(mktemp 2>/dev/null); then
     # Bound the probe like the sibling verifiers (timeout 30): a hanging tool or
     # a hanging front-runner shim must not hang the whole verify. `timeout`
     # preserves the SCH_WRAPPER_PROBE env var for the tool; absent it (macOS),
     # fall back unbounded rather than skip the probe.
     if command -v timeout >/dev/null 2>&1; then
-      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
+      COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
     else
-      RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
+      COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
     fi
     while IFS= read -r scv__wl; do
       [ -n "$scv__wl" ] || continue
@@ -1764,7 +1769,25 @@ if have composer; then
   # parse exactly the OLDEST composer - the one with the largest gap - and
   # reported "could not parse" where the answer should have been "no audit
   # blocking at all". Keep the optional group. (from templates/verify.sh.j2:274)
-  cv=$(composer --version --no-ansi --no-plugins 2>/dev/null \
+  #
+  # EVERY composer probe in this section runs with COMPOSER_ALLOW_SUPERUSER=1 and
+  # --no-interaction. A root run on a terminal (`sudo supply-chain-verify`) of a
+  # composer that is not our wrapper (the wrapper sets the variable itself)
+  # otherwise stops at composer's "Continue as root/super user [yes]?" prompt,
+  # written to stderr, which these probes discard: MEASURED on 2.2.6 with the
+  # wrapper reverted, the verifier was still waiting when a 45 s timeout killed
+  # it, both under `su - root` and under sudo. -n alone answers that prompt but
+  # still makes composer run `sudo -K` against the invoking user's sudo
+  # timestamp. The variable only lifts composer's root guard; plugins stay off
+  # because every probe also passes --no-plugins.
+  #
+  # The version probe gives composer no project: COMPOSER names a file that
+  # cannot exist (/dev/null is not a directory). Reading a version needs none,
+  # and a posture probe must never boot the checkout it is standing in. Unlike
+  # changing to an empty directory, it keeps the caller's working directory, so a
+  # relative PATH entry still resolves the composer the caller would get.
+  cv=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 \
+        composer --version --no-ansi --no-plugins --no-interaction 2>/dev/null \
         | sed -nE 's/.*[Cc]omposer( version)? ([0-9]+\.[0-9]+\.[0-9]+).*/\2/p' | head -1)
   cmaj=${cv%%.*}; crest=${cv#*.}; cmin=${crest%%.*}; cpat=${cv##*.}
   case "$cmaj$cmin" in *[!0-9]*|'') cmaj=""; cmin="" ;; esac
@@ -1779,10 +1802,10 @@ if have composer; then
   # to its root scripts (MEASURED, 2.2.6 -> 2.11.2, whenever COMPOSER_SKIP_SCRIPTS
   # is not honoured: composer < 2.8.6, or no PAM env). -n stops the parent-dir walk.
   cnone=$(mktemp -d 2>/dev/null) || cnone=/
-  CDUMP=$(cd "$cnone" && composer config --global --list --source --no-ansi --no-plugins --no-interaction 2>&1); crc=$?
+  CDUMP=$(cd "$cnone" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global --list --source --no-ansi --no-plugins --no-interaction 2>&1); crc=$?
   clist=1
   if [ "$crc" -ne 0 ]; then
-    (cd "$cnone" && composer config --global --list --no-ansi --no-plugins --no-interaction) >/dev/null 2>&1 && clist=0
+    (cd "$cnone" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global --list --no-ansi --no-plugins --no-interaction) >/dev/null 2>&1 && clist=0
   fi
   [ "$cnone" = / ] || rmdir "$cnone" 2>/dev/null
   if [ "$crc" -ne 0 ] && [ "$clist" -eq 0 ]; then
@@ -1849,7 +1872,7 @@ if have composer; then
     # `composer config` rejects --no-scripts on 2.0/2.1, but those have no
     # --source either, so this call fails there with or without it. See
     # tests/bats/51-verifier-composer-plugin-safety.bats.
-    PDUMP=$(composer config --list --source --no-ansi --no-plugins --no-scripts --no-interaction 2>/dev/null); prc=$?
+    PDUMP=$(COMPOSER_ALLOW_SUPERUSER=1 composer config --list --source --no-ansi --no-plugins --no-scripts --no-interaction 2>/dev/null); prc=$?
     if [ "$prc" -eq 0 ]; then EDUMP="$PDUMP"; escope="effective config for $(cq "$PWD")"; fi
   fi
   # A checkout we could not read is a checkout that may be overriding us; that

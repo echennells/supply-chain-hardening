@@ -725,11 +725,16 @@ wrapper_ran() {
   # (MEASURED: 757 MB). Only rustup reads the variable.
   # --no-plugins for composer: an unwrapped `composer --version` inside a
   # checkout activates the checkout's allowed plugin (MEASURED, 2.11.2).
-  wa=""; case "${w##*/}" in composer) wa="--no-plugins" ;; esac
+  # --no-interaction, COMPOSER_ALLOW_SUPERUSER=1 and COMPOSER (a file that cannot
+  # exist): see the composer version probe in files/verify-probes.sh. An
+  # unwrapped composer run as root on a terminal otherwise waits at a hidden
+  # prompt, and a version probe must not boot the checkout it is standing in.
+  # Only composer reads those two variables.
+  wa=""; case "${w##*/}" in composer) wa="--no-plugins --no-interaction" ;; esac
   if have timeout; then
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version $wa >/dev/null 2>&1 || true
+    COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version $wa >/dev/null 2>&1 || true
   else
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version $wa >/dev/null 2>&1 || true
+    COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version $wa >/dev/null 2>&1 || true
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
