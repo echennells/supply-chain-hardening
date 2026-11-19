@@ -182,6 +182,48 @@ FAKE
   grep -q "pip install download" "$FAKE_DIR/runs"
 }
 
+@test "pip wrapper: download is still recognised after a general option that takes a value" {
+  # `pip --python X download six` read X as the subcommand, so the attributed
+  # refusal was skipped and uv's own error came first (VM#2 review).
+  [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
+  [ "$(id -u)" = 0 ] || skip "fixture is root-owned"
+  [ -x /usr/local/bin/uv ] || [ -x /usr/bin/uv ] && skip "a system uv exists and would be used"
+  fake_uv_wrapper 0
+  run "$FAKE_DIR/pip" --python /usr/bin/python3 download six
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"[supply-chain-hardening] error: 'pip download' is not available here"* ]]
+  run "$FAKE_DIR/pip" --cache-dir /tmp/sch-cache download six
+  [ "$status" -eq 2 ]
+  [ ! -s "$FAKE_DIR/runs" ]
+  # The value of such an option is not mistaken for the subcommand either way.
+  run "$FAKE_DIR/pip" --cache-dir download install six
+  [ "$status" -eq 0 ]
+  grep -q "pip --cache-dir download install six" "$FAKE_DIR/runs"
+}
+
+@test "pip wrapper: with no uv this account can run, the error names the redirect and the fix" {
+  # A uv in a home this account cannot enter is invisible, so this is the
+  # branch a second account lands in when the deployer's home is 0750 and the
+  # baked uv is there. It used to say only "uv not found ...; refusing to recurse".
+  [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
+  [ "$(id -u)" = 0 ] || skip "needs root to run as another account"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  [ -x /usr/local/bin/uv ] || [ -x /usr/bin/uv ] && skip "a system uv exists and would be used"
+  # The baked uv is real and root-owned, but in a 0700 directory the caller
+  # cannot enter, as the deployer's ~/.local/bin is behind a 0750 home.
+  FAKE_DIR=$(mktemp -d /tmp/sch-nouv.XXXXXX); chmod 755 "$FAKE_DIR"
+  mkdir -m 0700 "$FAKE_DIR/private"
+  printf '#!/bin/sh\nexit 0\n' > "$FAKE_DIR/private/uv"; chmod 755 "$FAKE_DIR/private/uv"
+  sed "s#^UV=.*#UV='$FAKE_DIR/private/uv'#" /usr/local/bin/pip > "$FAKE_DIR/pip"
+  chmod 755 "$FAKE_DIR/pip"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups \
+    env -i PATH=/usr/bin:/bin HOME=/nonexistent "$FAKE_DIR/pip" install six
+  [ "$status" -eq 127 ]
+  [[ "$output" == *"[supply-chain-hardening] error: pip on this host is redirected to uv (the pip-to-uv wrapper)"* ]]
+  [[ "$output" == *"Install uv for this account"* ]]
+  [[ "$output" == *"/usr/local/bin/uv for root and every account"* ]]
+}
+
 @test "pip wrapper: a root-owned uv in the caller's own directory is the caller's to run" {
   [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
   [ "$(id -u)" = 0 ] || skip "needs root to run as another account"
