@@ -421,7 +421,7 @@ composer_audit_block_abandoned: true    # Composer >= 2.9 only
 # Setting to true is the documented opt-in path for users with legitimate
 # composer Plugin classes (composer/installers, phpstan/extension-installer,
 # etc.). Doing so still leaves --no-scripts injected, so post-install-cmd
-# and friends remain blocked. Default false = no plugins, no scripts.
+# and friends remain blocked. Default false = no plugins, no lifecycle scripts.
 #
 # (--no-plugins was previously hardcoded in the wrapper regardless of this
 # var, making this knob decorative whenever composer_path_wrapper was on.
@@ -432,16 +432,19 @@ composer_allow_plugins: false
 # Composer has no host-wide config/env knob for disabling script execution
 # — COMPOSER_NO_SCRIPTS and "scripts-are-disabled" are made-up names that
 # composer ignores entirely. The wrapper at /usr/local/bin/composer (or
-# /usr/bin/composer on apt-installed hosts) injects --no-scripts and
-# --no-plugins on every invocation. Belt-and-suspenders second layer is
-# COMPOSER_SKIP_SCRIPTS=<events> in /etc/environment + /etc/profile.d,
-# which catches composer-real and `php composer.phar` callers in PAM-
-# loaded shells (composer >= 2.8.0 — MEASURED: ignored on 2.2.6 and 2.7.1,
-# honoured on 2.8.12+; the wrapper is the only layer below 2.8, and the run
-# summary records that). Documented bypass for both layers:
-# `COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install`. Set
-# this var to false to restore the real binary at the wrap location on
-# next apply (env-var layer remains).
+# /usr/bin/composer on apt-installed hosts) injects --no-plugins on every
+# invocation and --no-scripts on every invocation except a script run by
+# name (`composer test`, `composer run-script x`), which runs as asked.
+# Belt-and-suspenders second layer is COMPOSER_SKIP_SCRIPTS=<events> in
+# /etc/environment + /etc/profile.d, which catches composer-real and
+# `php composer.phar` callers in PAM-loaded shells (composer >= 2.8.6 —
+# MEASURED: ignored on 2.2.6, 2.7.1, 2.8.4 and 2.8.5, honoured from 2.8.6;
+# the wrapper is the only layer below that, and the run summary records it).
+# Documented bypass for both layers, with the real binary next to the
+# wrapper: `COMPOSER_SKIP_SCRIPTS= /usr/bin/composer-real install` on an apt
+# host, `/usr/local/bin/composer-real` for the upstream installer. Set this
+# var to false to restore the real binary at the wrap location on next apply
+# (env-var layer remains).
 composer_path_wrapper: true
 
 # cargo / Rust hardening.

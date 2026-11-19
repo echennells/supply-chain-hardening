@@ -11,8 +11,9 @@
 # COMPOSER_SKIP_SCRIPTS=<event,list> (MEASURED: honoured from composer
 # 2.8.6 — ignored on 2.2.6, 2.7.1 and 2.8.0-2.8.5, honoured on 2.8.6+; this
 # comment previously said 2.9 and that number was wrong. Requires
-# enumerating every event name). The /usr/local/bin/composer wrapper below
-# is the primary layer; the env var is the backup for callers that bypass
+# enumerating every event name). The composer wrapper below (at the
+# discovered path: /usr/local/bin/composer or /usr/bin/composer) is the
+# primary layer; the env var is the backup for callers that bypass
 # it, and it buys nothing at all on composer 2.2-2.7 — recorded in
 # skipped_protections there rather than left to read as coverage.
 #
@@ -37,8 +38,8 @@
 #              same protection — below 2.2.15 and when the version is unknown.
 #   <= 2.1   : --no-scripts is not an application-level option; only
 #              install/update/require/remove/dump-autoload declare it.
-#              composer-wrapper.sh.j2 injects it unconditionally from 2.2.0
-#              and per-subcommand below that. --no-plugins IS global that far
+#              composer-wrapper.sh.j2 injects it on every invocation from
+#              2.2.0 (except a script run by name) and per-subcommand below. --no-plugins IS global that far
 #              back and is always injected.
 
 - name: Detect installed Composer version (empty if not installed)
@@ -75,17 +76,15 @@
   ansible.builtin.set_fact:
     composer_detected_version: "{{ composer_version_check.stdout | default('') | trim }}"
 
-- name: Warn when Composer is installed but below 2.9 (audit block-* keys inert)
-  # block-insecure and block-abandoned require Composer ≥ 2.9.0 (2025-11).
-  # The template omits them on older Composer so the config.json stays valid.
-  # Surfacing the warning here is the user-visible signal that those specific
-  # protections didn't apply on this host — everything else still does.
-  ansible.builtin.debug:
-    msg: >-
-      Composer {{ composer_detected_version }} detected. The audit.block-insecure
-      and audit.block-abandoned settings require Composer >= 2.9 and will not be
-      written. Other hardening (secure-http, allow-plugins, preferred-install)
-      still applies on this host.
+- name: Record skipped protection — audit blocking unavailable (Composer < 2.9)
+  # block-insecure and block-abandoned require Composer ≥ 2.9.0 (2025-11), and
+  # the audit key itself 2.7.0. The template omits them on older Composer so the
+  # config.json stays valid. This was a debug message that scrolled past; the
+  # end-of-run summary is where a skipped protection has to appear, and the
+  # verifier already reports it as a toolchain GAP.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Composer audit blocking — Composer ' ~ composer_detected_version ~ (' has no audit config at all (audit.* added in 2.7.0)' if composer_detected_version is version('2.7.0', '<') else ' supports only audit.abandoned, not audit.block-insecure / block-abandoned (added in 2.9.0)') ~ ', so a package with a known advisory still installs. Other hardening (secure-http, allow-plugins, preferred-install) still applies. See docs/composer-bundler-cooldown-by-distro.md'] }}
   when:
     - composer_detected_version | length > 0
     - composer_detected_version is version('2.9.0', '<')
@@ -98,7 +97,7 @@
   # the run reports a belt-and-suspenders layer that does nothing here.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['COMPOSER_SKIP_SCRIPTS — Composer ' ~ composer_detected_version ~ ' ignores it (MEASURED: honoured from 2.8.6; 2.8.5 ignores it). The env-var backup layer in /etc/environment and /etc/profile.d is inert on this host, so the /usr/local/bin/composer wrapper is the ONLY layer blocking composer scripts; `php composer.phar` callers that bypass the wrapper are not covered. Upgrade Composer to >= 2.8.6 to close this.'] }}
+      {{ (skipped_protections | default([])) + ['COMPOSER_SKIP_SCRIPTS — Composer ' ~ composer_detected_version ~ ' ignores it (MEASURED: honoured from 2.8.6; 2.8.5 ignores it). The env-var backup layer in /etc/environment and /etc/profile.d is inert on this host, so the composer wrapper is the ONLY layer blocking composer scripts; composer-real and `php composer.phar` callers that bypass the wrapper are not covered. Upgrade Composer to >= 2.8.6 to close this.'] }}
   when:
     - composer_detected_version | length > 0
     - composer_detected_version is version('2.8.6', '<')
@@ -238,16 +237,24 @@
     - (composer_home_root.stdout | trim) is match('^/')
     - (composer_home_root.stdout | trim) != '/root/.config/composer'
 
-# --- /usr/local/bin/composer wrapper (primary layer) ---
+# --- composer wrapper at the discovered path (primary layer) ---
 # Composer has no host-wide config-file or env-var way to disable script
-# execution. The wrapper at the discovered composer path injects
-# --no-scripts and --no-plugins on every invocation. /etc/profile.d/ and
+# execution. The wrapper at the discovered composer path (/usr/local/bin/composer
+# for the upstream installer, /usr/bin/composer for the distro package) injects
+# --no-plugins on every invocation and --no-scripts on every invocation except
+# a script run by name (see the template header). /etc/profile.d/ and
 # /etc/environment also set COMPOSER_SKIP_SCRIPTS=<event,list> as
 # belt-and-suspenders for `php composer.phar` callers that bypass the
 # wrapper but inherit the system env (PAM-loaded shells only); the
 # env-var layer also catches composer-real invocations in those shells
-# — by design. Documented bypass for both layers:
-#   COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install
+# — by design. Documented bypass for both layers, with the real binary next to
+# the wrapper (/usr/local/bin/composer-real or /usr/bin/composer-real):
+#   COMPOSER_SKIP_SCRIPTS= <wrapper path>-real install
+#
+# Package-manager caveat: `apt-get install --reinstall composer` (or an upgrade)
+# writes the stock /usr/bin/composer back over the wrapper. MEASURED on 2.7.1:
+# the verifier then reports GAP on the wrapper and lifecycle rows, and the next
+# apply re-wraps. dpkg-divert would survive package operations; not done yet.
 #
 # Self-update caveat: `composer self-update` overwrites the wrapper.
 # Detection below sees a fresh real binary at the wrap location and
@@ -341,7 +348,7 @@
   # detected, because the wrapper then renders the same safe baseline.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['composer wrapper --no-scripts (partial) — Composer ' ~ (composer_detected_version | default('', true) | default('<undetected>', true)) ~ ' does not accept --no-scripts as a global option (it became one in 2.2.0), so the wrapper injects it only for install/update/require/remove/dump-autoload. create-project, run-script and exec run WITHOUT it on this host. --no-plugins is unaffected. Upgrade Composer to >= 2.2 and re-run to make the injection unconditional.'] }}
+      {{ (skipped_protections | default([])) + ['composer wrapper --no-scripts (partial) — Composer ' ~ (composer_detected_version | default('', true) | default('<undetected>', true)) ~ ' does not accept --no-scripts as a global option (it became one in 2.2.0), so the wrapper injects it only for install/update/require/remove/dump-autoload. create-project and exec run WITHOUT it on this host (a script run by name runs on every version, on purpose). --no-plugins is unaffected. Upgrade Composer to >= 2.2 and re-run to cover every lifecycle command.'] }}
   when:
     - composer_path_wrapper | bool
     - composer_binary_path is defined
