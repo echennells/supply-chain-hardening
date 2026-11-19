@@ -40,8 +40,13 @@ Every release above ships a PHP new enough for Composer 2.11, so the same steps
 apply everywhere. Check the published checksum, then re-apply the role so the wrapper
 lands on the new binary:
 
+Use 2.11.2 or later, not just 2.11.0: Composer 2.10.0 to 2.11.1 can run arbitrary
+commands from a crafted `composer.lock` or `installed.json`
+([GHSA-jhfp-4ppm-crmm](https://github.com/composer/composer/security/advisories/GHSA-jhfp-4ppm-crmm),
+high, fixed in 2.11.2).
+
 ```sh
-V=2.11.1
+V=2.11.2
 curl -fsSLO "https://getcomposer.org/download/$V/composer.phar"
 curl -fsSL "https://getcomposer.org/download/$V/composer.phar.sha256sum" | sha256sum -c -
 sudo install -m 0755 composer.phar /usr/local/bin/composer
