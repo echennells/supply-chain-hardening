@@ -2785,15 +2785,22 @@ harden_nuget() {
   <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
        packages signed under a rotation we do not trust fail with NU3034 and the
        install is refused — signatureValidationMode=require makes that fatal.
-       Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
-       Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
+       SOURCE OF TRUTH: nuget.org's repository-signatures index,
+         https://api.nuget.org/v3-index/repository-signatures/5.0.0/index.json
+       These three SHA-256 fingerprints match the three it lists, exactly (checked
+       2026-11-19); the validity windows below are its notBefore / notAfter.
+       THE CURRENT CERTIFICATE EXPIRES 2027-05-18. nuget.org has to rotate before
+       then: add the new fingerprint as soon as that index lists it, or every
+       package repository-signed after the rotation is refused.
+       2024 rotation notice:
+         https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/ -->
   <trustedSigners>
     <repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">
-      <!-- current; deployed 2024-04-08 -->
+      <!-- current: valid 2024-02-23 to 2027-05-18 -->
       <certificate fingerprint="1F4B311D9ACC115C8DC8018B5A49E00FCE6DA8E2855F9F014CA6F34570BC482D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
-      <!-- previous; renewed 2021-03-15, expired 2024-05-15 -->
+      <!-- previous: valid 2021-02-16 to 2024-05-15 -->
       <certificate fingerprint="5A2901D6ADA3D18260B9C6DFE2133C95D74B9EEF6AE0E5DC334C8454D1477DF4" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
-      <!-- intermediate/original; still required for older packages -->
+      <!-- original (not an intermediate): valid 2018-04-10 to 2021-04-14; kept for packages whose repository signature was made with it -->
       <certificate fingerprint="0E5F38F57DC1BCC806D8494F4F90FBCEDD988B46760709CBEEC6F4219AA6157D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
     </repository>
   </trustedSigners>

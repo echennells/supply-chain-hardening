@@ -4525,9 +4525,11 @@ NGEOF
   # the merged trustedSigners section but NOT certificate fingerprints
   # (MEASURED: entries print as `\trepository name="..." serviceIndex="..."`,
   # the <certificate> children are not printed at all), so a present entry can
-  # only ever be WEAK.  (MEASURED: the fingerprint pinned by action/harden.sh,
-  # 0E5F38F5..., does not match what nuget.org counter-signs with today,
-  # 5A2901D6..., and restores fail NU3034 with it as the only pin.)
+  # only ever be WEAK.  (MEASURED back when action/harden.sh pinned only the
+  # 2018 certificate, 0E5F38F5...: packages repository-signed with a later one,
+  # 5A2901D6..., failed NU3034 with that as the only pin.  Both writers now pin
+  # all three certificates nuget.org's repository-signatures index lists; the
+  # current one expires 2027-05-18 — see tasks/nuget.yml.)
   if [ "$nsigstate" != "enforcing" ]; then
     row "N/A" - "nuget trusted signers" \
       "signature validation is not proven to be enforcing on this host; trusted signers cannot change that outcome"
