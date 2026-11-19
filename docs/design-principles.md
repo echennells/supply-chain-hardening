@@ -242,8 +242,12 @@ A defense fires in some execution contexts and not others. Knowing
 ### PAM-loaded vs non-PAM
 
 `/etc/environment` loads via pam_env at session start, and `/etc/profile.d/`
-when a login shell sources it (login shells, interactive sudo with
-`env_reset`, `su -`). They do NOT load for: systemd `ExecStart`, container
+when a login shell sources it (an ssh or console login, `sudo -i`, `su -`).
+Plain `sudo cmd` and `su` without `-` start no login shell, so they never
+source profile.d; whether plain `sudo` gets `/etc/environment` depends on the
+distro's `/etc/pam.d/sudo`: Ubuntu 24.04's lists pam_env, Debian 13's does
+not (MEASURED with sudo 1.9.15p5 and 1.9.16p2; `su` loads it on both). They
+do NOT load for: systemd `ExecStart`, container
 CMD, non-interactive `bash -c` outside such a session, most automation. Cron
 is a split case: Debian's and Ubuntu's cron open a PAM session, so a job gets
 `/etc/environment` but not `/etc/profile.d/`, and it runs with
