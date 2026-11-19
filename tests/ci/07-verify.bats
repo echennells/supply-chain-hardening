@@ -948,6 +948,42 @@ forge_record() { # a COMPLETE-looking record scoped to npm only
   [ "$status" -eq 1 ]
 }
 
+# ---- VM#14: an N/A must not contradict itself, a launcher is not a wrapper ----
+
+@test "wrapper N/A: the reason is the wrapper record, not the ecosystem list" {
+  # Old main: "npm PATH wrapper  not deployed ... — not required here: this job
+  # hardened: npm". npm WAS hardened; the wrapper only comes with intel.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'npm PATH wrapper' <<<"$output")
+  [[ "$r" == *"N/A"*"BYDESIGN"* ]]
+  [[ "$r" == *"the PATH wrappers this job deployed are: none"*"only with INTEL=sfw"* ]]
+  [[ "$r" != *"this job hardened"* ]]
+  # GitHub names the input, not the variable.
+  run verify_sourced --emit=github
+  [[ "$(grep 'npm PATH wrapper' <<<"$output")" == *"only with intel: sfw"* ]]
+}
+
+@test "describe_binary: a script nobody recognised is not called a wrapper" {
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
+  run verify -- --emit=plain
+  [[ "$(grep 'bun PATH wrapper' <<<"$output")" == *"(a script that is not ours)"* ]]
+  [[ "$output" != *"another wrapper script"* ]]
+}
+
+# ---- VM#14: remediation names the delivery path that is actually in use ----
+
+@test "uv age gate: the freeze remedy on this surface is harden.sh, not the role's timer" {
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'uv age gate' <<<"$output")
+  [[ "$r" == *"Re-run action/harden.sh"* ]]
+  [[ "$r" != *"Re-apply the role"* ]]
+  [[ "$r" != *"systemctl status"* ]]
+}
+
 # ---- VM#10: yarn is probed, not grepped, and below 4.10 is a toolchain gap ----
 
 # yarn_stub <version> <config-get npmMinimalAgeGate stdout> <its exit code>

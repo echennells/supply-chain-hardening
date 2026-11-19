@@ -316,6 +316,12 @@ elif [ -n "$OUTPUT_FILE" ] && [ -r "$OUTPUT_FILE" ]; then
     [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ -z "$_env_file_why" ] && _exp="$_exp env.propagation"
     SCV_EXPECT="$_exp"
     SCV_EXPECT_WHY="this job hardened: ${HARDENED_LIST:-<nothing>}"
+    # A wrapper's N/A is about the WRAPPER record, not the ecosystem list.
+    # "npm PATH wrapper not deployed — not required here: this job hardened:
+    # npm" contradicted itself (VM#14): npm WAS hardened, by config; harden.sh
+    # deploys the npm and npx wrappers only when it installs sfw.
+    _wl=$(_rec wrappers_deployed)
+    SCV_WRAPPERS_WHY="the PATH wrappers this job deployed are: ${_wl:-none}"
   fi
 fi
 
@@ -402,7 +408,14 @@ _neg() { # class, id, evidence, protection, detail
     if [ "$1" = config ]; then GAPS_CONFIG=$((GAPS_CONFIG + 1)); else GAPS_TOOLCHAIN=$((GAPS_TOOLCHAIN + 1)); fi
     row GAP "$3" "$4" "$5"
   else
-    row "N/A" BYDESIGN "$4" "$5 — not required here: ${SCV_EXPECT_WHY:-no declared expectations for this surface}"
+    local why="${SCV_EXPECT_WHY:-no declared expectations for this surface}"
+    case "$2" in
+      wrapper.npm|wrapper.npx)
+        case "$PLATFORM" in github) _sfw_in="intel: sfw" ;; *) _sfw_in="INTEL=sfw" ;; esac
+        why="${SCV_WRAPPERS_WHY:-$why}. harden.sh deploys the npm and npx wrappers only with $_sfw_in" ;;
+      wrapper.*) why="${SCV_WRAPPERS_WHY:-$why}" ;;
+    esac
+    row "N/A" BYDESIGN "$4" "$5 — not required here: $why"
   fi
 }
 gap()     { _neg config    "$@"; }   # id evidence protection detail
@@ -735,7 +748,9 @@ describe_binary() {
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     */hostedtoolcache/*)                  echo "a toolcache binary — a setup-* step ran AFTER hardening" ;;
     *)
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      # A script, but nothing above recognised it: often the package's own
+      # launcher (Debian's /usr/bin/npm, a composer.phar), not a wrapper.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "a script that is not ours"
       else echo "an unwrapped binary"; fi ;;
   esac
 }

@@ -72,6 +72,11 @@ set -u
 # This is executed bash, not rendered text: $(hostname) below runs when the
 # verifier runs. Only the literal string is frozen at apply time.
 
+# Which delivery path deployed this host. The shared probe body reads it to
+# word a remediation for THIS path ("re-apply the role" here, "re-run
+# action/harden.sh" in CI); action/verify.sh declares SCV_SURFACE=ci.
+# shellcheck disable=SC2034  # read by the shared probe body
+SCV_SURFACE=role
 SCV_SCOPE_LABEL="on $(hostname)"
 
 # When this host's intent was recorded. A stale preamble is the one failure
@@ -830,7 +835,9 @@ describe_binary() {
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     *)
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      # A script, but nothing above recognised it: often the package's own
+      # launcher (Debian's /usr/bin/npm, a composer.phar), not a wrapper.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "a script that is not ours"
       else echo "an unwrapped binary"; fi ;;
   esac
 }

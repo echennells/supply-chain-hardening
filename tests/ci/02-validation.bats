@@ -259,6 +259,20 @@ setup() { common_setup; }
   [[ "$output" != *"does NOT implement npmMinimalAgeGate"* ]]
 }
 
+@test "reporting: the cargo-cooldown hint names the switch this caller has (VM#14)" {
+  # Old main told a plain-mode caller to set the ACTION INPUT
+  # install_cargo_cooldown, which only action.yml reads.
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo to wrap cargo"
+  stub_bin cargo
+  run harden ECOSYSTEMS=cargo -- --emit=plain
+  [[ "$output" == *"INSTALL_CARGO_COOLDOWN=true"* ]]
+  [[ "$output" != *"install_cargo_cooldown: true"* ]]
+  sudo -n rm -f "$(stub_real cargo)"; stub_bin cargo
+  run harden GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT="$TEST_TMP/ghout" \
+             GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum" ECOSYSTEMS=cargo
+  [[ "$output" == *"install_cargo_cooldown: true"* ]]
+}
+
 @test "reporting: npm that cannot enforce the age gate is flagged at hardening time" {
   # min-release-age landed in npm 11.10.0. The version is already detected, so
   # the run can say so itself instead of leaving it to an opt-in verifier.

@@ -2347,7 +2347,12 @@ WRAPPER
   if [[ -n "$cooldown_bin" ]]; then
     log "cargo: wrapper at $wrapper_target (--locked injection + ${RELEASE_AGE_HOURS}h publish-age gate via cargo-cooldown)"
   else
-    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. Set install_cargo_cooldown: true, or install cargo-cooldown in an earlier step."
+    # Name the switch the way THIS caller sets it: the action input on GitHub,
+    # the env var everywhere else (VM#14: plain mode was told to set an input
+    # it does not have).
+    local _cc_how="set INSTALL_CARGO_COOLDOWN=true in harden.sh's environment"
+    [[ "$PLATFORM" == "github" ]] && _cc_how="set the action input install_cargo_cooldown: true"
+    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. To enforce it, ${_cc_how}, or install cargo-cooldown in an earlier step."
     set_eco_status cargo PARTIAL "--locked injection active; publish-age gate written but no cargo-cooldown backend to enforce it"
     log "cargo: wrapper at $wrapper_target (--locked injection; age gate written but inert without cargo-cooldown)"
   fi

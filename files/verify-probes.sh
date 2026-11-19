@@ -19,6 +19,24 @@ scv_toolchain_gap() { # id evidence protection detail
   if type unavail >/dev/null 2>&1; then unavail "$@"; else shift; row GAP "$@"; fi
 }
 
+# How THIS surface puts a deployed setting back. The body is shared, so a
+# remediation that names one delivery path is wrong on the other. MEASURED
+# (VM#14, a host hardened with action/harden.sh --emit=plain): the frozen-cutoff
+# rows told the user to re-apply a role they never ran and to check a systemd
+# timer that path never installs. SCV_SURFACE is declared by both preambles.
+scv_reapply() { # -> an imperative phrase, lower case
+  case "${SCV_SURFACE:-role}" in
+    ci) printf 're-run action/harden.sh' ;;
+    *)  printf 're-apply the role' ;;
+  esac
+}
+scv_cutoff_fix() { # -> the remedy for a frozen absolute uv/pip cutoff
+  case "${SCV_SURFACE:-role}" in
+    ci) printf '%s' "Re-run action/harden.sh to advance it, and re-source its env file in any shell that sourced the old one. harden.sh ships no refresh timer: a CI job re-hardens on every run, but a long-lived host hardened this way keeps the cutoff of its last harden.sh run until something runs it again (the Ansible role installs supply-chain-age-gate-refresh.timer for this)" ;;
+    *)  printf '%s' "Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal" ;;
+  esac
+}
+
 # The window this surface promised, in hours; empty when nothing recorded one.
 # The role renders it into its preamble, the action records it in OUTPUT_FILE.
 scv_want_hours() {
@@ -895,7 +913,7 @@ deno_npm_fallback() { # prints the min-release-age value deno would read, or fai
 deno_unwrapped_row() { # <why it is not wrapped>
   if _dnr=$(deno_npm_fallback); then
     row WEAK PARSED "deno publish-age gate" \
-      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. Re-apply the role to restore the wrapper"
+      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. To restore the wrapper, $(scv_reapply)"
   else
     row GAP PRESENT "deno publish-age gate" \
       "$1, so no invocation is age-gated${dver:+ (deno $dver reads no npm min-release-age here)}"
@@ -985,7 +1003,7 @@ else
         "wrapper is at $dshadow but deno resolves to $dp — the wrapper is shadowed and never runs, so no invocation is age-gated"
     elif [ -x "${dp}-real" ]; then
       row GAP PRESENT "deno publish-age gate" \
-        "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper; re-apply the role"
+        "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper; $(scv_reapply)"
     elif [ -f /etc/profile.d/deno-cooldown.sh ] && grep -q 'minimum-dependency-age' /etc/profile.d/deno-cooldown.sh 2>/dev/null; then
       deno_unwrapped_row "no wrapper at $dp; only the /etc/profile.d/deno-cooldown.sh alias, which fires in interactive login shells ONLY — scripts, agents, CI and cron are not wrapped"
     else
@@ -1382,7 +1400,7 @@ if have uv; then
             "uv reports exclude-newer cutoff $uvcut, but this host's date cannot parse it, so its age is unknown - the instant is fixed at apply time, and a months-old freeze cannot be told from a fresh 48h gate here"
         elif [ "$_scd" -gt 7 ]; then
           row WEAK PARSED "uv age gate" \
-            "uv reports exclude-newer cutoff $uvcut, which is $_scd days old - that is a FREEZE, not a rolling cooldown: the instant is fixed at apply time, so every release since then is refused and a security fix cannot be installed without an override. Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal"
+            "uv reports exclude-newer cutoff $uvcut, which is $_scd days old - that is a FREEZE, not a rolling cooldown: the instant is fixed at apply time, so every release since then is refused and a security fix cannot be installed without an override. $(scv_cutoff_fix)"
         else
           row OK PARSED "uv age gate" \
             "uv reports exclude-newer cutoff $uvcut ($_scd day(s) old) - anything published after it is refused"
@@ -1548,7 +1566,7 @@ elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
             "pip $pipver reports uploaded-prior-to=$pipcut, but this host's date cannot parse it, so its age is unknown - the instant is fixed at apply time, and a months-old freeze cannot be told from a fresh 48h gate here"
         elif [ "$_spd" -gt 7 ]; then
           row WEAK PARSED "pip native age gate" \
-            "pip $pipver reports uploaded-prior-to=$pipcut, which is $_spd days old - a FREEZE, not a rolling cooldown, so a security fix published since then cannot be installed without --uploaded-prior-to on the command line. Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal"
+            "pip $pipver reports uploaded-prior-to=$pipcut, which is $_spd days old - a FREEZE, not a rolling cooldown, so a security fix published since then cannot be installed without --uploaded-prior-to on the command line. $(scv_cutoff_fix)"
         else
           row OK PARSED "pip native age gate" \
             "pip $pipver reports uploaded-prior-to=$pipcut ($_spd day(s) old) - anything published after it is refused, pinned or not (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)"
