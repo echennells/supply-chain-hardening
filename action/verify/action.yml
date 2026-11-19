@@ -91,6 +91,10 @@ runs:
         VERIFY_FAIL_ON: ${{ inputs.fail-on }}
         HARDENING_ENV_FILE: ${{ inputs.env-file }}
         HARDENING_OUTPUT_FILE: ${{ inputs.output-file }}
+        # The ref this action ran at, so the doc URLs in the table match the
+        # code that printed them. GitHub only exposes it through the env context
+        # of a composite action's step.
+        SCV_DOCS_REF: ${{ github.action_ref }}
       run: |
         args=()
         [[ "$VERIFY_STRICT" == "true" ]] && args+=(--strict)

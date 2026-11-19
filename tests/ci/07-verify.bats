@@ -944,6 +944,22 @@ esac"
   [[ "$output" != *"$weak_all row(s) verified only as PRESENT"* ]]
 }
 
+@test "doc pointers are absolute URLs pinned to the ref GitHub reports, never repo-relative paths" {
+  bundler_age_stub 2.4.20 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"bundler publish-age gate"* ]]
+  [[ "$output" == *"See https://github.com/echennells/supply-chain-hardening/blob/main/docs/composer-bundler-cooldown-by-distro.md"* ]]
+  [[ "$output" != *"See docs/"* ]]
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" SCV_DOCS_REF=v2.1.0 \
+    bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"/blob/v2.1.0/docs/composer-bundler-cooldown-by-distro.md"* ]]
+  # A value that is not a git ref never reaches the URL.
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" SCV_DOCS_REF='x y;$(id)' \
+    bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"/blob/main/docs/composer-bundler-cooldown-by-distro.md"* ]]
+}
+
 @test "npm exclude: the matcher block is byte-identical on both surfaces" {
   block() { sed -n '/^# >>> npm exclude scope$/,/^# <<< npm exclude scope$/p' "$1"; }
   role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"

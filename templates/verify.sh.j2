@@ -185,6 +185,11 @@ pip3=/usr/local/bin/pip3
 # END OF PREAMBLE — nothing below this line is rendered from role variables
 # =========================================================================
 
+# Where a row's doc pointer leads. The role deploys no docs to the host, so a
+# repo-relative path pointed nowhere. Nothing records which release of the role
+# rendered this file, so this is the main branch, not a tag.
+SCV_DOCS_URL="https://github.com/echennells/supply-chain-hardening/blob/main"
+
 STRICT=0
 QUIET=0
 VERBOSE=0
@@ -596,7 +601,7 @@ scv_hooks_k=$(printf '%s\n' "$scv_hooks" | awk -F'\t' '$1 == "K" { print $2 }')
 if [ -n "$scv_hooks_u" ]; then
   scv_hook_n=$(printf '%s\n' "$scv_hooks_u" | wc -l | tr -d ' ')
   scv_hook_list=$(printf '%s\n' "$scv_hooks_u" | scv_hook_join)
-  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
+  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" at ${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}/docs/verify.md#dont-run-it-on-a-host-you-suspect-is-compromised" >&2
   row WEAK PRESENT "python startup hooks" \
     "$scv_hook_n file(s) that run code on every Python start with nothing vouching for them: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
 elif [ -n "$scv_hooks_k" ]; then

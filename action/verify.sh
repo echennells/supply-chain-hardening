@@ -149,6 +149,15 @@ case "$SCV_FAIL_ON" in
      SCV_FAIL_ON=any ;;
 esac
 
+# Where a row's doc pointer leads. A repo-relative path is no use in a CI log,
+# so details carry a URL. action/verify/action.yml passes the ref the job ran
+# this action at (github.action_ref: a tag, a branch or a SHA), so the doc
+# matches the code that printed it; anything else falls back to main. Only
+# characters a git ref can use reach the URL.
+SCV_DOCS_REF="${SCV_DOCS_REF:-main}"
+case "$SCV_DOCS_REF" in ''|*[!A-Za-z0-9._/-]*) SCV_DOCS_REF=main ;; esac
+SCV_DOCS_URL="https://github.com/echennells/supply-chain-hardening/blob/$SCV_DOCS_REF"
+
 # ---- platform adapter ----
 #
 # Copied from harden.sh:67-79 INCLUDING the BASH_ENV branch. They used to
@@ -590,7 +599,7 @@ scv_hooks_k=$(printf '%s\n' "$scv_hooks" | awk -F'\t' '$1 == "K" { print $2 }')
 if [ -n "$scv_hooks_u" ]; then
   scv_hook_n=$(printf '%s\n' "$scv_hooks_u" | wc -l | tr -d ' ')
   scv_hook_list=$(printf '%s\n' "$scv_hooks_u" | scv_hook_join)
-  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
+  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" at ${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}/docs/verify.md#dont-run-it-on-a-host-you-suspect-is-compromised" >&2
   row WEAK PRESENT "python startup hooks" \
     "$scv_hook_n file(s) that run code on every Python start with nothing vouching for them: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
 elif [ -n "$scv_hooks_k" ]; then

@@ -35,6 +35,14 @@ scv_want_hours() {
 # "cq: command not found" (MEASURED, action/verify.sh with a poetry exclude list).
 cq() { printf '%s' "$1"; }
 
+# A doc a row points at, as a URL. A repo-relative path such as
+# docs/composer-bundler-cooldown-by-distro.md exists neither on a hardened host
+# (the role deploys no docs) nor in a CI log, so the reader had nothing to open.
+# Each preamble sets SCV_DOCS_URL: the action pins it to the ref the job used
+# when GitHub reports one; the role has no record of its release, so it points
+# at main.
+scv_doc() { printf '%s/%s' "${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}" "$1"; }
+
 
 # ======================================================================
 # HOST TOOL DISCOVERY  (ECH-189, generalised)
@@ -2108,7 +2116,7 @@ if have composer; then
     row WEAK PRESENT "composer publish-age gate" "could not parse a version out of 'composer --version'"
   elif [ "$cmaj" -lt 2 ] || { [ "$cmaj" -eq 2 ] && [ "$cmin" -lt 11 ]; }; then
     scv_toolchain_gap composer.age-gate PARSED "composer publish-age gate" \
-      "composer $cv does NOT implement config.policy.cooldown (added in 2.11.0) - the key is written and ignored, and composer echoes it back anyway, so a release published minutes ago still resolves. See docs/composer-bundler-cooldown-by-distro.md"
+      "composer $cv does NOT implement config.policy.cooldown (added in 2.11.0) - the key is written and ignored, and composer echoes it back anyway, so a release published minutes ago still resolves. See $(scv_doc docs/composer-bundler-cooldown-by-distro.md)"
   elif [ "$crc" -ne 0 ]; then
     row GAP PARSED "composer publish-age gate" \
       "composer $cv implements the cooldown but cannot report its config (see the composer config in effect row)"
@@ -2740,7 +2748,7 @@ else
     cerr=$(cargo_delegate_err "$creal")
     if cargo_run_ok_as_cargo "$creal" --version; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
-        "the wrapper's delegate '$creal' runs when invoked as \`cargo\` but FAILS under its own name: ${cerr}. It is rustup's argv[0]-dispatching proxy, renamed by a plain mv. The wrapper's own call is fixed up with exec -a, but re-entry is not: cargo hands subcommands its own path via \$CARGO. This probe measures the asymmetry only; that cargo-cooldown then dies on re-entry is recorded in design-principles.md Axis 5, not observed here"
+        "the wrapper's delegate '$creal' runs when invoked as \`cargo\` but FAILS under its own name: ${cerr}. It is rustup's argv[0]-dispatching proxy, renamed by a plain mv. The wrapper's own call is fixed up with exec -a, but re-entry is not: cargo hands subcommands its own path via \$CARGO. This probe measures the asymmetry only; that cargo-cooldown then dies on re-entry is recorded in $(scv_doc docs/design-principles.md#assumed-canonical-paths), not observed here"
     else
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper's delegate '$creal' does not execute at all (${cerr}) - \`cargo build\` is broken, not gated"
@@ -3307,7 +3315,7 @@ else
     row WEAK PRESENT "bundler publish-age gate" "could not read a version from bundler; the gate was not checked"
   elif [ "$(printf '4.0.13\n%s\n' "$bver" | sort -V | head -1)" != "4.0.13" ]; then
     scv_toolchain_gap bundler.age-gate PARSED "bundler publish-age gate" \
-      "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See docs/composer-bundler-cooldown-by-distro.md"
+      "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See $(scv_doc docs/composer-bundler-cooldown-by-distro.md)"
   else
     bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
     # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
