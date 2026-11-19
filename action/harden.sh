@@ -1857,6 +1857,34 @@ EOF
     log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
+  # ---- which backend the wrapper runs (absolute path) ----
+  #
+  # A wrapper the invoking user does not own (apt's /usr/bin/cargo, a root
+  # job's /usr/local/cargo/bin) runs for root and for every other account, so
+  # its backend must not be a file in this user's $CARGO_HOME/bin, which this
+  # user can rewrite. MEASURED (VM#2, role and plain path alike): the old
+  # wrapper prepended that directory to PATH, and root and a second account
+  # then ran this user's cargo-cooldown and ~/.cargo/bin/cargo. A shared
+  # wrapper therefore gets a ROOT-OWNED copy under /usr/local/libexec; if that
+  # cannot be made, the wrapper still works for this user and refuses, with a
+  # message, for everyone else. Numeric 0 for owner and group: macOS has no
+  # group named root.
+  local cooldown_exe=""
+  if [[ -n "$cooldown_bin" ]]; then
+    cooldown_exe="$cooldown_bin/cargo-cooldown"
+    if [[ "$(id -u)" -eq 0 || ! -O "$(dirname "$wrapper_target")" ]]; then
+      local sys_cooldown=/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown
+      if [[ "${CAN_ESCALATE:-0}" -eq 1 ]] \
+         && $SUDO install -d -o 0 -g 0 -m 0755 "$(dirname "$sys_cooldown")" \
+         && $SUDO install -o 0 -g 0 -m 0755 "$cooldown_exe" "$sys_cooldown"; then
+        cooldown_exe="$sys_cooldown"
+        log "cargo: $wrapper_target is shared, so its gate backend is a root-owned copy at $sys_cooldown"
+      else
+        warn "cargo: $wrapper_target is shared, but no root-owned copy of cargo-cooldown could be installed; the wrapper gates builds for $(id -un) and refuses the backend for root and other accounts"
+      fi
+    fi
+  fi
+
   # Written via placeholders + sed rather than an interpolating heredoc: the
   # wrapper is dense with $ and the escaping is where this kind of code goes
   # wrong silently.
@@ -1915,15 +1943,16 @@ if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
 fi
 
 
-# cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup
-# cargo but NOT for a distro/apt cargo. Without this prepend, both
-# `command -v cargo-cooldown` and cargo's own cargo-<name> subcommand
-# resolution fail on apt-cargo hosts, so the gate silently does nothing even
-# though the backend installed fine.
-COOLDOWN_BIN='__COOLDOWN_BIN__'
-if [ -n "$COOLDOWN_BIN" ] && [ -d "$COOLDOWN_BIN" ]; then
-  case ":$PATH:" in *":$COOLDOWN_BIN:"*) ;; *) PATH="$COOLDOWN_BIN:$PATH"; export PATH ;; esac
-fi
+# THE GATE BACKEND, BY ABSOLUTE PATH, AND WHOSE IT IS. Parity with the role's
+# templates/cargo-wrapper.sh.j2, which carries the measurement record (VM#2):
+# this wrapper used to PREPEND $CARGO_HOME/bin to PATH, and at a system path
+# (/usr/bin/cargo) that made root and every other account run the hardening
+# user's cargo-cooldown and ~/.cargo/bin/cargo, files that user can replace.
+# harden.sh now renders the backend's absolute path: the one in $CARGO_HOME/bin
+# when the wrapped cargo is the invoking user's own, a ROOT-OWNED copy under
+# /usr/local/libexec/supply-chain-hardening/ otherwise. Nothing is prepended,
+# and use_cooldown refuses a backend whose owner is neither the caller nor root.
+COOLDOWN_EXE='__COOLDOWN_EXE__'
 
 if [ -z "$REAL_CARGO" ] || [ ! -x "$REAL_CARGO" ] || [ "$REAL_CARGO" = "$0" ]; then
   echo "[supply-chain-harden] error: real cargo not found at '$REAL_CARGO'; refusing to recurse" >&2
@@ -1961,6 +1990,62 @@ run_real() {
     exec "$pfx" "$REAL_CARGO" "$@"
   fi
   exec -a cargo "$REAL_CARGO" "$@"
+}
+
+# May THIS caller run "$1" as the gate backend? Your own file when you are not
+# root; otherwise only a root-owned file, writable by neither group nor others,
+# under directories that are root-owned and likewise (or sticky, like /tmp).
+# find(1), not stat(1): `stat -c` is GNU-only and this runs on macOS runners.
+backend_trusted() {
+  _bt_why=""
+  if [ "$(id -u)" != 0 ] && [ -O "$1" ]; then return 0; fi
+  _bt_p=$(readlink -f "$1" 2>/dev/null) || _bt_p="$1"
+  case "$_bt_p" in /*) ;; *) _bt_why="$1 is not an absolute path"; return 1 ;; esac
+  if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+    _bt_why="$_bt_p is not owned by root, or is writable by its group or others"
+    return 1
+  fi
+  while [ "$_bt_p" != "/" ]; do
+    _bt_p=$(dirname "$_bt_p")
+    if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ]; then
+      _bt_why="directory $_bt_p is not owned by root, or is writable by its group or others"
+      return 1
+    fi
+  done
+  return 0
+}
+
+cooldown_installed() {
+  local c
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && return 0
+  done
+  return 1
+}
+
+# Pick the backend for a gated command or REFUSE (exit 126); a quiet degrade
+# would leave the command ungated exactly when it runs as someone else. cargo
+# still starts the backend (`cargo-real cooldown build`), because cargo is what
+# consumes a leading +toolchain / -C / --config. It searches $CARGO_HOME/bin,
+# then PATH, so the backend's directory is APPENDED to PATH when neither covers
+# it: appending cannot change what any name already on PATH resolves to.
+use_cooldown() {
+  local c d refused=""
+  COOLDOWN=""
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if backend_trusted "$c"; then COOLDOWN="$c"; break; fi
+    refused="$_bt_why"
+  done
+  if [ -z "$COOLDOWN" ]; then
+    echo "[supply-chain-harden] error: refusing to run the cargo publish-age gate backend as $(id -un): $refused, so another account could choose what runs here. Re-run harden.sh with sudo available to give a shared cargo a root-owned backend, or run cargo as the account that owns this one. (cargo wrapper: $0)" >&2
+    exit 126
+  fi
+  d=$(dirname "$COOLDOWN")
+  case ":$PATH:" in
+    *":$d:"*) ;;
+    *) [ "$d" = "${CARGO_HOME:-$HOME/.cargo}/bin" ] || { PATH="$PATH:$d"; export PATH; } ;;
+  esac
 }
 
 subcmd=""
@@ -2160,9 +2245,10 @@ case "$KIND" in
     # These exist to change the lockfile, so --locked is contradictory.
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         update)
+          use_cooldown
           sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
@@ -2180,7 +2266,7 @@ case "$KIND" in
     ;;
 
   RESOLVING)
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -2196,6 +2282,7 @@ case "$KIND" in
         # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
         # and fetch then resolved a version real cargo refused, and add wrote
         # it, while the note claimed this policy "applies instead".
+        use_cooldown
         sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
@@ -2216,7 +2303,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_BIN__|$(sed_repl "$cooldown_bin")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_EXE__|$(sed_repl "$cooldown_exe")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
   $SUDO cp "$tmp_wrapper" "$wrapper_target"
   $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo

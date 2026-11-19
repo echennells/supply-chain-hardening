@@ -356,6 +356,53 @@ cooldown_stubs() {
   chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
 }
 
+# ---- the gate backend: absolute path, never a PATH prepend, and whose it is ----
+#
+# MEASURED (VM#2; reproduced on Ubuntu 26.04 with apt cargo 1.93.1): the
+# wrapper PREPENDED $CARGO_HOME/bin to PATH, so at a system path root and every
+# other account ran the hardening user's cargo-cooldown and ~/.cargo/bin/cargo.
+
+# cooldown_stubs plus a cargo stub that also prints the PATH it was given, and
+# a pass-through sfw so a real one cannot change PATH under the test.
+path_stubs() {
+  cooldown_stubs
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]"; echo "PATH=$PATH";; esac'
+  stub_bin sfw 'exec "$@"'
+}
+
+@test "cargo-cooldown: the backend is named by absolute path and PATH is left alone" {
+  path_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  grep -q "^COOLDOWN_EXE='$TEST_HOME/.cargo/bin/cargo-cooldown'\$" "$TEST_BIN/cargo"
+  ! grep -q 'PATH="$COOLDOWN' "$TEST_BIN/cargo"
+  # HOME as the user's own: cargo searches $CARGO_HOME/bin itself, so nothing changes.
+  run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [ "$(printf '%s\n' "$output" | sed -n 's/^PATH=//p')" = "$TEST_BIN:/usr/bin:/bin" ]
+  # A caller whose CARGO_HOME is elsewhere: the backend's directory is APPENDED.
+  run bash -c "cd '$(lockdir)' && HOME=/nonexistent PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [ "$(printf '%s\n' "$output" | sed -n 's/^PATH=//p')" = "$TEST_BIN:/usr/bin:/bin:$TEST_HOME/.cargo/bin" ]
+}
+
+@test "cargo-cooldown: a backend the caller does not own and root does not own safely is refused" {
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to root"
+  path_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  # Root owns the file, but it sits in this user's directory, so this user
+  # could still swap it: exactly what a root caller must not run.
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown" "$TEST_HOME/.cargo/bin"
+  sudo chown 0 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' '$TEST_BIN/cargo' build 2>&1"
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  printf '%s\n' "$output"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"[supply-chain-harden] error: refusing to run the cargo publish-age gate backend"* ]]
+  [[ "$output" == *"directory $TEST_HOME/.cargo/bin is not owned by root"* ]]
+  [[ "$output" != *"STUB:cargo"* ]]
+}
+
 @test "cargo-cooldown: the crates.io window, clock and skip list are pinned over the caller's" {
   # Each has a cooldown.toml form a committed repo file can set
   # ([registry] min-publish-age, now, skip_registries), and MEASURED on

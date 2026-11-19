@@ -273,6 +273,90 @@
     - cargo_check.rc == 0
     - cargo_check.stdout | default('') | length > 0
 
+- name: Choose the gate backend the wrapper runs (by absolute path)
+  # A wrapper the role writes as root (cargo outside $HOME: apt's /usr/bin/cargo,
+  # /usr/local/bin/cargo, the rust images' /usr/local/cargo/bin) runs for root
+  # and for every account on the host. It must not reach into the deploying
+  # user's ~/.cargo/bin, which that user can rewrite. MEASURED (VM#2, reproduced
+  # on Ubuntu 26.04 with apt cargo 1.93.1): the old wrapper prepended that
+  # directory to PATH, so `sudo -H cargo build` and a second account's build ran
+  # the deployer's cargo-cooldown and ~/.cargo/bin/cargo, and a second account's
+  # apply re-rendered the wrapper with its own home, after which the first
+  # account's builds were not gated at all. So a system-wide wrapper gets a
+  # root-owned copy under /usr/local/libexec, rendered identically whoever
+  # applies, and a wrapper in the deployer's own ~/.cargo/bin keeps the backend
+  # beside it. The wrapper refuses, at run time, a backend the caller does not
+  # own unless root owns it.
+  ansible.builtin.set_fact:
+    cargo_cooldown_exe: >-
+      {{ '/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown'
+         if cargo_wrap_become | default(true) | bool
+         else cargo_home ~ '/bin/cargo-cooldown' }}
+  when:
+    - cargo_check.rc == 0
+    - cargo_check.stdout | default('') | length > 0
+
+- name: Read the version of the gate backend the deploying user built
+  ansible.builtin.shell:
+    cmd: "'{{ cargo_home }}/bin/cargo-cooldown' --version 2>/dev/null | awk '{print $NF}'"
+    executable: /bin/bash
+  register: cargo_cooldown_built
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+    - cargo_check.rc == 0
+    - cargo_wrap_become | default(true) | bool
+
+- name: Create the root-owned directory for a system-wide wrapper's gate backend
+  # Holds nothing but cargo-cooldown: the wrapper may append this directory to
+  # PATH so cargo finds the backend, and nothing else in it can then be found.
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /usr/local/libexec/supply-chain-hardening
+    - /usr/local/libexec/supply-chain-hardening/cargo
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+    - cargo_check.rc == 0
+    - cargo_wrap_become | default(true) | bool
+    - (cargo_cooldown_built.stdout | default('') | trim) == cargo_cooldown_version
+
+- name: Install a root-owned copy of the gate backend for a system-wide wrapper
+  # Copied only when the deploying user's build is the pinned version. When it
+  # is not (the build failed, or rustc is too old), an existing copy from an
+  # earlier apply, by this or another account, is left in place, so a second
+  # deployer whose build fails does not take the gate away from the first.
+  become: true
+  ansible.builtin.copy:
+    src: "{{ cargo_home }}/bin/cargo-cooldown"
+    dest: "{{ cargo_cooldown_exe }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - cargo_path_wrapper | bool
+    - cargo_cooldown_enforce | bool
+    - cargo_check.rc == 0
+    - cargo_wrap_become | default(true) | bool
+    - (cargo_cooldown_built.stdout | default('') | trim) == cargo_cooldown_version
+
+- name: Remove the root-owned gate backend when the cargo wrapper or gate is off
+  become: true
+  ansible.builtin.file:
+    path: /usr/local/libexec/supply-chain-hardening/cargo
+    state: absent
+  when: not (cargo_path_wrapper | bool) or not (cargo_cooldown_enforce | bool)
+
 - name: Determine whether current cargo binary is our wrapper or the real binary
   # NOT gated on cargo_path_wrapper. The restore task below needs this fact
   # precisely when the wrapper has been turned OFF, and gating it on the same
@@ -362,7 +446,6 @@
     mode: "0755"
   vars:
     cargo_real_path: "{{ cargo_check.stdout }}-real"
-    cargo_cooldown_bin: "{{ cargo_home }}/bin"
   when:
     - cargo_path_wrapper | bool
     - cargo_check.rc == 0
@@ -413,7 +496,7 @@
   # missing. So report the state and let the wrapper handle it.
   ansible.builtin.shell:
     cmd: |
-      BIN='{{ cargo_home }}/bin/cargo-cooldown'
+      BIN='{{ cargo_cooldown_exe | default(cargo_home ~ '/bin/cargo-cooldown') }}'
       [ -x "$BIN" ] || { echo absent; exit 0; }
       "$BIN" --version >/dev/null 2>&1 && echo works || echo broken
     executable: /bin/bash

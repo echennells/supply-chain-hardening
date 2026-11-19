@@ -267,6 +267,23 @@ exec '"$realpy"' "$@"'
   [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"[allow.global]"* ]]
 }
 
+@test "cargo publish-age gate: a backend the wrapper refuses for this account is its own GAP" {
+  # The wrapper runs cargo-cooldown only when the caller owns it, or root owns
+  # it with nothing above it writable by anyone else (VM#2). A refusal exits
+  # 126 before cargo is reached; the row must say so, not "no dispatch".
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to root"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  sudo chown 0 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run verify_sourced --emit=plain
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"REFUSES its gate backend"* ]]
+}
+
 # uv_reporting <cutoff>: a uv that reports an absolute exclude-newer instant in
 # the Debug shape `uv pip list --show-settings` prints, so the age-gate row
 # can be driven without a real uv or a frozen clock.

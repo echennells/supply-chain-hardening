@@ -33,16 +33,14 @@ make_probe() {
   PROBE_DIR="$(mktemp -d)"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*"\n' > "$PROBE_DIR/cargo-real"
   chmod +x "$PROBE_DIR/cargo-real"
-  # Neutralise the wrapper's COOLDOWN_BIN prepend so THIS fixture controls
-  # whether cargo-cooldown is reachable. The wrapper prepends its embedded
-  # COOLDOWN_BIN ($CARGO_HOME/bin) to PATH before dispatching — added so the
-  # gate resolves on apt-cargo hosts. On the rustup test image that dir holds a
-  # REAL cargo-cooldown, so without this the `without-cooldown` probes would
-  # still find it and route to `cooldown`, never exercising the --locked
-  # fallback. Point it at PROBE_DIR, where make_probe places a cargo-cooldown
-  # only for the with-cooldown case, so presence is fully under fixture control.
+  # Point the wrapper's embedded backend (COOLDOWN_EXE, an absolute path) at
+  # PROBE_DIR, so THIS fixture controls whether cargo-cooldown is reachable. On
+  # the rustup test image the rendered path holds a REAL cargo-cooldown, so
+  # without this the `without-cooldown` probes would still find it and route to
+  # `cooldown`, never exercising the --locked fallback. make_probe places a
+  # cargo-cooldown in PROBE_DIR only for the with-cooldown case.
   sed -e "s|^REAL_CARGO=.*|REAL_CARGO='$PROBE_DIR/cargo-real'|" \
-      -e "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$PROBE_DIR'|" \
+      -e "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/cargo-cooldown'|" \
       "$(cargo_path)" > "$PROBE_DIR/cargo"
   chmod +x "$PROBE_DIR/cargo"
   mkdir -p "$PROBE_DIR/proj"
@@ -284,23 +282,116 @@ teardown() { [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"; return 0; }
   [ "$status" -eq 127 ]
 }
 
-# ---- BUG 1 regression: cargo-cooldown must be reachable on apt-cargo hosts ----
+# ---- the gate backend: absolute path, never a PATH prepend, and whose it is ----
 #
-# On a rustup cargo, $CARGO_HOME/bin is on PATH, so `command -v cargo-cooldown`
-# and cargo's own `cargo cooldown` subcommand resolution both find the backend.
-# On a distro/apt cargo, ~/.cargo/bin is NOWHERE on PATH — so the backend builds
-# fine but the wrapper cannot find it, and the age gate silently resolves fresh
-# crates unchecked. Every test image used rustup, so this hid until a real
-# Ubuntu 26.04 apt-cargo box surfaced it. The wrapper prepends $CARGO_HOME/bin
-# to PATH; assert that it does.
+# BUG 1 (apt-cargo reachability) was first fixed by PREPENDING $CARGO_HOME/bin
+# to PATH, and an earlier test here asserted that prepend. On a SYSTEM-path
+# cargo (apt's /usr/bin/cargo) that put the deploying user's home in front of
+# root and every other account. MEASURED (VM#2, reproduced on Ubuntu 26.04 with
+# apt cargo 1.93.1 and cargo-cooldown 0.3.5): `sudo -H cargo build` and a second
+# account's build ran the deployer's cargo-cooldown and ~/.cargo/bin/cargo, and
+# a second account's apply re-rendered the wrapper so the first account's
+# builds went ungated. The wrapper now names the backend by absolute path,
+# never prepends, appends the backend's directory only when cargo would not
+# otherwise find it, and refuses a backend whose owner is neither the caller
+# nor root.
 
-@test "cargo: wrapper prepends the cooldown bin dir to PATH (apt-cargo reachability)" {
+# Stub cargo-real that also reports the PATH it was started with, plus a
+# pass-through sfw first on PATH: the wrapper prefixes network commands with
+# sfw when it is installed (it is, in the test image), and the real one may
+# change PATH itself, which is not what these tests are about.
+path_probe() {
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\nprintf "PATH=%%s\\n" "$PATH"\n' > "$PROBE_DIR/cargo-real"
+  printf '#!/bin/sh\nexec "$@"\n' > "$PROBE_DIR/sfw"
+  chmod +x "$PROBE_DIR/cargo-real" "$PROBE_DIR/sfw"
+}
+
+@test "cargo: the wrapper names its gate backend by absolute path" {
   command -v cargo >/dev/null || skip "cargo not installed"
-  # COOLDOWN_BIN must be set to a non-empty $CARGO_HOME/bin, and the wrapper
-  # must add it to PATH.
-  run grep -E "^COOLDOWN_BIN='.+/bin'" "$(cargo_path)"
+  run grep -E "^COOLDOWN_EXE='/.+/cargo-cooldown'" "$(cargo_path)"
   [ "$status" -eq 0 ]
-  grep -q 'PATH="$COOLDOWN_BIN:$PATH"' "$(cargo_path)"
+  # The prepend that ran the deployer's binaries for everyone must be gone.
+  ! grep -q 'PATH="$COOLDOWN' "$(cargo_path)"
+}
+
+@test "cargo: a gated build leaves the caller's PATH order alone" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  path_probe
+  out=$(probe build)
+  [[ "$out" == *"cooldown build"* ]]
+  # probe() runs with PATH="$PROBE_DIR:/usr/bin:/bin"; the backend's directory
+  # is already on it, so nothing may be added in front or behind.
+  [[ "$out" == *"PATH=$PROBE_DIR:/usr/bin:/bin"* ]]
+}
+
+@test "cargo: a backend directory cargo would not search is appended, never prepended" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  path_probe
+  mkdir -p "$PROBE_DIR/backend"
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_DIR/backend/cargo-cooldown"
+  chmod +x "$PROBE_DIR/backend/cargo-cooldown"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/backend/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  out=$(probe build)
+  [[ "$out" == *"cooldown build"* ]]
+  [[ "$out" == *"PATH=$PROBE_DIR:/usr/bin:/bin:$PROBE_DIR/backend"* ]]
+}
+
+@test "cargo: a backend owned by another account is refused, attributably, and never run" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to give the backend to another account"
+  make_probe with-cooldown
+  printf '#!/bin/sh\ntouch "%s/backend-ran"\nexit 0\n' "$PROBE_DIR" > "$PROBE_DIR/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/cargo-cooldown"
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"[supply-chain-hardening] error: refusing to run the cargo publish-age gate backend"* ]]
+  [[ "$output" == *"not owned by root"* ]]
+  # Neither the backend nor cargo ran: not a quiet degrade to --locked.
+  [ ! -e "$PROBE_DIR/backend-ran" ]
+  [[ "$output" != *"--locked"* ]]
+  [[ "$output" != *"cooldown build"* ]]
+}
+
+@test "cargo: a root-owned backend in a directory another account can write is refused" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to stage another account's directory"
+  make_probe without-cooldown
+  mkdir -p "$PROBE_DIR/theirs"
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_DIR/theirs/cargo-cooldown"
+  chmod 755 "$PROBE_DIR/theirs/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/theirs"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/theirs/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"directory $PROBE_DIR/theirs is not owned by root"* ]]
+}
+
+@test "cargo: another account may run a root-owned backend" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to run as another account"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  make_probe with-cooldown
+  chmod 755 "$PROBE_DIR"
+  chown -R 65534 "$PROBE_DIR/proj"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && HOME=/nonexistent PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [[ "$output" == *"cooldown build"* ]]
+  [[ "$output" != *"refusing"* ]]
+}
+
+@test "cargo: a command that never runs the backend is not refused over it" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to give the backend to another account"
+  make_probe with-cooldown
+  chown 65534 "$PROBE_DIR/cargo-cooldown"
+  # `cargo add` only warns about the gate; `cargo fmt` never touches it.
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' add serde 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"add serde"* ]]
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' fmt 2>&1"
+  [ "$status" -eq 0 ]
 }
 
 # ---- the gate config ----

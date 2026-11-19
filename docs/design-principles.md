@@ -256,6 +256,23 @@ fallback.
 The pip-redirect wrapper is the gold-standard example — `/usr/local/bin/pip`
 catches every caller regardless of UID.
 
+**A system-wide wrapper must not run a per-user backend.** The pip wrapper and
+the apt-cargo wrapper both resolved their backend (uv, cargo-cooldown) in the
+DEPLOYING user's context and baked that user's home into a file every account
+runs. MEASURED (VM#2, reproduced on Ubuntu 26.04): `sudo pip` exec'd the
+deployer's `~/.local/bin/uv`; `sudo cargo build` and a second account's build
+ran the deployer's `cargo-cooldown` and, through a PATH prepend, their
+`~/.cargo/bin/cargo`; a second account's apply re-rendered `/usr/bin/cargo`
+with its own home and the first account's builds went ungated. The deploying
+user can rewrite every one of those files, so root was running code that
+user controls. That is a privilege boundary the wrapper itself crossed, not a
+threat this role excludes. Name the backend by absolute path, keep a
+system-wide wrapper's backend root-owned (the role copies cargo-cooldown to
+`/usr/local/libexec/supply-chain-hardening/`), never prepend to PATH (append
+if anything), and at run time refuse a backend the caller does not own unless
+root owns it and nothing above it is writable by anyone else. The refusal must
+name the control, like any other.
+
 ### Apply-time vs runtime
 
 uv's `exclude-newer` is computed at template render time and frozen in

@@ -87,16 +87,27 @@ if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
 fi
 
 
-# cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup cargo
-# but NOT for a distro/apt cargo (whose ~/.cargo/bin is nowhere on PATH). Without
-# this, `command -v cargo-cooldown` below fails on apt-cargo hosts and cargo's
-# own `cargo cooldown` subcommand resolution (cargo-<name> on PATH) fails too —
-# so the age gate silently does nothing even though the backend built fine.
-# Prepend it, idempotently, so both lookups succeed on every host shape.
-COOLDOWN_BIN='{{ cargo_cooldown_bin | default("") }}'
-if [ -n "$COOLDOWN_BIN" ] && [ -d "$COOLDOWN_BIN" ]; then
-  case ":$PATH:" in *":$COOLDOWN_BIN:"*) ;; *) PATH="$COOLDOWN_BIN:$PATH"; export PATH ;; esac
-fi
+# THE GATE BACKEND, BY ABSOLUTE PATH, AND WHOSE IT IS.
+#
+# This wrapper used to PREPEND the deploying user's $CARGO_HOME/bin to PATH so
+# that cargo-cooldown was found on apt-cargo hosts. A wrapper at a SYSTEM path
+# (/usr/bin/cargo) runs for root and for every account, so that put one user's
+# home in front of all of them. MEASURED (VM#2, reproduced on Ubuntu 26.04 with
+# apt cargo 1.93.1 and cargo-cooldown 0.3.5):
+#   - `sudo -H cargo build` and a second account's `cargo build` ran the
+#     deployer's cargo-cooldown AND the deployer's ~/.cargo/bin/cargo, because
+#     cargo-cooldown starts `cargo` by PATH lookup: files that user can
+#     replace, executed as root and as the other account;
+#   - the deployer's own builds ran ~/.cargo/bin/cargo (a rustup proxy, on a
+#     host where it exists) instead of the apt cargo first on their PATH;
+#   - a second account's apply re-rendered this file with ITS home, and the
+#     first account's `cargo build` then resolved a fresh crate with no gate.
+# So the role renders the backend's absolute path: the one beside this wrapper
+# when the wrapper lives in a user's own ~/.cargo/bin, a ROOT-OWNED copy under
+# /usr/local/libexec/supply-chain-hardening/ when it sits at a system path.
+# PATH is never prepended, and use_cooldown below refuses a backend whose
+# owner is not the caller (or root).
+COOLDOWN_EXE='{{ cargo_cooldown_exe | default("") }}'
 
 # Recursion guard — same pattern as the bun, composer, deno, npm and pip
 # wrappers.
@@ -128,6 +139,72 @@ run_real() {
     exec "$pfx" "$REAL_CARGO" "$@"
   fi
   exec -a cargo "$REAL_CARGO" "$@"
+}
+
+# May THIS caller run "$1" as the gate backend? Yes for your own file when you
+# are not root: no account boundary is crossed. Otherwise only when nobody but
+# root can replace it: the file owned by root and writable by neither group nor
+# others, and every directory above it owned by root and likewise, unless the
+# directory is sticky (/tmp), where only an entry's owner may rename or remove
+# it. find(1), not stat(1), because `stat -c` is GNU-only. Sets _bt_why on no.
+backend_trusted() {
+  _bt_why=""
+  if [ "$(id -u)" != 0 ] && [ -O "$1" ]; then return 0; fi
+  _bt_p=$(readlink -f "$1" 2>/dev/null) || _bt_p="$1"
+  case "$_bt_p" in /*) ;; *) _bt_why="$1 is not an absolute path"; return 1 ;; esac
+  if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+    _bt_why="$_bt_p is not owned by root, or is writable by its group or others"
+    return 1
+  fi
+  while [ "$_bt_p" != "/" ]; do
+    _bt_p=$(dirname "$_bt_p")
+    if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ]; then
+      _bt_why="directory $_bt_p is not owned by root, or is writable by its group or others"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Is a backend installed at all? Decides which warning the WRITER arm prints and
+# whether to try the gate; it does not run anything.
+cooldown_installed() {
+  local c
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && return 0
+  done
+  return 1
+}
+
+# Pick the backend for a gated command, or REFUSE. Called only after
+# cooldown_installed, so an empty result means every candidate was refused.
+# Refusing rather than degrading to --locked: a quiet degrade would make the
+# command ungated exactly when it runs as root or as someone else.
+#
+# cargo still starts the backend itself (`cargo-real cooldown build`) rather
+# than this wrapper exec'ing it by path, because cargo is what consumes a
+# leading +toolchain, -C or --config and sets $CARGO for it. cargo searches
+# $CARGO_HOME/bin, then PATH. When neither covers the backend's directory it is
+# APPENDED to PATH, which cannot change what any name already on PATH resolves
+# to; prepending did. The backend cargo runs is therefore the one vouched for
+# here, or one the caller's own CARGO_HOME or PATH put first.
+use_cooldown() {
+  local c d refused=""
+  COOLDOWN=""
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if backend_trusted "$c"; then COOLDOWN="$c"; break; fi
+    refused="$_bt_why"
+  done
+  if [ -z "$COOLDOWN" ]; then
+    echo "[supply-chain-hardening] error: refusing to run the cargo publish-age gate backend as $(id -un): $refused, so another account could choose what runs here. Re-apply the role to give a shared cargo a root-owned backend, or run cargo as the account that owns this one. (cargo wrapper: $0)" >&2
+    exit 126
+  fi
+  d=$(dirname "$COOLDOWN")
+  case ":$PATH:" in
+    *":$d:"*) ;;
+    *) [ "$d" = "${CARGO_HOME:-$HOME/.cargo}/bin" ] || { PATH="$PATH:$d"; export PATH; } ;;
+  esac
 }
 
 # --- find the subcommand: first non-flag argument ---
@@ -410,9 +487,10 @@ case "$KIND" in
     # `cargo update` is also the one resolution path --locked can never cover,
     # which is why the age gate matters most here.
 {% if cargo_cooldown_enforce | bool %}
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         update)
+          use_cooldown
           sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
@@ -437,7 +515,7 @@ case "$KIND" in
 
   RESOLVING)
 {% if cargo_cooldown_enforce | bool %}
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -453,6 +531,7 @@ case "$KIND" in
         # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
         # and fetch then resolved a version real cargo refused, and add wrote
         # it, while the note claimed this policy "applies instead".
+        use_cooldown
         sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
