@@ -46,8 +46,8 @@ setup() { common_setup; }
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "ignoreScripts: false"
   assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
-  assert_file_contains "$TEST_HOME/.config/pnpm/rc" "only-built-dependencies[]=esbuild"
-  assert_file_contains "$TEST_HOME/.config/pnpm/rc" "only-built-dependencies[]=@scope/native"
+  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=esbuild'
+  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=@scope/native'
   python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$TEST_HOME/.config/pnpm/config.yaml"
 }
 

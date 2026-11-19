@@ -835,9 +835,12 @@ esac'
   # The role pins sfw_version and passes --ignore-scripts (ECH-185); the
   # action floated sfw@2 with scripts on.
   sfw_stubs
+  # The record path is baked in now: harden runs under `env -i`, so a
+  # $TEST_TMP read at stub run time would be empty.
+  local rec="$TEST_TMP/sfw-install-args"
   stub_bin npm 'case "$*" in
-  "install -g --ignore-scripts sfw@2.0.6") echo "PINNED-INSTALL" > "$TEST_TMP/sfw-install-args"; exit 0 ;;
-  "install -g"*) echo "UNPINNED: $*" > "$TEST_TMP/sfw-install-args"; exit 0 ;;
+  "install -g --ignore-scripts sfw@2.0.6") echo "PINNED-INSTALL" > "'"$rec"'"; exit 0 ;;
+  "install -g"*) echo "UNPINNED: $*" > "'"$rec"'"; exit 0 ;;
   "--version") echo "10.9.8" ;;
   *) echo "STUB:npm ARGS=[$*]" ;;
 esac'

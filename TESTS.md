@@ -1,6 +1,6 @@
 # Tests
 
-459 container tests verify the supply chain hardening works (`make test`), plus 237 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+460 container tests verify the supply chain hardening works (`make test`), plus 247 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -111,7 +111,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 459 tests
+make test          # build container + run all 460 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

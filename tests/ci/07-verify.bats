@@ -497,9 +497,25 @@ esac"
   [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
   bundler_age_stub 4.0.13 2
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  # What the row says about `gem install` depends on RubyGems, so pin it: the
+  # host's own gem made this test pass or fail by what happened to be installed.
+  stub_bin gem 'echo 3.4.20'
   run verify_sourced --emit=plain
   [[ "$output" == *"OK     PARSED      bundler publish-age gate"* ]]
   [[ "$output" == *"is not age-gated"* ]]
+}
+
+@test "bundler: on RubyGems 4.1+ the row says gem install shares the window" {
+  # RubyGems 4.1.0 reads BUNDLE_COOLDOWN for `gem install` too (MEASURED: it
+  # installs an older version inside the window, and refuses an exact pin to a
+  # too-new one), so "gem install is not age-gated" is wrong there.
+  bundler_age_stub 4.0.24 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  stub_bin gem 'echo 4.1.0'
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      bundler publish-age gate"* ]]
+  [[ "$output" == *"RubyGems 4.1.0 applies the same window"* ]]
+  [[ "$output" != *"is not age-gated"* ]]
 }
 
 @test "bundler: cooldown=0 is a GAP, because a repo's .bundle/config outranks the env var" {

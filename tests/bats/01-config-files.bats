@@ -138,7 +138,7 @@ load setup
 }
 
 @test "pnpm rc: prefer-frozen-lockfile is NOT written by default (it would turn off pnpm's CI freeze)" {
-  assert_file_lacks "$HOME/.config/pnpm/rc" "prefer-frozen-lockfile"
+  ! grep -q "prefer-frozen-lockfile" "$HOME/.config/pnpm/rc"
 }
 
 @test "pnpm config.yaml: verifyStoreIntegrity true (pnpm 11+ store hash-check)" {
@@ -146,7 +146,7 @@ load setup
 }
 
 @test "pnpm config.yaml: preferFrozenLockfile is NOT written by default (it would turn off pnpm's CI freeze)" {
-  assert_file_lacks "$HOME/.config/pnpm/config.yaml" "preferFrozenLockfile"
+  ! grep -q "preferFrozenLockfile" "$HOME/.config/pnpm/config.yaml"
 }
 
 # yarn
