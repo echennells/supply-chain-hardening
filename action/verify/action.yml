@@ -101,7 +101,10 @@ runs:
         [[ -z "$HARDENING_ENV_FILE"    ]] && unset HARDENING_ENV_FILE
         [[ -z "$HARDENING_OUTPUT_FILE" ]] && unset HARDENING_OUTPUT_FILE
 
-        VERIFY_OUTPUT_FILE="${RUNNER_TEMP:-/tmp}/supply-chain-verify.outputs"
+        # The runner's per-job directory, and no fallback: a fixed name in /tmp
+        # is what VM#3 removed from both scripts. Without RUNNER_TEMP nothing is
+        # written, and the outputs below read `unknown`, not a count.
+        VERIFY_OUTPUT_FILE="${RUNNER_TEMP:+$RUNNER_TEMP/supply-chain-verify.outputs}"
         export VERIFY_OUTPUT_FILE
 
         set +e
