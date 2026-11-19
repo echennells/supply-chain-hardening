@@ -786,10 +786,14 @@ fi
 
 # ------------------------------------------------- sfw (reputation layer) ----
 if have sfw; then
-  if sfw --version >/dev/null 2>&1; then
+  # SFW_SKIP_UPDATE_CHECK=1 because that is how the npm and cargo wrappers run
+  # it. Without it, sfw run by a non-root account fails from one hour after the
+  # apply (it tries to rewrite its root-owned .sfw-cache/next-check), and this
+  # row reported a GAP for wrappers that were working.
+  if sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
     row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
   else
-    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully"
+    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully: $(printf '%s' "$sfw_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
   fi
 elif expected tool.sfw; then
   row GAP PRESENT "Socket Firewall" "sfw not installed — npm installs are not threat-intel filtered"

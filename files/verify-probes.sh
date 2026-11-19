@@ -2737,14 +2737,21 @@ else
   elif ! have sfw; then
     row GAP PRESENT "cargo threat-intel filtering" \
       "the wrapper routes cargo through sfw but sfw is not on PATH - crate downloads are unfiltered"
-  elif ! cargo_run_ok sfw --version && ! cargo_run_ok sfw --help; then
+  elif ! cargo_run_ok env SFW_SKIP_UPDATE_CHECK=1 sfw --version \
+       && ! cargo_run_ok env SFW_SKIP_UPDATE_CHECK=1 sfw --help; then
+    # SFW_SKIP_UPDATE_CHECK=1: the wrappers run sfw that way, so a non-root
+    # caller never writes its root-owned cache. Probing without it reported
+    # this GAP from one hour after hardening for wrappers that were working.
     row GAP FUNCTIONAL "cargo threat-intel filtering" \
       "sfw is present but CANNOT EXECUTE, and the wrapper prefixes cargo with it - EVERY cargo build in this job is failing. sfw downloads its firewall binary from GitHub on first use; this state usually means that fetch never succeeded"
   else
-    # Deliberately WEAK, no OK branch. MEASURED in the role: with no network
-    # sfw prints "fetch failed", exits 0, and the build proceeds UNFILTERED.
+    # Deliberately WEAK, no OK branch: sfw checks only what is DOWNLOADED, so
+    # a crate already in the local cache builds unchecked. An earlier note here
+    # said sfw fails open when it cannot reach Socket. MEASURED with sfw-free
+    # 1.16.0 (2026-11-19), it does not: with Socket's API refused or
+    # blackholed, `cargo fetch` exited 101 and the download never happened.
     row WEAK FUNCTIONAL "cargo threat-intel filtering" \
-      "wrapper routes cargo through sfw; note sfw FAILS OPEN - if it cannot reach Socket it warns, exits 0 and the build proceeds unfiltered"
+      "wrapper routes cargo through sfw; it checks only crates that are downloaded, so one already in the local cache builds unchecked, and an unreachable Socket API fails the build rather than letting it through"
   fi
 fi
 
