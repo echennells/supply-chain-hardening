@@ -89,17 +89,28 @@ Every target writes that canonical sourceable env file. Its path is
 
 ```bash
 ./action/harden.sh --emit=plain &&
-  source "${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env"
+  source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}"
 ```
 
 Keep the `&&`: a failed `harden.sh` must not be followed by a `source`. The run
 record (`supply-chain-hardening.outputs`) sits beside the env file. Neither ever
 defaults to a shared directory such as `/tmp`, where another local user could
-plant a file for you to source. `harden.sh` creates the per-user directory with
-mode 0700, writes each file through `mktemp` and a rename, and refuses an
-existing file that is not yours or that group or others can write, and a
-world-writable directory without the sticky bit, where anyone could replace it. `verify.sh` ignores a record or env
-file owned by anyone but you or root, and says so.
+plant a file for you to source. `harden.sh` creates the per-user directory, and
+any parent it has to create, with mode 0700 whatever the umask. It writes each
+file through `mktemp` and a rename. It refuses, before writing anything:
+
+- an existing file that is not a regular file (`/dev/null` included), that is
+  not yours, or that group or others can write;
+- a path through a world-writable directory without the sticky bit, at any
+  level, where anyone could rename the file or a directory above it away;
+- a path through a sticky directory that another user owns. The sticky bit
+  restricts everyone except the directory's owner.
+
+It accepts group-writable directories, and directories another user owns that
+are not world-writable: both are trust somebody granted. `verify.sh` ignores a
+record or env file owned by anyone but you or root, and says so. Run it as the
+user who ran `harden.sh`: as root under `sudo -E`, it finds that user's record,
+does not read it, and fails with a GAP.
 
 Worked examples for each platform live in [`examples/`](examples/).
 

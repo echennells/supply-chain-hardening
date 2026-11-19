@@ -509,9 +509,10 @@ fi
 #      RUNNER_TEMP is GitHub's per-job directory, owned by the runner user, so
 #      that path is unchanged. action/verify.sh resolves the same default.
 #   2. A file that already exists must be a regular file we own that group and
-#      others cannot write, in a directory other users cannot replace it in
-#      (world-writable only with the sticky bit). Anything else is refused
-#      before a byte is written, with the reason.
+#      others cannot write. The directory it is in, and every directory above
+#      that, must not let another user swap what is below it: world-writable
+#      only with the sticky bit, and then only when we or root own it.
+#      Anything else is refused before a byte is written, with the reason.
 #   3. Each file is created by mktemp in its own directory and renamed over the
 #      target. An existing inode, and any descriptor someone holds on it, is
 #      never written through.
@@ -520,7 +521,8 @@ HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-$SCH_STATE_DIR/supply-chain-hardening.
 HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-$SCH_STATE_DIR/supply-chain-hardening.outputs}"
 
 # The 10-character mode string, as `ls -ld` prints it on GNU and BSD alike.
-_sch_mode() { ls -ld -- "$1" 2>/dev/null | cut -c1-10; }
+# -L: a symlink's own mode is lrwxrwxrwx on Linux whatever it points to.
+_sch_mode() { ls -ldL -- "$1" 2>/dev/null | cut -c1-10; }
 
 # _sch_unsafe_target <file>: prints why <file> must not be (re)created; silent when it may.
 _sch_unsafe_target() {
@@ -533,15 +535,65 @@ _sch_unsafe_target() {
     m=$(_sch_mode "$f")
     case "$m" in ?????w*|????????w*) echo "already exists and is writable by group or others ($m)"; return 0 ;; esac
   fi
-  # The directory: world-writable needs the sticky bit, or anyone could replace
-  # the file after it is written. Group-writable is not refused: with per-user
-  # groups and umask 002 (the Ubuntu default) every project directory is 0775,
-  # and the group is a trust grant somebody made on purpose.
-  m=$(_sch_mode "$d")
-  case "$m" in
-    ????????w[tT]) ;;
-    ????????w*) echo "is in $d, which every user can write to and which has no sticky bit ($m), so anyone could replace the file after it is written"; return 0 ;;
-  esac
+  _sch_dir_walk "$d"
+}
+
+# _sch_dir_walk <dir>: prints why another user could swap the file in <dir>,
+# or <dir> itself, or any directory above it; silent when no one can.
+#
+# Every directory from <dir> up to /, as written and as resolved (a symlinked
+# component is judged by where it points). Each one decides who can rename the
+# entry below it, so one open directory anywhere above lets that user move ours
+# aside and put their own in its place. For each directory:
+#   world-writable, no sticky bit -> anyone can.
+#   world-writable, sticky        -> its owner still can: the sticky bit
+#                                    restricts everyone EXCEPT the directory's
+#                                    owner. Accepted only when that is us or root.
+# MEASURED (review of the VM#3 fix): HARDENING_ENV_FILE in another user's 1777
+# directory was accepted with a warning, and that user deleted and replaced
+# the file; a later `source` ran their code. Under `umask 0000` (GitLab's
+# Docker and Kubernetes executors) `mkdir -p` made ~/.cache drwxrwxrwx, the
+# parent of the 0700 leaf, and the old check looked at the leaf only.
+#
+# Group-writable is not refused: with per-user groups and umask 002 (the Ubuntu
+# default) every project directory is 0775, and the group is a trust grant
+# somebody made on purpose. Nor is a directory merely OWNED by another user, if
+# it is not world-writable. A GitHub `container:` job is the case in mind: it
+# runs as root by default, and its RUNNER_TEMP is a host directory bind-mounted
+# in, owned by the runner's uid (no smoke job runs in a container, so this is
+# not exercised by CI).
+_sch_dir_walk() {
+  local d="$1" phys p m o me
+  me=$(id -u)
+  case "$d" in /*) ;; *) d="$PWD/$d" ;; esac
+  phys=$(cd -P -- "$d" 2>/dev/null && pwd -P) || phys=""
+  [ "$phys" = "$d" ] && phys=""
+  for p in "$d" ${phys:+"$phys"}; do
+    while :; do
+      m=$(_sch_mode "$p")
+      case "$m" in
+        ????????w[tT])
+          o=$(ls -ldnL -- "$p" 2>/dev/null | awk '{print $3}')
+          if [ "$o" != "$me" ] && [ "$o" != 0 ]; then
+            if [ "$p" = "$d" ] || [ "$p" = "$phys" ]; then
+              echo "is in $p, a sticky directory that another user ($(ls -ldL -- "$p" | awk '{print $3}')) owns. The sticky bit stops everyone except the directory's owner, who can delete the file and put their own in its place"
+            else
+              echo "is below $p, a sticky directory that another user ($(ls -ldL -- "$p" | awk '{print $3}')) owns, who can rename the directory under it and put their own in its place"
+            fi
+            return 0
+          fi ;;
+        ????????w*)
+          if [ "$p" = "$d" ] || [ "$p" = "$phys" ]; then
+            echo "is in $p, which every user can write to and which has no sticky bit ($m), so anyone could replace the file after it is written"
+          else
+            echo "is below $p, which every user can write to and which has no sticky bit ($m), so anyone could rename the directory under it and put their own in its place"
+          fi
+          return 0 ;;
+      esac
+      [ "$p" = / ] && break
+      p=$(dirname -- "$p")
+    done
+  done
   return 0
 }
 
@@ -550,12 +602,16 @@ _sch_create() {
   local f="$1" what="$2" var="$3" d why tmp=""
   d=$(dirname -- "$f")
   # The directory is not guaranteed to exist: a caller can point the override
-  # at a path it has not created yet.
+  # at a path it has not created yet. Whatever we create is never
+  # world-writable, whatever the caller's umask: under GitLab's `umask 0000`
+  # a plain `mkdir -p` made every new directory 0777, which the walk above
+  # then refuses.
   if [ "$d" = "$HOME/.cache/supply-chain-hardening" ]; then
-    # -m on the leaf only; `mkdir -p -m` would leave it to the leaf anyway.
-    [ -d "$d" ] || { mkdir -p "$(dirname -- "$d")" && mkdir -m 0700 "$d"; } 2>/dev/null || true
+    # 077 for every directory this creates, ~/.cache included, not the leaf alone.
+    [ -d "$d" ] || ( umask 077 && mkdir -p -- "$d" ) 2>/dev/null || true
   else
-    mkdir -p "$d" 2>/dev/null || true
+    # The caller's umask plus o-w: a group-shared directory stays group-shared.
+    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$(umask) | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
   fi
   why=$(_sch_unsafe_target "$f")
   if [ -n "$why" ]; then
@@ -573,10 +629,14 @@ _sch_create() {
     echo "  set $var to a writable path" >&2
     exit 2
   fi
+  # What the refusals leave: the file directly in a sticky world-writable
+  # directory that we or root own, such as /tmp. No other user can replace it
+  # while it exists. Once a reboot or a cleanup removes it, anyone can put a
+  # file at the same path, and a `source` of that path runs it.
   if [ "$what" = "env file" ]; then
     case "$(_sch_mode "$d")" in
       ????????w*)
-        warn "the $what is in $d, which every user can write to. It is safe as written, but a later \`source\` of that path, in a shell where this harden.sh run did not just succeed, can run a file another user put there after a reboot or a cleanup. Prefer a per-user directory." ;;
+        warn "the $what is in $d, which every user can write to. While the file exists no other user can replace it, but once a reboot or a cleanup removes it anyone can put a file at that path, and a later \`source\` of it, in a shell where this harden.sh run did not just succeed, runs their file. Prefer a per-user directory." ;;
     esac
   fi
   return 0

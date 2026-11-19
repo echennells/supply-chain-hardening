@@ -68,15 +68,18 @@ Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/
 
 ```bash
 ./action/harden.sh --emit=plain &&
-  source "${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env" &&
+  source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}" &&
   ./action/verify.sh --emit=plain
 ```
 
 Keep the `&&`. If `harden.sh` fails, nothing after it should run, least of all
 the `source`. Outside a CI runner the env file goes in
-`~/.cache/supply-chain-hardening/` (mode 0700), never a shared directory;
-`HARDENING_ENV_FILE` moves it, and `harden.sh` refuses a path where another user
-could have placed or could replace the file.
+`~/.cache/supply-chain-hardening/` (created with mode 0700), never a shared
+directory. `HARDENING_ENV_FILE` moves it, and the `source` line follows. `harden.sh`
+refuses a file that is not yours or that group or others can write, and a path
+through a world-writable directory without the sticky bit, or through a sticky
+one another user owns. It accepts group-writable directories. Run `verify.sh` as
+the same user: it will not read a record another user owns, and fails instead.
 
 This path was built for CI, so it is narrower than the role:
 

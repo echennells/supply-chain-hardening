@@ -167,6 +167,91 @@ setup() { common_setup; }
   [[ "$output" == *"no sticky bit"* ]]
 }
 
+# The directory checks walk every directory above the file, not only the one it
+# is in. MEASURED on the first VM#3 fix: a world-writable ~/.cache (created by
+# harden.sh itself under umask 0000) and another user's sticky directory were
+# both let through, and in the second case that user replaced the file.
+
+@test "env file: a world-writable directory ABOVE the file's directory is refused" {
+  mkdir -p "$TEST_TMP/open/mine" && chmod 777 "$TEST_TMP/open" && chmod 755 "$TEST_TMP/open/mine"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/open/mine/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"is below $TEST_TMP/open, which every user can write to"* ]]
+  [ ! -e "$TEST_TMP/open/mine/h.env" ]
+  [ ! -f "$TEST_HOME/.npmrc" ]
+}
+
+@test "env file: a symlinked directory is judged by where it points" {
+  # A symlink's own mode is lrwxrwxrwx on Linux. Judged by that, every
+  # symlinked path would be refused; judged by nothing, an open target passes.
+  mkdir -p "$TEST_TMP/safe" "$TEST_TMP/open"
+  chmod 755 "$TEST_TMP/safe"; chmod 777 "$TEST_TMP/open"
+  ln -s "$TEST_TMP/safe" "$TEST_TMP/to-safe"
+  ln -s "$TEST_TMP/open" "$TEST_TMP/to-open"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/to-safe/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/safe/h.env" ]
+  run harden HARDENING_ENV_FILE="$TEST_TMP/to-open/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no sticky bit"* ]]
+}
+
+@test "env file: a sticky directory another user owns is refused" {
+  # The sticky bit stops everyone EXCEPT the directory's owner, who can delete
+  # the file and put their own in its place.
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo to create a directory owned by someone else"
+  id -u nobody >/dev/null 2>&1 || skip "no 'nobody' user"
+  sudo -n mkdir -m 1777 "$TEST_TMP/theirs"
+  sudo -n chown nobody "$TEST_TMP/theirs"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/theirs/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"a sticky directory that another user (nobody) owns"* ]]
+  [ ! -e "$TEST_TMP/theirs/h.env" ]
+  [ ! -f "$TEST_HOME/.npmrc" ]
+}
+
+@test "env file: a sticky directory we own is accepted, with a warning that does not call it safe" {
+  mkdir -m 1777 "$TEST_TMP/ours"
+  chmod 1777 "$TEST_TMP/ours"      # mkdir -m is still filtered by some umasks
+  run harden HARDENING_ENV_FILE="$TEST_TMP/ours/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/ours/h.env" ]
+  [[ "$output" == *"which every user can write to"*"once a reboot or a cleanup removes it"* ]]
+  [[ "$output" != *"safe as written"* ]]
+}
+
+@test "env file: under umask 0000 every directory harden.sh creates is 0700, ~/.cache included" {
+  # GitLab's Docker and Kubernetes executors run jobs under umask 0000. A plain
+  # `mkdir -p` made ~/.cache drwxrwxrwx there, the parent of the 0700 leaf.
+  [ ! -e "$TEST_HOME/.cache" ]
+  run env -i PATH="$PATH" HOME="$TEST_HOME" GRADLE_USER_HOME="$TEST_HOME/.gradle" \
+    TMPDIR="$TEST_TMP" WRITE_ETC=false ECOSYSTEMS=npm \
+    bash -c "umask 0000; bash '$HARDEN_SH' --emit=plain"
+  [ "$status" -eq 0 ]
+  [ "$(ls -ld "$TEST_HOME/.cache" | cut -c1-10)" = drwx------ ]
+  [ "$(ls -ld "$STATE_DIR" | cut -c1-10)" = drwx------ ]
+  [ -f "$ENV_FILE" ]
+}
+
+@test "env file: under umask 0000 a directory created for an override is not world-writable" {
+  # It would otherwise be created 0777 and then refused by the same run.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" GRADLE_USER_HOME="$TEST_HOME/.gradle" \
+    TMPDIR="$TEST_TMP" WRITE_ETC=false ECOSYSTEMS=npm \
+    HARDENING_ENV_FILE="$TEST_TMP/new/deeper/h.env" \
+    bash -c "umask 0000; bash '$HARDEN_SH' --emit=plain"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/new/deeper/h.env" ]
+  [ "$(ls -ld "$TEST_TMP/new" | cut -c9)" = - ]
+  [ "$(ls -ld "$TEST_TMP/new/deeper" | cut -c9)" = - ]
+}
+
+@test "env file: /dev/null is refused, not replaced" {
+  run harden HARDENING_ENV_FILE=/dev/null ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'/dev/null' exists and is not a regular file"* ]]
+  [ -c /dev/null ]
+}
+
 @test "env file: an existing file is replaced, never written through" {
   # `: >` kept the inode, so whoever held it (a hard link, an open descriptor)
   # saw every line harden.sh wrote, and the other user appended to it after.
