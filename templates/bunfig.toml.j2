@@ -38,11 +38,14 @@
 # FAIL-WHOLE HAZARD — read before adding a key or widening a value.
 # bun rejects the ENTIRE bunfig on ONE bad value ("Invalid Bunfig: failed to
 # load bunfig", exit 1) — MEASURED with a QUOTED minimumReleaseAge
-# (minimumReleaseAge = "2d"). It does not skip the bad key: every other key in
-# this file goes with it AND bun itself stops working. So minimumReleaseAge is
-# rendered through `| int` (bare integer seconds, never quoted, never a
-# duration string) and tasks/bun.yml asserts the variable is a non-negative
-# integer before this file is written.
+# (minimumReleaseAge = "2d") on bun 1.3.0 through 1.4.3, which want a number
+# of seconds there. bun 1.4.4 accepts a duration string (MEASURED), but this
+# file is read by whatever bun the host has. It does not skip the bad key:
+# every other key in this file goes with it AND bun itself stops working. So
+# minimumReleaseAge is rendered through `| int` (bare integer seconds, which
+# every bun from 1.3.0 accepts, never quoted, never a duration string) and
+# tasks/bun.yml asserts the variable is a non-negative integer before this
+# file is written.
 #
 # frozenLockfile refuses install if package.json diverges from the
 # lockfile — catches sneaky dep additions during build. Universal

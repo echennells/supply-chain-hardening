@@ -13,8 +13,9 @@
 #
 # minimumReleaseAge is asserted UNQUOTED and numeric on purpose: bun rejects
 # the ENTIRE bunfig on one bad value ("Invalid Bunfig: failed to load
-# bunfig", exit 1 — measured with a quoted "2d"), so a quoted value here
-# would disarm every other key in the file and break bun.
+# bunfig", exit 1 — measured with a quoted "2d" on bun 1.3.0 through 1.4.3;
+# 1.4.4 accepts a duration string), so a quoted value here would disarm
+# every other key in the file and break bun on those versions.
 #
 # Mirrors the composer + yarn tier-rendering tests in
 # 28-composer-tier-rendering.bats and 32-yarn-tier-rendering.bats.
@@ -81,7 +82,7 @@ assert_has_baseline() {
 }
 
 # minimumReleaseAge must be a bare integer: quoted or non-numeric makes bun
-# reject the whole file.
+# 1.3.0 through 1.4.3 reject the whole file.
 assert_age_is_bare_integer() {
   grep -qE '^minimumReleaseAge = [0-9]+$' "$1" \
     || { echo "FAIL: minimumReleaseAge is not a bare integer in $1" >&2; grep -n minimumReleaseAge "$1" >&2; return 1; }

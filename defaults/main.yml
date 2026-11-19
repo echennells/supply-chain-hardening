@@ -30,7 +30,8 @@ pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" #
 # omits it below that and records the gap in skipped_protections.
 # Must render as a BARE INTEGER of seconds: bun rejects the ENTIRE bunfig on
 # one bad value ("Invalid Bunfig: failed to load bunfig", exit 1 — measured
-# with a quoted "2d"), which disarms every other key AND breaks bun.
+# with a quoted "2d" on bun 1.3.0 through 1.4.3; 1.4.4 accepts a duration
+# string), which disarms every other key AND breaks bun.
 # tasks/bun.yml asserts this is ^[0-9]+$ before the template renders.
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
 # Composer 2.11.0+ ONLY (MEASURED: config.policy.cooldown withholds versions on
