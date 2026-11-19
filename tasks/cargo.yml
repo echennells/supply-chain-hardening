@@ -323,6 +323,7 @@
   loop:
     - /usr/local/libexec/supply-chain-hardening
     - /usr/local/libexec/supply-chain-hardening/cargo
+  failed_when: false
   when:
     - cargo_path_wrapper | bool
     - cargo_cooldown_enforce | bool
@@ -335,6 +336,10 @@
   # is not (the build failed, or rustc is too old), an existing copy from an
   # earlier apply, by this or another account, is left in place, so a second
   # deployer whose build fails does not take the gate away from the first.
+  #
+  # NON-FATAL, like every optional install here (25-integration-regressions):
+  # root reading the deploying user's home can fail (a root-squashed NFS home),
+  # and that must cost the gate on this wrapper, recorded below, not the play.
   become: true
   ansible.builtin.copy:
     src: "{{ cargo_home }}/bin/cargo-cooldown"
@@ -343,12 +348,24 @@
     owner: root
     group: root
     mode: "0755"
+  register: cargo_cooldown_sys_copy
+  failed_when: false
   when:
     - cargo_path_wrapper | bool
     - cargo_cooldown_enforce | bool
     - cargo_check.rc == 0
     - cargo_wrap_become | default(true) | bool
     - (cargo_cooldown_built.stdout | default('') | trim) == cargo_cooldown_version
+
+- name: Record skipped protection — root-owned gate backend could not be installed
+  ansible.builtin.set_fact:
+    cargo_cooldown_sys_copy_failed: true
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['cargo publish-age gate — the root-owned copy of cargo-cooldown that the system-wide wrapper at ' ~ cargo_check.stdout ~ ' runs could not be installed at ' ~ cargo_cooldown_exe ~ ' (' ~ (cargo_cooldown_sys_copy.msg | default('the copy failed with no message; re-run the play with -v for the reason')) ~ '). The wrapper degrades to --locked until it can; it never runs the copy in ' ~ cargo_home ~ '/bin for root or other accounts.'] }}
+  when:
+    - cargo_cooldown_sys_copy is defined
+    - not (cargo_cooldown_sys_copy.skipped | default(false))
+    - cargo_cooldown_sys_copy.checksum is not defined
 
 - name: Remove the root-owned gate backend when the cargo wrapper or gate is off
   become: true
@@ -522,6 +539,7 @@
     - cargo_cooldown_health.stdout | default('') | trim in ['absent', 'broken']
     - not (cargo_rustc_too_old | default(false) | bool)
     - cargo_cc_check.rc | default(0) == 0
+    - not (cargo_cooldown_sys_copy_failed | default(false) | bool)
 
 - name: Record skipped protection — cargo hardening (cargo absent)
   ansible.builtin.set_fact:
