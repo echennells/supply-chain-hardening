@@ -168,6 +168,9 @@ elif command -v requested >/dev/null 2>&1 && ! requested yarn; then
   row "N/A" - "yarn" "yarn installed but not in the requested ecosystems"
 else
   yv=$(yarn --version 2>/dev/null | head -1 | tr -d '\r')
+  # A yarn that cannot name its version (a corepack shim that cannot resolve
+  # one, a broken yarnPath) must not be reported as one too old for the gate.
+  case "$yv" in [0-9]*) ;; *) yv="" ;; esac
   case "$yv" in
     1.*)
       scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
@@ -176,10 +179,15 @@ else
       yout=$(yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
       v=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | tr -d ' ')
       ywant=$(scv_want_hours)
-      if [ "$yrc" -ne 0 ]; then
+      ysaid=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | cut -c1-90)
+      if [ "$yrc" -ne 0 ] && [ -z "$yv" ]; then
         scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
-          "yarn ${yv:-<unknown>} has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $(printf '%s\n' "$yout" | head -1 | tr -d '\r' | cut -c1-90). Only a yarn upgrade closes this"
+          "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` in this directory to see why it printed none"
+      elif [ "$yrc" -ne 0 ]; then
+        scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
+          "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this"
       else
+        yv="${yv:-(version unknown)}"
         case "$v" in
           ''|undefined|null)
             row GAP PARSED "yarn age gate" "yarn $yv reports no npmMinimalAgeGate value, so no age gate is in effect" ;;

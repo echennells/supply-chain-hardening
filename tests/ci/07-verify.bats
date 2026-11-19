@@ -1034,3 +1034,16 @@ esac'
   run verify_sourced --emit=plain
   [[ "$(grep 'yarn hardening' <<<"$output")" == GAP*"classic and ignores .yarnrc.yml"* ]]
 }
+
+@test "yarn: a yarn that prints no version is not blamed on its version" {
+  # A corepack shim that cannot resolve a version prints nothing for --version.
+  # The row used to read "yarn <unknown> has no npmMinimalAgeGate (needs Yarn
+  # 4.10.0)", sending the reader to upgrade a yarn whose version nobody knew.
+  yarn_stub '' 'Internal Error: cannot resolve a yarn version' 1
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'yarn age gate' <<<"$output")
+  [[ "$r" == GAP*"yarn could not report its version"* ]]
+  [[ "$r" != *"needs Yarn 4.10.0"* ]]
+  [[ "$r" != *"<unknown>"* ]]
+}
