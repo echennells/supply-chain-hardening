@@ -303,10 +303,10 @@
       ✓ No missing prerequisites within this run's scope.
       ⚠ This was NOT a full run, so this is not a statement of full coverage:
       {% if ansible_run_tags | default(['all']) != ['all'] %}
-        - limited to tags: {{ ansible_run_tags | join(', ') }}
+        - limited to tags: {{ ansible_run_tags | sort | join(', ') }}
       {% endif %}
       {% if ansible_skip_tags | default([]) | length > 0 %}
-        - skipping tags: {{ ansible_skip_tags | join(', ') }}
+        - skipping tags: {{ ansible_skip_tags | sort | join(', ') }}
       {% endif %}
       {% if not (socket_firewall_install | bool) %}
         - socket_firewall_install=false — Socket Firewall and the npm PATH

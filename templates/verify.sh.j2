@@ -156,11 +156,15 @@ SCV_EXPECT='{{ scv_expect | join(" ") }}'
 # Appended to every "N/A BYDESIGN" detail so a suppressed row can always be
 # traced back to the decision that suppressed it.
 {% set scv_scope_notes = [] %}
+{#- Sorted: Ansible hands the tags over as a set, so their order changes from run
+    to run (MEASURED on 6c77f4e: three applies with the same --tags rendered
+    three orders), and this fragment then changed, with the assembled verifier,
+    on a re-apply that changed nothing. -#}
 {% if ansible_run_tags | default(['all']) != ['all'] %}
-{%- set _ = scv_scope_notes.append('this run was limited to tags ' ~ (ansible_run_tags | join(','))) %}
+{%- set _ = scv_scope_notes.append('this run was limited to tags ' ~ (ansible_run_tags | sort | join(','))) %}
 {% endif %}
 {% if ansible_skip_tags | default([]) | length > 0 %}
-{%- set _ = scv_scope_notes.append('this run skipped tags ' ~ (ansible_skip_tags | join(','))) %}
+{%- set _ = scv_scope_notes.append('this run skipped tags ' ~ (ansible_skip_tags | sort | join(','))) %}
 {% endif %}
 SCV_EXPECT_WHY='not enabled in the role configuration for this host{% if scv_scope_notes %} ({{ scv_scope_notes | join("; ") }}, so ecosystem coverage was NOT narrowed){% endif %}'
 
