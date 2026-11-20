@@ -617,6 +617,33 @@ J
   [[ "$output" == *"--no-scripts"* ]]
 }
 
+# composer <= 2.1 takes --no-scripts only on the commands that declare it, and
+# resolves an alias or a unique prefix to the command itself. MEASURED on
+# 6c77f4e with composer 2.1.14 behind the role's wrapper (the same body as
+# this one): `req`, `upd`, `ins`, `dump` and `rem` got no --no-scripts and ran
+# the root update and autoload-dump scripts.
+@test "composer: on composer <= 2.1 an alias or unique prefix of a lifecycle command gets --no-scripts" {
+  stub_bin composer 'case "${1:-}" in
+  --version) echo "Composer version 2.1.14 2021-11-30 10:51:43" ;;
+  *) echo "STUB:composer ARGS=[$*]" ;;
+esac'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  grep -q '^NO_SCRIPTS_IS_GLOBAL=false$' "$TEST_BIN/composer"
+  local args d="$BATS_TEST_TMPDIR/empty"
+  mkdir -p "$d"
+  for args in "install" "ins" "upd" "up" "upgrade" "req x/y" "rem x/y" "dump" "du" "cr a/b" "rei x/y" "UPD"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$d" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* && "$output" == *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
+  # Not on a command that does not declare it there, nor on an ambiguous name.
+  for args in "show" "sh" "conf" "in" "re" "exec x"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$d" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
+}
+
 @test "composer: --no-plugins is conditional on the input" {
   stub_bin composer
   harden ECOSYSTEMS=composer -- --emit=plain >/dev/null

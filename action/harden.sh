@@ -1547,7 +1547,8 @@ harden_composer() {
 
   # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
   # MEASURED (2.0.14 -> 2.10.3): on 2.0/2.1 only install, update, require,
-  # remove and dump-autoload declare it, so a wrapper that injects it
+  # remove, dump-autoload, create-project and reinstall (2.1) declare it
+  # (`composer list --format=json` on 2.1.14), so a wrapper that injects it
   # unconditionally makes `composer show`, `composer config` and
   # `composer diagnose` die with
   #     The "--no-scripts" option does not exist.
@@ -1573,8 +1574,10 @@ harden_composer() {
 # (MEASURED 2.0.14 -> 2.10.3). NO_SCRIPTS_IS_GLOBAL below was rendered from
 # the composer version detected when this wrapper was written
 # (${composer_version:-undetected}); when it is false the wrapper injects
-# --no-scripts only for the subcommands that declare it on 2.0/2.1, because
-# injecting it elsewhere there fails with
+# --no-scripts only for the commands that declare it on 2.0/2.1 (install,
+# update, require, remove, dump-autoload, create-project, reinstall), under any
+# alias or unique prefix of their names, because injecting it elsewhere there
+# fails with
 #     The "--no-scripts" option does not exist.
 REAL_COMPOSER='$real_composer'
 WRAPPER_PATH='$wrapper_target'
@@ -1686,6 +1689,42 @@ builtins_starting_with() {
   printf '%s' "$out"
 }
 
+# The command composer runs for the built-in name $1 (an alias names its command).
+canonical_builtin() {
+  case "$1" in
+    i) echo install ;;
+    u|upgrade) echo update ;;
+    r) echo require ;;
+    rm|uninstall) echo remove ;;
+    dumpautoload) echo dump-autoload ;;
+    selfupdate) echo self-update ;;
+    cc|clearcache) echo clear-cache ;;
+    info) echo show ;;
+    why) echo depends ;;
+    why-not) echo prohibits ;;
+    run) echo run-script ;;
+    home) echo browse ;;
+    repo) echo repository ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# The built-in command composer runs for $1, resolved the way its console does:
+# an exact name or alias, else the one command that every built-in starting with
+# $1 belongs to. Prints nothing when composer would call $1 ambiguous or unknown
+# (it then refuses to run anything).
+builtin_command_for() {
+  local b c one=""
+  case "$BUILTIN_COMMANDS" in *" $1 "*) canonical_builtin "$1"; return 0 ;; esac
+  for b in $(builtins_starting_with "$1" | tr -d ','); do
+    c=$(canonical_builtin "$b")
+    if [ -z "$one" ]; then one=$c
+    elif [ "$one" != "$c" ]; then return 0
+    fi
+  done
+  printf '%s\n' "$one"
+}
+
 # How the composer.json composer will read defines the name $1: prints "key"
 # for a "scripts" key, "alias<TAB><key>" for a "scripts-aliases" alias of a
 # key, and nothing otherwise. It finds the file the way composer does:
@@ -1763,8 +1802,12 @@ if [ "$EXPLICIT_SCRIPT" = "true" ]; then
 elif [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
   FLAGS+=(--no-scripts)
 else
-  case "$SUBCOMMAND" in
-    install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+  # composer <= 2.1: only the commands that declare --no-scripts get it, on the
+  # command composer resolves the name to. An alias or a unique prefix (`req`,
+  # `upd`, `dump`) is the same command: MEASURED on 2.1.14, when only the full
+  # names got it, those ran the root update and autoload-dump scripts.
+  case "$(builtin_command_for "$SUBCOMMAND")" in
+    install|update|require|remove|dump-autoload|create-project|reinstall)
       FLAGS+=(--no-scripts) ;;
   esac
 fi
@@ -1778,8 +1821,8 @@ EOF
   $SUDO chmod 755 "$wrapper_target"
   local wrap_desc="--no-scripts on every invocation except a script run by name"
   if [[ "$no_scripts_is_global" != "true" ]]; then
-    wrap_desc="--no-scripts on install/update/require/remove/dump-autoload only"
-    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
+    wrap_desc="--no-scripts on install/update/require/remove/dump-autoload/create-project/reinstall only"
+    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for the commands that declare it there (install, update, require, remove, dump-autoload, create-project, reinstall, under any alias or abbreviation); every other command, exec included, runs WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
   fi
   [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] || wrap_desc="$wrap_desc, --no-plugins"
   log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"

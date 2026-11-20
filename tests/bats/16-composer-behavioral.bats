@@ -281,3 +281,95 @@ cooldown_resolve() {
   got=$(cooldown_resolve '{"policy":{"cooldown":{"ignore":["*"]}}}' COMPOSER_POLICY_COOLDOWN_PERIOD=81648000)
   [ "$got" = "$control" ]
 }
+
+# ---- composer <= 2.1: an abbreviation is the same command ----
+#
+# --no-scripts is a global option only from composer 2.2.0, so on 2.0/2.1 the
+# wrapper injects it per command. It used to match only the full names, while
+# composer runs any unique prefix of a built-in (`req` is require). MEASURED on
+# 6c77f4e with composer 2.1.14 behind the wrapper: `composer req local/pkg`,
+# `upd`, `up`, `ins`, `dump` and `rem local/pkg` each ran the root
+# pre/post-update-cmd and pre/post-autoload-dump scripts. A real 2.1.14 phar is
+# downloaded (checksum pinned) and wrapped by the role's own template, rendered
+# for that version.
+C21_SHA256=d44a904520f9aaa766e8b4b05d2d9a766ad9a6f03fa1a48518224aad703061a4
+c21_setup() {
+  command -v php >/dev/null 2>&1 || skip "php not installed"
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  C21="$BATS_TEST_TMPDIR/c21"
+  mkdir -p "$C21/home" "$C21/pkg"
+  curl -fsSL --max-time 120 -o "$C21/composer-2.1.14" https://getcomposer.org/download/2.1.14/composer.phar \
+    || skip "could not download composer 2.1.14 (offline?)"
+  [ "$(sha256sum < "$C21/composer-2.1.14" | cut -d' ' -f1)" = "$C21_SHA256" ] || { echo "composer 2.1.14 checksum mismatch"; return 1; }
+  chmod 0755 "$C21/composer-2.1.14"
+  cat > "$C21/render.yml" <<Y
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.template:
+        src: $ROLE_DIR/templates/composer-wrapper.sh.j2
+        dest: $C21/composer
+        mode: "0755"
+      vars:
+        composer_allow_plugins: false
+        composer_cooldown_seconds: 172800
+        composer_real_path: $C21/composer-2.1.14
+        composer_detected_version: "2.1.14"
+Y
+  ansible-playbook "$C21/render.yml" >/dev/null 2>&1 || { echo "rendering the wrapper failed"; return 1; }
+  grep -q '^NO_SCRIPTS_IS_GLOBAL="false"$' "$C21/composer"
+  echo '{ "name": "local/pkg", "version": "1.0.0" }' > "$C21/pkg/composer.json"
+}
+# c21_run <composer> <args...>: in a fresh project whose root scripts touch
+# markers; prints the events whose script ran
+c21_run() {
+  local bin=$1 p="$C21/proj"; shift
+  rm -rf "$p" /tmp/marker-c21-*; mkdir -p "$p"
+  cat > "$p/composer.json" <<J
+{ "name": "t/p", "minimum-stability": "dev",
+  "repositories": [ { "type": "path", "url": "$C21/pkg", "options": { "symlink": false } }, { "packagist.org": false } ],
+  "scripts": { "pre-update-cmd": "touch /tmp/marker-c21-pre-update-cmd",
+               "post-update-cmd": "touch /tmp/marker-c21-post-update-cmd",
+               "post-install-cmd": "touch /tmp/marker-c21-post-install-cmd",
+               "post-autoload-dump": "touch /tmp/marker-c21-post-autoload-dump" } }
+J
+  if [ "$1" = rem ]; then
+    ( cd "$p" && env -u COMPOSER_SKIP_SCRIPTS COMPOSER_HOME="$C21/home" COMPOSER_ALLOW_SUPERUSER=1 \
+        "$C21/composer-2.1.14" require local/pkg --no-scripts -n >/dev/null 2>&1 )
+  fi
+  ( cd "$p" && env -u COMPOSER_SKIP_SCRIPTS COMPOSER_HOME="$C21/home" COMPOSER_ALLOW_SUPERUSER=1 \
+      "$bin" "$@" -n >/dev/null 2>&1 ) || true
+  ls /tmp/marker-c21-* 2>/dev/null | sed 's#/tmp/marker-c21-##' | tr '\n' ' '
+  rm -f /tmp/marker-c21-*
+}
+
+@test "FIXTURE CONTROL: on composer 2.1.14 an abbreviation of a lifecycle command runs the root scripts" {
+  c21_setup
+  local args ran
+  for args in "upd" "req local/pkg" "dump" "rem local/pkg"; do
+    # shellcheck disable=SC2086
+    ran=$(c21_run "$C21/composer-2.1.14" $args)
+    echo "unwrapped composer $args: ${ran:-none}"
+    [ -n "$ran" ] || { echo "the fixture fires no script for '$args' even unwrapped"; return 1; }
+  done
+}
+
+@test "ATTACK: composer <= 2.1 tier — an abbreviation of a lifecycle command runs no root script through the wrapper" {
+  c21_setup
+  local args ran
+  for args in "upd" "up" "ins" "req local/pkg" "requ local/pkg" "dump" "du" "rem local/pkg" "UPD"; do
+    # shellcheck disable=SC2086
+    ran=$(c21_run "$C21/composer" $args)
+    echo "wrapped composer $args: ${ran:-none}"
+    [ -z "$ran" ] || { echo "'composer $args' ran root scripts through the wrapper: $ran"; return 1; }
+  done
+  # The commands that do not declare --no-scripts on 2.1 still work (no
+  # "option does not exist"), abbreviated or not.
+  for args in "show" "sh" "valid" "conf --list"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$C21/proj" \
+      env COMPOSER_HOME="$C21/home" COMPOSER_ALLOW_SUPERUSER=1 "$C21/composer" $args
+    [[ "$output" != *"option does not exist"* ]] || { echo "'composer $args': $output"; return 1; }
+  done
+}

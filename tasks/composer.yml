@@ -37,10 +37,12 @@
 #              2.2.6. composer-config.json.j2 emits {} — the empty allowlist,
 #              same protection — below 2.2.15 and when the version is unknown.
 #   <= 2.1   : --no-scripts is not an application-level option; only
-#              install/update/require/remove/dump-autoload declare it.
-#              composer-wrapper.sh.j2 injects it on every invocation from
-#              2.2.0 (except a script run by name) and per-subcommand below. --no-plugins IS global that far
-#              back and is always injected.
+#              install/update/require/remove/dump-autoload/create-project
+#              (and reinstall, 2.1) declare it. composer-wrapper.sh.j2
+#              injects it on every invocation from 2.2.0 (except a script run
+#              by name) and per command below, under any alias or unique
+#              prefix of the name. --no-plugins IS global that far back and
+#              is always injected.
 
 - name: Detect installed Composer version (empty if not installed)
   # Pull the X.Y.Z out of `composer --version` output:
@@ -344,15 +346,17 @@
 - name: Record skipped protection — wrapper --no-scripts is subcommand-gated (Composer <= 2.1)
   # MEASURED (composer 2.0.14 → 2.10.3): --no-scripts became an
   # application-level option in 2.2.0. On 2.0/2.1 only install, update,
-  # require, remove and dump-autoload declare it, and injecting it anywhere
-  # else makes `composer show`, `composer config` and `composer diagnose` die
-  # with `The "--no-scripts" option does not exist.` The wrapper therefore
-  # gates the injection on those hosts — which means the subcommands that are
-  # NOT in that list run without it. Same record when the version could not be
-  # detected, because the wrapper then renders the same safe baseline.
+  # require, remove, dump-autoload, create-project and reinstall (2.1.14's
+  # `composer list --format=json`; 2.0.14 has no reinstall) declare it, and
+  # injecting it anywhere else makes `composer show`, `composer config` and
+  # `composer diagnose` die with `The "--no-scripts" option does not exist.`
+  # The wrapper therefore gates the injection on those hosts — which means the
+  # subcommands that are NOT in that list run without it. Same record when the
+  # version could not be detected, because the wrapper then renders the same
+  # safe baseline.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['composer wrapper --no-scripts (partial) — Composer ' ~ (composer_detected_version | default('', true) | default('<undetected>', true)) ~ ' does not accept --no-scripts as a global option (it became one in 2.2.0), so the wrapper injects it only for install/update/require/remove/dump-autoload. create-project and exec run WITHOUT it on this host (a script run by name runs on every version, on purpose). --no-plugins is unaffected. Upgrade Composer to >= 2.2 and re-run to cover every lifecycle command.'] }}
+      {{ (skipped_protections | default([])) + ['composer wrapper --no-scripts (partial) — Composer ' ~ (composer_detected_version | default('', true) | default('<undetected>', true)) ~ ' does not accept --no-scripts as a global option (it became one in 2.2.0), so the wrapper injects it only for the commands that declare it here (install, update, require, remove, dump-autoload, create-project, reinstall, under any alias or abbreviation). Every other command, exec included, runs WITHOUT it on this host (a script run by name runs on every version, on purpose). --no-plugins is unaffected. Upgrade Composer to >= 2.2 and re-run to cover every command.'] }}
   when:
     - composer_path_wrapper | bool
     - composer_binary_path is defined
