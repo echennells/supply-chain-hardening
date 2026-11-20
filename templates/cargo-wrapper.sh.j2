@@ -466,9 +466,12 @@ sanitize_cooldown_env() {
   # COOLDOWN_MINUTES. MEASURED on cargo-cooldown 0.3.5 (itoa = "1", one-year
   # window): with that repo file, COOLDOWN_MINUTES alone resolved the newest
   # itoa, 1.0.19, published 11 days earlier; adding this variable cooled it to
-  # 1.0.15. Cargo itself ignores this name. MEASURED on cargo 1.100.0: set
-  # alone, plain `cargo generate-lockfile` took 1.0.19 and printed nothing.
-  # Cargo's own stabilised gate reads registry.global-min-publish-age
+  # 1.0.15. Cargo itself gates nothing on this name. MEASURED, set alone with a
+  # 365-day window: plain `cargo generate-lockfile` took 1.0.19 on cargo
+  # 1.100.0 and printed nothing, and took 1.0.19 on cargo 1.99.0 and printed
+  # "warning: ignoring `registry.min-publish-age` without `-Zmin-publish-age`",
+  # so on 1.99 each routed build shows that line.
+  # Cargo's own stabilised gate (1.100) reads registry.global-min-publish-age
   # (CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE) and [registries.crates-io]
   # min-publish-age, and calls a [registry] min-publish-age key in config.toml
   # unused.
@@ -487,8 +490,11 @@ sanitize_cooldown_env() {
   # workspace while a loose requirement is silently cooled. MEASURED on cargo
   # 1.100.0 + cargo-cooldown 0.3.5. On this path cargo-cooldown IS the gate
   # (it still denies and cools with this set, measured), so the native resolver
-  # is told to defer to it. Only on 1.100+: older cargo warns about the
-  # unknown setting.
+  # is told to defer to it: MEASURED on cargo 1.100.0, a 365-day
+  # CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE with this set locked the newest itoa,
+  # silently. Only on 1.100+: cargo 1.99.0 gates nothing either way and prints
+  # "warning: ignoring `resolver.incompatible-publish-age` without
+  # `-Zmin-publish-age`" for it (MEASURED).
   if cargo_has_native_gate; then
     export CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow
   fi
