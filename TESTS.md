@@ -1,6 +1,6 @@
 # Tests
 
-561 container tests verify the supply chain hardening works (`make test`), plus 326 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+562 container tests verify the supply chain hardening works (`make test`), plus 326 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -30,7 +30,7 @@
 | 22-pip-wrapper-safety.bats | 15 | Defensive guards in the pip→uv wrapper, and which uv it runs per caller: root refuses a uv another account owns (attributably, never running it), an account runs its own uv or a root-owned one in its own directory; `--version` is answered naming uv and the redirect; `--user` and `download` are refused by name (also after a value-taking option); with no usable uv, or when uv refuses, the message names the redirect and keeps uv's exit code; a real sdist is still refused |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
 | 24-deno-path-wrapper.bats | 12 | Deno in-place PATH wrapper plumbing + end-to-end |
-| 25-integration-regressions.bats | 28 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency; the end-of-run summary lists what it skipped and claims nothing more (stub yarn, uv moved aside); optional tool installs respect the Go 1.21 floor (fake Go 1.18) and reinstall when a pin moves, read the copy the install would replace (lockfile-lint under root's `npm root -g`, not another copy first on `PATH`), and leave alone a zizmor / uv-secure / pip-audit that uv did not install (UV_TOOL_DIR / UV_TOOL_BIN_DIR staging); a JDK-only host gets the gradle init script and settings.xml (with a no-java FIXTURE CONTROL); the preflight refuses to replace a per-user cargo/maven/nuget config it did not write, replaces it with a byte-identical backup under `accept_user_config_overwrite=true`, passes its own files and dotnet's first-run NuGet.Config, and checks only the files this run writes |
+| 25-integration-regressions.bats | 29 | H1/H2/H3 catchers (structural + runtime), preflight tests, idempotency; the end-of-run summary lists what it skipped and claims nothing more (stub yarn, uv moved aside), and with no uv its pip entry describes the wrapper on disk (this version's refuses another account's uv with exit 126; an earlier version's runs any uv); optional tool installs respect the Go 1.21 floor (fake Go 1.18) and reinstall when a pin moves, read the copy the install would replace (lockfile-lint under root's `npm root -g`, not another copy first on `PATH`), and leave alone a zizmor / uv-secure / pip-audit that uv did not install (UV_TOOL_DIR / UV_TOOL_BIN_DIR staging); a JDK-only host gets the gradle init script and settings.xml (with a no-java FIXTURE CONTROL); the preflight refuses to replace a per-user cargo/maven/nuget config it did not write, replaces it with a byte-identical backup under `accept_user_config_overwrite=true`, passes its own files and dotnet's first-run NuGet.Config, and checks only the files this run writes |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
 | 27-cache-and-time.bats | 4 | Exploratory: cache+age-gate interaction, clock-skew impact |
 | 34-composer-wrapper-tier-rendering.bats | 12 | composer_allow_plugins authority on the wrapper layer (renders template with both values, asserts --no-plugins conditional, --no-scripts present in both), and the wrapper's routing: a root script run by name gets no `--no-scripts` while built-ins, unknown and smuggled names keep it; a name that is both a script and a built-in is refused; an abbreviation that is not a script is the built-in; `-nd DIR` takes DIR as a value; composer.json is found where composer looks; composer <= 2.1 injects only where the subcommand declares `--no-scripts` |
@@ -119,7 +119,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 561 tests
+make test          # build container + run all 562 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

@@ -136,11 +136,17 @@
   # wrapper, so "the wrappers were not deployed and pip runs the real pip"
   # would be false (MEASURED: a second sudo user applying on a host root had
   # hardened got that entry while /usr/local/bin/pip was the wrapper). Prints
-  # the uv path that apply baked in.
+  # which wrapper it is, then the uv path that apply baked in. This version's
+  # wrapper (sch_trusted) runs only a uv the caller or root owns; an earlier
+  # version's runs any uv it can execute. The entry below describes the one
+  # that is there: it described only the earlier one, so after a second
+  # account with no uv applied, it said the wrapper runs the first account's
+  # uv while `pip` refused that uv with exit 126 (MEASURED, Ubuntu 26.04).
   ansible.builtin.shell:
     cmd: |
       for f in /usr/local/bin/pip /usr/local/bin/pip3; do
         grep -qx '# Managed by ansible-supply-chain-security' "$f" 2>/dev/null || continue
+        if grep -q '^sch_trusted()' "$f"; then echo owner-checked; else echo any-owner; fi
         sed -nE "s/^UV='(.*)'$/\1/p" "$f" | head -1
         exit 0
       done
@@ -160,7 +166,7 @@
   # VM matrix: no stock image ships uv, so no wrapper on any of them.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — this run found no uv, so it did not deploy /usr/local/bin/pip or /usr/local/bin/pip3. ' ~ (('The wrappers an earlier apply left there are still in place and were not updated: each runs the first uv it can execute (/usr/local/bin/uv, /usr/bin/uv, the ' ~ (pip_wrapper_left.stdout | trim | default('<none>', true)) ~ ' recorded at that apply, then PATH) and refuses every pip command (exit 127) when it finds none. ') if pip_wrapper_left.rc | default(1) == 0 else ('`pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. ')) ~ 'Install uv and re-apply.'] }}
+      {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — this run found no uv, so it did not deploy /usr/local/bin/pip or /usr/local/bin/pip3. ' ~ (('The wrappers an earlier apply left there are still in place and were not updated: ' ~ (('each runs the first uv that the caller owns, or that root owns where no other account can replace it, trying /usr/local/bin/uv, /usr/bin/uv, the ' ~ ((pip_wrapper_left.stdout_lines + ['', ''])[1] | trim | default('<none>', true)) ~ ' recorded at that apply, PATH, then ~/.local/bin/uv of the account running pip. It refuses every pip command, with exit 126 when each uv it finds belongs to another account or sits where one could replace it, and with exit 127 when it finds none. ') if (pip_wrapper_left.stdout_lines + [''])[0] == 'owner-checked' else ('they are from an earlier version of this role, and each runs the first uv it can execute (/usr/local/bin/uv, /usr/bin/uv, the ' ~ ((pip_wrapper_left.stdout_lines + ['', ''])[1] | trim | default('<none>', true)) ~ ' recorded at that apply, then PATH) whoever owns it, so root and other accounts can end up running a uv that another account can replace. It refuses every pip command (exit 127) when it finds none. '))) if pip_wrapper_left.rc | default(1) == 0 else ('`pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. ')) ~ 'Install uv and re-apply.'] }}
   when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
 
 - name: Detect installed uv tools (uv-managed versions, or copies uv does not manage)

@@ -801,6 +801,74 @@ summary_of() { # the summary task's msg, one line per entry
   fi
 }
 
+# The no-uv entry has to describe the pip wrapper that is on disk. It used to
+# describe only an earlier version's (runs any uv it can execute), so after a
+# second account with no uv applied, it said `pip` runs the first account's uv
+# while this version's wrapper refused that uv with exit 126 (MEASURED, Ubuntu
+# 26.04). Runs the REAL detect and record tasks from tasks/uv.yml, lifted out
+# by name as 32-* does for yarn, with uv_binary_path saying "no uv".
+pip_no_uv_entry() {
+  local dir task play out
+  dir=$(mktemp -d)
+  task="$dir/task.json"; play="$dir/play.yml"; out="$dir/out.txt"
+  python3 - "$ROLE_DIR/tasks/uv.yml" "$task" <<'PY'
+import json, sys, yaml
+tasks = yaml.safe_load(open(sys.argv[1]))
+names = ("Look for pip wrappers an earlier apply left in place",
+         "Record skipped protection — pip / pip3 wrapper")
+t = [t for t in tasks if t.get("name", "").startswith(names)]
+assert len(t) == 2, [x.get("name") for x in t]
+json.dump(t, open(sys.argv[2], "w"))
+PY
+  cat > "$play" <<PLAY
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    uv_binary_path: {rc: 1, stdout: ""}
+    pip_only_binary: true
+  tasks:
+    - ansible.builtin.include_tasks: $task
+    - ansible.builtin.copy:
+        content: "{{ (skipped_protections | default([])) | join('\n') }}\n"
+        dest: $out
+        mode: "0644"
+PLAY
+  ansible-playbook "$play" >/dev/null 2>&1 || { echo "playbook failed" >&2; rm -rf "$dir"; return 1; }
+  cat "$out"; rm -rf "$dir"
+}
+
+@test "summary: with no uv, the pip entry describes the wrapper on disk, this version's or an earlier one's" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  grep -q '^sch_trusted()' /usr/local/bin/pip 2>/dev/null || skip "no pip wrapper from this version at /usr/local/bin/pip"
+  require_root "swaps /usr/local/bin/pip for an earlier version's wrapper"
+  run pip_no_uv_entry
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"runs the first uv that the caller owns, or that root owns"*"exit 126"*"exit 127"* ]]
+  [[ "$output" != *"whoever owns it"* ]]
+
+  # An earlier version's wrapper: the opening of main's (8281a6b), whose loop
+  # takes the first uv it can execute.
+  cp -p /usr/local/bin/pip "$BATS_TEST_TMPDIR/pip.saved"
+  cat > /usr/local/bin/pip <<'EOF'
+#!/bin/sh
+# Managed by ansible-supply-chain-security
+UV='/home/someone/.local/bin/uv'
+for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
+  if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
+done
+exec "$UV" pip "$@"
+EOF
+  run pip_no_uv_entry
+  cp -p "$BATS_TEST_TMPDIR/pip.saved" /usr/local/bin/pip
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"earlier version of this role"*"the /home/someone/.local/bin/uv recorded at that apply"*"whoever owns it"* ]]
+  [[ "$output" != *"exit 126"* ]]
+  grep -q '^sch_trusted()' /usr/local/bin/pip
+}
+
 @test "summary: Yarn 2.x-4.9 is listed without its age gate; Yarn 4.10+ is not listed" {
   [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
   require_root "re-renders /etc/yarnrc.yml for a stub Yarn and restores it afterwards"
