@@ -143,6 +143,28 @@ first_wrapper() {
   deactivate
 }
 
+@test "caller: in a stock venv the verifier grades only-binary WEAK, naming the path/URL hole" {
+  # The row was OK PARSED from a grep of /etc/pip.conf while the test above shows
+  # pip does not refuse a direct-path sdist (MEASURED: pip 24.0 in a venv ran a
+  # path sdist's setup.py). WEAK, with the hole named, is what it can honestly say.
+  [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
+  [ -f /etc/pip.conf ] || skip "/etc/pip.conf not deployed"
+  grep -q 'only-binary' /etc/pip.conf || skip "pip_only_binary disabled on this host"
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  python3 -c 'import venv' 2>/dev/null || skip "python3 venv module not available"
+
+  python3 -m venv "$BATS_TEST_TMPDIR/venv" >/dev/null 2>&1 || skip "venv creation failed"
+  . "$BATS_TEST_TMPDIR/venv/bin/activate"
+  run "$VERIFY" --verbose
+  echo "$output" | grep "pip source-build blocking" | grep -q "^WEAK"
+  echo "$output" | grep "pip source-build blocking" | grep -q "NOT one named by path or URL"
+  # And the venv's pip is named for what it is: a python launcher, not "another
+  # wrapper script" (which sent readers looking for a second security tool).
+  echo "$output" | grep "pip PATH wrapper" | grep -q "an unwrapped python3 launcher"
+  ! echo "$output" | grep -q "another wrapper script"
+  deactivate
+}
+
 @test "caller: --system-site-packages is NOT a mitigation for the wrapper shadow" {
   [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
   [ -x /usr/local/bin/pip ] || skip "pip wrapper not deployed"

@@ -45,6 +45,22 @@ scv_want_hours() {
   return 0
 }
 
+# cq() quotes a value for a row detail. It is a pass-through; the comment at the
+# composer section says why it stays. Defined HERE, before its first caller: the
+# poetry rows call it, and they run before the composer section. When it was
+# defined only down there, bash had not seen it yet, every poetry detail that
+# named a value or a directory printed blank fields, and stderr said
+# "cq: command not found" (MEASURED, action/verify.sh with a poetry exclude list).
+cq() { printf '%s' "$1"; }
+
+# A doc a row points at, as a URL. A repo-relative path such as
+# docs/composer-bundler-cooldown-by-distro.md exists neither on a hardened host
+# (the role deploys no docs) nor in a CI log, so the reader had nothing to open.
+# Each preamble sets SCV_DOCS_URL: the action pins it to the ref the job used
+# when GitHub reports one; the role has no record of its release, so it points
+# at main.
+scv_doc() { printf '%s/%s' "${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}" "$1"; }
+
 
 # ======================================================================
 # HOST TOOL DISCOVERY  (ECH-189, generalised)
@@ -1205,6 +1221,109 @@ fi
 # ATTRIBUTION IS NOT CLAIMED BY ANY ROW. uv never reports which file it loaded
 # (checked: -v, -vv, RUST_LOG=trace, with and without --show-settings), so no
 # row can say "our file is in effect" - only "a config uv reads sets this".
+
+# ---- exclude-newer as uv prints it, for row 6 --------------------------------
+# uv 0.13.9 (MEASURED) prints the setting as one struct with a GLOBAL cutoff and
+# a PER-PACKAGE map, the map holding what exclude-newer-package sets:
+#     exclude_newer: ExcludeNewer {
+#         global: Some( Absolute( 2026-11-18T00:00:00Z ) ),      or
+#         global: Some( Relative( ExcludeNewerSpan( 30d ) ) ),
+#         package: ExcludeNewerPackage( {
+#             PackageName( "boto3" ): Disabled,                   (= false)
+#             PackageName( "botocore" ): Enabled( Absolute( 2099-01-01T00:00:00Z ) ),
+#         } ),
+#     },
+# (one token per line in the real dump). A map entry decides for that package
+# whatever the global says: with the global at 2026-11-18, botocore = false,
+# = "2099-01-01T00:00:00Z" and = "1 second" each let botocore 1.44.7 resolve,
+# the same as no gate at all, where the host config alone gave 1.44.5.
+#
+# scv_uv_en_block: the exclude_newer field on one line, from its own line to the
+# next field at the same depth. An older one-line form (exclude_newer: None, or
+# a flat Some(<ts>)) is just that line.
+scv_uv_en_block() { # uv --show-settings dump on stdin
+  awk '
+    on { match($0, /^[[:space:]]*/); if (RLENGTH <= ind) exit; print; next }
+    /^[[:space:]]*exclude_newer:/ { match($0, /^[[:space:]]*/); ind = RLENGTH; on = 1; print }
+  ' | tr '\n' ' ' | tr -s ' '
+}
+# scv_uv_en_global / scv_uv_en_pkgs: the two halves of that block. A block with
+# no `global:` (older uv) is all global, and has no map.
+scv_uv_en_global() { # block
+  case "$1" in
+    *global:*) printf '%s' "${1#*global:}" | sed 's/package:.*//' ;;
+    *)         printf '%s' "$1" ;;
+  esac
+}
+scv_uv_en_pkgs() { # block -> one "name<TAB>value" line per map entry
+  case "$1" in *package:*) ;; *) return 0 ;; esac
+  printf '%s\n' "${1#*package:}" | awk '{
+    n = split($0, a, /PackageName\(/)
+    for (i = 2; i <= n; i++) {
+      if (!match(a[i], /"[^"]*"/)) continue
+      name = substr(a[i], RSTART + 1, RLENGTH - 2); v = substr(a[i], RSTART + RLENGTH)
+      sub(/^[^:]*:/, "", v); print name "\t" v
+    }
+  }'
+}
+# scv_uv_span_secs: a span as uv prints it (jiff's friendly form: 1s, 90m, 30d,
+# 1w 2d 3h, 1500ms) in seconds; nothing for a unit it does not know. uv refuses
+# months and years in exclude-newer ("use days instead"), so every unit it can
+# print is a fixed length. A negative span prints as "1d ago"; MEASURED, uv
+# then resolved botocore exactly as far back as it does for "1 day" (1.44.6), so
+# "ago" is read as the same span, not as a cutoff in the future.
+scv_uv_span_secs() { # span
+  printf '%s\n' "$1" | awk '{
+    s = $0; sub(/[[:space:]]*ago[[:space:]]*$/, "", s); gsub(/[[:space:],]+/, "", s)
+    if (s == "") exit 1
+    tot = 0
+    while (s != "") {
+      if (!match(s, /^[0-9]+(\.[0-9]+)?/)) exit 1
+      v = substr(s, 1, RLENGTH) + 0; s = substr(s, RLENGTH + 1)
+      match(s, /^[^0-9.]+/); u = substr(s, 1, RLENGTH); s = substr(s, RLENGTH + 1)
+      if (u == "w") f = 604800; else if (u == "d") f = 86400; else if (u == "h") f = 3600
+      else if (u == "m") f = 60; else if (u == "s") f = 1; else if (u == "ms") f = 0.001
+      else if (u == "us" || u == "\302\265s") f = 0.000001; else if (u == "ns") f = 0.000000001
+      else exit 1
+      tot += v * f
+    }
+    printf "%d\n", tot
+  }'
+}
+# scv_uv_cutoff: one exclude-newer value -> the cutoff as epoch seconds, "off"
+# when it gates nothing (Disabled, or no global at all), "?" when it cannot be
+# read. A span is resolved the way uv resolves it, against now. When a value
+# carries both an instant and a span (uv 0.10.x printed the resolved instant
+# beside the span) the instant wins, as in rows 1-3.
+scv_uv_cutoff() { # value text, now (epoch seconds)
+  local t="$1" ts sp secs e
+  case "$t" in *Disabled*) printf 'off'; return 0 ;; esac
+  ts=$(printf '%s' "$t" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]*Z' | head -1)
+  if [ -n "$ts" ]; then
+    e=$(scv_epoch "$ts"); printf '%s' "${e:-?}"; return 0
+  fi
+  case "$t" in
+    *ExcludeNewerSpan\(*)
+      sp=$(printf '%s' "$t" | sed 's/.*ExcludeNewerSpan([[:space:]]*//; s/[,)].*//; s/[[:space:]]*$//')
+      secs=$(scv_uv_span_secs "$sp")
+      if [ -n "$secs" ]; then printf '%s' "$(( $2 - secs ))"; else printf '?'; fi
+      return 0 ;;
+  esac
+  case "$t" in
+    *None*|'') printf 'off' ;;
+    *[!\ ,]*)  printf '?' ;;
+    *)         printf 'off' ;;
+  esac
+}
+# scv_uv_when: a cutoff for a row detail.
+scv_uv_when() { # epoch | off | ?
+  case "$1" in
+    off) printf 'no cutoff' ;;
+    '?') printf 'an unreadable value' ;;
+    *)   date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s' "$1" ;;
+  esac
+}
+
 if have uv; then
   # The CI verifier scopes rows to the ecosystems harden.sh recorded; the host
   # verifier has no such record and reports on whatever it finds. One body for
@@ -1510,6 +1629,136 @@ if have uv; then
         rm -rf "$uvtmp"
       fi
     fi
+
+# --- uv repo config override  [PARSED] ---
+    # ---- row 6: does a config HERE weaken what rows 1-5 saw? ----------------
+    # Rows 1-5 ask uv from "/" on purpose (see "probe cwd" above), which makes
+    # them blind to the override AGENTS.md tells people to look for when it
+    # says to run the verifier from the project. MEASURED (uv 0.13.9, role
+    # applied): in a directory whose uv.toml says no-build = false, uv reported
+    # no_build: None there and `uv pip install ./x.tar.gz` ran its setup.py,
+    # while row 2 printed OK; an exclude-newer in 2099 there left row 3 OK too.
+    # So ask once more, from the working directory, and compare the anchors.
+    # This row can only LOWER the verdict - OK when nothing here weakens rows
+    # 1-5, GAP when something does, WEAK when it cannot tell - and never
+    # upgrades a host row, so a uv.toml planted in a world-writable ancestor of
+    # $PWD still cannot forge an OK: it can only describe, truthfully, what uv
+    # does in this directory.
+    uvcand=""
+    uvd=$PWD
+    while [ -n "$uvd" ] && [ "$uvd" != / ]; do
+      if [ -f "$uvd/uv.toml" ]; then uvcand="$uvd/uv.toml"; break; fi
+      if [ -f "$uvd/pyproject.toml" ] && grep -qE '^[[:space:]]*(\[tool\.uv|tool\.uv\.)' "$uvd/pyproject.toml" 2>/dev/null; then
+        uvcand="$uvd/pyproject.toml"; break
+      fi
+      uvd=${uvd%/*}
+    done
+    if [ "$PWD" = / ]; then
+      row "N/A" - "uv repo config override" \
+        "the verifier ran from /, where rows 1-5 already asked uv - run it from a project to check that project's uv config"
+    elif [ -n "$uvforeign" ] || [ "${uvmode:-}" != ok ]; then
+      if [ -n "$uvcand" ]; then
+        row WEAK PRESENT "uv repo config override" \
+          "$uvcand may override the host config, but the host probe above could not read uv's settings, so there is nothing to compare it with"
+      else
+        row "N/A" - "uv repo config override" "no uv.toml or pyproject.toml uv config at or above $PWD"
+      fi
+    else
+      uvcdump=$(uv pip list --show-settings 2>&1); uvcrc=$?
+      if [ "$uvcrc" -ne 0 ]; then
+        uvcwhy=$(printf '%s' "$uvcdump" | grep -i 'failed to parse\|^error:' | head -1 | cut -c1-150)
+        row WEAK FUNCTIONAL "uv repo config override" \
+          "uv refuses to run in $PWD (${uvcwhy:-exit $uvcrc}) - nothing installs here, but whatever config uv found here could not be compared with the host's"
+      else
+        uvcnb=$(printf '%s\n' "$uvcdump" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
+        uvcix=$(printf '%s\n' "$uvcdump" | grep 'index_strategy:' | head -1 | sed 's/.*index_strategy:[ ]*//; s/,.*//')
+        uvweak=""; uvodd=""; uvnote=""
+        if [ "$uvnb" = All ] && [ "$uvcnb" != All ]; then
+          uvweak="no-build: All -> ${uvcnb:-<absent>} (sdists build and run setup.py)"
+        fi
+        # exclude-newer: the global cutoff AND every exclude-newer-package entry,
+        # each resolved to an instant (a span against now, as uv does) and set
+        # against what uv reported from "/". This row used to compare the global
+        # alone, so `exclude-newer-package = { botocore = false }` here printed
+        # OK while botocore resolved as if there were no gate (MEASURED, see
+        # scv_uv_en_block), and any span was WEAK "cannot order" - "1 second",
+        # which gates nothing, as much as a stricter "30 days".
+        #
+        # A cutoff later than the host's is not counted as weaker while it is
+        # still at least the window this surface promised (scv_want_hours): the
+        # host's own instant lags behind now by up to a refresh interval, so a
+        # project that pins exclude-newer = "2 days" on a 48h host resolves what
+        # the host resolves (MEASURED: botocore 1.44.5 both ways) and is not a
+        # weakening. Without a recorded window, any later cutoff counts.
+        uvnows=$(date -u +%s)
+        uvwant=""; uvwh=$(scv_want_hours)
+        case "$uvwh" in ''|*[!0-9]*) ;; *) uvwant=$(( uvnows - uvwh * 3600 )) ;; esac
+        uvhb=$(printf '%s\n' "$uvdump" | scv_uv_en_block)
+        uvcb=$(printf '%s\n' "$uvcdump" | scv_uv_en_block)
+        uvhp=$(scv_uv_en_pkgs "$uvhb"); uvcp=$(scv_uv_en_pkgs "$uvcb")
+        uvhgv=$(scv_uv_en_global "$uvhb"); uvcgv=$(scv_uv_en_global "$uvcb")
+        # One line per thing to compare: "<name, empty for the global>|<host
+        # value>|<value here>". A package either side does not name takes that
+        # side's global, which is what uv does with it. `|` and not a tab: read
+        # treats a tab in IFS as whitespace and would swallow the empty name.
+        uvcmp=$(
+          printf '|%s|%s\n' "$uvhgv" "$uvcgv"
+          printf '%s\n%s\n' "$uvhp" "$uvcp" | cut -f1 | grep -v '^$' | sort -u | while IFS= read -r uvpn; do
+            uvph=$(printf '%s\n' "$uvhp" | awk -F'\t' -v n="$uvpn" '$1 == n { print $2; exit }')
+            uvpc=$(printf '%s\n' "$uvcp" | awk -F'\t' -v n="$uvpn" '$1 == n { print $2; exit }')
+            printf '%s|%s|%s\n' "$uvpn" "${uvph:-$uvhgv}" "${uvpc:-$uvcgv}"
+          done
+        )
+        while IFS='|' read -r uvpn uvph uvpc; do
+          [ "$uvph" = "$uvpc" ] && continue
+          uvh=$(scv_uv_cutoff "$uvph" "$uvnows"); uvc=$(scv_uv_cutoff "$uvpc" "$uvnows")
+          [ "$uvh" = off ] && continue
+          if [ -n "$uvpn" ]; then uvwhat="exclude-newer-package $uvpn"; else uvwhat="exclude-newer"; fi
+          uvsp=""
+          case "$uvpc" in *ExcludeNewerSpan\(*)
+            uvsp=$(printf '%s' "$uvpc" | sed 's/.*ExcludeNewerSpan([[:space:]]*//; s/[,)].*//; s/[[:space:]]*$//')
+            case "$uvsp" in
+              *ago) uvsp=" (span \"$uvsp\", which uv resolves like ${uvsp% ago} before now)" ;;
+              *)    uvsp=" (span $uvsp before now)" ;;
+            esac ;;
+          esac
+          if [ "$uvc" = off ]; then
+            case "$uvpc" in *Disabled*) uvoff=1 ;; *) uvoff="" ;; esac
+            if [ -n "$uvoff" ]; then
+              uvweak="${uvweak:+$uvweak; }$uvwhat: $(scv_uv_when "$uvh") -> false ($uvpn skips the age gate entirely; a release of it published minutes ago resolves)"
+            else
+              uvweak="${uvweak:+$uvweak; }$uvwhat: $(scv_uv_when "$uvh") -> removed (a release published minutes ago resolves)"
+            fi
+          elif [ "$uvh" = '?' ] || [ "$uvc" = '?' ]; then
+            uvodd="${uvodd:+$uvodd; }$uvwhat: $(printf '%s' "$uvph" | tr -s ' ') -> $(printf '%s' "$uvpc" | tr -s ' ')"
+          elif [ "$uvc" -le "$uvh" ]; then
+            :
+          elif [ -n "$uvwant" ] && [ "$uvc" -le "$uvwant" ]; then
+            uvnote="${uvnote:+$uvnote; }$uvwhat here is $(scv_uv_when "$uvc")$uvsp, later than the host's $(scv_uv_when "$uvh") but still at least the ${uvwh}h this host promised"
+          else
+            uvweak="${uvweak:+$uvweak; }$uvwhat: $(scv_uv_when "$uvh") -> $(scv_uv_when "$uvc")$uvsp (later, so newer releases${uvpn:+ of $uvpn} resolve)"
+          fi
+        done <<EOF_UVCMP
+$uvcmp
+EOF_UVCMP
+        if [ "${uvix:-}" = FirstIndex ] && [ -n "$uvcix" ] && [ "$uvcix" != FirstIndex ]; then
+          uvweak="${uvweak:+$uvweak; }index-strategy: FirstIndex -> $uvcix (a secondary index can shadow a package name)"
+        fi
+        if [ -n "$uvweak" ]; then
+          row GAP PARSED "uv repo config override" \
+            "in $PWD uv reports weaker settings than the host probe: $uvweak. A uv.toml or pyproject.toml [tool.uv] at or above this directory${uvcand:+ (nearest: $uvcand)} outranks the host config, so every uv command run here, and pip through the wrapper, uses it"
+        elif [ -n "$uvodd" ]; then
+          row WEAK PARSED "uv repo config override" \
+            "in $PWD uv reports a setting this verifier cannot order against the host's: $uvodd${uvcand:+ (nearest uv config: $uvcand)}"
+        elif [ -n "$uvcand" ]; then
+          row OK PARSED "uv repo config override" \
+            "in $PWD uv reports no-build, exclude-newer (global and per package) and index-strategy no weaker than the host probe${uvnote:+ ($uvnote)} - $uvcand does not weaken them"
+        else
+          row "N/A" - "uv repo config override" \
+            "no uv.toml or pyproject.toml uv config at or above $PWD, and uv reports the same settings here as from /"
+        fi
+      fi
+    fi
   fi
 else
   row "N/A" - "uv" "uv not installed"
@@ -1520,7 +1769,7 @@ fi
 # ======================================================================
 
 # --- pip native age gate  [PARSED] ---
-# A DIFFERENT AXIS from the five uv rows above, and deliberately NOT nested
+# A DIFFERENT AXIS from the uv rows above, and deliberately NOT nested
 # inside any `have pip || have pip3` gate: the whole point of this row is the
 # `python3 -m pip` caller, which invokes the MODULE directly and so bypasses
 # both /usr/local/bin/pip and uv's exclude-newer. That caller exists on hosts
@@ -1675,6 +1924,170 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
             "poetry $pov reports ${pod}d, below the ${powant}d this host declared - something shortened the window"
         else
           row OK PARSED "poetry publish-age gate" "poetry $pov implements min-release-age and reports ${pod}d"
+        fi ;;
+    esac
+  fi
+fi
+
+# ======================================================================
+# go (checksum database, toolchain switching)
+# ======================================================================
+
+# --- go checksum verification  [PARSED] ---
+# --- go toolchain switching  [PARSED] ---
+# SHARED by both surfaces. The role used to check only GOPRIVATE, so GOSUMDB=off
+# and GONOSUMDB='*' both read OK, and the action did not check the checksum
+# database at all. `go env` is Go's own merged answer (environment > the per-user
+# `go env -w` file > $GOROOT/go.env), so these rows are PARSED. Asked from "/":
+# with GOTOOLCHAIN=auto, a go.mod in the working directory that names a newer
+# toolchain makes even `go env` download and run it.
+#
+# MEASURED on go1.24.2 and go1.27.4, fetching rsc.io/quote with a checksum
+# database that refuses connections (a lookup fails the fetch, so a fetch that
+# succeeds proves the lookup was skipped):
+#   GOSUMDB=off             fetched, no lookup
+#   GONOSUMDB='*'           fetched, no lookup
+#   GOPRIVATE='*'           fetched, no lookup (GONOSUMDB defaults to GOPRIVATE,
+#                           and `go env GONOSUMDB` reports that default)
+#   GOINSECURE='*'          lookup made, fetch failed: NOT a sumdb bypass
+#   GONOSUMDB=example.com   lookup made for rsc.io: a narrow list exempts only
+#                           what it matches
+# And the layer trap, same versions: after `go env -w GONOSUMDB='*'`, an EXPORTED
+# EMPTY GONOSUMDB (what the role's profile.d exports) still reads back '*' and
+# the lookup is still skipped. Go treats an empty variable as unset and falls
+# back to its env file, so the env layer's blanks cannot clear a `go env -w`
+# value. Each detail says where a value came from for exactly that reason.
+#
+# GOTOOLCHAIN=local for every read but GOTOOLCHAIN's own. Under an exported
+# toolchain NAME go switches before it runs any subcommand, `go env` included:
+# MEASURED on go1.24.2 with GOPROXY=off, GOTOOLCHAIN=go1.23.0 made
+# `go env GOTOOLCHAIN GOVERSION` print "go: downloading go1.23.0" and fail, so
+# with a network the verifier would have fetched and run that toolchain, and
+# read its version back as "the installed" one. Forced local, go answers for
+# the installed toolchain and switches to nothing. GOTOOLCHAIN itself is the
+# exported value when there is one (the environment wins); otherwise go reads
+# it from its env file or go.env, and then `go env` did not switch (MEASURED:
+# after `go env -w GOTOOLCHAIN=go1.23.0` it printed go1.23.0, no download).
+scv_go_env() {
+  if [ "$1" = GOTOOLCHAIN ] && [ -n "${GOTOOLCHAIN:-}" ]; then
+    printf '%s\n' "$GOTOOLCHAIN"; return 0
+  fi
+  if [ "$1" = GOTOOLCHAIN ]; then
+    (cd / && go env "$1") 2>/dev/null | head -1 | tr -d '\r'
+  else
+    (cd / && GOTOOLCHAIN=local go env "$1") 2>/dev/null | head -1 | tr -d '\r'
+  fi
+}
+scv_go_src() { # KEY -> where Go got its value, in words; empty when unknown
+  local k="$1" gf gr
+  if [ -n "${!k:-}" ]; then
+    printf 'from the %s environment variable' "$k"; return 0
+  fi
+  gf=$(scv_go_env GOENV)
+  if [ -n "$gf" ] && [ -f "$gf" ] && grep -q "^$k=." "$gf" 2>/dev/null; then
+    if [ "${!k+set}" = set ]; then
+      printf 'from %s, written by `go env -w` - the EMPTY %s exported here does not override it, because Go treats an empty variable as unset (MEASURED); `go env -u %s` removes it' "$gf" "$k" "$k"
+    else
+      printf 'from %s, written by `go env -w` (`go env -u %s` removes it)' "$gf" "$k"
+    fi
+    return 0
+  fi
+  gr=$(scv_go_env GOROOT)
+  if [ -n "$gr" ] && grep -q "^$k=." "$gr/go.env" 2>/dev/null; then
+    printf "from %s/go.env, the Go distribution's own default" "$gr"; return 0
+  fi
+  if [ "$k" = GONOSUMDB ] && [ -n "$(scv_go_env GOPRIVATE)" ]; then
+    printf '(GONOSUMDB is unset, so Go uses GOPRIVATE='"'"'%s'"'"' %s)' "$(scv_go_env GOPRIVATE)" "$(scv_go_src GOPRIVATE)"
+  fi
+  return 0
+}
+if ! have go; then
+  row "N/A" - "go checksum verification" "go not installed"
+  row "N/A" - "go toolchain switching"   "go not installed"
+elif command -v requested >/dev/null 2>&1 && ! requested go; then
+  row "N/A" - "go checksum verification" "go installed but not in the requested ecosystems"
+  row "N/A" - "go toolchain switching"   "go installed but not in the requested ecosystems"
+else
+  gosdb=$(scv_go_env GOSUMDB)
+  # The EFFECTIVE exemption list: go env reports GONOSUMDB with its GOPRIVATE
+  # default already applied (MEASURED), so GOPRIVATE needs no separate test.
+  gonos=$(scv_go_env GONOSUMDB)
+  if [ "$gosdb" = off ]; then
+    row GAP PARSED "go checksum verification" \
+      "go reports GOSUMDB=off $(scv_go_src GOSUMDB) - no module download is checked against the checksum database"
+  elif [ -n "$gonos" ]; then
+    # Go matches each comma-separated glob against module path PREFIXES, so a
+    # '*' element covers every first path element, which is every module.
+    case ",$gonos," in
+      *",*,"*)
+        row GAP PARSED "go checksum verification" \
+          "go reports GONOSUMDB='$gonos' $(scv_go_src GONOSUMDB) - the '*' matches every module path, so EVERY module skips the checksum database" ;;
+      *)
+        row GAP PARSED "go checksum verification" \
+          "go reports GONOSUMDB='$gonos' $(scv_go_src GONOSUMDB) - modules matching it skip the checksum database" ;;
+    esac
+  else
+    case "$gosdb" in
+      sum.golang.org|sum.golang.org+*|"sum.golang.org "*|sum.golang.google.cn|sum.golang.google.cn+*|"sum.golang.google.cn "*)
+        row OK PARSED "go checksum verification" \
+          "go reports GOSUMDB='$gosdb' and no GONOSUMDB/GOPRIVATE exemption - every module download is checked against the checksum database" ;;
+      '')
+        row WEAK PARSED "go checksum verification" "go did not report a GOSUMDB value" ;;
+      *)
+        row WEAK PARSED "go checksum verification" \
+          "go reports GOSUMDB='$gosdb' $(scv_go_src GOSUMDB) - a checksum database other than sum.golang.org, which this verifier cannot vouch for" ;;
+    esac
+  fi
+
+  # GOTOOLCHAIN (go1.21+). Unset, it comes from $GOROOT/go.env, which says `auto`
+  # in the go.dev tarballs AND in Ubuntu 24.04's golang-1.22 package (both
+  # MEASURED): go then downloads and runs whatever toolchain a go.mod or go.work
+  # names. `local` refuses instead. `path` and `+path` switch only to a toolchain
+  # already on PATH and never download.
+  #
+  # A plain toolchain NAME (go1.24.2, no +auto/+path) never follows go.mod
+  # either. MEASURED on go1.24.2 with GOPROXY=off, in a module whose go.mod
+  # says go 1.99.0: GOTOOLCHAIN=go1.24.2 printed "go.mod requires go >= 1.99.0
+  # (running go 1.24.2; GOTOOLCHAIN=go1.24.2)", exactly as local does, while
+  # go1.24.2+auto and auto printed "downloading go1.99.0". A name other than
+  # the installed version is still a toolchain fetched at build time
+  # (GOTOOLCHAIN=go1.23.0: "downloading go1.23.0" for any command), so only a
+  # name equal to the installed version is OK. It used to fall through to the
+  # GAP below, which said go downloads what a go.mod names.
+  gotc=$(scv_go_env GOTOOLCHAIN)
+  gov=$(scv_go_env GOVERSION)
+  [ -n "$gov" ] || gov=$( (cd / && go version) 2>/dev/null | awk '{print $3}')
+  gonum=${gov#go}
+  gotcname=""
+  case "$gotc" in go[0-9]*) case "$gotc" in *+*) ;; *) gotcname=$gotc ;; esac ;; esac
+  if [ -n "$gonum" ] && [ "$(printf '1.21\n%s\n' "$gonum" | sort -V | head -1)" != "1.21" ]; then
+    row OK PARSED "go toolchain switching" \
+      "$gov predates toolchain switching (GOTOOLCHAIN, added in go1.21), so it never downloads a toolchain a go.mod asks for"
+  elif [ -n "$gotcname" ] && [ "$gotcname" = "$gov" ]; then
+    row OK PARSED "go toolchain switching" \
+      "go reports GOTOOLCHAIN=$gotc $(scv_go_src GOTOOLCHAIN), the installed version - a plain toolchain name never follows a go.mod or go.work (only name+auto does), so one that asks for a newer toolchain is refused, not downloaded and run"
+  elif [ -n "$gotcname" ]; then
+    row WEAK PARSED "go toolchain switching" \
+      "go reports GOTOOLCHAIN=$gotc $(scv_go_src GOTOOLCHAIN), not the installed $gov - go runs $gotc for every command, downloading it through GOPROXY when this host does not have it. A go.mod or go.work cannot choose a different toolchain (a plain name never follows them; only name+auto does), but this one is fetched at build time rather than installed"
+  else
+    case "$gotc" in
+      local)
+        row OK PARSED "go toolchain switching" \
+          "go reports GOTOOLCHAIN=local - a go.mod that asks for a newer toolchain is refused, not downloaded and run" ;;
+      path|*+path)
+        row WEAK PARSED "go toolchain switching" \
+          "go reports GOTOOLCHAIN=$gotc $(scv_go_src GOTOOLCHAIN) - go switches to a newer toolchain it finds on PATH when a go.mod asks for one; it never downloads one" ;;
+      *)
+        if [ -z "${GOTOOLCHAIN:-}" ] && grep -qs '^[^#]*GOTOOLCHAIN=local' /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
+          # Same shape as the role's GOFLAGS row: the env layer reaches only
+          # PAM-launched and login shells, so THIS process may just not have it.
+          # Only when nothing in this environment set it: an exported
+          # GOTOOLCHAIN=auto is an override, not a missing env layer.
+          row WEAK PRESENT "go toolchain switching" \
+            "GOTOOLCHAIN is '${gotc:-<empty>}' in THIS process $(scv_go_src GOTOOLCHAIN), but GOTOOLCHAIN=local is in /etc/environment or /etc/profile.d - non-PAM contexts (docker exec, systemd, cron, a container CMD) do not load it, and there go downloads and runs whatever toolchain a go.mod asks for. Verify from a login shell"
+        else
+          row GAP PARSED "go toolchain switching" \
+            "go reports GOTOOLCHAIN='${gotc:-<empty>}' $(scv_go_src GOTOOLCHAIN) - go downloads and runs the toolchain a go.mod or go.work names, a binary fetched at build time"
         fi ;;
     esac
   fi
@@ -1874,7 +2287,7 @@ composer_ignore_all() {
 # kept as a PASS-THROUGH rather than deleted so its 24 call sites stay valid
 # and the intent stays greppable. If a renderer is ever reverted to using
 # $ROWS as a format string, restore the sed and revert BOTH renderers with it.
-cq() { printf '%s' "$1"; }
+# (cq() itself is defined at the top of this file, before the poetry rows use it.)
 # first useful line of a composer failure. The first line of composer's output
 # is often NOT the cause: MEASURED, a wrapper injecting a bogus flag leads with
 # "Composer could not detect the root package (a/b) version, defaulting to
@@ -2135,7 +2548,7 @@ if have composer; then
     row WEAK PRESENT "composer publish-age gate" "could not parse a version out of 'composer --version'"
   elif [ "$cmaj" -lt 2 ] || { [ "$cmaj" -eq 2 ] && [ "$cmin" -lt 11 ]; }; then
     scv_toolchain_gap composer.age-gate PARSED "composer publish-age gate" \
-      "composer $cv does NOT implement config.policy.cooldown (added in 2.11.0) - the key is written and ignored, and composer echoes it back anyway, so a release published minutes ago still resolves. See docs/composer-bundler-cooldown-by-distro.md"
+      "composer $cv does NOT implement config.policy.cooldown (added in 2.11.0) - the key is written and ignored, and composer echoes it back anyway, so a release published minutes ago still resolves. See $(scv_doc docs/composer-bundler-cooldown-by-distro.md)"
   elif [ "$crc" -ne 0 ]; then
     row GAP PARSED "composer publish-age gate" \
       "composer $cv implements the cooldown but cannot report its config (see the composer config in effect row)"
@@ -2571,12 +2984,14 @@ cargo_dispatch_differs() {
 # MEASURED against both shipping wrappers with the backend installed:
 #   cargo build             -> cooldown build       (gated)
 #   cargo update            -> cooldown update      (gated)
-#   cargo add serde         -> add serde            (UNGATED, and SILENT)
-#   cargo generate-lockfile -> generate-lockfile    (UNGATED, and SILENT)
+#   cargo add serde         -> add serde            (UNGATED)
+#   cargo generate-lockfile -> generate-lockfile    (UNGATED)
 #   cargo vendor / remove   -> likewise
-# Silent because the wrapper's "not age-gated" warning lives in the branch
-# taken when cargo-cooldown is ABSENT: the hardened runner says less about the
-# hole than the unhardened one.
+# These were once SILENT too, because the wrapper's "not age-gated" warning
+# lived only in the branch taken when cargo-cooldown is ABSENT. Both wrappers
+# now warn in the backend-present branch as well ("'cargo add' writes
+# Cargo.lock and is NOT age-gated"), but a warning is not a gate, and
+# cargo-cooldown has no subcommand to route them through.
 cargo_ungated_writers() {
   local sub wd list=""
   for sub in update add generate-lockfile vendor remove; do
@@ -2855,7 +3270,7 @@ else
     cerr=$(cargo_delegate_err "$creal")
     if cargo_run_ok_as_cargo "$creal" --version; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
-        "the wrapper's delegate '$creal' runs when invoked as \`cargo\` but FAILS under its own name: ${cerr}. It is rustup's argv[0]-dispatching proxy, renamed by a plain mv. The wrapper's own call is fixed up with exec -a, but re-entry is not: cargo hands subcommands its own path via \$CARGO. This probe measures the asymmetry only; that cargo-cooldown then dies on re-entry is recorded in design-principles.md Axis 5, not observed here"
+        "the wrapper's delegate '$creal' runs when invoked as \`cargo\` but FAILS under its own name: ${cerr}. It is rustup's argv[0]-dispatching proxy, renamed by a plain mv. The wrapper's own call is fixed up with exec -a, but re-entry is not: cargo hands subcommands its own path via \$CARGO. This probe measures the asymmetry only; that cargo-cooldown then dies on re-entry is recorded in $(scv_doc docs/design-principles.md#assumed-canonical-paths), not observed here"
     else
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper's delegate '$creal' does not execute at all (${cerr}) - \`cargo build\` is broken, not gated"
@@ -3049,8 +3464,18 @@ else
       row WEAK PRESENT "cargo lockfile writers routed" \
         "could not dispatch-probe the writer subcommands - unverified, not credited"
     elif [ -n "$cungated" ]; then
-      row GAP FUNCTIONAL "cargo lockfile writers routed" \
-        "\`cargo build\` is routed through the age gate but these lockfile WRITERS are not: ${cungated}. cooldown.toml sets lockfile-baseline='floor', so every later gated build ACCEPTS whatever they pinned - one \`cargo ${cungated%% *}\` switches the gate off for every build after it. The wrapper's 'not age-gated' warning fires only when the backend is ABSENT, so this state is SILENT. design-principles.md Axis 3"
+      # A TOOL LIMIT, NOT A CONFIG GAP. cargo-cooldown has no subcommand for
+      # these writers (both wrappers say so), so no re-run of the hardening
+      # routes them: as a plain row() the action counted this "fixable by
+      # re-running", and `fail-on: config` failed every job that installed
+      # cargo-cooldown, permanently. Classed like a toolchain gap instead. The
+      # role has no classes, so there it is an ordinary GAP.
+      # The old detail said this state was SILENT. It is not: both wrappers
+      # print "'cargo <writer>' writes Cargo.lock and is NOT age-gated" on every
+      # such call with the backend installed (MEASURED: `cargo add` on the role
+      # wrapper). A warning is not a gate, so it stays a GAP.
+      scv_toolchain_gap cargo.lockfile-writers FUNCTIONAL "cargo lockfile writers routed" \
+        "\`cargo build\` is routed through the age gate but these lockfile WRITERS are not: ${cungated}. cooldown.toml sets lockfile-baseline='floor', so every later gated build ACCEPTS whatever they pinned - one \`cargo ${cungated%% *}\` switches the gate off for every build after it. The wrapper prints a 'writes Cargo.lock and is NOT age-gated' warning for each of them, but a warning is not a gate. No configuration closes this: cargo-cooldown has no subcommand for these writers. See $(scv_doc docs/design-principles.md#gated-the-entry-points-missed-the-state-writers)"
     else
       row OK FUNCTIONAL "cargo lockfile writers routed" \
         "update, add, generate-lockfile, vendor and remove all dispatch through \`cargo cooldown\` - no ungated path writes the lockfile the gated builds then trust. (Routing only; whether cooldown refuses is the gate row's caveat)"
@@ -3137,7 +3562,7 @@ fi
 # resolves as its config home). BUNDLE_APP_CONFIG is redirected to an empty
 # temp path, so a checked-out project's own .bundle/config is deliberately
 # excluded — bundler gives that layer higher precedence and this row cannot
-# speak for it.
+# speak for it. The "bundler local config override" row below does.
 
 bundler_bin=""
 for bcand in bundle bundler; do
@@ -3355,6 +3780,88 @@ else
     rm -rf "$btmp" "$btmp2"
   fi
 
+  # --- bundler local config override  [FUNCTIONAL] ---
+  # The row above points BUNDLE_APP_CONFIG at an empty temp dir, so it measures
+  # the user layer only (its LAYER SCOPE note). Bundler's LOCAL layer -
+  # <project>/.bundle/config, or $BUNDLE_APP_CONFIG/config - outranks the
+  # environment and ~/.bundle/config. MEASURED (bundler 2.4.20, role applied):
+  # in a project whose .bundle/config says BUNDLE_FROZEN: "false",
+  # `bundle install --local` resolved past a lockfile that does not name the
+  # gem, while the row above printed OK FUNCTIONAL from inside that project.
+  # So find the local config bundler would read from $PWD, and rerun the same
+  # admission fixture with it in force. Only its BUNDLE_FROZEN and
+  # BUNDLE_DEPLOYMENT lines are copied: a project config can also name a
+  # gemfile, bundler EVALUATES a Gemfile, and a verifier judging a checkout must
+  # not run that checkout's code. This row can only lower the verdict: OK when
+  # the local config leaves pinning on, GAP when it switches it off.
+  blgf=""; blcfg=""
+  if [ -n "${BUNDLE_GEMFILE:-}" ]; then
+    case "$BUNDLE_GEMFILE" in /*) blgf=$BUNDLE_GEMFILE ;; *) blgf="$PWD/$BUNDLE_GEMFILE" ;; esac
+  else
+    # Bundler searches up from the working directory, gems.rb then Gemfile in
+    # each directory (Bundler::SharedHelpers#find_gemfile).
+    bld=$PWD
+    while [ -n "$bld" ]; do
+      if [ -f "$bld/gems.rb" ]; then blgf="$bld/gems.rb"; break; fi
+      if [ -f "$bld/Gemfile" ]; then blgf="$bld/Gemfile"; break; fi
+      [ "$bld" = / ] && break
+      bld=${bld%/*}; [ -n "$bld" ] || bld=/
+    done
+  fi
+  blroot=""
+  if [ -n "$blgf" ]; then blroot=${blgf%/*}; [ -n "$blroot" ] || blroot=/; fi
+  if [ -n "${BUNDLE_APP_CONFIG:-}" ]; then
+    case "$BUNDLE_APP_CONFIG" in
+      /*) blcfg="$BUNDLE_APP_CONFIG/config" ;;
+      *)  [ -n "$blroot" ] && blcfg="$blroot/$BUNDLE_APP_CONFIG/config" ;;
+    esac
+  elif [ -n "$blroot" ]; then
+    blcfg="$blroot/.bundle/config"
+  fi
+  blhost=0
+  [ -n "${bout:-}" ] && [ -n "${brx:-}" ] && printf '%s\n' "$bout" | grep -qE "$brx" && blhost=1
+  if [ -z "$blcfg" ]; then
+    row "N/A" - "bundler local config override" \
+      "no Gemfile or gems.rb at or above $(cq "$PWD") and no BUNDLE_APP_CONFIG - bundler reads no local config here"
+  elif [ ! -f "$blcfg" ]; then
+    row "N/A" - "bundler local config override" \
+      "no local config at $(cq "$blcfg") - nothing here overrides the user config"
+  else
+    blkeys=$(grep -E "^[\"']?BUNDLE_(FROZEN|DEPLOYMENT)[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
+    blshow=$(printf '%s' "$blkeys" | tr '\n\t' '  ' | cut -c1-120)
+    if [ -z "$blkeys" ]; then
+      row "N/A" - "bundler local config override" \
+        "$(cq "$blcfg") sets neither BUNDLE_FROZEN nor BUNDLE_DEPLOYMENT, so it cannot switch lockfile pinning off"
+    elif [ "$blhost" -ne 1 ]; then
+      row "N/A" - "bundler local config override" \
+        "lockfile pinning was not shown in effect at the user level either (see bundler lockfile pinning), so there is nothing for $(cq "$blcfg") to switch off"
+    else
+      bl3=$(mktemp -d 2>/dev/null)
+      if [ -z "$bl3" ] || [ ! -d "$bl3" ] || ! bundler_fixture "$bl3" || ! mkdir -p "$bl3/app-config" \
+         || ! printf -- '---\n%s\n' "$blkeys" > "$bl3/app-config/config"; then
+        row WEAK PRESENT "bundler local config override" \
+          "$(cq "$blcfg") sets $(cq "$blshow"), but the probe fixture could not be built, so its effect was not measured"
+      else
+        blout=$(cd "$bl3" && env BUNDLE_GEMFILE="$bl3/Gemfile" \
+                                 BUNDLE_APP_CONFIG="$bl3/app-config" \
+                                 BUNDLE_PATH="$bl3/vendor" \
+                                 BUNDLE_RETRY=0 \
+                                 "$bundler_bin" install --local 2>&1) || true
+        if printf '%s\n' "$blout" | grep -qE "$brx"; then
+          row OK FUNCTIONAL "bundler local config override" \
+            "the local config at $(cq "$blcfg") ($(cq "$blshow")) leaves pinning on: with those lines in force bundler $bver still refused a gem the lockfile does not name"
+        elif printf '%s\n' "$blout" | grep -qiE 'could not find gem'; then
+          row GAP FUNCTIONAL "bundler local config override" \
+            "the local config at $(cq "$blcfg") switches lockfile pinning off ($(cq "$blshow")): with those lines in force bundler $bver resolved past a lockfile that does not name the gem. Bundler's local config outranks BUNDLE_FROZEN in the environment and ~/.bundle/config, so \`bundle install\` and \`bundle add\` in this project are not pinned"
+        else
+          row WEAK FUNCTIONAL "bundler local config override" \
+            "$(cq "$blcfg") sets $(cq "$blshow"), and the fixture run with those lines produced neither a refusal nor a resolution: $(printf '%s\n' "$blout" | grep -viE 'deprecat|didyoumean|warning:' | head -1 | tr '\t' ' ' | cut -c1-160)"
+        fi
+      fi
+      rm -rf "$bl3" 2>/dev/null
+    fi
+  fi
+
   # --- bundler publish-age gate  [PARSED] ---
   # cooldown landed in 4.0.13, and needs ruby >= 3.2. The version check has to
   # come first: MEASURED, `bundle config get cooldown` echoes the value on 2.4.20,
@@ -3371,7 +3878,7 @@ else
     row WEAK PRESENT "bundler publish-age gate" "could not read a version from bundler; the gate was not checked"
   elif [ "$(printf '4.0.13\n%s\n' "$bver" | sort -V | head -1)" != "4.0.13" ]; then
     scv_toolchain_gap bundler.age-gate PARSED "bundler publish-age gate" \
-      "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See docs/composer-bundler-cooldown-by-distro.md"
+      "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See $(scv_doc docs/composer-bundler-cooldown-by-distro.md)"
   else
     bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
     # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
@@ -3887,9 +4394,11 @@ fi
 # --- gradle HTTPS-only repos  [FUNCTIONAL] ---
 # ---------------------------------------------------------------- gradle -----
 # Gradle's hardening is an init SCRIPT, not a key/value file: the role writes
-# $GRADLE_USER_HOME/init.d/supply-chain-security.gradle (Groovy, HTTP-repo
-# refusal only) and harden.sh writes $GRADLE_USER_HOME/init.gradle.kts (Kotlin,
-# HTTP-repo refusal PLUS failOnDynamicVersions/failOnChangingVersions).
+# $GRADLE_USER_HOME/init.d/supply-chain-security.gradle (Groovy) and harden.sh
+# writes $GRADLE_USER_HOME/init.gradle.kts (Kotlin). Both refuse an http://
+# repository and both call failOnDynamicVersions()/failOnChangingVersions();
+# the role's script guards those two calls with respondsTo(), the action's
+# does not (tasks/gradle.yml, action/harden.sh harden_gradle).
 #
 # Three things follow, and they shape the whole probe.
 #
@@ -3901,10 +4410,19 @@ fi
 # 2. `gradle dependencies` REPORTS an unresolved graph and exits 0 (474b165).
 #    The only honest evidence is a real resolve(). This probe forces one from a
 #    file:// repo it writes itself, so it stays entirely offline.
-# 3. Gradle has FOUR http-capable repository containers and both writers hook
-#    exactly ONE (project.repositories, maven only). The probe baits all four,
-#    because "HTTPS-only repos" is what the row is NAMED, and a plugin jar
-#    fetched over http from buildscript{} executes at configuration time.
+# 3. Gradle has FOUR http-capable repository containers: project
+#    repositories, buildscript{} (the plugin classpath), and the settings
+#    pluginManagement{} and dependencyResolutionManagement{}. Until ECH-171
+#    (bb5446d) both writers hooked only project.repositories, and only maven
+#    repos, so this probe measured the other three, and ivy, as ADDED on gradle
+#    8.14.3. Both writers now hook all four, maven and ivy alike (ECH-171,
+#    verified per scope on 8.14.3), with one difference: the role's settings
+#    hook sits behind respondsTo('beforeSettings') (tasks/gradle.yml), so on a
+#    gradle without beforeSettings (older than 6) the role covers project and
+#    buildscript repositories only; the action's Kotlin init script calls
+#    beforeSettings unguarded. The probe still baits all four, because
+#    "HTTPS-only repos" is what the row is NAMED, and a plugin jar fetched over
+#    http from buildscript{} executes at configuration time.
 #
 # CAVEATS this probe cannot remove, documented rather than papered over:
 #   - Running gradle at all populates $GRADLE_USER_HOME/{caches,native,daemon}.
@@ -3963,9 +4481,9 @@ SCEOF
     > "$r/1.0/probe-1.0.jar"
   cat > "$tmp/settings.gradle" <<'SCEOF'
 rootProject.name = 'sc-probe'
-// Baits #1 and #2: the two SETTINGS-level repository containers. Neither
-// writer hooks them -- both hook only allprojects{repositories}, which is
-// project.repositories. MEASURED on 8.14.3 with each writer's file: ADDED.
+// Baits #1 and #2: the two SETTINGS-level repository containers. Before
+// ECH-171 (bb5446d) neither writer hooked them (MEASURED on 8.14.3 with each
+// writer's file: ADDED); both now do, through beforeSettings.
 // The property form (not the pluginManagement{} block) is used deliberately:
 // it is legal after rootProject.name, and a throw from the hook is CAUGHT
 // here rather than aborting settings evaluation. MEASURED both ways.
@@ -3983,21 +4501,23 @@ SCEOF
   cat > "$tmp/build.gradle" <<'SCEOF'
 def sc = [:]
 // Bait #3: an http:// MAVEN repo in project.repositories -- the one container
-// both writers hook. MEASURED: with no init script gradle ACCEPTS it here
+// both writers hooked before ECH-171. MEASURED: with no init script gradle ACCEPTS it here
 // (gradle's own insecure-protocol refusal fires later, at RESOLUTION), so a
 // BLOCKED verdict cannot be manufactured by gradle's built-in behaviour.
 sc.http = 'ADDED'
 sc.httpmsg = ''
 try { repositories { maven { url = uri('http://127.0.0.1:9/sc-probe-http') } } }
 catch (Throwable t) { sc.http = 'BLOCKED'; sc.httpmsg = String.valueOf(t.message) }
-// Bait #4: an http:// IVY repo in the SAME container. Both writers test
-// `instanceof MavenArtifactRepository`, so ivy slips past. MEASURED ADDED.
+// Bait #4: an http:// IVY repo in the SAME container. Before ECH-171 both
+// writers tested only `instanceof MavenArtifactRepository`, so ivy slipped
+// past (MEASURED ADDED); both now test IvyArtifactRepository too.
 sc.ivy = 'ADDED'
 try { repositories { ivy { url = uri('http://127.0.0.1:9/sc-ivy-http') } } }
 catch (Throwable t) { sc.ivy = 'BLOCKED' }
 // Bait #5: buildscript.repositories -- the PLUGIN CLASSPATH container, where
 // gradle fetches jars it then EXECUTES at configuration time. A different
-// container from project.repositories; neither writer hooks it. MEASURED ADDED.
+// container from project.repositories; neither writer hooked it before ECH-171
+// (MEASURED ADDED); both now do.
 sc.bs = 'ADDED'
 try { buildscript { repositories { maven { url = uri('http://127.0.0.1:9/sc-bs-http') } } } }
 catch (Throwable t) { sc.bs = 'BLOCKED' }
@@ -4193,10 +4713,12 @@ fi
 
 # --- gradle dynamic-version refusal  [FUNCTIONAL] ---
 # ---------------------------------------------- gradle: dynamic versions -----
-# CI-only protection: action/harden.sh:1409-1410 emits failOnDynamicVersions()
-# and failOnChangingVersions(); tasks/gradle.yml deploys NO resolutionStrategy
-# at all, so this row reads GAP on a role-hardened host. That is the point of
-# the row - it is the divergence, reported.
+# Both writers call failOnDynamicVersions() and failOnChangingVersions() on
+# every configuration: action/harden.sh (harden_gradle) unconditionally, and
+# tasks/gradle.yml behind respondsTo(), so an older gradle skips them instead of
+# failing every build. (This comment used to call it CI-only: the role's script
+# once deployed no resolutionStrategy at all.) Gradle added both methods in 6.1
+# (@since 6.1 in ResolutionStrategy.java; absent from the 6.0 source).
 #
 # The evidence is a real resolve() from a file:// repo built in a temp dir.
 # `gradle dependencies` REPORTS an unresolved graph and exits 0 (474b165): it
@@ -4253,9 +4775,9 @@ SCEOF
     > "$r/1.0/probe-1.0.jar"
   cat > "$tmp/settings.gradle" <<'SCEOF'
 rootProject.name = 'sc-probe'
-// Baits #1 and #2: the two SETTINGS-level repository containers. Neither
-// writer hooks them -- both hook only allprojects{repositories}, which is
-// project.repositories. MEASURED on 8.14.3 with each writer's file: ADDED.
+// Baits #1 and #2: the two SETTINGS-level repository containers. Before
+// ECH-171 (bb5446d) neither writer hooked them (MEASURED on 8.14.3 with each
+// writer's file: ADDED); both now do, through beforeSettings.
 // The property form (not the pluginManagement{} block) is used deliberately:
 // it is legal after rootProject.name, and a throw from the hook is CAUGHT
 // here rather than aborting settings evaluation. MEASURED both ways.
@@ -4273,21 +4795,23 @@ SCEOF
   cat > "$tmp/build.gradle" <<'SCEOF'
 def sc = [:]
 // Bait #3: an http:// MAVEN repo in project.repositories -- the one container
-// both writers hook. MEASURED: with no init script gradle ACCEPTS it here
+// both writers hooked before ECH-171. MEASURED: with no init script gradle ACCEPTS it here
 // (gradle's own insecure-protocol refusal fires later, at RESOLUTION), so a
 // BLOCKED verdict cannot be manufactured by gradle's built-in behaviour.
 sc.http = 'ADDED'
 sc.httpmsg = ''
 try { repositories { maven { url = uri('http://127.0.0.1:9/sc-probe-http') } } }
 catch (Throwable t) { sc.http = 'BLOCKED'; sc.httpmsg = String.valueOf(t.message) }
-// Bait #4: an http:// IVY repo in the SAME container. Both writers test
-// `instanceof MavenArtifactRepository`, so ivy slips past. MEASURED ADDED.
+// Bait #4: an http:// IVY repo in the SAME container. Before ECH-171 both
+// writers tested only `instanceof MavenArtifactRepository`, so ivy slipped
+// past (MEASURED ADDED); both now test IvyArtifactRepository too.
 sc.ivy = 'ADDED'
 try { repositories { ivy { url = uri('http://127.0.0.1:9/sc-ivy-http') } } }
 catch (Throwable t) { sc.ivy = 'BLOCKED' }
 // Bait #5: buildscript.repositories -- the PLUGIN CLASSPATH container, where
 // gradle fetches jars it then EXECUTES at configuration time. A different
-// container from project.repositories; neither writer hooks it. MEASURED ADDED.
+// container from project.repositories; neither writer hooked it before ECH-171
+// (MEASURED ADDED); both now do.
 sc.bs = 'ADDED'
 try { buildscript { repositories { maven { url = uri('http://127.0.0.1:9/sc-bs-http') } } } }
 catch (Throwable t) { sc.bs = 'BLOCKED' }
@@ -4473,10 +4997,10 @@ elif have gradle; then
   elif [ "$gdflag" = "true" ]; then
     row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver reports failingOnDynamicVersions=true yet RESOLVED com.example:probe:1.+ - the setting is accepted and NOT enforced on this version"
   else
-    row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver resolved com.example:probe:1.+; failingOnDynamicVersions=$gdflag. The role's init script IS deployed and calls failOnDynamicVersions()/failOnChangingVersions(), guarded by respondsTo() - so this is NOT 'the role deploys nothing'. But those methods need gradle >= 6.0, and on an older gradle the guard correctly SKIPS them (rather than bricking the build with a missing-method error), leaving this gradle with no dynamic-version control. Upgrade to gradle >= 6.0.$ghome"
+    row GAP FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver resolved com.example:probe:1.+; failingOnDynamicVersions=$gdflag. The role's init script IS deployed and calls failOnDynamicVersions()/failOnChangingVersions(), guarded by respondsTo() - so this is NOT 'the role deploys nothing'. But those methods need gradle >= 6.1 (@since 6.1 in gradle's ResolutionStrategy), and on an older gradle the guard correctly SKIPS them (rather than bricking the build with a missing-method error), leaving this gradle with no dynamic-version control. Upgrade to gradle >= 6.1.$ghome"
   fi
 elif gradle_script_deployed; then
-  row WEAK PRESENT "gradle dynamic-version refusal" "no 'gradle' on PATH, but an init script IS deployed under $(gradle_san "$gwrite") and will run for ./gradlew builds - including failOnDynamicVersions(), a hard evaluation error on gradle < 6.0. Unexercised in both directions"
+  row WEAK PRESENT "gradle dynamic-version refusal" "no 'gradle' on PATH, but an init script IS deployed under $(gradle_san "$gwrite") and will run for ./gradlew builds - including failOnDynamicVersions(), which the role's script skips on gradle < 6.1 and the action's script calls unguarded, a hard evaluation error there. Unexercised in both directions"
 else
   row "N/A" - "gradle dynamic-version refusal" "gradle not installed and no init script deployed"
 fi

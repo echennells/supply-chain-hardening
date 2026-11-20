@@ -67,14 +67,17 @@ supply-chain-verify — what is ACTUALLY enforcing in this job
 USAGE
   verify.sh [--strict] [--quiet] [--emit=TARGET] [--fail-on=POLICY]
 
-  --strict          also fail when a protection could only be verified as
-                    PRESENT — unproven counts as unprotected.
+  --strict          also fail on any WEAK row: a protection verified only as
+                    PRESENT, or one in effect with a caveat the row states —
+                    unproven counts as unprotected.
   --quiet           suppress the table on stdout. The job summary and the exit
                     code are still produced.
   --emit=TARGET     auto|github|gitlab|circleci|azure|buildkite|plain
   --fail-on=POLICY  any     fail on any gap (default; today's contract)
                     config  fail only on gaps a re-run of harden.sh can close,
-                            not on ones that need a newer toolchain
+                            not on ones no configuration can close (a
+                            toolchain too old for the setting, or a tool
+                            with no such control)
                     never   always exit 0; report only
 
 WHY THIS EXISTS
@@ -115,9 +118,11 @@ EVIDENCE STRENGTH — reported per row, because it is the whole point
 STATUS
   OK    verified at the stated evidence strength
   GAP   the protection this job promised is NOT in effect
-  WEAK  the promise is met but we could not PROVE it — unverified
+  WEAK  not counted as coverage: verified only as PRESENT, or parsed or
+        observed in effect with a caveat the row names
   N/A   nothing to check here. The EVIDENCE column says which kind:
-        ABSENT    the tool is not installed
+        ABSENT    nothing here to check: the tool is not installed, or what
+                  the row looks for (a project config, an SDK) is not here
         BYDESIGN  this job never asked for it
 
 Exit 0 when there are no GAP rows, 1 otherwise. WEAK does not fail on its own
@@ -146,6 +151,15 @@ case "$SCV_FAIL_ON" in
   *) echo "[supply-chain-verify] warning: unknown --fail-on '$SCV_FAIL_ON' — using 'any'" >&2
      SCV_FAIL_ON=any ;;
 esac
+
+# Where a row's doc pointer leads. A repo-relative path is no use in a CI log,
+# so details carry a URL. action/verify/action.yml passes the ref the job ran
+# this action at (github.action_ref: a tag, a branch or a SHA), so the doc
+# matches the code that printed it; anything else falls back to main. Only
+# characters a git ref can use reach the URL.
+SCV_DOCS_REF="${SCV_DOCS_REF:-main}"
+case "$SCV_DOCS_REF" in ''|*[!A-Za-z0-9._/-]*) SCV_DOCS_REF=main ;; esac
+SCV_DOCS_URL="https://github.com/echennells/supply-chain-hardening/blob/$SCV_DOCS_REF"
 
 # ---- platform adapter ----
 #
@@ -201,6 +215,7 @@ GAPS=0
 GAPS_CONFIG=0
 GAPS_TOOLCHAIN=0
 WEAKS=0
+WEAK_PRESENT=0   # the WEAK rows whose evidence is only PRESENT; the footer reports both
 OKS=0
 NA_ABSENT=0
 NA_DESIGN=0
@@ -380,7 +395,7 @@ row() { # status, evidence, protection, detail
   NROWS=$((NROWS + 1))
   case "$s" in
     GAP)  GAPS=$((GAPS + 1)) ;;
-    WEAK) WEAKS=$((WEAKS + 1)) ;;
+    WEAK) WEAKS=$((WEAKS + 1)); [ "$e" = PRESENT ] && WEAK_PRESENT=$((WEAK_PRESENT + 1)) ;;
     OK)   OKS=$((OKS + 1)) ;;
     "N/A") if [ "$e" = BYDESIGN ]; then NA_DESIGN=$((NA_DESIGN + 1)); else NA_ABSENT=$((NA_ABSENT + 1)); fi ;;
   esac
@@ -636,7 +651,7 @@ scv_hooks_k=$(printf '%s\n' "$scv_hooks" | awk -F'\t' '$1 == "K" { print $2 }')
 if [ -n "$scv_hooks_u" ]; then
   scv_hook_n=$(printf '%s\n' "$scv_hooks_u" | wc -l | tr -d ' ')
   scv_hook_list=$(printf '%s\n' "$scv_hooks_u" | scv_hook_join)
-  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
+  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" at ${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}/docs/verify.md#dont-run-it-on-a-host-you-suspect-is-compromised" >&2
   row WEAK PRESENT "python startup hooks" \
     "$scv_hook_n file(s) that run code on every Python start with nothing vouching for them: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
 elif [ -n "$scv_hooks_k" ]; then
@@ -748,9 +763,22 @@ describe_binary() {
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     */hostedtoolcache/*)                  echo "a toolcache binary — a setup-* step ran AFTER hardening" ;;
     *)
-      # A script, but nothing above recognised it: often the package's own
-      # launcher (Debian's /usr/bin/npm, a composer.phar), not a wrapper.
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "a script that is not ours"
+      # A script is not necessarily a wrapper. Most of what PATH resolves to on
+      # a stock host is a launcher: Debian's /usr/bin/pip3 and /usr/bin/npm and
+      # a venv's bin/pip are python or node scripts, NodeSource's npm is
+      # npm-cli.js under node, a composer.phar is php. Calling those "another
+      # wrapper script" sent a reader looking for a second security tool that
+      # does not exist. Name the interpreter instead.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+        interp=$(head -n 1 "$f" 2>/dev/null | sed 's/^#![[:space:]]*//' | awk '{
+          b = $1; sub(".*/", "", b)
+          if (b == "env") { b = ""; for (i = 2; i <= NF; i++) if ($i !~ /^-/) { b = $i; sub(".*/", "", b); break } }
+          print b }')
+        case "$interp" in
+          sh|bash|dash|zsh|ksh|mksh|ash|busybox) echo "a shell script that is not ours" ;;
+          '') echo "a script with no interpreter named" ;;
+          *) echo "an unwrapped $interp launcher" ;;
+        esac
       else echo "an unwrapped binary"; fi ;;
   esac
 }
@@ -905,6 +933,95 @@ npm_implements() {
   [ -n "$v" ] && [ "$v" != "undefined" ]
 }
 
+# >>> npm exclude scope
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them). Both
+# npm rows live in the preambles, which run before the shared body, so this
+# cannot live in files/verify-probes.sh.
+#
+# WHICH NAMES DOES A min-release-age-exclude LIST EXEMPT? npm's own test is
+#   name === pattern || minimatch(name, pattern, {nonegate, nocomment, noext})
+# (@npmcli/arborist lib/release-age-exclude.js, read on npm 11.19.1), and the
+# rows used to compare entries with a literal '*' instead. MEASURED on npm
+# 11.19.1 with a repo .npmrc and a 99999-day window: '*' exempted lodash but
+# NOT @types/node (minimatch's '*' does not cross the '/' of a scoped name), so
+# "every package skips the gate" overstated it; '**' exempted both, and '@*/*'
+# and '*/*' every scoped package, while the row graded all three WEAK.
+#
+# So ask the minimatch npm itself loads, about sentinel names of each kind. A
+# list that matches every sentinel of a kind ("a" and the made-up ones) matches
+# that whole kind. A list that matches ANY made-up sentinel is broad even when
+# it misses some: no list that names real packages names zz9-sch-sentinel, and
+# MEASURED on npm 11.19.1 with a 99999-day window, '??*' and '[!z]*' each
+# exempted lodash AND express, while 'lodash' alone left express refused
+# (ENOVERSIONS), yet requiring every sentinel to match graded both WEAK as narrow.
+# Prints "unscoped", "scoped", "broad", any two or three of them, or nothing.
+# When npm's matcher cannot be found (a version-manager shim, an npm laid out
+# differently) only '*' and '**', whose meaning is fixed, are judged, and
+# anything else prints "unknown".
+scv_npm_exclude_scope() { # <the list as `npm config get` prints it: comma-separated>
+  local npmjs npmdir out
+  npmjs=$(command -v npm 2>/dev/null)
+  # Our npm wrapper names the real npm it execs.
+  if [ -n "$npmjs" ] && grep -q 'supply-chain-harden' "$npmjs" 2>/dev/null; then
+    npmjs=$(grep -oE "^REAL_NPM='[^']*'" "$npmjs" 2>/dev/null | head -1 | sed "s/^REAL_NPM='//; s/'\$//")
+  fi
+  [ -n "$npmjs" ] && npmjs=$(readlink -f "$npmjs" 2>/dev/null)
+  npmdir=${npmjs%/bin/npm-cli.js}
+  out=unknown
+  if [ -n "$npmjs" ] && [ "$npmdir" != "$npmjs" ] && [ -d "$npmdir/node_modules/@npmcli/arborist/lib" ]; then
+    out=$(node -e '
+const path = require("path");
+const lib = path.join(process.argv[1], "node_modules", "@npmcli", "arborist", "lib");
+let mm;
+try { mm = require(require.resolve("minimatch", { paths: [lib] })).minimatch; } catch (e) { process.exit(3); }
+if (typeof mm !== "function") process.exit(3);
+const opts = { nonegate: true, nocomment: true, noext: true };
+const pats = process.argv[2].split(",").map(s => s.trim()).filter(Boolean);
+const hit = n => pats.some(p => n === p || mm(n, p, opts));
+const kinds = [];
+const made = ["zz9-sch-sentinel", "q7x-sch-sentinel", "m3k-sch-sentinel", "e5w-sch-sentinel"];
+const madeS = made.map(n => "@" + n + "/sentinel");
+const unsc = ["a"].concat(made).every(hit), scop = ["@a/b"].concat(madeS).every(hit);
+if (unsc) kinds.push("unscoped");
+if (scop) kinds.push("scoped");
+if ((!unsc && made.some(hit)) || (!scop && madeS.some(hit))) kinds.push("broad");
+process.stdout.write(kinds.join(" "));
+' "$npmdir" "$1" 2>/dev/null) || out=unknown
+  fi
+  if [ "$out" = unknown ]; then
+    case ",$(printf '%s' "$1" | tr -d ' ')," in
+      *",**,"*) out="unscoped scoped" ;;
+      *",*,"*)  out="unscoped" ;;
+    esac
+  fi
+  printf '%s\n' "$out"
+}
+
+# The age-gate row's verdict on an exclude list, as "STATUS<TAB>detail".
+scv_npm_exclude_verdict() { # <npm version> <window days> <list>
+  local where sc; where=$(pwd); sc=$(scv_npm_exclude_scope "$3")
+  case "$sc" in
+    "unscoped scoped")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches EVERY package name, scoped or not (asked of the matcher npm uses) - the gate is off for every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    unscoped)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name (asked of the matcher npm uses) - the gate is off for every package except scoped @org/name ones, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    scoped)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name (asked of the matcher npm uses) - the gate is off for every @org/name package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    "unscoped broad")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name, and made-up scoped names too (asked of the matcher npm uses) - the gate is off for nearly every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    "scoped broad")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name, and made-up unscoped names too (asked of the matcher npm uses) - the gate is off for nearly every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    broad)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches made-up package names no exclude list would name (zz9-sch-sentinel and the like, asked of the matcher npm uses) - a wildcard that broad exempts arbitrary packages, not a named few, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    unknown)
+      printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude). The matcher npm uses could not be loaded, so whether these patterns match every package was not tested' "$1" "$2" "$where" "$3" ;;
+    *)
+      printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude)' "$1" "$2" "$where" "$3" ;;
+  esac
+}
+# <<< npm exclude scope
+
 if ! have npm; then
   na_absent "npm" "npm not installed"
 elif ! requested npm; then
@@ -943,7 +1060,7 @@ else
         # Read from the working directory on purpose: a repo .npmrc can EXEMPT
         # packages from the gate (min-release-age-exclude, npm 11.17) or pin a
         # cutoff date (before, npm 11.15). MEASURED on npm 11.19.1 and 12.2.2:
-        # a project `min-release-age-exclude[]=*` let every package through even
+        # a project `min-release-age-exclude[]=*` let every UNSCOPED package through (scoped ones stayed gated on 11.19.1: see scv_npm_exclude_scope) even
         # with the env layer exported, and exporting an empty exclude list does
         # NOT override it, while this row printed OK. A repo `before=` wins only
         # when no NPM_CONFIG_MIN_RELEASE_AGE pins the age.
@@ -951,16 +1068,14 @@ else
         case "$nexcl" in null|undefined) nexcl="" ;; esac
         nbefore=$(npm config get before 2>/dev/null | tr -d '\r')
         case "$nbefore" in null|undefined) nbefore="" ;; esac
-        case ",$(printf '%s' "$nexcl" | tr -d ' ')," in
-          *",*,"*) nexcl_all=1 ;;
-          *) nexcl_all=0 ;;
-        esac
-        if [ "$nexcl_all" -eq 1 ]; then
-          gap npm.age-gate PARSED "npm age gate" "npm $nv reports min-release-age=$v but min-release-age-exclude=* in $(pwd) - every package skips the gate, and no exported setting overrides a repo's exclude list"
+        nxv=""
+        [ -n "$nexcl" ] && nxv=$(scv_npm_exclude_verdict "$nv" "$v" "$nexcl")
+        if [ "${nxv%%$'\t'*}" = GAP ]; then
+          gap npm.age-gate PARSED "npm age gate" "${nxv#*$'\t'}"
         elif [ -n "$nbefore" ] && [ -z "${NPM_CONFIG_MIN_RELEASE_AGE:-}${npm_config_min_release_age:-}" ]; then
           gap npm.age-gate PARSED "npm age gate" "npm $nv reports before=$nbefore in $(pwd), which replaces the min-release-age window when no NPM_CONFIG_MIN_RELEASE_AGE is exported"
         elif [ -n "$nexcl" ]; then
-          row WEAK PARSED "npm age gate" "npm $nv enforces $v day(s) but $(pwd) exempts: $nexcl (min-release-age-exclude)"
+          row WEAK PARSED "npm age gate" "${nxv#*$'\t'}"
         elif [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
           row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this job declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
         else
@@ -999,14 +1114,35 @@ else
   # corporate CI as well as the config-poisoning attack in arXiv:2607.15143 R10.
   # Strip spaces/quotes/CR so `install.only-binary = ':all:'` normalises.
   v=$("$pipbin" config list 2>/dev/null | tr -d " '\"\r" | sed -n 's/^install\.only-binary=//p' | tail -1)
+  # WEAK, never OK: only-binary refuses an sdist pip RESOLVES from an index or
+  # --find-links, not one named by path or URL, which still runs setup.py
+  # (MEASURED on pip 22.0.2, 23.0.1, 24.0, 25.1.1 and 26.0.1; README "Known
+  # limitations" and the action-pip-only-binary-limitation smoke job say the
+  # same). The role's row grades it the same way.
   if [ "$v" = ":all:" ]; then
-    row OK PARSED "pip sdist execution blocked" "pip reports only-binary=:all:"
+    row WEAK PARSED "pip sdist execution blocked" "pip reports only-binary=:all: - it refuses an sdist it resolves from an index or --find-links, but NOT one named by path or URL (pip install ./x.tar.gz), which still runs setup.py. uv's no-build refuses both: prefer uv pip"
   else
     gap pip.only-binary PARSED "pip sdist execution blocked" "pip reports only-binary='${v:-<unset>}'"
   fi
 fi
 
 # ============================================================ go =============
+# >>> go discovery
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them, and
+# checks the directories against `discover go` in files/verify-probes.sh).
+# The shared body's discovery (ECH-189) runs AFTER this preamble, so a go that
+# is installed at /usr/local/go/bin but not on this PATH (a non-login PATH,
+# another user's) read "go not installed" here, while the shared go rows below
+# found it and graded it OK in the same table (MEASURED). Look in the same
+# fixed directories, in the same order, before the go rows below.
+if ! have go; then
+  for scv__gd in /usr/local/go/bin "$HOME/go/bin"; do
+    if [ -x "$scv__gd/go" ]; then PATH="$scv__gd:$PATH"; export PATH; break; fi
+  done
+fi
+# <<< go discovery
+
 if ! have go; then
   na_absent "go" "go not installed"
 elif ! requested go; then
@@ -1053,8 +1189,9 @@ fi
 
 # ============================================================ shared probes ==
 #
-# yarn, bun, deno, uv, composer, cargo, bundler, maven, gradle, nuget — the same
-# bytes the Ansible role installs at /usr/local/bin/supply-chain-verify. The
+# yarn, bun, deno, uv, pip age gates, go checksum db + toolchain, composer,
+# cargo, bundler, maven, gradle, nuget — the same bytes the Ansible role
+# installs at /usr/local/bin/supply-chain-verify. The
 # body needs row(), have() and requested(), all defined above. It never exits.
 if [ ! -r "$SCV_PROBES" ]; then
   echo "[supply-chain-verify] error: shared probe body not found at $SCV_PROBES" >&2
@@ -1118,17 +1255,29 @@ if [ "$QUIET" -eq 0 ]; then
   echo
   echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
   echo "setting back · PRESENT = a file exists and nothing more (unverified)."
-  echo "N/A rows say ABSENT (the tool is not installed) or BYDESIGN (not requested here)."
+  echo "N/A rows say ABSENT (nothing here to check: no such tool, or no project config of"
+  echo "that kind here) or BYDESIGN (not requested here)."
   echo
   if [ "$GAPS" -gt 0 ]; then
     echo "RESULT: $GAPS gap(s) — protections NOT in effect $SCV_SCOPE_LABEL."
-    echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN need a newer toolchain."
+    # The toolchain class holds every gap no configuration closes: a tool too
+    # old for the setting (npm 10 and min-release-age), and a tool with no such
+    # control at all (cargo-cooldown has no verb for cargo add / generate-lockfile).
+    echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN no configuration can close (the tool is too old, or has no such control)."
   else
     echo "RESULT: no gaps."
   fi
-  [ "$WEAKS" -gt 0 ] && echo "        $WEAKS row(s) verified only as PRESENT — not evidence of enforcement."
+  # WEAKS counts every WEAK row, PARSED and FUNCTIONAL ones included, so it
+  # cannot be called "verified only as PRESENT" (it was). Say both numbers.
+  if [ "$WEAKS" -gt 0 ]; then
+    if [ "$WEAK_PRESENT" -eq "$WEAKS" ]; then
+      echo "        $WEAKS row(s) WEAK, all verified only as PRESENT — not evidence of enforcement."
+    else
+      echo "        $WEAKS row(s) WEAK — not counted as coverage: $WEAK_PRESENT verified only as PRESENT, the rest parsed or observed with a caveat the row states."
+    fi
+  fi
   [ $((NA_ABSENT + NA_DESIGN)) -gt 0 ] && \
-    echo "        $((NA_ABSENT + NA_DESIGN)) row(s) N/A ($NA_ABSENT tool not installed, $NA_DESIGN not requested here)."
+    echo "        $((NA_ABSENT + NA_DESIGN)) row(s) N/A ($NA_ABSENT with nothing here to check, $NA_DESIGN not requested here)."
   echo
 fi
 
@@ -1142,7 +1291,7 @@ fi
   if [ "$GAPS" -gt 0 ]; then
     echo "**$GAPS gap(s)** — protections are not in effect in this job."
   else
-    echo "No gaps. $WEAKS row(s) carry PRESENT-level evidence only."
+    echo "No gaps. $WEAKS row(s) WEAK, $WEAK_PRESENT of them with PRESENT-level evidence only."
   fi
 } | emit_summary
 
@@ -1188,7 +1337,7 @@ if [ "$fail" -eq 1 ]; then
   exit 1
 fi
 if [ "$SCV_FAIL_ON" != never ] && [ "$STRICT" -eq 1 ] && [ "$WEAKS" -gt 0 ]; then
-  annotate_error "--strict: $WEAKS protection(s) could only be verified as PRESENT"
+  annotate_error "--strict: $WEAKS protection(s) are WEAK ($WEAK_PRESENT only PRESENT, the rest in effect with a caveat) — see the verification table"
   exit 1
 fi
 exit 0

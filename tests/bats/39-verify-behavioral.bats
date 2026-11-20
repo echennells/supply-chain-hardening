@@ -416,3 +416,290 @@ EOF
   [[ "$row" == *"REFUSES this account"* ]]
   [[ "$row" == *"pip-to-uv wrapper"* ]]
 }
+
+# ---- verifier cluster: repo overrides, go, npm exclude, text ----------------
+#
+# Each test below stages a failure shape that the verifier at 8281a6b reported
+# as OK (or mis-described), measured on the real tools in this image.
+
+# The rows the verifier prints for $1, from directory $2, with extra env $3...
+verify_from() { # dir [VAR=value ...]
+  local d="$1"; shift
+  run env "$@" bash -c 'cd "$1" && shift && exec "$@"' _ "$d" "$VERIFY" --verbose
+}
+
+@test "verify: a repo uv.toml that turns no-build off is a GAP from inside the repo" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  d="$BATS_TEST_TMPDIR/uvproj"; mkdir -p "$d"
+  # Control: no repo config, nothing to override.
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "N/A"
+  printf 'no-build = false\n' > "$d/uv.toml"
+  # uv's own answer in that directory is the ground truth the row must agree with.
+  ( cd "$d" && uv pip list --show-settings 2>/dev/null ) | grep -qE 'no_build: None'
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q "no-build: All -> None"
+  # The host rows still describe the host, from /: unchanged, never upgraded.
+  echo "$output" | grep "uv sdist builds blocked" | grep -q "no_build=All"
+  # And pip through the wrapper is uv in this directory too.
+  if [ -x /usr/local/bin/pip ]; then
+    echo "$output" | grep "pip source-build blocking" | grep -q "^GAP"
+  fi
+}
+
+# The host cutoff uv reports from /, or skip: with no host gate there is
+# nothing for a repo config to weaken.
+uv_host_gate() {
+  ( cd / && uv pip list --show-settings 2>/dev/null ) | tr -d ' \n' | grep -q 'exclude_newer:ExcludeNewer{global:Some(' \
+    || skip "uv reports no global exclude-newer from / on this host"
+}
+
+@test "verify: a repo exclude-newer later than the host's is a GAP, a span is resolved, a stricter one is OK" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  uv_host_gate
+  d="$BATS_TEST_TMPDIR/uvproj2"; mkdir -p "$d"
+  printf 'exclude-newer = "2099-01-01T00:00:00Z"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q -- "-> 2099-01-01T00:00:00Z"
+  # A span is resolved against now, as uv resolves it. "1 second" gates
+  # nothing (MEASURED: botocore resolved as with no gate at all); it used to
+  # read WEAK "cannot order".
+  printf 'exclude-newer = "1 second"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q "span 1s before now"
+  # Stricter, as a span and as an instant: OK. (This case used to stage
+  # no-build = true, which is not a stricter exclude-newer.)
+  printf 'exclude-newer = "3650 days"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  printf 'exclude-newer = "2020-01-01T00:00:00Z"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  # A span equal to the window this host promised is not a weakening, even
+  # though it lands later than the host's own day-truncated instant.
+  wh=$(sed -n "s/^SCV_MIN_AGE_HOURS='\([0-9][0-9]*\)'.*/\1/p" "$VERIFY" | head -1)
+  if [ -n "$wh" ]; then
+    printf 'exclude-newer = "%s hours"\n' "$wh" > "$d/uv.toml"
+    verify_from "$d"
+    echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  fi
+}
+
+@test "verify: a repo exclude-newer-package exemption is a GAP, not OK" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  uv_host_gate
+  d="$BATS_TEST_TMPDIR/uvpkg"; mkdir -p "$d"
+  printf 'exclude-newer-package = { botocore = "2099-01-01T00:00:00Z" }\n' > "$d/uv.toml"
+  # CONTROL: uv itself reports the entry there, so the row has the data. On a
+  # uv without exclude-newer-package this skips rather than passes.
+  ( cd "$d" && uv pip list --show-settings 2>/dev/null ) | tr -d ' \n' \
+    | grep -q 'PackageName("botocore",):Enabled(Absolute(2099-01-01T00:00:00Z' \
+    || skip "this uv does not report exclude-newer-package"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q "exclude-newer-package botocore: .* -> 2099-01-01T00:00:00Z"
+  printf 'exclude-newer-package = { botocore = false }\n' > "$d/uv.toml"
+  if ( cd "$d" && uv pip list --show-settings 2>/dev/null ) | tr -d ' \n' | grep -q 'PackageName("botocore",):Disabled'; then
+    verify_from "$d"
+    echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+    echo "$output" | grep "uv repo config override" | grep -q "botocore skips the age gate entirely"
+  fi
+  printf 'exclude-newer-package = { botocore = "1 second" }\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  # Stricter for one package is not a weakening.
+  printf 'exclude-newer-package = { botocore = "2020-01-01T00:00:00Z" }\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  # The same exemption from pyproject.toml [tool.uv].
+  rm -f "$d/uv.toml"
+  printf '[project]\nname = "p"\nversion = "0"\n[tool.uv]\nexclude-newer-package = { botocore = "2099-01-01T00:00:00Z" }\n' > "$d/pyproject.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+}
+
+# A project whose lockfile does not name its one gem: the same admission fixture
+# the bundler row uses, so `bundle install --local` either refuses (pinned) or
+# reports the gem missing (resolved past the lockfile).
+bundler_project() { # dir
+  mkdir -p "$1/.bundle"
+  printf 'source "https://rubygems.invalid"\ngem "sch-verify-probe-nonexistent-gem"\n' > "$1/Gemfile"
+  printf 'GEM\n  remote: https://rubygems.invalid/\n  specs:\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n' > "$1/Gemfile.lock"
+}
+
+@test "verify: a project .bundle/config that turns frozen off is a GAP from inside the project" {
+  command -v bundle >/dev/null 2>&1 || skip "bundler not installed"
+  d="$BATS_TEST_TMPDIR/rb"; bundler_project "$d"
+  verify_from "$d"
+  echo "$output" | grep "bundler lockfile pinning" | grep -q "^OK" || skip "frozen is not in effect at the user level on this host"
+  echo "$output" | grep "bundler local config override" | grep -q "N/A"
+  printf -- '---\nBUNDLE_FROZEN: "false"\n' > "$d/.bundle/config"
+  # Ground truth: with that file, bundler resolves past the lockfile here.
+  run bash -c "cd '$d' && BUNDLE_PATH='$BATS_TEST_TMPDIR/bp' bundle install --local 2>&1"
+  echo "$output" | grep -qi "could not find gem"
+  verify_from "$d"
+  echo "$output" | grep "bundler local config override" | grep -q "^GAP"
+  # Local config outranks the environment too, so exporting frozen does not help.
+  verify_from "$d" BUNDLE_FROZEN=true
+  echo "$output" | grep "bundler local config override" | grep -q "^GAP"
+  printf -- '---\nBUNDLE_FROZEN: "true"\n' > "$d/.bundle/config"
+  verify_from "$d"
+  echo "$output" | grep "bundler local config override" | grep -q "^OK"
+}
+
+@test "verify: the bundler override probe never evaluates a gemfile the checkout names" {
+  command -v bundle >/dev/null 2>&1 || skip "bundler not installed"
+  d="$BATS_TEST_TMPDIR/rbhostile"; bundler_project "$d"
+  m="$BATS_TEST_TMPDIR/gemfile-ran"
+  printf 'File.write(%s, "ran")\n' "'$m'" > "$d/evil.rb"
+  printf -- '---\nBUNDLE_FROZEN: "false"\nBUNDLE_GEMFILE: "%s/evil.rb"\n' "$d" > "$d/.bundle/config"
+  # FIXTURE CONTROL: handed that WHOLE config, bundler does evaluate the named
+  # file. Without this the assertion below could pass for a fixture that never
+  # fires.
+  mkdir -p "$BATS_TEST_TMPDIR/ctl"
+  printf 'source "https://rubygems.invalid"\n' > "$BATS_TEST_TMPDIR/ctl/Gemfile"
+  ( cd "$BATS_TEST_TMPDIR/ctl" && BUNDLE_APP_CONFIG="$d/.bundle" BUNDLE_PATH="$BATS_TEST_TMPDIR/bp" \
+      bundle install --local >/dev/null 2>&1 ) || true
+  [ -e "$m" ] || skip "this bundler does not read a gemfile from the local config; nothing to guard"
+  rm -f "$m"
+  verify_from "$d"
+  echo "$output" | grep "bundler local config override" | grep -q "^GAP"
+  [ ! -e "$m" ]
+}
+
+@test "verify: GOSUMDB=off and a match-all GONOSUMDB are GAPs, not OK" {
+  command -v go >/dev/null 2>&1 || skip "go not installed"
+  verify_from /tmp GOSUMDB=off
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  echo "$output" | grep "go checksum verification" | grep -q "GOSUMDB=off"
+  verify_from /tmp 'GONOSUMDB=*'
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  echo "$output" | grep "go checksum verification" | grep -q "EVERY module"
+  verify_from /tmp 'GOPRIVATE=*'
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  verify_from /tmp GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE=
+  echo "$output" | grep "go checksum verification" | grep -q "^OK"
+}
+
+@test "verify: a go env -w exemption survives the env layer's empty export, and the row says so" {
+  command -v go >/dev/null 2>&1 || skip "go not installed"
+  ge="$BATS_TEST_TMPDIR/goenv"
+  GOENV="$ge" go env -w 'GONOSUMDB=*'
+  # Ground truth: the empty export the role ships does not clear it.
+  [ "$(GOENV="$ge" GONOSUMDB= go env GONOSUMDB)" = '*' ]
+  verify_from /tmp GOENV="$ge" GONOSUMDB=
+  echo "$output" | grep "go checksum verification" | grep -q "^GAP"
+  echo "$output" | grep "go checksum verification" | grep -q "$ge"
+  echo "$output" | grep "go checksum verification" | grep -q "does not override it"
+}
+
+@test "verify: a go off this PATH is found by the preamble too, so the table agrees with itself" {
+  [ -x /usr/local/go/bin/go ] || skip "no go at /usr/local/go/bin"
+  # The verifier's own non-login PATH, without /usr/local/go/bin. The shared go
+  # rows discover go there; the preamble's row used to say "go not installed".
+  run env -i HOME="$HOME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$VERIFY" --verbose
+  echo "$output" | grep -q "go checksum verification"
+  ! echo "$output" | grep -qE '^N/A +- +go +go not installed'
+  echo "$output" | grep -qE '^[A-Z/]+ +[A-Z-]+ +go module integrity'
+}
+
+@test "verify: GOTOOLCHAIN is reported - local is OK, an exported auto is a GAP" {
+  command -v go >/dev/null 2>&1 || skip "go not installed"
+  verify_from /tmp GOTOOLCHAIN=local
+  echo "$output" | grep "go toolchain switching" | grep -q "^OK"
+  verify_from /tmp GOTOOLCHAIN=auto
+  echo "$output" | grep "go toolchain switching" | grep -q "^GAP"
+  echo "$output" | grep "go toolchain switching" | grep -q "downloads and runs"
+  # A plain name never follows go.mod. Ground truth first: pinned to the
+  # installed version, a module that asks for a newer go is refused, not
+  # switched (+auto would try to download it).
+  gv=$(cd / && GOTOOLCHAIN=local go env GOVERSION)
+  m="$BATS_TEST_TMPDIR/gomod"; mkdir -p "$m"
+  printf 'module example.com/m\n\ngo 1.99.0\n' > "$m/go.mod"
+  run bash -c "cd '$m' && GOTOOLCHAIN='$gv' GOPROXY=off go list 2>&1"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "requires go >= 1.99.0"
+  ! echo "$output" | grep -qi "downloading go1.99.0"
+  verify_from /tmp GOTOOLCHAIN="$gv"
+  echo "$output" | grep "go toolchain switching" | grep -q "^OK"
+  # GOPROXY=off: the verifier forces GOTOOLCHAIN=local for its own reads, but
+  # nothing here should be able to download go1.20.0 if something else runs go.
+  verify_from /tmp GOTOOLCHAIN=go1.20.0 GOPROXY=off
+  echo "$output" | grep "go toolchain switching" | grep -q "^WEAK"
+  echo "$output" | grep "go toolchain switching" | grep -q "not the installed $gv"
+  verify_from /tmp GOTOOLCHAIN="$gv+auto"
+  echo "$output" | grep "go toolchain switching" | grep -q "^GAP"
+}
+
+# Stage a project .npmrc with one exclude pattern and run the verifier there.
+npm_exclude_from() { # pattern
+  local d="$BATS_TEST_TMPDIR/np"
+  mkdir -p "$d"
+  printf '{"name":"np","version":"1.0.0"}\n' > "$d/package.json"
+  printf 'min-release-age-exclude[]=%s\n' "$1" > "$d/.npmrc"
+  verify_from "$d"
+}
+
+@test "verify: npm exclude patterns are judged by npm's own matcher (scoped and unscoped apart)" {
+  command -v npm >/dev/null 2>&1 || skip "npm not installed"
+  npm_exclude_from 'lodash'
+  echo "$output" | grep "npm age gate" | grep -q "does NOT implement" && skip "this npm predates the gate"
+  [ "$(cd "$BATS_TEST_TMPDIR/np" && npm config get min-release-age-exclude 2>/dev/null)" = lodash ] \
+    || skip "this npm predates min-release-age-exclude (11.17)"
+  echo "$output" | grep "npm age gate" | grep -q "^WEAK"
+  npm_exclude_from '**'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "EVERY package name, scoped or not"
+  npm_exclude_from '*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "every UNSCOPED package name"
+  npm_exclude_from '@*/*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "every SCOPED package name"
+  # Patterns that miss one sentinel but match made-up names are broad, not narrow.
+  npm_exclude_from '??*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "matches made-up package names"
+  npm_exclude_from '[!z]*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  npm_exclude_from '@types/*'
+  echo "$output" | grep "npm age gate" | grep -q "^WEAK"
+}
+
+@test "verify: the footer counts PRESENT-only WEAK rows apart from caveated ones" {
+  run "$VERIFY" --verbose
+  all=$(echo "$output" | grep -cE '^WEAK ' || true)
+  pres=$(echo "$output" | grep -cE '^WEAK +PRESENT ' || true)
+  [ "$all" -gt 0 ] || skip "no WEAK rows on this host"
+  if [ "$all" -eq "$pres" ]; then
+    echo "$output" | grep -q "$all row(s) WEAK, all verified only as PRESENT"
+  else
+    echo "$output" | grep -q "$all row(s) WEAK — not counted as coverage: $pres verified only as PRESENT"
+  fi
+  ! echo "$output" | grep -q "$all row(s) verified only as PRESENT"
+}
+
+@test "verify: the cargo writers row says the wrapper warns, and it does" {
+  command -v cargo >/dev/null 2>&1 || skip "cargo not installed"
+  run "$VERIFY" --verbose
+  row=$(echo "$output" | grep "cargo lockfile writers routed")
+  echo "$row" | grep -q "^GAP" || skip "writers are not reported ungated on this host"
+  ! echo "$row" | grep -q "SILENT"
+  echo "$row" | grep -q "writes Cargo.lock and is NOT age-gated' warning"
+  d="$BATS_TEST_TMPDIR/cp"; mkdir -p "$d/src"
+  printf '[package]\nname = "cp"\nversion = "0.1.0"\nedition = "2021"\n' > "$d/Cargo.toml"
+  echo 'fn main() {}' > "$d/src/main.rs"
+  run bash -c "cd '$d' && RUSTUP_AUTO_INSTALL=0 timeout 60 cargo add itoa@1.0.0 2>&1"
+  echo "$output" | grep -q "'cargo add' writes Cargo.lock and is NOT age-gated"
+}
+
+@test "verify: doc pointers are URLs, never repo-relative paths" {
+  run "$VERIFY" --verbose
+  ! echo "$output" | grep -qE 'See docs/|design-principles\.md Axis|in docs/verify\.md'
+  if echo "$output" | grep -q "does NOT implement cooldown"; then
+    echo "$output" | grep -q "https://github.com/echennells/supply-chain-hardening/blob/main/docs/composer-bundler-cooldown-by-distro.md"
+  fi
+}

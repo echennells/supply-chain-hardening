@@ -38,8 +38,10 @@ export UV_LINK_MODE=copy
 # not in a self-disarming env var.
 
 # === Go ===
-# Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are emptied so
-# no module is exempted from sumdb checks, proxy traffic, or HTTPS. GOTOOLCHAIN
+# Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are exported
+# empty so no value inherited through the environment exempts a module from
+# sumdb checks, proxy traffic, or HTTPS (a `go env -w` value survives an empty
+# export: see GONOSUMDB below). GOTOOLCHAIN
 # locks to the installed toolchain to prevent auto-download of alternatives.
 export GOSUMDB='{{ go_sumdb }}'
 export GOPROXY='{{ go_proxy }}'
@@ -55,7 +57,17 @@ export GOINSECURE='{{ go_insecure }}'
 # GOINSECURE entry names GONOSUMDB as a way to disable sumdb validation.
 # It was omitted because 10-go-adversarial.bats asserted it was not a real
 # variable - a wrong test comment was the documented reason a recommended
-# sweep (SOURCES.md:16) got dropped. Clearing it, like the other three.
+# sweep (SOURCES.md:16) got dropped. Exported empty, like the other three.
+#
+# WHAT AN EMPTY EXPORT DOES NOT DO. It replaces a value inherited through the
+# environment. It does NOT clear one written with `go env -w` (the per-user
+# file `go env GOENV` names): Go treats an empty variable as unset and falls
+# back to that file. MEASURED on go1.24.2 and go1.27.4: after
+# `go env -w GONOSUMDB='*'`, with GONOSUMDB='' exported, `go env GONOSUMDB`
+# still printed '*' and a fetch skipped the checksum database. The same holds
+# for GOPRIVATE (both versions) and for GONOPROXY and GOINSECURE (go1.24.2).
+# supply-chain-verify reports a sumdb exemption as a GAP and names the file;
+# `go env -u <KEY>` removes it.
 export GONOSUMDB='{{ go_nosumdb | default('', true) }}'
 export GOTOOLCHAIN=local
 

@@ -242,7 +242,7 @@ exec '"$realpy"' "$@"'
   [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
   # Counted as toolchain: no re-run teaches pip 24 the flag. It was counted as
   # config, so the summary told the reader re-running the hardening would fix it.
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
@@ -524,7 +524,7 @@ esac"
   [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
   [[ "$output" == *"does NOT implement config.policy.cooldown"* ]]
   # Counted as toolchain, or --fail-on=config fails a job for what it was handed.
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "composer: every version-limited gap is toolchain, so fail-on=config can pass on a stock LTS" {
@@ -535,7 +535,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      composer audit blocking"* ]]
   [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
-  [[ "$output" =~ [2-9]\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [2-9]\ no\ configuration\ can\ close ]]
 }
 
 @test "composer 2.11 with the gate in effect reads OK" {
@@ -765,7 +765,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
   [[ "$output" == *"does NOT implement cooldown"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "bundler 4.0.13 is the first version the row accepts" {
@@ -854,7 +854,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
   [[ "$output" == *"has no solver.min-release-age"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "poetry 2.4.0 is the first version the row accepts" {
@@ -878,6 +878,10 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"WEAK   PARSED      poetry publish-age gate"* ]]
   [[ "$output" == *"exempts"* ]]
+  # The detail must NAME what is exempt and where. These fields used to print
+  # blank: cq() was defined below the poetry rows, so bash had not seen it yet.
+  [[ "$output" == *'exempts ["six"] in '* ]]
+  [[ "$output" != *"cq: command not found"* ]]
   poetry_age_stub 2.5.1 1
   harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
@@ -1324,4 +1328,161 @@ esac'
   [[ "$r" == GAP*"yarn could not report its version"* ]]
   [[ "$r" != *"needs Yarn 4.10.0"* ]]
   [[ "$r" != *"<unknown>"* ]]
+}
+
+# ---- verifier cluster (VM#7, #8, #11, #14; CMP 4.8) --------------------------
+
+@test "pip: only-binary=:all: is WEAK, never OK - a path or URL sdist still runs setup.py" {
+  # MEASURED on pip 22.0.2 to 26.0.1: only-binary refuses an sdist pip resolves
+  # from an index or --find-links and builds one named by path. This row was OK.
+  stub_bin pip3 "case \"\$*\" in
+  --version) echo 'pip 24.0 from /x (python 3.12)' ;;
+  'config list') echo \"install.only-binary=':all:'\" ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip sdist execution blocked"* ]]
+  [[ "$output" == *"NOT one named by path or URL"* ]]
+  [[ "$output" != *"OK     PARSED      pip sdist execution blocked"* ]]
+}
+
+@test "report: the footer separates PRESENT-only WEAK rows from caveated ones" {
+  # The footer said "N row(s) verified only as PRESENT" with N counting every
+  # WEAK row, PARSED and FUNCTIONAL ones included.
+  stub_bin pip3 "case \"\$*\" in
+  --version) echo 'pip 24.0 from /x (python 3.12)' ;;
+  'config list') echo \"install.only-binary=':all:'\" ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  weak_all=$(grep -cE '^WEAK ' <<<"$output" || true)
+  weak_present=$(grep -cE '^WEAK +PRESENT ' <<<"$output" || true)
+  [ "$weak_all" -gt "$weak_present" ]
+  [[ "$output" == *"$weak_all row(s) WEAK — not counted as coverage: $weak_present verified only as PRESENT"* ]]
+  [[ "$output" != *"$weak_all row(s) verified only as PRESENT"* ]]
+}
+
+@test "cargo lockfile writers: a tool limit, not a config gap, and the detail says the wrapper warns" {
+  # cargo-cooldown has no verb for add/generate-lockfile/vendor/remove, so no
+  # re-run routes them. Counted as "fixable by re-running", it made
+  # --fail-on=config fail every job that installed cargo-cooldown.
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo lockfile writers routed"* ]]
+  [[ "$output" == *"writes Cargo.lock and is NOT age-gated' warning"* ]]
+  [[ "$output" != *"this state is SILENT"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
+  # The wrapper really does warn on a writer, with the backend present.
+  run env -i PATH="${TEST_BIN}:${TEST_HOME}/.cargo/bin:${PATH}" HOME="$TEST_HOME" cargo add serde
+  [[ "$output" == *"'cargo add' writes Cargo.lock and is NOT age-gated"* ]]
+}
+
+@test "doc pointers are absolute URLs pinned to the ref GitHub reports, never repo-relative paths" {
+  bundler_age_stub 2.4.20 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"bundler publish-age gate"* ]]
+  [[ "$output" == *"See https://github.com/echennells/supply-chain-hardening/blob/main/docs/composer-bundler-cooldown-by-distro.md"* ]]
+  [[ "$output" != *"See docs/"* ]]
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" SCV_DOCS_REF=v2.1.0 \
+    bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"/blob/v2.1.0/docs/composer-bundler-cooldown-by-distro.md"* ]]
+  # A value that is not a git ref never reaches the URL.
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" SCV_DOCS_REF='x y;$(id)' \
+    bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"/blob/main/docs/composer-bundler-cooldown-by-distro.md"* ]]
+}
+
+@test "npm exclude: the matcher block is byte-identical on both surfaces" {
+  block() { sed -n '/^# >>> npm exclude scope$/,/^# <<< npm exclude scope$/p' "$1"; }
+  role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+}
+
+# Stage a project .npmrc whose exclude list is $1, and run the verifier there.
+npm_exclude_run() {
+  mkdir -p "$BATS_TEST_TMPDIR/np"
+  printf '{"name":"np","version":"1.0.0"}\n' > "$BATS_TEST_TMPDIR/np/package.json"
+  printf 'min-release-age-exclude[]=%s\n' "$1" > "$BATS_TEST_TMPDIR/np/.npmrc"
+  cd "$BATS_TEST_TMPDIR/np"
+  run verify_sourced --emit=plain
+}
+
+@test "npm exclude: patterns are judged by npm's own matcher, scoped and unscoped apart" {
+  # MEASURED on npm 11.19.1, 99999-day window: '*' exempted lodash but not
+  # @types/node; '**' exempted both; '@*/*' every scoped package. The row
+  # compared entries with a literal '*': '*' read "every package", the rest WEAK.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_exclude_run 'lodash'
+  [[ "$output" == *"does NOT implement min-release-age"* ]] && skip "this npm predates the gate"
+  [ "$(npm config get min-release-age-exclude 2>/dev/null)" = lodash ] || skip "this npm predates min-release-age-exclude (11.17)"
+  [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: lodash"* ]]
+  npm_exclude_run '**'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches EVERY package name, scoped or not"* ]]
+  npm_exclude_run '*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every UNSCOPED package name"* ]]
+  [[ "$output" != *"EVERY package name"* ]]
+  npm_exclude_run '@*/*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every SCOPED package name"* ]]
+  # MEASURED, same npm: '??*' and '[!z]*' each exempted lodash and express.
+  # They miss one sentinel each ('a', zz9-sch-sentinel), which is how they
+  # used to read WEAK; a match on ANY made-up name is broad.
+  npm_exclude_run '??*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches made-up package names"* ]]
+  npm_exclude_run '[!z]*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches made-up package names"* ]]
+  npm_exclude_run '@types/*'
+  [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: @types/*"* ]]
+}
+
+@test "go discovery: both preambles look where the shared body looks, before their go rows" {
+  # The shared body's `discover go` runs after the preambles. Without the same
+  # lookup in each preamble, a go at /usr/local/go/bin off this PATH printed
+  # "go not installed" from the preamble and OK go rows from the shared body.
+  block() { sed -n '/^# >>> go discovery$/,/^# <<< go discovery$/p' "$1"; }
+  role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  probes="${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+  shared=$(sed -n 's/^discover go[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*|| true$/\1/p' "$probes")
+  mine=$(block "$VERIFY_SH" | sed -n 's/^[[:space:]]*for scv__gd in \(.*\); do$/\1/p')
+  [ -n "$shared" ] && [ "$shared" = "$mine" ]
+  # And the block sits before each preamble's own go rows (the last match: the
+  # block's own `if ! have go` matches too).
+  for f in "$role" "$VERIFY_SH"; do
+    [ "$(grep -n '^# <<< go discovery$' "$f" | cut -d: -f1)" -lt "$(grep -nE '^if (! )?have go; then$' "$f" | tail -1 | cut -d: -f1)" ]
+  done
+}
+
+@test "go discovery: a go off PATH is found by the preamble too, so the table agrees with itself" {
+  # A stub go in a directory the shared list names cannot be planted from here
+  # (/usr/local/go/bin needs root, $HOME/go/bin is under the test HOME), so use
+  # the second: HOME is the test's.
+  mkdir -p "$TEST_HOME/go/bin"
+  cat > "$TEST_HOME/go/bin/go" <<'GO'
+#!/bin/sh
+case "$1 $2" in
+  "env GOSUMDB") echo sum.golang.org ;;
+  "env GOTOOLCHAIN") echo local ;;
+  "env GOVERSION") echo go1.24.2 ;;
+  "env GOFLAGS") echo -mod=readonly ;;
+  "version "*) echo "go version go1.24.2 linux/amd64" ;;
+  env*) echo "" ;;
+  *) exit 0 ;;
+esac
+GO
+  chmod +x "$TEST_HOME/go/bin/go"
+  run env -i PATH="/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
+  [[ "$output" == *"go checksum verification"* ]]
+  # Not a substring test: "cargo not installed" contains "go not installed".
+  ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output"
+  grep -qE '^[A-Z/]+ +[A-Z-]+ +go settings persisted' <<<"$output"
 }
