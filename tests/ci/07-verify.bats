@@ -812,6 +812,93 @@ esac"
   [[ "$output" == *"below the 2d"* ]]
 }
 
+# A checkout whose own .bundle/config sets BUNDLE_COOLDOWN. Bundler's local
+# config outranks the BUNDLE_COOLDOWN the env layer exports (MEASURED on 4.0.13,
+# 4.0.24 and 4.1.0: a repo "0" let `bundle lock` take a release 22 hours old
+# with BUNDLE_COOLDOWN=2 exported). The "bundler local config override" row
+# used to read only BUNDLE_FROZEN and BUNDLE_DEPLOYMENT from that file, so it
+# said N/A ("cannot switch lockfile pinning off") while the file switched the
+# age gate off. The stub answers the window bundler reports from inside the
+# checkout; the real-bundler test after these measures that answer.
+bundler_cooldown_checkout() { # value
+  CHECKOUT="$BATS_TEST_TMPDIR/rbcheckout"; mkdir -p "$CHECKOUT/.bundle" "$CHECKOUT/sub"
+  # The verifier sees the physical path (macOS: /var is /private/var).
+  CHECKOUT=$(cd "$CHECKOUT" && pwd -P)
+  printf 'source "https://rubygems.org"\n' > "$CHECKOUT/Gemfile"
+  printf -- '---\nBUNDLE_COOLDOWN: "%s"\n' "$1" > "$CHECKOUT/.bundle/config"
+}
+
+@test "bundler: a checkout's BUNDLE_COOLDOWN \"0\" is a GAP on the local config row, which names the file" {
+  bundler_age_stub 4.0.24 0
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  bundler_cooldown_checkout 0
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "GAP    PARSED      bundler local config override"* ]]
+  [[ "$r" == *"$CHECKOUT/.bundle/config switches the publish-age gate off"* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == GAP*"set by the local config at $CHECKOUT/.bundle/config"* ]]
+}
+
+@test "bundler: a checkout's BUNDLE_COOLDOWN below the declared window is WEAK on the local config row; at or above it, OK" {
+  bundler_age_stub 4.0.24 1
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  bundler_cooldown_checkout 1
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "WEAK   PARSED      bundler local config override"* ]]
+  [[ "$r" == *"shortens the publish-age gate"*"below the 2d"* ]]
+  bundler_age_stub 4.0.24 7
+  bundler_cooldown_checkout 7
+  run verify_sourced --emit=plain
+  r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "OK     PARSED      bundler local config override"*"leaves the publish-age gate on"* ]]
+}
+
+@test "bundler: the local config row judges BUNDLE_COOLDOWN only where bundler implements it, and only when the file sets it" {
+  # Below 4.0.13 the line is inert, and the publish-age row already reports the
+  # toolchain gap.
+  bundler_age_stub 4.0.12 0
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  bundler_cooldown_checkout 0
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == N/A*"is inert: bundler 4.0.12 has no cooldown"* ]]
+  # FIXTURE CONTROL: the same stub window with no BUNDLE_COOLDOWN line in the
+  # file. The local row must not blame a file that does not set the key.
+  bundler_age_stub 4.0.24 0
+  printf -- '---\nBUNDLE_JOBS: "4"\n' > "$CHECKOUT/.bundle/config"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == N/A*"sets none of BUNDLE_FROZEN, BUNDLE_DEPLOYMENT and BUNDLE_COOLDOWN"* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == GAP*"no local config here sets it"* ]]
+}
+
+@test "bundler: with a real bundler, a checkout's BUNDLE_COOLDOWN outranks the exported one and the local config row reports it" {
+  have bundle || skip "bundler not installed"
+  have ruby || skip "ruby not installed"
+  ruby -e 'require "bundler"; exit(Gem::Version.new(Bundler::VERSION) >= Gem::Version.new("4.0.13") ? 0 : 1)' 2>/dev/null \
+    || skip "this bundler predates cooldown (4.0.13)"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  bundler_cooldown_checkout 0
+  # Ground truth: bundler's own answer from inside the checkout, with the env
+  # layer (BUNDLE_COOLDOWN=2) in force.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c \
+    "set -a; . '$ENV_FILE'; set +a; [ \"\$BUNDLE_COOLDOWN\" = 2 ] || exit 9; cd '$CHECKOUT/sub' && bundle config get cooldown --parseable"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cooldown=0"* ]]
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == "GAP    PARSED      bundler local config override"*"switches the publish-age gate off"* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == GAP* ]]
+  # CONTROL: the same checkout without the line. Nothing here overrides the
+  # window, so the local row has nothing to report and the gate reads OK.
+  printf -- '---\nBUNDLE_JOBS: "4"\n' > "$CHECKOUT/.bundle/config"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == N/A* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == "OK     PARSED      bundler publish-age gate"* ]]
+}
+
 @test "composer: our config in the home composer really reads is OK, anyone else's is a GAP" {
   stub_bin composer "case \"\$*\" in
   *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;

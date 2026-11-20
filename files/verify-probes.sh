@@ -3780,9 +3780,44 @@ else
     rm -rf "$btmp" "$btmp2"
   fi
 
-  # --- bundler local config override  [FUNCTIONAL] ---
-  # The row above points BUNDLE_APP_CONFIG at an empty temp dir, so it measures
-  # the user layer only (its LAYER SCOPE note). Bundler's LOCAL layer -
+  # --- the cooldown bundler applies from $PWD (read by the next two rows) ---
+  # cooldown landed in 4.0.13 (its CHANGELOG: "Add `cooldown` to delay newly
+  # published gem", rubygems#9576; 4.0.12's settings.rb has no such key), and
+  # needs ruby >= 3.2. The version check has to come first: MEASURED,
+  # `bundle config get cooldown` echoes the value on 2.4.20, which ignores it.
+  # Asked from $PWD on purpose, because a repo's .bundle/config outranks the
+  # environment and the global file, and this readback does show it. MEASURED
+  # on 4.0.13, 4.0.24 and 4.1.0 (ruby 3.3.13): with BUNDLE_COOLDOWN=2 (or 7)
+  # exported and ~/.bundle/config at 2, a repo's "0" let `bundle lock` take a
+  # release 22 hours old, and its "1" one 46 hours old.
+  # Compared in days the way both writers derive it, floored at 1.
+  bwanth=$(scv_want_hours); bwant=""
+  case "$bwanth" in
+    ''|*[!0-9]*) ;;
+    *) bwant=$((bwanth / 24)); [ "$bwant" -lt 1 ] && bwant=1 ;;
+  esac
+  bcd_has=0; bcd=""; bcd_src="reports"
+  if [ -n "$bver" ] && [ "$(printf '4.0.13\n%s\n' "$bver" | sort -V | head -1)" = "4.0.13" ]; then
+    bcd_has=1
+    bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
+    # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
+    # and --parseable does not show that. MEASURED (4.1.0): with only ~/.gemrc
+    # `:cooldown: 3650` this row printed "none is set" while `bundle install`
+    # still resolved the older version, and with a repo "0" plus the gemrc it
+    # printed "cooldown=0 disables" while the gemrc value applied. Ask bundler
+    # for the window it will apply, pinned to the version `bundle` reported;
+    # bundler < 4.1 has no cooldown_for and keeps the --parseable answer.
+    bcd_eff=$(ruby -e 'begin; gem "bundler", ARGV[0]; require "bundler"; s = Bundler.settings; print(s.respond_to?(:cooldown_for) ? s.cooldown_for.to_s : ""); rescue Exception; end' "$bver" 2>/dev/null)
+    case "$bcd_eff" in
+      ''|*[!0-9]*) ;;
+      *) [ "$bcd_eff" != "${bcd:-}" ] && bcd_src="applies (raised by RubyGems' :cooldown:)"
+         bcd=$bcd_eff ;;
+    esac
+  fi
+
+  # --- bundler local config override  [FUNCTIONAL / PARSED] ---
+  # The pinning row above points BUNDLE_APP_CONFIG at an empty temp dir, so it
+  # measures the user layer only (its LAYER SCOPE note). Bundler's LOCAL layer -
   # <project>/.bundle/config, or $BUNDLE_APP_CONFIG/config - outranks the
   # environment and ~/.bundle/config. MEASURED (bundler 2.4.20, role applied):
   # in a project whose .bundle/config says BUNDLE_FROZEN: "false",
@@ -3792,8 +3827,19 @@ else
   # admission fixture with it in force. Only its BUNDLE_FROZEN and
   # BUNDLE_DEPLOYMENT lines are copied: a project config can also name a
   # gemfile, bundler EVALUATES a Gemfile, and a verifier judging a checkout must
-  # not run that checkout's code. This row can only lower the verdict: OK when
-  # the local config leaves pinning on, GAP when it switches it off.
+  # not run that checkout's code.
+  # The same file can set BUNDLE_COOLDOWN, which outranks the one the env layer
+  # exports (MEASURED above). That half is PARSED: judging it functionally needs
+  # a release younger than the window, so a network fetch. It is judged on the
+  # window bundler reports from $PWD, read above, and only when the local config
+  # names the key, so the row names the file that did it; the publish-age row
+  # below reports the same window as the effect. This row can only lower the
+  # verdict: the worse of its two halves, OK when the local config leaves both
+  # protections on.
+  # The official ruby images export BUNDLE_APP_CONFIG=/usr/local/bundle, and
+  # bundler then reads $BUNDLE_APP_CONFIG/config INSTEAD of the project's
+  # .bundle/config (MEASURED, ruby:3.3.13-slim-trixie: a repo "0" had no effect
+  # there), so the path below follows BUNDLE_APP_CONFIG the way bundler does.
   blgf=""; blcfg=""
   if [ -n "${BUNDLE_GEMFILE:-}" ]; then
     case "$BUNDLE_GEMFILE" in /*) blgf=$BUNDLE_GEMFILE ;; *) blgf="$PWD/$BUNDLE_GEMFILE" ;; esac
@@ -3820,6 +3866,7 @@ else
   fi
   blhost=0
   [ -n "${bout:-}" ] && [ -n "${brx:-}" ] && printf '%s\n' "$bout" | grep -qE "$brx" && blhost=1
+  blc_by=""
   if [ -z "$blcfg" ]; then
     row "N/A" - "bundler local config override" \
       "no Gemfile or gems.rb at or above $(cq "$PWD") and no BUNDLE_APP_CONFIG - bundler reads no local config here"
@@ -3829,18 +3876,20 @@ else
   else
     blkeys=$(grep -E "^[\"']?BUNDLE_(FROZEN|DEPLOYMENT)[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
     blshow=$(printf '%s' "$blkeys" | tr '\n\t' '  ' | cut -c1-120)
-    if [ -z "$blkeys" ]; then
-      row "N/A" - "bundler local config override" \
-        "$(cq "$blcfg") sets neither BUNDLE_FROZEN nor BUNDLE_DEPLOYMENT, so it cannot switch lockfile pinning off"
-    elif [ "$blhost" -ne 1 ]; then
-      row "N/A" - "bundler local config override" \
-        "lockfile pinning was not shown in effect at the user level either (see bundler lockfile pinning), so there is nothing for $(cq "$blcfg") to switch off"
-    else
+    blckeys=$(grep -E "^[\"']?BUNDLE_COOLDOWN[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
+    blcshow=$(printf '%s' "$blckeys" | tr '\n\t' '  ' | cut -c1-80)
+    # Each half sets a verdict, an evidence level and a clause, or a reason it
+    # has nothing to judge (*na). The row is the worse half.
+    blpv=""; blpe=""; blpm=""; blpna=""
+    blcv=""; blce=""; blcm=""; blcna=""
+    if [ -n "$blkeys" ] && [ "$blhost" -ne 1 ]; then
+      blpna="its $(cq "$blshow") was not judged: lockfile pinning was not shown in effect at the user level either (see bundler lockfile pinning), so there is nothing for it to switch off"
+    elif [ -n "$blkeys" ]; then
       bl3=$(mktemp -d 2>/dev/null)
       if [ -z "$bl3" ] || [ ! -d "$bl3" ] || ! bundler_fixture "$bl3" || ! mkdir -p "$bl3/app-config" \
          || ! printf -- '---\n%s\n' "$blkeys" > "$bl3/app-config/config"; then
-        row WEAK PRESENT "bundler local config override" \
-          "$(cq "$blcfg") sets $(cq "$blshow"), but the probe fixture could not be built, so its effect was not measured"
+        blpv=WEAK; blpe=PRESENT
+        blpm="sets $(cq "$blshow"), but the probe fixture could not be built, so its effect on lockfile pinning was not measured"
       else
         blout=$(cd "$bl3" && env BUNDLE_GEMFILE="$bl3/Gemfile" \
                                  BUNDLE_APP_CONFIG="$bl3/app-config" \
@@ -3848,53 +3897,72 @@ else
                                  BUNDLE_RETRY=0 \
                                  "$bundler_bin" install --local 2>&1) || true
         if printf '%s\n' "$blout" | grep -qE "$brx"; then
-          row OK FUNCTIONAL "bundler local config override" \
-            "the local config at $(cq "$blcfg") ($(cq "$blshow")) leaves pinning on: with those lines in force bundler $bver still refused a gem the lockfile does not name"
+          blpv=OK; blpe=FUNCTIONAL
+          blpm="leaves lockfile pinning on ($(cq "$blshow")): with those lines in force bundler $bver still refused a gem the lockfile does not name"
         elif printf '%s\n' "$blout" | grep -qiE 'could not find gem'; then
-          row GAP FUNCTIONAL "bundler local config override" \
-            "the local config at $(cq "$blcfg") switches lockfile pinning off ($(cq "$blshow")): with those lines in force bundler $bver resolved past a lockfile that does not name the gem. Bundler's local config outranks BUNDLE_FROZEN in the environment and ~/.bundle/config, so \`bundle install\` and \`bundle add\` in this project are not pinned"
+          blpv=GAP; blpe=FUNCTIONAL
+          blpm="switches lockfile pinning off ($(cq "$blshow")): with those lines in force bundler $bver resolved past a lockfile that does not name the gem. Bundler's local config outranks BUNDLE_FROZEN in the environment and ~/.bundle/config, so \`bundle install\` and \`bundle add\` in this project are not pinned"
         else
-          row WEAK FUNCTIONAL "bundler local config override" \
-            "$(cq "$blcfg") sets $(cq "$blshow"), and the fixture run with those lines produced neither a refusal nor a resolution: $(printf '%s\n' "$blout" | grep -viE 'deprecat|didyoumean|warning:' | head -1 | tr '\t' ' ' | cut -c1-160)"
+          blpv=WEAK; blpe=FUNCTIONAL
+          blpm="sets $(cq "$blshow"), and the fixture run with those lines produced neither a refusal nor a resolution: $(printf '%s\n' "$blout" | grep -viE 'deprecat|didyoumean|warning:' | head -1 | tr '\t' ' ' | cut -c1-160)"
         fi
       fi
       rm -rf "$bl3" 2>/dev/null
     fi
+    if [ -n "$blckeys" ] && [ "$bcd_has" -ne 1 ]; then
+      blcna="its $(cq "$blcshow") is inert: bundler ${bver:-<unknown>} has no cooldown (see bundler publish-age gate)"
+    elif [ -n "$blckeys" ]; then
+      blc_by=" - set by the local config at $(cq "$blcfg") ($(cq "$blcshow")), which outranks BUNDLE_COOLDOWN in the environment and ~/.bundle/config"
+      case "$bcd" in
+        ''|*[!0-9]*)
+          blcv=GAP; blce=PARSED
+          blcm="sets $(cq "$blcshow"), and bundler $bver then reports cooldown=$(cq "${bcd:-<none>}") here, which is no publish-age gate. Bundler's local config outranks BUNDLE_COOLDOWN in the environment and ~/.bundle/config" ;;
+        0)
+          blcv=GAP; blce=PARSED
+          blcm="switches the publish-age gate off ($(cq "$blcshow")): bundler $bver reports cooldown=0 here. Bundler's local config outranks BUNDLE_COOLDOWN in the environment and ~/.bundle/config, so \`bundle lock\`, \`bundle update\` and \`bundle add\` in this project take releases of any age" ;;
+        *)
+          if [ -n "$bwant" ] && [ "$bcd" -lt "$bwant" ]; then
+            blcv=WEAK; blce=PARSED
+            blcm="shortens the publish-age gate ($(cq "$blcshow")): bundler $bver $bcd_src cooldown=${bcd}d here, below the ${bwant}d this host declared. Bundler's local config outranks BUNDLE_COOLDOWN in the environment and ~/.bundle/config"
+          else
+            blcv=OK; blce=PARSED
+            blcm="leaves the publish-age gate on ($(cq "$blcshow")): bundler $bver $bcd_src cooldown=${bcd}d here"
+          fi ;;
+      esac
+    fi
+    blv=$blpv; ble=$blpe
+    if [ -n "$blcv" ]; then
+      case "$blv:$blcv" in
+        :*|OK:WEAK|OK:GAP|WEAK:GAP) blv=$blcv; ble=$blce ;;
+        OK:OK)
+          # OK is only as strong as its weaker half.
+          case "$ble:$blce" in FUNCTIONAL:PARSED|FUNCTIONAL:PRESENT|PARSED:PRESENT) ble=$blce ;; esac ;;
+      esac
+    fi
+    blm=""
+    [ -n "$blpm" ] && blm=$blpm
+    [ -n "$blcm" ] && blm="${blm:+$blm; it also }$blcm"
+    for blna in "$blpna" "$blcna"; do
+      [ -n "$blna" ] && blm="${blm:+$blm; }$blna"
+    done
+    if [ -n "$blv" ]; then
+      row "$blv" "$ble" "bundler local config override" "the local config at $(cq "$blcfg") $blm"
+    elif [ -n "$blm" ]; then
+      row "N/A" - "bundler local config override" "the local config at $(cq "$blcfg") switches nothing off: $blm"
+    else
+      row "N/A" - "bundler local config override" \
+        "$(cq "$blcfg") sets none of BUNDLE_FROZEN, BUNDLE_DEPLOYMENT and BUNDLE_COOLDOWN, so it cannot switch lockfile pinning or the publish-age gate off"
+    fi
   fi
 
   # --- bundler publish-age gate  [PARSED] ---
-  # cooldown landed in 4.0.13, and needs ruby >= 3.2. The version check has to
-  # come first: MEASURED, `bundle config get cooldown` echoes the value on 2.4.20,
-  # which ignores it. Asked from $PWD on purpose, because a repo's .bundle/config
-  # outranks the environment and the global file (MEASURED on 4.0.24: "0" there
-  # disabled the gate with BUNDLE_COOLDOWN set), and this readback does show it.
-  # Compared in days the way both writers derive it, floored at 1.
-  bwanth=$(scv_want_hours); bwant=""
-  case "$bwanth" in
-    ''|*[!0-9]*) ;;
-    *) bwant=$((bwanth / 24)); [ "$bwant" -lt 1 ] && bwant=1 ;;
-  esac
+  # The window bundler reports from $PWD, read above.
   if [ -z "$bver" ]; then
     row WEAK PRESENT "bundler publish-age gate" "could not read a version from bundler; the gate was not checked"
-  elif [ "$(printf '4.0.13\n%s\n' "$bver" | sort -V | head -1)" != "4.0.13" ]; then
+  elif [ "$bcd_has" -ne 1 ]; then
     scv_toolchain_gap bundler.age-gate PARSED "bundler publish-age gate" \
       "bundler $bver does NOT implement cooldown (added in 4.0.13, which needs ruby >= 3.2) - the key is written and ignored, and bundler echoes it back anyway. See $(scv_doc docs/composer-bundler-cooldown-by-distro.md)"
   else
-    bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
-    # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
-    # and --parseable does not show that. MEASURED (4.1.0): with only ~/.gemrc
-    # `:cooldown: 3650` this row printed "none is set" while `bundle install`
-    # still resolved the older version, and with a repo "0" plus the gemrc it
-    # printed "cooldown=0 disables" while the gemrc value applied. Ask bundler
-    # for the window it will apply, pinned to the version `bundle` reported;
-    # bundler < 4.1 has no cooldown_for and keeps the --parseable answer.
-    bcd_src="reports"
-    bcd_eff=$(ruby -e 'begin; gem "bundler", ARGV[0]; require "bundler"; s = Bundler.settings; print(s.respond_to?(:cooldown_for) ? s.cooldown_for.to_s : ""); rescue Exception; end' "$bver" 2>/dev/null)
-    case "$bcd_eff" in
-      ''|*[!0-9]*) ;;
-      *) [ "$bcd_eff" != "${bcd:-}" ] && bcd_src="applies (raised by RubyGems' :cooldown:)"
-         bcd=$bcd_eff ;;
-    esac
     # Does `gem install` share the window? RubyGems 4.1.0 added a cooldown that
     # reads BUNDLE_COOLDOWN, ~/.bundle/config and gemrc `:cooldown:`, taking the
     # larger. MEASURED: it installs an older version inside the window and
@@ -3908,16 +3976,16 @@ else
     case "$bcd" in
       '')
         row GAP PARSED "bundler publish-age gate" \
-          "bundler $bver implements cooldown but none is set in $(cq "$PWD") - new releases resolve immediately" ;;
+          "bundler $bver implements cooldown but none is set in $(cq "$PWD") - new releases resolve immediately$blc_by" ;;
       *[!0-9]*)
-        row GAP PARSED "bundler publish-age gate" "bundler $bver reports a non-numeric cooldown=$(cq "$bcd")" ;;
+        row GAP PARSED "bundler publish-age gate" "bundler $bver reports a non-numeric cooldown=$(cq "$bcd")$blc_by" ;;
       0)
         row GAP PARSED "bundler publish-age gate" \
-          "bundler $bver reports cooldown=0 in $(cq "$PWD"), which disables the gate - a repo's .bundle/config outranks BUNDLE_COOLDOWN" ;;
+          "bundler $bver reports cooldown=0 in $(cq "$PWD"), which disables the gate${blc_by:- - no local config here sets it, so BUNDLE_COOLDOWN or the user config does}" ;;
       *)
         if [ -n "$bwant" ] && [ "$bcd" -lt "$bwant" ]; then
           row WEAK PARSED "bundler publish-age gate" \
-            "bundler $bver $bcd_src cooldown=${bcd}d, below the ${bwant}d this host declared - something shortened the window"
+            "bundler $bver $bcd_src cooldown=${bcd}d, below the ${bwant}d this host declared${blc_by:- - something shortened the window}"
         else
           row OK PARSED "bundler publish-age gate" \
             "bundler $bver implements cooldown and $bcd_src ${bcd}d - $bgem"
