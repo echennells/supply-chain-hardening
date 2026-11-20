@@ -610,6 +610,105 @@ hosts_restore() {
   [ -z "$output" ]
 }
 
+# --- an sfw under another npm prefix than root's npm uses --------------------
+#
+# MEASURED 2026-11-20 on a live Ubuntu 24.04 host with NodeSource Node 24: sfw
+# 2.0.4 sat under /usr/local (an earlier role run with Ubuntu's apt npm, whose
+# prefix is /usr/local), and root's npm, now NodeSource's, has prefix /usr. The
+# replacement went to /usr/lib/node_modules and /usr/bin/sfw, root's PATH still
+# found /usr/local/bin/sfw 2.0.4 first, the warm moved that aside, and the run
+# summary said the replacement "left it unchanged: sfw_version must be 2.0.6 or
+# later", which was false. The 2.0.6 was neither warmed nor checked in that run.
+# The test image is NodeSource too, so the image's own sfw is moved out of the
+# way and 2.0.4 is staged under /usr/local, as on that host.
+PREFIX_STAGED=""
+sfw_prefix_teardown() {
+  [ -n "$PREFIX_STAGED" ] || return 0
+  local own=$PREFIX_OWN saved="$BATS_TEST_TMPDIR/own-sfw"
+  echo "# teardown: putting the image's sfw back under $own" >&3
+  rm -rf /usr/local/lib/node_modules/sfw
+  rm -f /usr/local/bin/sfw /usr/local/bin/sfw.broken
+  [ -n "$PREFIX_MADE_LIB" ] && rm -rf /usr/local/lib/node_modules
+  if [ -d "$saved/pkg" ]; then
+    rm -rf "$own/lib/node_modules/sfw"; rm -f "$own/bin/sfw" "$own/bin/sfw.broken"
+    mv "$saved/pkg" "$own/lib/node_modules/sfw"
+    # The link's (relative) target is kept, and it is back in its directory.
+    mv "$saved/bin" "$own/bin/sfw"
+  fi
+  hash -r
+  PREFIX_STAGED=""
+}
+
+@test "upgrade: an sfw under another npm prefix than root's npm is replaced where it is, with no false message" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "moves the global sfw and installs one under /usr/local"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  own=$(cd / && npm prefix -g)
+  [ -n "$own" ] && [ "$own" != /usr/local ] || skip "root's npm already uses /usr/local; there is no second prefix to stage"
+  [ "${c%/.sfw-cache}" = "$own/lib/node_modules/sfw" ] && [ -L "$own/bin/sfw" ] \
+    || skip "the image's sfw is not where root's npm puts it"
+  [ ! -e /usr/local/lib/node_modules/sfw ] && [ ! -e /usr/local/bin/sfw ] || skip "an sfw is already under /usr/local"
+  want=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  gc=$(cd / && npm config get globalconfig)
+
+  # The live host's layout: no sfw under root's npm's prefix, 2.0.4 under
+  # /usr/local, warm (the image's cache, so the install's own npm call through
+  # the wrapper does not download the binary for 2.0.4).
+  PREFIX_OWN=$own; PREFIX_MADE_LIB=""
+  [ -d /usr/local/lib/node_modules ] || PREFIX_MADE_LIB=1
+  mkdir -p "$BATS_TEST_TMPDIR/own-sfw"
+  PREFIX_STAGED=1
+  mv "$own/lib/node_modules/sfw" "$BATS_TEST_TMPDIR/own-sfw/pkg"
+  mv "$own/bin/sfw" "$BATS_TEST_TMPDIR/own-sfw/bin"
+  hash -r
+  (cd / && npm install -g --prefix /usr/local --globalconfig "$gc" --ignore-scripts sfw@2.0.4) >/dev/null 2>&1 \
+    || skip "could not install sfw@2.0.4 (offline?)"
+  lc=/usr/local/lib/node_modules/sfw/.sfw-cache
+  cp -a "$BATS_TEST_TMPDIR/own-sfw/pkg/.sfw-cache" "$lc"
+  # An absolute `latest` would point at the moved copy, outside this cache.
+  t=$(readlink "$lc/latest")
+  case "$t" in "$c"/*) ln -sfn "$lc/${t#"$c"/}" "$lc/latest" ;; esac
+  hash -r
+  [ "$(command -v sfw)" = /usr/local/bin/sfw ]
+  grep -q '"version": "2.0.4"' /usr/local/lib/node_modules/sfw/package.json
+
+  socket_apply
+  echo "$output" | grep -E 'Socket Firewall|fatal|FAILED|PLAY RECAP' | head -20
+  [ "$status" -eq 0 ]
+  # What the summary said on that host. Each is false once the replacement
+  # lands where the old sfw was.
+  if [[ "$output" == *"left it unchanged"* || "$output" == *"predates 2.0.6"* ]]; then
+    echo "the run summary still reports the sfw it replaced"; return 1
+  fi
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == changed:* ]]
+  # The replacement went where the old sfw was, and nothing into root's npm's
+  # own prefix.
+  grep -q "\"version\": \"$want\"" /usr/local/lib/node_modules/sfw/package.json
+  grep -rqs SFW_SKIP_UPDATE_CHECK /usr/local/lib/node_modules/sfw/dist/
+  [ ! -e "$own/lib/node_modules/sfw" ] || { echo "a second sfw was installed under $own"; return 1; }
+  [ ! -e "$own/bin/sfw" ]
+  [ ! -L "$own/bin/sfw" ]
+  hash -r
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    skip "sfw's binary could not be downloaded from GitHub after the reinstall; it was replaced under /usr/local, at $want, with no false message"
+  fi
+  # One sfw on root's PATH, at sfw_version, warmed by root, and nobody else can
+  # write its cache.
+  run type -ap sfw
+  [ "$output" = /usr/local/bin/sfw ] || { echo "sfw on PATH: $output"; return 1; }
+  [ ! -e /usr/local/bin/sfw.broken ]
+  [ -e "$lc/latest" ]
+  run find "$lc" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+
+  # Converged: the next apply has nothing to replace.
+  socket_apply
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+}
+
 # ---- cargo: a system-path wrapper that an earlier version left behind ----
 #
 # MEASURED (VM#2's u2204/u2404 layout, reproduced on Ubuntu 26.04 with apt
@@ -676,6 +775,7 @@ cargo_teardown() {
 # bats runs one teardown, so it calls both.
 teardown() {
   hosts_restore
+  sfw_prefix_teardown
   sfw_teardown
   cargo_teardown
 }

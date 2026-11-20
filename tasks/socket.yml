@@ -46,28 +46,74 @@
   # The install used to run only when sfw was absent (or older than 2.0.6), so
   # bumping sfw_version never reached a host that already had sfw (MEASURED on
   # 6c77f4e: an installed sfw whose version differed from sfw_version, in either
-  # direction, was left as it was, changed=0). Same rule as lockfile-lint in
-  # npm.yml: read the install TARGET, the package.json under `npm root -g` of
-  # the npm root runs, and leave alone an sfw some other installer put
-  # elsewhere.
+  # direction, was left as it was, changed=0). This reads the version of the
+  # sfw root runs, the one the wrappers and the warm below use.
   #
-  # `aside=` is an sfw an earlier apply moved aside (sfw -> sfw.broken) because
-  # its firewall binary could not be fetched or run. The install below still
-  # runs over it, to retry with a fresh package directory, but it only counts as
-  # a change when that retry leaves a working sfw (see the warm). MEASURED on
-  # 6c77f4e with GitHub unreachable: every re-apply reinstalled, failed the
-  # warm, moved sfw aside again and reported changed=1, ending where it began.
+  # The install replaces that sfw WHERE IT IS. MEASURED 2026-11-20 on a live
+  # Ubuntu 24.04 host with NodeSource Node 24: sfw 2.0.4 sat under /usr/local
+  # (installed by an earlier role run with Ubuntu's apt npm, whose prefix is
+  # /usr/local), and root's npm, now NodeSource's, has prefix /usr. The
+  # replacement went to npm's own prefix, /usr/lib/node_modules and
+  # /usr/bin/sfw; root's PATH still found /usr/local/bin/sfw 2.0.4 first, so
+  # the warm moved it aside as still too old, the run summary said the
+  # replacement "left it unchanged: sfw_version must be 2.0.6 or later" (false),
+  # and the 2.0.6 was neither warmed nor checked until the next apply. So the
+  # probe prints the npm prefix that sfw lives under (npm's global layout is
+  # <prefix>/lib/node_modules/sfw) when it is not root's npm's own, and the
+  # install passes it to npm. It passes the globalconfig root's npm reads by
+  # default with it: npm derives that file from the prefix, so --prefix alone
+  # would install without the role's global npmrc (MEASURED, npm 10.9.9 on
+  # NodeSource: `--prefix /usr/local` moves globalconfig from /usr/etc/npmrc
+  # to /usr/local/etc/npmrc).
+  #
+  # `aside=` is an sfw an earlier apply moved aside (sfw -> sfw.broken, in the
+  # directory root found it in) because its firewall binary could not be
+  # fetched or run. With no sfw on root's PATH, that is the one the install
+  # replaces. The install still runs over it, to retry with a fresh package
+  # directory, but it only counts as a change when that retry leaves a working
+  # sfw (see the warm). MEASURED on 6c77f4e with GitHub unreachable: every
+  # re-apply reinstalled, failed the warm, moved sfw aside again and reported
+  # changed=1, ending where it began.
+  #
+  # Only an sfw root owns, as the cache reset requires of the one it runs:
+  # root's npm writes the replacement into its directory. Anything else prints
+  # nothing here, and the install (when sfw is absent for the applying user)
+  # goes to npm's own prefix, as before.
   become: true
   ansible.builtin.shell:
     cmd: |
-      root=$(npm root -g 2>/dev/null) || exit 0
-      f="$root/sfw/package.json"
-      [ -f "$f" ] || exit 0
-      echo "version=$(sed -nE 's/^ *"version": *"([^"]+)".*/\1/p' "$f" | head -n 1)"
-      bin="$(npm prefix -g 2>/dev/null)/bin/sfw"
-      if [ ! -e "$bin" ] && [ ! -L "$bin" ] && { [ -e "$bin.broken" ] || [ -L "$bin.broken" ]; }; then
-        echo "aside=$bin.broken"
+      set -u
+      d=$(mktemp -d) && cd "$d" || exit 0
+      trap 'cd / && rm -rf -- "$d"' EXIT
+      p=$(command -v sfw 2>/dev/null) || p=""
+      aside=""
+      if [ -z "$p" ]; then
+        IFS=:
+        for dir in $PATH; do
+          if [ -e "$dir/sfw.broken" ] || [ -L "$dir/sfw.broken" ]; then
+            p=$dir/sfw.broken; aside=1; break
+          fi
+        done
+        unset IFS
       fi
+      [ -n "$p" ] || exit 0
+      shim=$(readlink -f "$p") || exit 0
+      pkg=${shim%/*}; pkg=${pkg%/*}
+      [ -f "$pkg/package.json" ] || exit 0
+      [ "$(stat -c %u "$shim")" = 0 ] && [ "$(stat -c %u "$pkg")" = 0 ] || exit 0
+      echo "version=$(sed -nE 's/^ *"version": *"([^"]+)".*/\1/p' "$pkg/package.json" | head -n 1)"
+      [ -z "$aside" ] || echo "aside=$p"
+      own=$(npm prefix -g 2>/dev/null) || own=""
+      case "$pkg" in
+        */lib/node_modules/sfw)
+          prefix=${pkg%/lib/node_modules/sfw}
+          if [ -n "$prefix" ] && [ -n "$own" ] && [ "$(readlink -f "$prefix")" != "$(readlink -f "$own")" ]; then
+            gc=$(npm config get globalconfig 2>/dev/null) || gc=""
+            [ -n "$gc" ] && echo "prefix=$prefix" && echo "globalconfig=$gc"
+          fi
+          ;;
+      esac
+      echo "target=${prefix:-$own}"
     executable: /bin/bash
   register: sfw_installed
   changed_when: false
@@ -97,6 +143,19 @@
       {{ sfw_installed.stdout | default('') is search('^aside=', multiline=True)
          and (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
               | default([''], true) | first | default('', true) | trim) == sfw_version | string }}
+    # Where the install puts sfw: the prefix of the sfw it replaces, when that is
+    # not root's npm's own (see the probe), with the globalconfig npm would
+    # otherwise read. Empty: npm's own prefix, as for a fresh install.
+    sfw_install_target: >-
+      {{ sfw_installed.stdout | default('') | regex_search('^target=(.*)$', '\1', multiline=True)
+         | default([''], true) | first | default('', true) | trim }}
+    sfw_install_argv: >-
+      {{ ['npm', 'install', '-g', '--ignore-scripts']
+         + ((['--prefix', sfw_installed.stdout | regex_search('^prefix=(.*)$', '\1', multiline=True) | first | trim,
+              '--globalconfig', sfw_installed.stdout | regex_search('^globalconfig=(.*)$', '\1', multiline=True) | first | trim])
+            if (sfw_installed.stdout | default('') is search('^prefix=.', multiline=True)
+                and sfw_installed.stdout | default('') is search('^globalconfig=.', multiline=True)) else [])
+         + ['sfw@' ~ sfw_version] }}
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
@@ -136,7 +195,10 @@
   # version probe above). A retry over one an earlier apply moved aside, at the
   # same version, is reported by the warm instead: it changed something only if
   # sfw works afterwards.
-  ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
+  #
+  # Into the prefix of the sfw it replaces (sfw_install_argv, from the probe).
+  ansible.builtin.command:
+    argv: "{{ sfw_install_argv | default(['npm', 'install', '-g', '--ignore-scripts', 'sfw@' ~ sfw_version], true) }}"
   when:
     - >-
       sfw_check.rc != 0
@@ -309,7 +371,7 @@
 - name: Record skipped protection — Socket Firewall older than 2.0.6
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — sfw ' ~ (sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true)) ~ ' at ' ~ sfw_warm.stdout_lines[0][5:] ~ ' predates 2.0.6, so it ignores SFW_SKIP_UPDATE_CHECK, which the npm and cargo wrappers set so that a non-root caller never writes its root-owned cache. With it, every non-root npm and cargo call through sfw fails from an hour after each update check ("[sfw] Failed to prepare firewall binary: EACCES ... next-check"). ' ~ (('This --check run changed nothing: a real run replaces it with sfw@' ~ sfw_version ~ ', and moves it aside only if it is still older than 2.0.6.') if ansible_check_mode else ((('Replacing it with sfw@' ~ sfw_version ~ ((' failed (exit ' ~ (sfw_install.rc | string) ~ ').') if (sfw_install.rc | default(0)) != 0 else ' left it unchanged: sfw_version must be 2.0.6 or later.')) if (sfw_install is defined and sfw_install is not skipped) else 'It was not replaced (see the other Socket Firewall entries).') ~ ' It was moved aside so npm and cargo keep working, unfiltered. Install sfw 2.0.6 or later as root and re-apply.'))] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — sfw ' ~ (sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true)) ~ ' at ' ~ sfw_warm.stdout_lines[0][5:] ~ ' predates 2.0.6, so it ignores SFW_SKIP_UPDATE_CHECK, which the npm and cargo wrappers set so that a non-root caller never writes its root-owned cache. With it, every non-root npm and cargo call through sfw fails from an hour after each update check ("[sfw] Failed to prepare firewall binary: EACCES ... next-check"). ' ~ (('This --check run changed nothing: a real run replaces it with sfw@' ~ sfw_version ~ ', and moves it aside only if it is still older than 2.0.6.') if ansible_check_mode else (((('Replacing it with sfw@' ~ sfw_version ~ ' failed (exit ' ~ (sfw_install.rc | string) ~ ').') if (sfw_install.rc | default(0)) != 0 else (('Replacing it with sfw@' ~ sfw_version ~ ' left it unchanged: sfw_version must be 2.0.6 or later.') if sfw_version is version('2.0.6', '<') else ('sfw@' ~ sfw_version ~ ' was installed under ' ~ (sfw_install_target | default('', true) | default("root's npm prefix", true)) ~ ', but root still finds this older sfw first on its PATH.'))) if (sfw_install is defined and sfw_install is not skipped) else 'It was not replaced (see the other Socket Firewall entries).') ~ ' It was moved aside so npm and cargo keep working, unfiltered. ' ~ (('Remove it, or install sfw ' ~ sfw_version ~ ' in its place, as root, and re-apply.') if (sfw_install is defined and sfw_install is not skipped and (sfw_install.rc | default(0)) == 0 and sfw_version is version('2.0.6', '>=')) else 'Install sfw 2.0.6 or later as root and re-apply.')))] }}
   when:
     - sfw_warm is defined
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'old'
