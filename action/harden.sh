@@ -2456,7 +2456,7 @@ sfw_ready() {
   [ -e "$p/.sfw-cache/latest" ] && return 0
   if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
   else [ -w "$p" ] && return 0; fi
-  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. cargo call not filtered through threat intel" >&2
+  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run  sudo sh -c 'umask 022; sfw true && chmod -R go+rX $p/.sfw-cache'  once, or re-run the hardening step. cargo call not filtered through threat intel" >&2
   return 1
 }
 run_real() {
@@ -3578,7 +3578,7 @@ sfw_ready() {
   [ -e "$p/.sfw-cache/latest" ] && return 0
   if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
   else [ -w "$p" ] && return 0; fi
-  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. Call not filtered through threat intel" >&2
+  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run  sudo sh -c 'umask 022; sfw true && chmod -R go+rX $p/.sfw-cache'  once, or re-run the hardening step. Call not filtered through threat intel" >&2
   return 1
 }
 GUARD
