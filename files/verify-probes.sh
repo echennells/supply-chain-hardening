@@ -3617,6 +3617,38 @@ bundler_implements() {
   [ "$bi_real" = "true" ] && [ "$bi_sent" = '"true"' ]
 }
 
+# bundler_layer <key> - bundler's own account, from $PWD, of the config layer
+# <key> comes from: the first "Set ..." line of `bundle config get <key>`.
+# Bundler lists the layers that set a key in priority order ("The top value
+# will be used"), e.g.
+#   Set for your local app (/r/.bundle/config): 0
+#   Set via BUNDLE_COOLDOWN: 2
+#   Set for the current user (/root/.bundle/config): 2
+# Prints nothing when no layer sets the key ("You have not configured a value").
+# Returns 1 when bundler printed no "Settings for" header, so it gave no account
+# and the caller falls back to reading the file itself.
+# Why ask bundler instead of grepping the file: bundler parses its config with
+# its own serializer, not YAML, and the parsers differ by version. MEASURED
+# (ruby 3.3.13): 4.0.13 reads a key indented by one space, ignores a
+# tab-indented or quoted one, and raises NoMethodError on two spaces or more;
+# 4.1.0 reads all of those and `KEY :` too; both ignore a key nested under
+# another. A grep cannot follow that, and a grep that missed the key let a repo
+# switch the gate off while this verifier blamed the environment.
+# Callers gate on bcfgsafe: on bundler 1.x this command WRITES a key.
+bundler_layer() {
+  local bl_out
+  bl_out=$("$bundler_bin" config get "$1" 2>/dev/null) || :
+  case "$bl_out" in
+    *"Settings for"*) : ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$bl_out" | sed -n 's/^[[:space:]]*\(Set .*\)$/\1/p' | head -1 | tr -d '\r'
+}
+# The path and the value in a "Set for your local app (<path>): <value>" line;
+# empty for any other layer.
+bundler_local_path() { printf '%s\n' "$1" | sed -n 's/^Set for your local app (\(.*\)): .*$/\1/p'; }
+bundler_local_value() { printf '%s\n' "$1" | sed -n 's/^Set for your local app (.*): \(.*\)$/\1/p'; }
+
 # ADMISSION fixture: a Gemfile.lock that EXISTS but does not name the gem, so
 # this measures the protection actually claimed — "bundler will not resolve
 # what the lockfile does not already name" — rather than the weaker "bundler
@@ -3796,10 +3828,13 @@ else
     ''|*[!0-9]*) ;;
     *) bwant=$((bwanth / 24)); [ "$bwant" -lt 1 ] && bwant=1 ;;
   esac
-  bcd_has=0; bcd=""; bcd_src="reports"
+  # bcd_who is bundler's own account of the layer that window comes from (see
+  # bundler_layer); bcd_whok=1 when bundler gave one.
+  bcd_has=0; bcd=""; bcd_src="reports"; bcd_who=""; bcd_whok=0
   if [ -n "$bver" ] && [ "$(printf '4.0.13\n%s\n' "$bver" | sort -V | head -1)" = "4.0.13" ]; then
     bcd_has=1
     bcd=$("$bundler_bin" config get cooldown --parseable 2>/dev/null | sed -n 's/^cooldown=//p' | head -1)
+    if bcd_who=$(bundler_layer cooldown); then bcd_whok=1; else bcd_who=""; fi
     # Bundler 4.1 RAISES the configured window to RubyGems' gemrc `:cooldown:`,
     # and --parseable does not show that. MEASURED (4.1.0): with only ~/.gemrc
     # `:cooldown: 3650` this row printed "none is set" while `bundle install`
@@ -3832,10 +3867,18 @@ else
   # exports (MEASURED above). That half is PARSED: judging it functionally needs
   # a release younger than the window, so a network fetch. It is judged on the
   # window bundler reports from $PWD, read above, and only when the local config
-  # names the key, so the row names the file that did it; the publish-age row
+  # sets the key, so the row names the file that did it; the publish-age row
   # below reports the same window as the effect. This row can only lower the
   # verdict: the worse of its two halves, OK when the local config leaves both
   # protections on.
+  # WHICH keys the local config sets is bundler's call, not a grep's: where
+  # `config get` is safe (bcfgsafe) the keys come from bundler_layer, and the
+  # pinning fixture gets the values bundler parsed. MEASURED (4.0.13, 4.1.0): a
+  # repo file holding ` BUNDLE_COOLDOWN: "0"` (one leading space) switched the
+  # gate off, while a column-0 grep found no key, so this row said N/A and the
+  # publish-age row blamed the environment, which said 2. The grep, which
+  # allows leading blanks and quoted keys, is only the fallback for a bundler
+  # that gave no account (1.x, an unreadable version, or a crash).
   # The official ruby images export BUNDLE_APP_CONFIG=/usr/local/bundle, and
   # bundler then reads $BUNDLE_APP_CONFIG/config INSTEAD of the project's
   # .bundle/config (MEASURED, ruby:3.3.13-slim-trixie: a repo "0" had no effect
@@ -3864,6 +3907,12 @@ else
   elif [ -n "$blroot" ]; then
     blcfg="$blroot/.bundle/config"
   fi
+  # A local config bundler says sets the window, at a path the search above
+  # did not reach: bundler is the authority on which file it reads.
+  bcd_lpath=$(bundler_local_path "$bcd_who"); bcd_lval=$(bundler_local_value "$bcd_who")
+  if [ -n "$bcd_lpath" ] && { [ -z "$blcfg" ] || [ ! -f "$blcfg" ]; } && [ -f "$bcd_lpath" ]; then
+    blcfg=$bcd_lpath
+  fi
   blhost=0
   [ -n "${bout:-}" ] && [ -n "${brx:-}" ] && printf '%s\n' "$bout" | grep -qE "$brx" && blhost=1
   blc_by=""
@@ -3874,10 +3923,27 @@ else
     row "N/A" - "bundler local config override" \
       "no local config at $(cq "$blcfg") - nothing here overrides the user config"
   else
-    blkeys=$(grep -E "^[\"']?BUNDLE_(FROZEN|DEPLOYMENT)[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
+    # Pinning keys: bundler's account where it gives one for both, each line
+    # rebuilt from the value bundler parsed; otherwise the lines in the file.
+    blkeys=""; blpwho=0
+    if [ "$bcfgsafe" -eq 1 ] && blwf=$(bundler_layer frozen) && blwd=$(bundler_layer deployment); then
+      blpwho=1
+      blv1=$(bundler_local_value "$blwf"); blv2=$(bundler_local_value "$blwd")
+      [ -n "$blv1" ] && blkeys="BUNDLE_FROZEN: \"$blv1\""
+      [ -n "$blv2" ] && blkeys="${blkeys:+$blkeys
+}BUNDLE_DEPLOYMENT: \"$blv2\""
+    else
+      blkeys=$(grep -E "^[[:space:]]*[\"']?BUNDLE_(FROZEN|DEPLOYMENT)[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
+    fi
     blshow=$(printf '%s' "$blkeys" | tr '\n\t' '  ' | cut -c1-120)
-    blckeys=$(grep -E "^[\"']?BUNDLE_COOLDOWN[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
-    blcshow=$(printf '%s' "$blckeys" | tr '\n\t' '  ' | cut -c1-80)
+    if [ "$bcd_whok" -eq 1 ]; then
+      blckeys=""
+      [ -n "$bcd_lpath" ] && blckeys="BUNDLE_COOLDOWN: $bcd_lval"
+      blcshow="$blckeys, which bundler's own \`config get cooldown\` attributes to this file"
+    else
+      blckeys=$(grep -E "^[[:space:]]*[\"']?BUNDLE_COOLDOWN[\"']?[[:space:]]*:" "$blcfg" 2>/dev/null)
+      blcshow=$(printf '%s' "$blckeys" | tr '\n\t' '  ' | cut -c1-80)
+    fi
     # Each half sets a verdict, an evidence level and a clause, or a reason it
     # has nothing to judge (*na). The row is the worse half.
     blpv=""; blpe=""; blpm=""; blpna=""
@@ -3909,8 +3975,10 @@ else
       fi
       rm -rf "$bl3" 2>/dev/null
     fi
-    if [ -n "$blckeys" ] && [ "$bcd_has" -ne 1 ]; then
-      blcna="its $(cq "$blcshow") is inert: bundler ${bver:-<unknown>} has no cooldown (see bundler publish-age gate)"
+    if [ -n "$blckeys" ] && [ -z "$bver" ]; then
+      blcna="its $(cq "$blcshow") was not judged: bundler's version could not be read, so whether it implements cooldown is unknown"
+    elif [ -n "$blckeys" ] && [ "$bcd_has" -ne 1 ]; then
+      blcna="its $(cq "$blcshow") is inert: bundler $bver has no cooldown (see bundler publish-age gate)"
     elif [ -n "$blckeys" ]; then
       blc_by=" - set by the local config at $(cq "$blcfg") ($(cq "$blcshow")), which outranks BUNDLE_COOLDOWN in the environment and ~/.bundle/config"
       case "$bcd" in
@@ -3950,10 +4018,19 @@ else
     elif [ -n "$blm" ]; then
       row "N/A" - "bundler local config override" "the local config at $(cq "$blcfg") switches nothing off: $blm"
     else
+      if [ "$blpwho" -eq 1 ] && { [ "$bcd_whok" -eq 1 ] || [ "$bcd_has" -ne 1 ]; }; then
+        blsrc="by bundler's own \`config get\`"
+      else
+        blsrc="by the lines in the file (bundler gave no account of its own)"
+      fi
       row "N/A" - "bundler local config override" \
-        "$(cq "$blcfg") sets none of BUNDLE_FROZEN, BUNDLE_DEPLOYMENT and BUNDLE_COOLDOWN, so it cannot switch lockfile pinning or the publish-age gate off"
+        "$(cq "$blcfg") sets none of BUNDLE_FROZEN, BUNDLE_DEPLOYMENT and BUNDLE_COOLDOWN ($blsrc), so it cannot switch lockfile pinning or the publish-age gate off"
     fi
   fi
+  # Bundler's account of the layer behind the window, for the publish-age row
+  # when no local config sets it. No account, no claim about the layer.
+  bcd_whosays=""
+  [ "$bcd_whok" -eq 1 ] && [ -n "$bcd_who" ] && bcd_whosays=" - bundler names the layer in force: $(cq "$bcd_who")"
 
   # --- bundler publish-age gate  [PARSED] ---
   # The window bundler reports from $PWD, read above.
@@ -3981,11 +4058,11 @@ else
         row GAP PARSED "bundler publish-age gate" "bundler $bver reports a non-numeric cooldown=$(cq "$bcd")$blc_by" ;;
       0)
         row GAP PARSED "bundler publish-age gate" \
-          "bundler $bver reports cooldown=0 in $(cq "$PWD"), which disables the gate${blc_by:- - no local config here sets it, so BUNDLE_COOLDOWN or the user config does}" ;;
+          "bundler $bver reports cooldown=0 in $(cq "$PWD"), which disables the gate${blc_by:-${bcd_whosays:- - bundler gave no account of which config layer sets it}}" ;;
       *)
         if [ -n "$bwant" ] && [ "$bcd" -lt "$bwant" ]; then
           row WEAK PARSED "bundler publish-age gate" \
-            "bundler $bver $bcd_src cooldown=${bcd}d, below the ${bwant}d this host declared${blc_by:- - something shortened the window}"
+            "bundler $bver $bcd_src cooldown=${bcd}d, below the ${bwant}d this host declared${blc_by:-${bcd_whosays:- - something shortened the window}}"
         else
           row OK PARSED "bundler publish-age gate" \
             "bundler $bver implements cooldown and $bcd_src ${bcd}d - $bgem"
