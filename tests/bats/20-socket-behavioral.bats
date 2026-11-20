@@ -170,3 +170,32 @@ teardown() {
   [[ "$t" == "$CACHE"/* ]]
   [ "$(stat -c %u "$t")" = 0 ]
 }
+
+@test "sfw: the verifier reports an sfw cache another account can write" {
+  # The apply resets such a cache (40-upgrade-convergence), but only when it
+  # runs. Between applies the Socket Firewall row read OK over it: MEASURED on
+  # a host with the cache at 0777 and a user-owned `latest`, "OK FUNCTIONAL
+  # Socket Firewall". Each state is restored before anything is asserted.
+  sfw_preconditions
+  [ "$(id -u)" = 0 ] || skip "needs root to change the cache's owner"
+  [ -x /usr/local/bin/supply-chain-verify ] || skip "verifier not deployed"
+  id "$SFW_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$SFW_USER"
+  mode=$(stat -c %a "$CACHE")
+
+  chmod 0777 "$CACHE"
+  run /usr/local/bin/supply-chain-verify --verbose
+  chmod "$mode" "$CACHE"
+  row=$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep 'Socket Firewall')
+  echo "$row"
+  [[ "$row" == *GAP* ]]
+  [[ "$row" == *"$CACHE is root 777"* ]]
+  [[ "$row" == *"Re-apply the role"* ]]
+
+  chown -h "$SFW_USER" "$CACHE/latest"
+  run /usr/local/bin/supply-chain-verify --verbose
+  chown -h root "$CACHE/latest"
+  row=$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep 'Socket Firewall')
+  echo "$row"
+  [[ "$row" == *GAP* ]]
+  [[ "$row" == *"$CACHE/latest is $SFW_USER"* ]]
+}

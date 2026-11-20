@@ -25,7 +25,7 @@
 | 17-bundler-behavioral.bats | 4 | Bundler frozen-mode end-to-end |
 | 18-cargo-behavioral.bats | 5 | Cargo config (git-fetch-with-cli, retry), build.rs gap + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
-| 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept, and a NON-root caller: npm (with sfw's proxy and CA seen in the child's environment) and the verifier row after sfw's 1h update-check window (backdated next-check), a cold cache (named warning, pass-through), and no account but root able to change the cached binary |
+| 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept, and a NON-root caller: npm (with sfw's proxy and CA seen in the child's environment) and the verifier row after sfw's 1h update-check window (backdated next-check), a cold cache (named warning, pass-through), and no account but root able to change the cached binary, with the verifier's row turning GAP when another account can |
 | 21-podman.bats | 14 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign |
 | 22-pip-wrapper-safety.bats | 5 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
