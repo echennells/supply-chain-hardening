@@ -482,6 +482,25 @@ if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
   exit 2
 fi
 
+# ---- Nothing this script creates is writable by group or others ----
+#
+# MEASURED (harden.sh at 6c77f4e, run as root under `umask 0000`, the default of
+# GitLab's Docker and Kubernetes executors): /etc/uv was left drwxrwxrwx, every
+# per-user config and the directory it sat in (~/.npmrc, ~/.cargo,
+# ~/.config/uv/uv.toml, ~/.m2/settings.xml, 32 paths in all) world-writable, and
+# with intel=sfw the root `npm install -g` left /usr/local/lib/node_modules/sfw,
+# the code root runs on every npm call, 0777. Any other account could rewrite
+# what the next build reads or root executes.
+#
+# go-w is added to whatever the caller's umask is, here, before the first
+# write, so it also covers every tool this script starts (npm, cargo, go env
+# -w). A stricter umask (077) is kept. The few files every account must be
+# able to read (/etc, the wrappers, the sfw install) get explicit modes where
+# they are written. SCH_CALLER_UMASK is kept for the one place that honours the
+# caller's own grant: a directory created for an explicit HARDENING_ENV_FILE.
+SCH_CALLER_UMASK=$(umask)
+umask go-w
+
 # ---- The env file and the run record: where they go, and who else can touch them ----
 #
 # The env file is the canonical, platform-neutral artifact. It is written on
@@ -611,7 +630,7 @@ _sch_create() {
     [ -d "$d" ] || ( umask 077 && mkdir -p -- "$d" ) 2>/dev/null || true
   else
     # The caller's umask plus o-w: a group-shared directory stays group-shared.
-    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$(umask) | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
+    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$SCH_CALLER_UMASK | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
   fi
   why=$(_sch_unsafe_target "$f")
   if [ -n "$why" ]; then
@@ -833,7 +852,18 @@ write_etc() {
       return 0
     fi
   fi
-  $SUDO mkdir -p "$dir"
+  # 0755 for a directory this creates (/etc/uv) whatever the umask: under 077 it
+  # was 0700, and no other account could read the uv.toml inside it.
+  $SUDO mkdir -p -m 0755 "$dir"
+  # And converge one an earlier run left writable by others (/etc/uv after a run
+  # under umask 0000, measured above). /etc itself is the system's, not ours.
+  if [[ "$dir" != /etc ]]; then
+    case "$(_sch_mode "$dir")" in
+      ?????w*|????????w*)
+        $SUDO chmod go-w "$dir"
+        log "removed group and other write from $dir, which an earlier run left writable by other accounts" ;;
+    esac
+  fi
   echo "$content" | $SUDO tee "$path" >/dev/null
   $SUDO chmod 644 "$path"
 }
@@ -3481,9 +3511,16 @@ install_sfw_and_wrap() {
   #
   # Pinned and --ignore-scripts, like the role's own tool installs (ECH-185):
   # a floating `sfw@2` gave this enforcement tool no age gate at all.
+  #
+  # umask 022, as for the warm below: every account runs this package, and only
+  # root may write it. MEASURED (6c77f4e, root under umask 0000):
+  # /usr/local/lib/node_modules/sfw and dist/sfw.mjs were left 0777, so any
+  # account could replace the code root runs on its next npm call. A caller's
+  # 077, which sudo merges with its own umask, would instead make it unreadable
+  # to everyone but root.
   local npm_bin
   npm_bin=$(command -v npm)
-  $SUDO "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
+  $SUDO sh -c 'umask 022; exec "$@"' sh "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0

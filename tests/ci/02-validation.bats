@@ -245,6 +245,30 @@ setup() { common_setup; }
   [ "$(ls -ld "$TEST_TMP/new/deeper" | cut -c9)" = - ]
 }
 
+@test "under umask 0000 nothing harden.sh writes is writable by group or others" {
+  # MEASURED at 6c77f4e (root, umask 0000, the default of GitLab's Docker
+  # executor): every per-user config and the directory it sat in was left
+  # world-writable, 32 paths in all, plus /etc/uv. Any other account could
+  # rewrite what the next build reads. Every ecosystem runs here, with stubs
+  # for the tools CI lacks, so each writer and each tool harden.sh starts
+  # (the go stub writes its env file the way `go env -w` does) is covered.
+  # What this suite cannot reach is /etc (WRITE_ETC is false throughout); the
+  # container measurements in the commit cover that half.
+  umask 022
+  local t
+  for t in pnpm yarn bun composer cargo bundle deno mvn gradle dotnet poetry; do stub_bin "$t"; done
+  stub_go_env
+  umask 0000
+  run harden -- --emit=plain
+  umask 022
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_HOME/.cargo/config.toml" ] && [ -f "$TEST_HOME/.m2/settings.xml" ]
+  [ -f "$TEST_HOME/.config/go/env" ]
+  local bad
+  bad=$(find "$TEST_HOME" "$TEST_BIN" "$TEST_TMP" -mindepth 1 \( -perm -0002 -o -perm -0020 \) ! -type l 2>/dev/null)
+  [ -z "$bad" ] || { echo "writable by group or others:"; for t in $bad; do ls -ld "$t"; done; false; }
+}
+
 @test "env file: /dev/null is refused, not replaced" {
   run harden HARDENING_ENV_FILE=/dev/null ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 2 ]
