@@ -154,3 +154,13 @@ real_binary() {
   [ -n "$r" ] && [ -x "$r" ] || return 1
   printf '%s\n' "$r"
 }
+
+# The container suite runs as root (tests/Dockerfile CMD), so some tests write
+# root-owned paths (/etc/npmrc, /etc/uv, /etc/profile.d), move a root-owned
+# binary aside, or add a user. Run as a normal user on a real host those fail
+# with "Permission denied" and read as role defects; MEASURED on 9 VMs, 12 tests
+# plus a setup_file per host. Skip them with the reason instead. Call it from a
+# @test body (or setup_file) so bats's exit-based `skip` takes effect.
+require_root() {
+  [ "$(id -u)" = 0 ] || skip "needs root: ${1:-writes root-owned files} (the container suite runs as root)"
+}

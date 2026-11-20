@@ -73,6 +73,7 @@ hide_npq() {
   # leaving it preserves the false-protection state.
   command -v npq-hero >/dev/null 2>&1 || skip "npq not installed in this image"
   command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "writes $ALIASES"
 
   shadow_npq_as_suppressed || skip "could not shadow npq-hero"
 
@@ -109,6 +110,7 @@ EOF
   command -v npq-hero >/dev/null 2>&1 || skip "npq not installed in this image"
   command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
 
+  require_root "writes $ALIASES"
   hide_npq || skip "could not hide npq-hero"
 
   # Seed the broken artifact the failed apply left behind.
@@ -158,6 +160,7 @@ EOF
   # that upgrades its Node never gets the reputation layer back.
   npq_is_functional || skip "npq non-functional in this image; forward case covered above"
   command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "removes $ALIASES"
 
   rm -f "$ALIASES"
   cd "$ROLE_DIR"

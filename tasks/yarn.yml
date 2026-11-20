@@ -29,27 +29,32 @@
   ansible.builtin.set_fact:
     yarn_detected_version: "{{ yarn_version_check.stdout | default('') | trim }}"
 
+# The template below is written whatever the version, so it is ready when Yarn
+# is upgraded. This record stops the summary from reading as coverage on a Yarn
+# that ignores it. The verifier's yarn rows are the runtime check.
 - name: Record skipped protection — this Yarn does not implement the age gate
   # npmMinimalAgeGate arrived in Yarn 4.10.0. Older Berry ignores the key in
   # ~/.yarnrc.yml without a word (MEASURED: 4.1.0, the apt yarnpkg on Debian 13
-  # and Ubuntu 26.04, and 4.9.4), and Yarn 1.x never reads .yarnrc.yml at all
-  # (MEASURED: 1.22.22). The verifier reports both as a GAP; the end-of-play
-  # summary used to leave yarn out entirely (VM#10).
+  # and Ubuntu 26.04, and 4.9.4; via corepack, `yarn config get
+  # npmMinimalAgeGate` is a usage error on 4.9.4 and reports the value on 4.10.0
+  # and 4.10.3). Yarn 1.x never reads .yarnrc.yml at all: MEASURED (yarn 1.22.22
+  # via corepack, node 24), a dependency postinstall RAN with ~/.yarnrc.yml
+  # enableScripts: false, ~/.npmrc ignore-scripts=true,
+  # NPM_CONFIG_IGNORE_SCRIPTS=true and npm_config_ignore_scripts=true each in
+  # place; only `yarn install --ignore-scripts` stopped it. The verifier reports
+  # both as a GAP; the end-of-play summary used to leave yarn out entirely
+  # (VM#10). One task, not one per case: tests/bats/32-yarn-tier-rendering.bats
+  # runs it alone, by name.
   ansible.builtin.set_fact:
     skipped_protections: >-
       {{ (skipped_protections | default([])) + [
-           ('Yarn hardening — yarn ' ~ yarn_detected_version ~ ' is Yarn 1.x (classic), which never
-             reads .yarnrc.yml: no age gate, no enableScripts, none of the yarn settings apply.
-             Yarn 4.10 or later honours them.')
+           ('Yarn hardening — yarn ' ~ yarn_detected_version ~ ' is Yarn classic, which never reads .yarnrc.yml, so none of the yarn settings this role writes apply: dependency install scripts run and there is no age gate. The npm-side layers do not reach it either (MEASURED on 1.22.22: a postinstall ran with ~/.npmrc ignore-scripts=true and NPM_CONFIG_IGNORE_SCRIPTS=true; only `yarn install --ignore-scripts` stopped it). Move the project to Yarn >= 4.10 (corepack) and re-apply.')
            if yarn_detected_version is version('2.0.0', '<') else
-           ('Yarn publish-age gate — yarn ' ~ yarn_detected_version ~ ' does not implement
-             npmMinimalAgeGate (added in Yarn 4.10.0), so a release minutes old installs.
-             enableScripts: false still applies, and the key is written so it takes effect
-             once yarn is upgraded.')
+           ('Yarn publish-age gate — yarn ' ~ yarn_detected_version ~ ' does not implement npmMinimalAgeGate (added in Yarn 4.10.0), so `yarn install` accepts a release published seconds ago. enableScripts: false still applies, and the key is written so it takes effect once Yarn is upgraded.')
          ] }}
-  when: >-
-    (yarn_detected_version is match('^[0-9]+[.][0-9]+'))
-    and (yarn_detected_version is version('4.10.0', '<'))
+  when:
+    - yarn_detected_version is match('^[0-9]+[.][0-9]+')
+    - yarn_detected_version is version('4.10.0', '<')
 
 - name: Deploy hardened global .yarnrc.yml
   ansible.builtin.template:

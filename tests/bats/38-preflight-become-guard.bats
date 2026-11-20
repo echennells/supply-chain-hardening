@@ -30,6 +30,12 @@ fi
 TEST_USER=pfguard
 
 setup_file() {
+  # Every test here runs the preflight as a second account, which this creates
+  # with a sudoers drop-in. As a normal user that fails at useradd and bats
+  # reports one "setup_file failed" line in place of all seven tests, which is
+  # how they went unreported on every VM run of the suite. In the container
+  # suite (root) they run.
+  require_root "creates the $TEST_USER account and an /etc/sudoers.d drop-in"
   id "$TEST_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$TEST_USER"
   echo "$TEST_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$TEST_USER"
   chmod 440 "/etc/sudoers.d/$TEST_USER"
@@ -45,6 +51,10 @@ EOF
 }
 
 teardown_file() {
+  # Nothing was created when setup_file skipped (not root), and /etc/sudoers.d
+  # is not searchable by a normal user, so rm -f would fail and turn the skip
+  # into a "teardown_file failed".
+  [ "$(id -u)" = 0 ] || return 0
   rm -f /tmp/pf-guard.yml "/etc/sudoers.d/$TEST_USER"
 }
 
@@ -126,4 +136,111 @@ run_pf() {
   # invariant is that the guard does not depend on SUDO_USER alone.
   grep -q "become: false" "$ROLE_DIR/tasks/preflight.yml"
   grep -q "preflight_invoking_user" "$ROLE_DIR/tasks/preflight.yml"
+}
+
+# ---- sudo-rs vs ansible-core's become prompt ----
+#
+# MEASURED on Ubuntu 26.04 (sudo-rs 0.2.13): with a password prompt, every
+# become on ansible-core < 2.20.11 and on 2.21.0-2.21.5 stops with "Timed out
+# waiting for become success or become password prompt" (rc=4). The preflight
+# refuses that combination before the first become, naming the fix. These tests
+# put a stub `sudo` first on PATH, so they need neither sudo-rs nor a second
+# ansible-core: the stub answers `--version` as sudo-rs (or classic sudo) and
+# `-n true` as "a password is needed" (or not), and hands everything else to the
+# real sudo, so the become tasks later in preflight still work. Whether the
+# refusal SHOULD fire depends on the runner's ansible-core, so each test works
+# that out from `ansible --version` instead of assuming the image's version.
+# The verdict cannot be pinned from here: `-e '{"ansible_version": {...}}'`
+# does not override the real ansible_version on any core from 2.14 to 2.22
+# (MEASURED, 2.14.18 to 2.22.0). So on a fixed core the refusal test checks
+# that nothing is refused and then reports itself SKIPPED, rather than
+# passing: a tests/Dockerfile move to a fixed core must not turn it into a
+# quiet pass that no longer exercises the refusal.
+
+# Is the ansible-core on PATH one of the releases that time out under sudo-rs?
+# Prints "affected" or "fixed"; prints nothing when the version cannot be read.
+ansible_core_verdict() {
+  local v
+  v=$(ansible --version 2>/dev/null | sed -nE '1s/.*core ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+  [ -n "$v" ] || return 0
+  python3 - "$v" <<'PY2'
+import sys
+v = tuple(int(x) for x in sys.argv[1].split("."))
+bad = v < (2, 20, 11) or ((2, 21, 0) <= v < (2, 21, 6))
+print("affected" if bad else "fixed")
+PY2
+}
+
+# make_sudo_stub <version line> <rc for `sudo -n true`>
+# Under /tmp, not BATS_TEST_TMPDIR: the second account has to traverse it.
+make_sudo_stub() {
+  STUB_DIR=$(mktemp -d /tmp/sch-sudo-stub.XXXXXX)
+  cat > "$STUB_DIR/sudo" <<EOF
+#!/bin/sh
+case "\$*" in
+  --version) echo '$1'; exit 0 ;;
+  '-n true') exit $2 ;;
+esac
+exec /usr/bin/sudo "\$@"
+EOF
+  chmod 755 "$STUB_DIR" "$STUB_DIR/sudo"
+}
+
+teardown() {
+  [ -z "${STUB_DIR:-}" ] || rm -rf "$STUB_DIR"
+}
+
+# A bare `! cmd` does not fail a bats test unless it is the last command, so
+# absence is asserted through a function that returns non-zero.
+refute_output_has() {
+  if echo "$output" | grep -q -- "$1"; then
+    echo "unexpected in output: $1" >&2
+    return 1
+  fi
+}
+
+run_pf_with_stub() {
+  su "$TEST_USER" -c "cd /tmp && PATH='$STUB_DIR':\$PATH ansible-playbook pf-guard.yml $* 2>&1"
+}
+
+@test "sudo-rs guard: a password prompt on an affected ansible-core is refused, naming the fix" {
+  command -v sudo >/dev/null 2>&1 || skip "sudo not available"
+  local verdict; verdict=$(ansible_core_verdict)
+  [ -n "$verdict" ] || skip "could not read the ansible-core version"
+  make_sudo_stub "sudo-rs 0.2.13-0ubuntu1.2" 1
+  run run_pf_with_stub
+  echo "ansible-core verdict: $verdict"; echo "$output" | tail -15
+  if [ "$verdict" = affected ]; then
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "\[supply-chain-hardening\] preflight: ansible-core [0-9.]* cannot answer the sudo-rs password prompt"
+    echo "$output" | grep -q "sudo-rs 0.2.13"
+    echo "$output" | grep -q "pipx install 'ansible-core>=2.21.6'"
+    echo "$output" | grep -q "NOPASSWD"
+    # It must stop BEFORE the first become task, not after that task timed out.
+    refute_output_has "Detect non-managed existing system config files"
+  else
+    # A fixed ansible-core answers sudo-rs's prompt: nothing to refuse.
+    [ "$status" -eq 0 ]
+    refute_output_has "cannot answer the sudo-rs password prompt"
+    skip "ansible-core here answers sudo-rs's prompt, so the refusal itself was not exercised (needs < 2.20.11 or 2.21.0-2.21.5)"
+  fi
+}
+
+@test "sudo-rs guard: sudo-rs without a password prompt (NOPASSWD) is allowed on any ansible-core" {
+  command -v sudo >/dev/null 2>&1 || skip "sudo not available"
+  make_sudo_stub "sudo-rs 0.2.13-0ubuntu1.2" 0
+  run run_pf_with_stub
+  echo "$output" | tail -15
+  [ "$status" -eq 0 ]
+  refute_output_has "cannot answer the sudo-rs password prompt"
+  echo "$output" | grep -q "Privilege context OK"
+}
+
+@test "sudo-rs guard: classic sudo with a password prompt is not refused" {
+  command -v sudo >/dev/null 2>&1 || skip "sudo not available"
+  make_sudo_stub "Sudo version 1.9.15p5" 1
+  run run_pf_with_stub
+  echo "$output" | tail -15
+  [ "$status" -eq 0 ]
+  refute_output_has "cannot answer the sudo-rs password prompt"
 }

@@ -36,6 +36,28 @@
   failed_when: false
   when: go_check.rc == 0
 
+- name: Detect the installed govulncheck version (reinstall when the pin moves)
+  # `creates:` checked only that a binary existed, so bumping
+  # govulncheck_version never reinstalled anything unless refresh_tools was set.
+  # `go version -m` reads the module version the binary was built from (its
+  # `mod` line, e.g. golang.org/x/vuln v1.7.0), and the bin directory is the one
+  # `go install` writes: GOBIN, else the first GOPATH entry's bin.
+  ansible.builtin.shell:
+    cmd: |
+      go='{{ go_check.stdout }}'
+      bin=$("$go" env GOBIN 2>/dev/null)
+      [ -n "$bin" ] || bin="$("$go" env GOPATH 2>/dev/null | cut -d: -f1)/bin"
+      "$go" version -m "$bin/govulncheck" 2>/dev/null | awk '$1 == "mod" { print $3; exit }'
+    executable: /bin/bash
+  register: govulncheck_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - go_check.rc == 0
+    - go_version.stdout | default('') | trim | length > 0
+    - go_version.stdout | trim is version('1.21', '>=')
+
 - name: Install govulncheck (with toolchain auto-fetch for this install only)
   # Three things collide here without this fix:
   #   1. `go install golang.org/x/vuln/cmd/govulncheck@latest` requires a
@@ -73,20 +95,24 @@
   #      vulnerability scanner must never cost the load-bearing config layer.
   ansible.builtin.command:
     cmd: "{{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@{{ govulncheck_version }}"
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/govulncheck' }}"
   environment:
     GOTOOLCHAIN: auto
+  # A failed install changed nothing, so it must not report `changed`: with
+  # failed_when: false and no changed_when, a persistently failing install broke
+  # idempotency on every re-apply.
   register: govulncheck_install
+  changed_when: govulncheck_install.rc | default(1) == 0
   failed_when: false
   when:
     - go_check.rc == 0
     - go_version.stdout | default('') | trim | length > 0
     - go_version.stdout | trim is version('1.21', '>=')
+    - refresh_tools | bool or (govulncheck_installed.stdout | default('') | trim) != govulncheck_version
 
 - name: Record skipped protection — govulncheck (Go too old for toolchain fetch)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['govulncheck — Go ' ~ (go_version.stdout | default('') | trim | default('<undetected>', true)) ~ ' is older than 1.21, so GOTOOLCHAIN auto-fetch is unavailable and govulncheck cannot be installed. Go vulnerability scanning is not set up. Stock Ubuntu 22.04 (1.18) and Debian 12 (1.19) are both below this floor.'] }}
+      {{ (skipped_protections | default([])) + ['govulncheck (optional audit tool; nothing in the role runs it, so no install is blocked either way) — Go ' ~ (go_version.stdout | default('') | trim | default('<undetected>', true)) ~ ' is older than 1.21, so GOTOOLCHAIN auto-fetch is unavailable and govulncheck was not installed. Stock Ubuntu 22.04 (1.18) and Debian 12 (1.19) are both below this floor.'] }}
   when:
     - go_check.rc == 0
     - go_version.stdout | default('') | trim | length == 0
@@ -95,7 +121,7 @@
 - name: Record skipped protection — govulncheck (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['govulncheck — install failed on Go ' ~ (go_version.stdout | default('') | trim) ~ '. Go vulnerability scanning is not set up. The rest of the role still applied.'] }}
+      {{ (skipped_protections | default([])) + ['govulncheck (optional audit tool; nothing in the role runs it, so no install is blocked either way) — install failed on Go ' ~ (go_version.stdout | default('') | trim) ~ ', so the Go vulnerability scanner is not available to run by hand.'] }}
   when:
     - govulncheck_install is defined
     - govulncheck_install.rc | default(0) != 0
@@ -105,5 +131,5 @@
   # the end instead of only as `skipping: [localhost]` inside the task stream.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['govulncheck — Go is not installed, so Go vulnerability scanning was not set up.'] }}
+      {{ (skipped_protections | default([])) + ['govulncheck (optional audit tool; nothing in the role runs it, so no install is blocked either way) — Go is not installed, so the Go vulnerability scanner was not installed.'] }}
   when: go_check.rc != 0

@@ -157,10 +157,13 @@ task_block() { # file, task-name substring
   # Simulate a host with a pre-existing corporate /etc/npmrc (registry
   # auth, internal mirror, etc.) and verify the role refuses to clobber
   # it without explicit operator opt-in.
+  require_root "writes /etc/npmrc"
+  # cp -p: mktemp creates the backup 0600, and a plain cp into it keeps 0600, so
+  # the mv below used to leave /etc/npmrc unreadable by every non-root user.
   backup=""
   if [ -f /etc/npmrc ]; then
     backup=$(mktemp)
-    cp /etc/npmrc "$backup"
+    cp -p /etc/npmrc "$backup"
   fi
   echo "registry=https://malicious-corporate-stand-in.example.invalid/" > /etc/npmrc
 
@@ -183,10 +186,13 @@ task_block() { # file, task-name substring
 @test "preflight: accept_etc_overwrite=true bypasses the refuse-to-clobber check" {
   # The opt-in escape hatch must work — operators who knowingly want to
   # overwrite their existing /etc files need a documented path forward.
+  require_root "writes /etc/npmrc"
+  # cp -p: mktemp creates the backup 0600, and a plain cp into it keeps 0600, so
+  # the mv below used to leave /etc/npmrc unreadable by every non-root user.
   backup=""
   if [ -f /etc/npmrc ]; then
     backup=$(mktemp)
-    cp /etc/npmrc "$backup"
+    cp -p /etc/npmrc "$backup"
   fi
   echo "registry=https://unmarked-corporate-stand-in.example.invalid/" > /etc/npmrc
 
@@ -246,6 +252,344 @@ task_block() { # file, task-name substring
   [ "$changed" = "0" ]
 }
 
+# ---- Optional tool installs: Go floor and version pins ----
+#
+# The idempotency test above cannot see either bug below, because this image's
+# Go is new enough and its tools sit at their pins.
+
+# Stand a fake Go 1.18 in for the real one: `version` reports 1.18.1, and every
+# other subcommand logs its argv and fails, as `go install ...@v5` does there.
+# The image's pinact is hidden too: a real Go 1.18 host never got one, and with
+# it present the old `creates:` guard skipped the install and hid the bug.
+GO_REAL=/usr/local/go/bin/go
+PINACT_BIN="$HOME/go/bin/pinact"
+hide_real_go() {
+  [ -x "$GO_REAL" ] || return 1
+  [ -w "$(dirname "$GO_REAL")" ] || return 1
+  if [ -e "$PINACT_BIN" ]; then mv "$PINACT_BIN" "$PINACT_BIN.bats-hidden"; fi
+  mv "$GO_REAL" "$GO_REAL.bats-hidden"
+  cat > "$GO_REAL" <<'EOF'
+#!/bin/sh
+if [ "$1" = version ]; then echo "go version go1.18.1 linux/amd64"; exit 0; fi
+echo "$*" >> /tmp/fake-go-calls.log
+exit 1
+EOF
+  chmod 755 "$GO_REAL"
+}
+restore_real_go() {
+  if [ -e "$GO_REAL.bats-hidden" ]; then mv -f "$GO_REAL.bats-hidden" "$GO_REAL"; fi
+  if [ -e "$PINACT_BIN.bats-hidden" ]; then mv -f "$PINACT_BIN.bats-hidden" "$PINACT_BIN"; fi
+}
+
+# Runs after every test in this file. A no-op unless a test left the real Go
+# or uv hidden, which must never outlive the test that hid it.
+teardown() {
+  restore_real_go
+  restore_uv
+  restore_yarnrc
+}
+
+UV_HIDDEN=""
+hide_uv() {
+  local p
+  p=$(command -v uv 2>/dev/null) || return 1
+  [ -w "$(dirname "$p")" ] || return 1
+  mv "$p" "$p.bats-hidden" && UV_HIDDEN="$p"
+  hash -r
+  # uv.yml also looks in these; the test only means something if none has one.
+  if command -v uv >/dev/null 2>&1 || [ -x /usr/local/bin/uv ] || [ -x /usr/bin/uv ] || [ -x "$HOME/.local/bin/uv" ]; then
+    restore_uv
+    return 1
+  fi
+}
+restore_uv() {
+  if [ -n "$UV_HIDDEN" ] && [ -e "$UV_HIDDEN.bats-hidden" ]; then mv -f "$UV_HIDDEN.bats-hidden" "$UV_HIDDEN"; fi
+}
+
+@test "pinact: Go < 1.21 skips the install and records why, so a re-apply changes nothing" {
+  # MEASURED on stock Ubuntu 22.04 (Go 1.18.1) and Debian 12 (Go 1.19.8): the
+  # pinact install had no Go floor, failed on every apply, and with
+  # failed_when: false and no changed_when it reported `changed` each time, so
+  # a second apply was never changed=0. govulncheck in go.yml had the floor.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "swaps $GO_REAL for a fake Go 1.18"
+  rm -f /tmp/fake-go-calls.log
+  hide_real_go || skip "no tarball Go at $GO_REAL to stand in for"
+  cd "$ROLE_DIR"
+  local rc1=0 rc2=0
+  ansible-playbook site.yml --connection=local --limit localhost --tags github \
+    -e podman_enabled=false -e verify_protections=false >/tmp/pinact-go118-1.log 2>&1 || rc1=$?
+  ansible-playbook site.yml --connection=local --limit localhost --tags github \
+    -e podman_enabled=false -e verify_protections=false >/tmp/pinact-go118-2.log 2>&1 || rc2=$?
+  restore_real_go
+  echo "rc1=$rc1 rc2=$rc2; fake go calls: $(cat /tmp/fake-go-calls.log 2>/dev/null)"
+  grep -E '^localhost' /tmp/pinact-go118-2.log | tail -1
+  [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]
+  # The install never ran: the fake logged no `install` call.
+  if grep -q '^install ' /tmp/fake-go-calls.log 2>/dev/null; then
+    echo "the role ran go install on a Go older than 1.21" >&2
+    false
+  fi
+  grep -E '^localhost' /tmp/pinact-go118-2.log | tail -1 | grep -q 'changed=0'
+  grep -q 'pinact (optional audit tool; nothing in the role runs it, so no install is blocked either way) — Go 1.18.1 is older than 1.21' /tmp/pinact-go118-2.log
+}
+
+@test "tool pins: an installed version that differs from the pin is reinstalled, not left in place" {
+  # `creates:` (and lockfile-lint's `which`) only checked that a binary existed,
+  # so bumping a pin in defaults/main.yml never reinstalled anything. Offline
+  # by design: each pin is pointed at a version that does not exist, so the
+  # reinstall the role must now attempt fails, and the summary has to say so.
+  # Before the fix the install tasks were skipped and the summary said nothing.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "reinstalls the role's global tools"
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
+    -e socket_firewall_install=false \
+    -e zizmor_version=99.99.99 -e pinact_version=v99.99.99 \
+    -e govulncheck_version=v99.99.99 -e pip_audit_version=99.99.99 \
+    -e uv_secure_version=99.99.99 -e lockfile_lint_version=99.99.99
+  echo "$output" | grep -E 'NOT applied|optional audit tool' | head -20
+  [ "$status" -eq 0 ]
+  local t checked=0
+  for t in zizmor pinact govulncheck 'uv-secure / pip-audit' lockfile-lint; do
+    command -v "${t%% *}" >/dev/null 2>&1 || [ -x "$HOME/go/bin/$t" ] || continue
+    checked=$((checked + 1))
+    echo "$output" | grep -q "$t (optional audit tool[^)]*) — install failed" \
+      || { echo "no reinstall attempt recorded for $t" >&2; false; }
+  done
+  [ "$checked" -gt 0 ] || skip "none of the role's optional tools is installed here"
+  # The audit tools are not protections, so the header counts them apart.
+  echo "$output" | grep -qE 'protection\(s\) were NOT applied on this host, plus [0-9]+ optional audit tool entr(y|ies) \(not protections'
+}
+
+@test "tool pins: tools already at their pins are not reinstalled" {
+  # The other half: the version probes must recognise a tool that IS at its pin
+  # (`uv tool list`, `go version -m`, lockfile-lint's package.json). A probe
+  # that misreads its tool would reinstall on every apply.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  cd "$ROLE_DIR"
+  # A first apply brings the tools to their pins; only the second is measured.
+  # In the image root's tools already are, but a user who has not applied the
+  # role (a normal user on a real host) gets a legitimate first install of the
+  # per-user ones (pinact and govulncheck in its own GOPATH), which is not what
+  # this test is about.
+  ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
+    -e socket_firewall_install=false >/tmp/tool-pins-apply1.log 2>&1 || true
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
+    -e socket_firewall_install=false
+  echo "$output" | grep -E '^(changed|TASK \[.*Install)' | head -20
+  [ "$status" -eq 0 ]
+  local task
+  for task in 'Install zizmor' 'Install pinact' 'Install govulncheck' 'Install uv-managed tools' 'Install lockfile-lint globally'; do
+    # Look only at the result lines between this task's header and the next.
+    if echo "$output" | awk -v pat="$task" '
+         /^TASK \[/ { inblk = index($0, pat) > 0; next }
+         inblk && /^changed:/ { found = 1 }
+         END { exit !found }'; then
+      echo "$task reinstalled a tool that is already at its pin" >&2
+      false
+    fi
+  done
+}
+
+# Did this task report `changed` on any of its result lines? (Same parse as above.)
+task_changed() { # task_changed <output> <task name substring>
+  echo "$1" | awk -v pat="$2" '
+    /^TASK \[/ { inblk = index($0, pat) > 0; next }
+    inblk && /^changed:/ { found = 1 }
+    END { exit !found }'
+}
+
+@test "tool pins: a zizmor / uv-secure / pip-audit that uv did not install is left alone, not reported as a failed install" {
+  # MEASURED (review of the version probes): with a zizmor from pipx or
+  # `pip install --user` in ~/.local/bin, `uv tool list` does not show it, so
+  # the probe said "not at the pin" on every apply, and `uv tool install`
+  # failed with "Executable already exists: zizmor (use --force to overwrite)".
+  # Every summary then said zizmor's install failed, although zizmor runs.
+  # `creates:` had skipped quietly. UV_TOOL_DIR (empty, so `uv tool list` shows
+  # nothing) and UV_TOOL_BIN_DIR (holding the copies) stage that host without
+  # touching the image's own uv tools, and offline: the fixed role never runs
+  # the install here.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  local d t
+  d=$(mktemp -d /tmp/sch-foreign-uv.XXXXXX)
+  mkdir -p "$d/tools" "$d/bin"
+  for t in zizmor uv-secure pip-audit; do
+    printf '#!/bin/sh\necho "%s from pip --user"\n' "$t" > "$d/bin/$t"
+    chmod 755 "$d/bin/$t"
+  done
+  cd "$ROLE_DIR"
+  run env UV_TOOL_DIR="$d/tools" UV_TOOL_BIN_DIR="$d/bin" \
+    ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,uv -e podman_enabled=false -e verify_protections=false
+  local out="$output" rc="$status"
+  local intact=yes
+  for t in zizmor uv-secure pip-audit; do
+    [ "$("$d/bin/$t")" = "$t from pip --user" ] || intact=no
+  done
+  rm -rf "$d"
+  echo "$out" | grep -E 'optional audit tool|not installed by `uv tool`|Executable already exists' | head -10
+  [ "$rc" -eq 0 ]
+  [ "$intact" = yes ]
+  if echo "$out" | grep -qE '(zizmor|uv-secure / pip-audit) \(optional audit tools?[^)]*\) — install failed'; then
+    echo "the summary reports a failed install of a tool that is installed and runs" >&2
+    false
+  fi
+  # Not `! task_changed`: bash's errexit ignores a negated command, so it could not fail the test.
+  local task
+  for task in 'Install zizmor' 'Install uv-managed tools'; do
+    if task_changed "$out" "$task"; then
+      echo "$task installed over a copy uv does not manage" >&2
+      false
+    fi
+  done
+  # Leaving it alone is said, not silent.
+  echo "$out" | grep -q "$d/bin/zizmor was not installed by \`uv tool\`"
+  echo "$out" | grep -q "$d/bin/pip-audit was not installed by \`uv tool\`"
+}
+
+@test "tool pins: lockfile-lint's probe reads root's global prefix, not another copy earlier on the caller's PATH" {
+  # MEASURED (review of the version probes): the probe read whichever
+  # lockfile-lint `command -v` found, but the install writes root's global
+  # prefix. With another lockfile-lint at another version earlier on PATH (an
+  # nvm/fnm global; a local connection inherits the caller's PATH), the probe
+  # never matched the pin and every apply reinstalled the system copy:
+  # changed=1 on every re-apply.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  command -v npm >/dev/null 2>&1 || skip "npm not installed"
+  local pin sysroot
+  pin=$(sed -nE 's/^lockfile_lint_version: *"([^"]+)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  if [ "$(id -u)" -eq 0 ]; then sysroot=$(npm root -g 2>/dev/null); else sysroot=$(sudo -n npm root -g 2>/dev/null); fi
+  grep -qE "\"version\": *\"$pin\"" "$sysroot/lockfile-lint/package.json" 2>/dev/null \
+    || skip "root's global lockfile-lint is not at the pin $pin, so a reinstall would be correct"
+  local d
+  d=$(mktemp -d /tmp/sch-userpfx.XXXXXX)
+  mkdir -p "$d/lib/node_modules/lockfile-lint/bin" "$d/bin"
+  printf '{\n  "name": "lockfile-lint",\n  "version": "4.14.1"\n}\n' > "$d/lib/node_modules/lockfile-lint/package.json"
+  printf '#!/bin/sh\necho 4.14.1\n' > "$d/lib/node_modules/lockfile-lint/bin/lockfile-lint.js"
+  chmod 755 "$d/lib/node_modules/lockfile-lint/bin/lockfile-lint.js"
+  ln -s ../lib/node_modules/lockfile-lint/bin/lockfile-lint.js "$d/bin/lockfile-lint"
+  cd "$ROLE_DIR"
+  run env PATH="$d/bin:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npm -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  local out="$output" rc="$status"
+  rm -rf "$d"
+  echo "$out" | grep -A2 'lockfile-lint' | grep -E '^(TASK|ok|changed|skipping)' | head -12
+  [ "$rc" -eq 0 ]
+  if task_changed "$out" 'Install lockfile-lint globally'; then
+    echo "reinstalled root's lockfile-lint $pin because another copy came first on PATH" >&2
+    false
+  fi
+}
+
+# ---- The end-of-run summary ----
+#
+# MEASURED on every stock VM: the "NOT applied" summary left out npm < 11.10
+# (no age gate), Yarn classic / Yarn < 4.10, and the pip wrapper when uv is
+# absent; told the operator the pip wrapper "already does" route through uv
+# when there was none; and closed with "Everything else in the role applied
+# normally". A stub yarn first on PATH stands in for each Yarn version.
+
+# The yarn tasks render ~/.yarnrc.yml and /etc/yarnrc.yml for the version they
+# detect, so a stub's rendering must not outlive its test: left rendered for a
+# stub 4.10.3, a real Yarn 1.x host keeps a 4.x file, and the other way round a
+# Yarn 4 host loses enableHardenedMode. MEASURED in review: both files' hashes
+# changed across a run of these tests. Restored by teardown, whatever the outcome.
+YARNRC_FILES=("$HOME/.yarnrc.yml" /etc/yarnrc.yml)
+YARNRC_BACKUP=""
+backup_yarnrc() {
+  local f i=0
+  YARNRC_BACKUP=$(mktemp -d /tmp/sch-yarnrc.XXXXXX)
+  for f in "${YARNRC_FILES[@]}"; do
+    # cp -p keeps the 0644 mode and owner (see the /etc/npmrc tests above).
+    if [ -e "$f" ]; then cp -p "$f" "$YARNRC_BACKUP/$i"; fi
+    i=$((i + 1))
+  done
+}
+restore_yarnrc() {
+  [ -n "$YARNRC_BACKUP" ] && [ -d "$YARNRC_BACKUP" ] || return 0
+  local f i=0
+  for f in "${YARNRC_FILES[@]}"; do
+    if [ -e "$YARNRC_BACKUP/$i" ]; then cp -p "$YARNRC_BACKUP/$i" "$f"; else rm -f "$f"; fi
+    i=$((i + 1))
+  done
+  rm -rf "$YARNRC_BACKUP"
+  YARNRC_BACKUP=""
+}
+
+make_yarn_stub() { # make_yarn_stub <version>
+  YARN_STUB=$(mktemp -d /tmp/sch-yarn-stub.XXXXXX)
+  printf '#!/bin/sh\necho %s\n' "$1" > "$YARN_STUB/yarn"
+  chmod 755 "$YARN_STUB" "$YARN_STUB/yarn"
+}
+
+summary_of() { # the summary task's msg, one line per entry
+  echo "$1" | grep -A2 'Report protections that were NOT applied' | grep '"msg"' | sed 's/\\n/\n/g'
+}
+
+@test "summary: npm < 11.10, Yarn classic and a missing pip wrapper are listed, and nothing claims the rest applied" {
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "moves the image's uv aside"
+  hide_uv || skip "no uv this test can hide"
+  backup_yarnrc
+  make_yarn_stub 1.22.22
+  cd "$ROLE_DIR"
+  run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npm,yarn,pip -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  restore_uv; rm -rf "$YARN_STUB"
+  local sum; sum=$(summary_of "$output")
+  echo "$sum"
+  [ "$status" -eq 0 ]
+  echo "$sum" | grep -q 'Yarn hardening — yarn 1.22.22 is Yarn classic, which never reads .yarnrc.yml'
+  echo "$sum" | grep -q 'pip / pip3 wrapper — this run found no uv, so it did not deploy /usr/local/bin/pip or /usr/local/bin/pip3'
+  # The wrappers are system-wide and outlive the apply that wrote them. Where an
+  # earlier apply left one (this image's build did), "pip runs the real pip"
+  # would be false: the entry has to say the old wrapper is still there.
+  if grep -qx '# Managed by ansible-supply-chain-security' /usr/local/bin/pip 2>/dev/null; then
+    echo "$sum" | grep -q 'The wrappers an earlier apply left there are still in place'
+    if echo "$sum" | grep -q 'runs the real pip'; then echo "claims the real pip runs past a wrapper that is there" >&2; false; fi
+  else
+    echo "$sum" | grep -q '`pip install` runs the real pip'
+  fi
+  if echo "$sum" | grep -qE 'deployed /usr/local/bin/pip already does|Everything else in the role applied normally'; then
+    echo "the summary still claims coverage it does not have" >&2
+    false
+  fi
+  echo "$sum" | grep -q 'supply-chain-verify'
+  local nv; nv=$(npm --version 2>/dev/null)
+  if [ -n "$nv" ] && [ "$(printf '%s\n11.10.0\n' "$nv" | sort -V | head -1)" != 11.10.0 ]; then
+    echo "$sum" | grep -q "npm publish-age gate — npm $nv does not implement min-release-age"
+  else
+    if echo "$sum" | grep -q 'npm publish-age gate'; then echo "npm $nv listed as lacking the gate" >&2; false; fi
+  fi
+}
+
+@test "summary: Yarn 2.x-4.9 is listed without its age gate; Yarn 4.10+ is not listed" {
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "re-renders /etc/yarnrc.yml for a stub Yarn and restores it afterwards"
+  backup_yarnrc
+  cd "$ROLE_DIR"
+  make_yarn_stub 4.1.0
+  run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags yarn -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  rm -rf "$YARN_STUB"
+  [ "$status" -eq 0 ]
+  summary_of "$output" | grep -q 'Yarn publish-age gate — yarn 4.1.0 does not implement npmMinimalAgeGate (added in Yarn 4.10.0)'
+  make_yarn_stub 4.10.3
+  run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags yarn -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  rm -rf "$YARN_STUB"
+  [ "$status" -eq 0 ]
+  if echo "$output" | grep -qE 'Yarn (hardening|publish-age gate) — yarn 4.10.3'; then
+    echo "yarn 4.10.3 listed as missing a protection" >&2
+    false
+  fi
+}
+
 # --- check-mode support ---------------------------------------------------
 # QA found that `--check` was not merely imprecise but actively misleading:
 # the pre-flight GNU-date probe skipped, came back empty, and hard-aborted the
@@ -289,6 +633,12 @@ task_block() { # file, task-name substring
   echo "$output" | tail -30
   ! echo "$output" | grep -q "refused the probe"
   [ "$status" -eq 0 ]
+  # verify.yml does not run under --check, so the summary must not point at a
+  # report "that follows" (it said so whenever verify_protections was true).
+  if echo "$output" | grep -q 'supply-chain-verify report that follows'; then
+    echo "the --check summary promises a verifier report that never runs" >&2
+    false
+  fi
 }
 
 @test "no optional tool install may abort the play" {

@@ -58,13 +58,13 @@ an installed sfw older than that (see [limitations.md](limitations.md)).
 
 ## Refreshing auditing tools
 
-The role installs auditing tools (`govulncheck`, `cargo-audit`, `pip-audit`, `zizmor`, `pinact`, etc.) on first run and skips re-installs on subsequent runs for idempotency. After a toolchain upgrade (new Go, new Rust) or when you want the latest `@latest`-pinned versions of these tools, force a refresh:
+The role installs auditing tools (`govulncheck`, `pip-audit`, `uv-secure`, `zizmor`, `pinact`, `lockfile-lint`, and `cargo-audit` when opted in). Nothing in the role runs them; they are there for you to run. A re-apply reinstalls one only when it is missing or its installed version differs from its pin in `defaults/main.yml`, so bumping a pin takes effect on the next apply (the opt-in cargo audit tools only check that the binary exists). "Differs" includes newer: a `uv tool upgrade zizmor`, `go install ...@latest` or `npm i -g lockfile-lint@latest` is put back to the pin on the next apply. The version read is the copy the install would replace (uv's own tool list, the binary in Go's install directory, `lockfile-lint` under root's `npm root -g`). A `zizmor`, `uv-secure` or `pip-audit` that uv did not install (pipx, `pip install --user`) in uv's bin directory is left as it is, and the apply prints a note saying so. After a toolchain upgrade (new Go, new Rust), force a rebuild:
 
 ```bash
 ansible-playbook site.yml -e refresh_tools=true
 ```
 
-This re-installs every auditing tool regardless of whether the binary already exists. Slow (10–30 s per tool) but always produces fresh builds against the current toolchain.
+This re-installs every auditing tool regardless of what is installed. Slow (10–30 s per tool) but always produces fresh builds against the current toolchain.
 
 ## Inventory
 

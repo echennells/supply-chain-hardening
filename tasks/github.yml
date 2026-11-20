@@ -21,6 +21,45 @@
   check_mode: false
   failed_when: false
 
+- name: Detect the installed zizmor (uv-managed version, or a copy uv does not manage)
+  # `creates:` checked only that a binary existed, so bumping zizmor_version
+  # never reinstalled anything unless refresh_tools was set. `uv tool list`
+  # prints "<name> v<version>" per tool (MEASURED uv 0.13.9), and
+  # `uv tool install name==<other>` replaces the version uv installed.
+  # It does NOT replace an executable it did not install: a zizmor from pipx or
+  # `pip install --user` in uv's bin dir makes it fail with "Executable already
+  # exists: zizmor (use `--force` to overwrite)", rc=2 (MEASURED uv 0.13.9). So
+  # the probe looks where the install writes (`uv tool dir --bin`, which honours
+  # UV_TOOL_BIN_DIR and XDG_BIN_HOME) and reports such a copy as "foreign",
+  # which the install leaves alone, as `creates:` did. refresh_tools leaves it
+  # alone too: `--force` would overwrite a tool the user installed themselves.
+  ansible.builtin.shell:
+    cmd: |
+      uv='{{ uv_for_github.stdout }}'
+      bin=$("$uv" tool dir --bin 2>/dev/null) || bin="$HOME/.local/bin"
+      ver=$("$uv" tool list 2>/dev/null | awk '$1 == "zizmor" { sub(/^v/, "", $2); print $2; exit }')
+      if [ -n "$ver" ]; then
+        echo "uv $ver"
+      elif [ -e "$bin/zizmor" ] || [ -L "$bin/zizmor" ]; then
+        echo "foreign $bin/zizmor"
+      fi
+    executable: /bin/bash
+  register: zizmor_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: uv_for_github.rc == 0
+
+- name: Note an existing zizmor that uv does not manage (left in place)
+  ansible.builtin.debug:
+    msg: >-
+      {{ zizmor_installed.stdout | trim | regex_replace('^foreign ', '') }} was not
+      installed by `uv tool`, so the role leaves it as it is and does not install
+      zizmor {{ zizmor_version }} over it.
+  when:
+    - zizmor_installed.stdout is defined
+    - zizmor_installed.stdout is match('foreign ')
+
 - name: Install zizmor (GitHub Actions workflow auditor)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and
@@ -33,15 +72,21 @@
   # exported to ansible's connection environment.
   ansible.builtin.command:
     cmd: "{{ uv_for_github.stdout }} tool install zizmor=={{ zizmor_version }}"
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/zizmor' }}"
-  when: uv_for_github.rc == 0
+  when:
+    - uv_for_github.rc == 0
+    - zizmor_installed.stdout | default('') is not match('foreign ')
+    - refresh_tools | bool or (zizmor_installed.stdout | default('') | trim) != ('uv ' ~ zizmor_version)
+  # A failed install changed nothing, so it must not report `changed`: with
+  # failed_when: false and no changed_when, a persistently failing install broke
+  # idempotency on every re-apply.
   register: zizmor_install
+  changed_when: zizmor_install.rc | default(1) == 0
   failed_when: false
 
 - name: Record skipped protection — zizmor (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['zizmor — install failed. The GitHub Actions workflow auditor is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['zizmor (optional audit tool; nothing in the role runs it, so no install is blocked either way) — install failed, so the GitHub Actions workflow auditor is not available to run by hand.'] }}
   when:
     - zizmor_install is defined
     - zizmor_install.rc | default(0) != 0
@@ -49,7 +94,7 @@
 - name: Record skipped protection — zizmor (uv absent)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['zizmor — uv is not installed, so the GitHub Actions workflow auditor was not set up.'] }}
+      {{ (skipped_protections | default([])) + ['zizmor (optional audit tool; nothing in the role runs it, so no install is blocked either way) — uv is not installed, so the GitHub Actions workflow auditor was not installed.'] }}
   when: uv_for_github.rc != 0
 
 - name: Check if go is installed (for pinact)
@@ -69,6 +114,49 @@
   check_mode: false
   failed_when: false
 
+- name: Detect Go version (GOTOOLCHAIN below only exists in Go >= 1.21)
+  # Same probe and floor as tasks/go.yml (govulncheck). Without this gate the
+  # install below ran, and failed, on every apply on Go < 1.21: a command task
+  # with failed_when: false and no changed_when reports `changed` each time, so
+  # the play was never idempotent there. MEASURED on stock Ubuntu 22.04
+  # (Go 1.18.1) and Debian 12 (Go 1.19.8): changed=1 on every re-apply.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      "{{ go_for_github.stdout }}" version 2>/dev/null | sed -nE 's/.*go([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p'
+    executable: /bin/bash
+  register: go_version_for_github
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: go_for_github.rc == 0
+
+- name: Set whether this Go can build pinact
+  ansible.builtin.set_fact:
+    pinact_go_ok: >-
+      {{ go_for_github.rc == 0
+         and go_version_for_github.stdout | default('') | trim | length > 0
+         and go_version_for_github.stdout | trim is version('1.21', '>=') }}
+
+- name: Detect the installed pinact version (reinstall when the pin moves)
+  # `creates:` checked only that a binary existed, so bumping pinact_version
+  # never reinstalled anything unless refresh_tools was set. `go version -m`
+  # reads the module version the binary was built from (its `mod` line), and
+  # the bin directory is the one `go install` writes: GOBIN, else the first
+  # GOPATH entry's bin.
+  ansible.builtin.shell:
+    cmd: |
+      go='{{ go_for_github.stdout }}'
+      bin=$("$go" env GOBIN 2>/dev/null)
+      [ -n "$bin" ] || bin="$("$go" env GOPATH 2>/dev/null | cut -d: -f1)/bin"
+      "$go" version -m "$bin/pinact" 2>/dev/null | awk '$1 == "mod" { print $3; exit }'
+    executable: /bin/bash
+  register: pinact_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: pinact_go_ok | bool
+
 - name: Install pinact (with toolchain auto-fetch for this install only)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and
@@ -84,17 +172,30 @@
   # Also use the absolute go path so bare `go` isn't required on PATH.
   ansible.builtin.command:
     cmd: "{{ go_for_github.stdout }} install github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@{{ pinact_version }}"
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/go/bin/pinact' }}"
   environment:
     GOTOOLCHAIN: auto
-  when: go_for_github.rc == 0
+  when:
+    - pinact_go_ok | bool
+    - refresh_tools | bool or (pinact_installed.stdout | default('') | trim) != pinact_version
+  # A failed install changed nothing, so it must not report `changed`: with
+  # failed_when: false and no changed_when, a persistently failing install broke
+  # idempotency on every re-apply.
   register: pinact_install
+  changed_when: pinact_install.rc | default(1) == 0
   failed_when: false
+
+- name: Record skipped protection — pinact (Go too old for toolchain fetch)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pinact (optional audit tool; nothing in the role runs it, so no install is blocked either way) — Go ' ~ (go_version_for_github.stdout | default('') | trim | default('<undetected>', true)) ~ ' is older than 1.21, so GOTOOLCHAIN auto-fetch is unavailable and pinact was not installed. Stock Ubuntu 22.04 (1.18) and Debian 12 (1.19) are both below this floor.'] }}
+  when:
+    - go_for_github.rc == 0
+    - not (pinact_go_ok | bool)
 
 - name: Record skipped protection — pinact (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['pinact — install failed (needs Go >= 1.21 for GOTOOLCHAIN auto-fetch). Actions SHA-pinning tooling is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['pinact (optional audit tool; nothing in the role runs it, so no install is blocked either way) — install failed on Go ' ~ (go_version_for_github.stdout | default('') | trim) ~ ', so the Actions SHA-pinning tool is not available to run by hand.'] }}
   when:
     - pinact_install is defined
     - pinact_install.rc | default(0) != 0
@@ -102,5 +203,5 @@
 - name: Record skipped protection — pinact (Go absent)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['pinact — Go is not installed, so GitHub Actions SHA-pinning tooling was not set up.'] }}
+      {{ (skipped_protections | default([])) + ['pinact (optional audit tool; nothing in the role runs it, so no install is blocked either way) — Go is not installed, so the Actions SHA-pinning tool was not installed.'] }}
   when: go_for_github.rc != 0

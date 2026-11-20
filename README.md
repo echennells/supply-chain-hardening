@@ -62,12 +62,23 @@ git clone https://github.com/echennells/supply-chain-hardening.git
 cd supply-chain-hardening
 
 # 3. Apply to this host. Run as your normal user with sudo rights; tasks
-#    escalate themselves. Add -K if sudo asks for a password.
+#    escalate themselves. Add -K if sudo asks for a password (on Ubuntu 26.04
+#    see the sudo-rs note below).
 ansible-playbook site.yml --limit localhost
 
 # 4. See what is actually enforcing (OK / WEAK / GAP per protection)
 supply-chain-verify
 ```
+
+**sudo-rs (Ubuntu 26.04's default sudo) and `-K`:** ansible-core cannot answer
+sudo-rs's password prompt before 2.20.11 (and in 2.21.0 to 2.21.5): every
+escalating task times out (measured on 2.19.9 to 2.20.10 and 2.21.0 to 2.21.5)
+or hangs (measured on 2.16 to 2.18). Ubuntu 26.04's apt package is 2.20.1.
+The preflight stops the play before the first escalation and says so. Either
+run a fixed ansible-core for your user (`pipx install 'ansible-core>=2.21.6'`, then
+`~/.local/bin/ansible-playbook ... -K`) or give the user NOPASSWD sudo for the
+apply. A user with no sudo rights at all gets the same refusal, and neither fix
+applies to them. Measured with sudo-rs 0.2.13.
 
 From your own playbook:
 

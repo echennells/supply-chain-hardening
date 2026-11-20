@@ -68,6 +68,29 @@
   check_mode: false
   failed_when: false
 
+- name: Detect the npm version (min-release-age needs npm 11.10.0)
+  # The npmrc templates write min-release-age unconditionally, so it activates
+  # the day npm is upgraded. Below 11.10.0 npm echoes the key back from
+  # `npm config get` and enforces nothing, so without this record the summary
+  # was silent about a missing age gate on every stock distro npm (MEASURED on
+  # the VM matrix: Ubuntu 22.04 8.5.1, 24.04/26.04 and Debian 12/13 9.2.0,
+  # NodeSource 22 10.9.9).
+  ansible.builtin.command: "{{ npm_check.stdout }} --version"
+  register: npm_version_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: npm_check.rc == 0 and npm_check.stdout | length > 0
+
+- name: Record skipped protection — npm age gate (npm < 11.10.0)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['npm publish-age gate — npm ' ~ (npm_version_check.stdout | trim) ~ ' does not implement min-release-age (added in npm 11.10.0; older npm echoes the key back and enforces nothing). The key is written and activates on upgrade; until then `npm install` accepts a release published seconds ago. See docs/npm-cooldown-by-distro.md'] }}
+  when:
+    - npm_version_check.stdout is defined
+    - npm_version_check.stdout | trim is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+    - npm_version_check.stdout | trim is version('11.10.0', '<')
+
 - name: Resolve npm's real global config path (globalconfig is prefix-relative, not /etc/npmrc)
   # ECH-149. npm's `globalconfig` defaults to {prefix}/etc/npmrc. That is
   # /etc/npmrc ONLY on Debian/Ubuntu apt npm; on NodeSource, nvm, fnm, volta,
@@ -127,14 +150,6 @@
     - (npm_globalconfig.stdout | trim) is match('^/')
     - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
 
-- name: Check if lockfile-lint is already installed
-  ansible.builtin.command: which lockfile-lint
-  register: lockfile_lint_check
-  changed_when: false
-  check_mode: false
-  failed_when: false
-  when: npm_check.rc == 0
-
 - name: Check that root can run npm (a per-user Node is invisible to become)
   # Same reason as tasks/socket.yml: the install runs as root, root's PATH is
   # sudo's secure_path, and a per-user Node (fnm, nvm, volta, asdf) is not on it.
@@ -157,9 +172,46 @@
   changed_when: false
   check_mode: false
   failed_when: false
+  when: npm_check.rc == 0
+
+- name: Detect the lockfile-lint version the install below would replace (reinstall when the pin moves)
+  # A presence check (`which lockfile-lint`) used to gate the install, so
+  # bumping lockfile_lint_version never reinstalled anything, and unlike the
+  # `creates:` guards elsewhere not even refresh_tools did. The probe reads the
+  # install TARGET: the package.json under `npm root -g` of the npm that root
+  # runs, in the same become context as the install. Not whichever
+  # lockfile-lint comes first on the caller's PATH: with an nvm/fnm global of
+  # another version ahead of the system one (a local connection inherits the
+  # caller's PATH), that probe never matched the pin and every apply reinstalled
+  # the system copy (MEASURED: changed=1 on every re-apply). Not by running
+  # `lockfile-lint --version` either: that needs a Node the tool supports, and a
+  # probe that fails every time would reinstall on every apply.
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      root=$(npm root -g 2>/dev/null) || exit 0
+      f="$root/lockfile-lint/package.json"
+      [ -f "$f" ] || exit 0
+      sed -nE 's/^ *"version": *"([^"]+)".*/\1/p' "$f" | head -1
+    executable: /bin/bash
+  register: lockfile_lint_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: npm_root_for_lockfile_lint.rc | default(1) == 0
+
+- name: Check for a lockfile-lint on the caller's PATH (when root has no npm to install one)
+  # Only consulted for the "npm is per-user" record below: as before, a
+  # lockfile-lint the user installed themselves (an nvm/fnm global) is
+  # available to run, so there is nothing to report.
+  ansible.builtin.command: which lockfile-lint
+  register: lockfile_lint_on_path
+  changed_when: false
+  check_mode: false
+  failed_when: false
   when:
     - npm_check.rc == 0
-    - lockfile_lint_check.rc != 0
+    - npm_root_for_lockfile_lint.rc | default(0) != 0
 
 - name: Install lockfile-lint globally
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
@@ -176,18 +228,19 @@
   # same for its own tools. lockfile-lint is a pure-JS CLI with no required
   # postinstall. Universal npm CLI flag across versions. See tasks/socket.yml.
   ansible.builtin.command: npm install -g --ignore-scripts lockfile-lint@{{ lockfile_lint_version }}
-  changed_when: true
+  # A failed install changed nothing (see the other optional tool installs).
+  changed_when: lockfile_lint_install.rc | default(1) == 0
   when:
     - npm_check.rc == 0
-    - lockfile_lint_check.rc != 0
     - npm_root_for_lockfile_lint.rc | default(1) == 0
+    - refresh_tools | bool or (lockfile_lint_installed.stdout | default('') | trim) != lockfile_lint_version
   register: lockfile_lint_install
   failed_when: false
 
 - name: Record skipped protection — lockfile-lint (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['lockfile-lint — install failed. Lockfile URL/integrity linting is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['lockfile-lint (optional audit tool; nothing in the role runs it, so no install is blocked either way) — install failed, so the lockfile URL/integrity linter is not available to run by hand.'] }}
   when:
     - lockfile_lint_install is defined
     - lockfile_lint_install.rc | default(0) != 0
@@ -195,8 +248,9 @@
 - name: Record skipped protection — lockfile-lint (npm is per-user)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['lockfile-lint — not installed: ' ~ (('root would run ' ~ (npm_root_for_lockfile_lint.stdout | trim) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), and the role does not run a user-writable program as root') if npm_root_for_lockfile_lint.rc == 3 else ('the only npm found is ' ~ (npm_check.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf)')) ~ '. lockfile-lint installs system-wide, so it needs a system-wide Node. Lockfile URL/integrity linting is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['lockfile-lint (optional audit tool; nothing in the role runs it, so no install is blocked either way) — not installed: ' ~ (('root would run ' ~ (npm_root_for_lockfile_lint.stdout | trim) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), and the role does not run a user-writable program as root') if npm_root_for_lockfile_lint.rc == 3 else ('the only npm found is ' ~ (npm_check.stdout | trim) ~ ', which root cannot run (a per-user Node such as fnm, nvm, volta or asdf)')) ~ '. lockfile-lint installs system-wide, so it needs a system-wide Node.'] }}
   when:
     - npm_root_for_lockfile_lint is defined
     - npm_root_for_lockfile_lint.rc is defined
     - npm_root_for_lockfile_lint.rc != 0
+    - lockfile_lint_on_path.rc | default(1) != 0

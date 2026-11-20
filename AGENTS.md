@@ -54,6 +54,10 @@ supply-chain-verify
 
 - Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or global
   `--become`: per-user config would land in root's home. The preflight refuses this.
+- If the preflight says ansible-core cannot answer the sudo-rs password prompt (Ubuntu
+  26.04 with apt ansible-core 2.20.1 and `-K`), tell the user. The fix is a newer
+  ansible-core for their user (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo
+  for the apply. Don't change their sudoers yourself.
 - If the play stops on an existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or
   `/etc/uv/uv.toml`, don't override it yourself. It may be a corporate registry setting.
   Show it to the user, and pass `-e accept_etc_overwrite=true` only if they agree.

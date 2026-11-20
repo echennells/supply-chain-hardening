@@ -117,7 +117,7 @@ setup() {
   # re-evaluation.
   skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts even with --ignore-scripts=false (allowScripts), so this documented bypass no longer reproduces on npm >=12 (ECH-194)"
   backup=$(mktemp)
-  cp "$HOME/.npmrc" "$backup"
+  cp -p "$HOME/.npmrc" "$backup"   # -p: keep the original mode, not mktemp's 0600
 
   # Attacker-controlled override at user level
   echo "ignore-scripts=false" > "$HOME/.npmrc"
