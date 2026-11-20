@@ -32,6 +32,25 @@
       tags: always
   tags: always
 
+- name: Include the sfw cache reset (before the first root npm install)
+  # npm.yml, npq.yml and socket.yml each run `npm install -g` as root, and on a
+  # host an earlier version hardened that goes through its npm wrapper and so
+  # through sfw. A cache another account could write therefore has to be reset
+  # here, before npm.yml, and not in socket.yml, which runs after the other two.
+  # See the top of sfw_cache_reset.yml for the measurement.
+  #
+  # Tagged `always`, not [socket, npm, npq]: Ansible skips a task when ANY of
+  # its tags is skipped, so `--skip-tags npq` would drop the reset while npm.yml
+  # still installed as root. socket.yml includes the file itself if this did
+  # not run. Same `when` as the socket.yml include: with
+  # socket_firewall_install=false the role leaves sfw alone.
+  ansible.builtin.include_tasks:
+    file: sfw_cache_reset.yml
+    apply:
+      tags: always
+  when: socket_firewall_install | bool
+  tags: always
+
 - name: Include npm hardening
   ansible.builtin.include_tasks:
     file: npm.yml

@@ -234,7 +234,7 @@ sfw_teardown() {
     echo "# teardown: restoring the clean sfw cache" >&3
     rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
   fi
-  rm -f /tmp/sfwprior-bin
+  rm -f /tmp/sfwprior-bin /tmp/sfwprior-root-marker
   return 0
 }
 
@@ -278,6 +278,61 @@ sfw_teardown() {
   [[ "$output" != *NOT-THE-REAL-SFW* ]]
   if [ -n "$stray" ]; then
     [ ! -e "${stray%/.sfw-cache}" ]
+  fi
+}
+
+@test "upgrade: the reset comes before the role's own root npm installs, so none of them runs a planted sfw binary" {
+  # npm.yml and npq.yml run `npm install -g` as root, through the npm wrapper an
+  # earlier apply left and so through sfw. MEASURED on Debian 13 (apt npm) while
+  # the reset still opened socket.yml, which runs after both: with the cache
+  # 0777 and `latest` repointed by another account, an apply with
+  # refresh_tools=true ran the planted binary as root from "Install lockfile-lint
+  # globally", nine seconds before the reset. refresh_tools=true is what makes
+  # that install run on a host that already has lockfile-lint.
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to seed root-owned state"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  grep -qx '# Managed by ansible-supply-chain-security' /usr/local/bin/npm 2>/dev/null \
+    || skip "no npm wrapper at /usr/local/bin/npm to route root's installs through sfw"
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+  sfw_snapshot "$c"
+
+  m=/tmp/sfwprior-root-marker
+  rm -f "$m"
+  printf '#!/bin/sh\n[ "$(id -u)" = 0 ] && echo ran-as-root >> %s\nexit 0\n' "$m" > /tmp/sfwprior-bin
+  chmod 755 /tmp/sfwprior-bin; chown sfwprior /tmp/sfwprior-bin
+  chmod 0777 "$c"
+  ln -sfn /tmp/sfwprior-bin "$c/latest"; chown -h sfwprior "$c/latest"
+
+  # FIXTURE CONTROL: in this state root's npm, through the wrapper, runs the
+  # planted binary. Without that, a missing marker below would prove nothing.
+  /usr/local/bin/npm view is-number version </dev/null >/dev/null 2>&1 || true
+  if [ ! -e "$m" ]; then
+    echo "FIXTURE CONTROL failed: root's npm did not run the planted sfw binary" >&2
+    false
+  fi
+  rm -f "$m"
+
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npm -e podman_enabled=false -e verify_protections=false -e refresh_tools=true
+  rm -f /tmp/sfwprior-bin
+  printf '%s\n' "$output" | grep -A1 -E 'TASK \[.*(Reset an sfw cache|Install lockfile-lint globally|Install npq globally|Install Socket Firewall)' || true
+  [ "$status" -eq 0 ]
+  # The root install this is about ran; a skipped one would leave no marker
+  # either way.
+  st=$(printf '%s\n' "$output" | grep -A1 'TASK \[.*Install lockfile-lint globally' | tail -n 1)
+  [ -n "$st" ]
+  [[ "$st" != skipping:* ]]
+  # The reset came first, and the planted binary never ran as root.
+  reset_at=$(printf '%s\n' "$output" | grep -n 'TASK \[.*Reset an sfw cache' | head -n 1 | cut -d: -f1)
+  install_at=$(printf '%s\n' "$output" | grep -n 'TASK \[.*Install lockfile-lint globally' | head -n 1 | cut -d: -f1)
+  echo "reset task at line $reset_at, lockfile-lint install at line $install_at"
+  [ -n "$reset_at" ] && [ "$reset_at" -lt "$install_at" ]
+  if [ -e "$m" ]; then
+    echo "the planted sfw binary ran as root during the apply: $(cat "$m")" >&2
+    false
   fi
 }
 
