@@ -150,6 +150,12 @@ run_pf() {
 # real sudo, so the become tasks later in preflight still work. Whether the
 # refusal SHOULD fire depends on the runner's ansible-core, so each test works
 # that out from `ansible --version` instead of assuming the image's version.
+# The verdict cannot be pinned from here: `-e '{"ansible_version": {...}}'`
+# does not override the real ansible_version on any core from 2.14 to 2.22
+# (MEASURED, 2.14.18 to 2.22.0). So on a fixed core the refusal test checks
+# that nothing is refused and then reports itself SKIPPED, rather than
+# passing: a tests/Dockerfile move to a fixed core must not turn it into a
+# quiet pass that no longer exercises the refusal.
 
 # Is the ansible-core on PATH one of the releases that time out under sudo-rs?
 # Prints "affected" or "fixed"; prints nothing when the version cannot be read.
@@ -216,6 +222,7 @@ run_pf_with_stub() {
     # A fixed ansible-core answers sudo-rs's prompt: nothing to refuse.
     [ "$status" -eq 0 ]
     refute_output_has "cannot answer the sudo-rs password prompt"
+    skip "ansible-core here answers sudo-rs's prompt, so the refusal itself was not exercised (needs < 2.20.11 or 2.21.0-2.21.5)"
   fi
 }
 

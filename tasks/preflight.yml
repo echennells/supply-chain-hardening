@@ -111,6 +111,9 @@
 # waiting for. Measured per ansible-core release, same container:
 #   FAIL: 2.19.9, 2.19.14, 2.19.15, 2.20.0, 2.20.1 (apt on 26.04), 2.20.2,
 #         2.20.5, 2.20.8, 2.20.10, 2.21.0, 2.21.1, 2.21.3, 2.21.5
+#   HANG: 2.16.14, 2.17.14, 2.18.12 (Python 3.12 venvs): no timeout message,
+#         still running when killed at 90s; 2.16.14 and 2.18.12 escalate
+#         with NOPASSWD sudo, so it is the prompt again
 #   OK:   2.20.11, 2.21.6, 2.22.0
 # NOPASSWD sudo has no prompt to answer: on 2.20.1 it worked both with and
 # without a become password supplied. So the refusal needs all three: sudo-rs,
@@ -143,9 +146,11 @@
     msg: |
       [supply-chain-hardening] preflight: ansible-core {{ ansible_version.full }} cannot answer the sudo-rs password prompt.
 
-      This host's sudo is {{ preflight_sudo_rs.stdout | trim }} and it asks for a password.
-      Every task that needs root would stop with "Timed out waiting for become
-      success or become password prompt" and change nothing.
+      This host's sudo is {{ preflight_sudo_rs.stdout | trim }} and `sudo -n true` fails for this user,
+      so it would ask for a password. Every task that needs root would either stop
+      with "Timed out waiting for become success or become password prompt"
+      (measured on 2.19.9 to 2.20.10 and 2.21.0 to 2.21.5) or hang (measured on
+      2.16 to 2.18), and change nothing.
 
       Fix, either one:
         - Run a fixed ansible-core (2.20.11+, 2.21.6+ or 2.22+) for your user,
@@ -154,6 +159,9 @@
               ~/.local/bin/ansible-playbook site.yml --limit localhost -K
         - Or give this user NOPASSWD sudo for the duration of the apply and
           drop -K (with no prompt to answer, the become succeeds; measured on 2.20.1).
+
+      If this user has no sudo rights on this host at all, `sudo -n true` fails the
+      same way and neither fix helps: the role needs an account that can use sudo.
 
       Measured on Ubuntu 26.04 (sudo-rs 0.2.13, apt ansible-core 2.20.1).
   when:
