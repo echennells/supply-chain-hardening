@@ -119,6 +119,8 @@ harden_nosudo() {
 }
 
 @test "an unwritable target degrades with a reason instead of dying" {
+  # Root writes into a 0555 directory, so as root there is no unwritable target.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
   local ro="${BATS_TEST_TMPDIR}/ro"
   mkdir -p "$ro"
   cat > "$ro/bun" <<'EOF'
@@ -142,6 +144,7 @@ EOF
   # neither summary list, so the ecosystem vanishes from the one line most
   # people read while still appearing in the table below it — reported and
   # unreported at once. Caught in review of this very change.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
   local ro="${BATS_TEST_TMPDIR}/ro2"
   mkdir -p "$ro"
   cat > "$ro/bun" <<'EOF'

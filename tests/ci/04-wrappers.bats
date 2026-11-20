@@ -349,6 +349,7 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
 # A stub cargo that reports the cooldown environment it was handed, plus a
 # cargo-cooldown where harden.sh looks for one, so builds route through it.
 cooldown_stubs() {
+  skip_if_root_stages_cooldown
   local ver="${1:-1.99.0}"
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo '"$ver"' (abc 2026-11-12)";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}] GLOBAL=[${CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE-unset}] RESOLVER=[${CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE-unset}] TESTTIME=[${__CARGO_TEST_INVOCATION_TIME-unset}]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"

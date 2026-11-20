@@ -255,6 +255,7 @@ exec '"$realpy"' "$@"'
   # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` in a repo
   # cooldown.toml still built a crate published hours earlier through a pinned
   # wrapper. The row used to downgrade this to WEAK.
+  skip_if_root_stages_cooldown
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
@@ -1538,6 +1539,7 @@ esac"
   # cargo-cooldown has no verb for add/generate-lockfile/vendor/remove, so no
   # re-run routes them. Counted as "fixable by re-running", it made
   # --fail-on=config fail every job that installed cargo-cooldown.
+  skip_if_root_stages_cooldown
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
