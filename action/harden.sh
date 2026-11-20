@@ -440,16 +440,54 @@ err() {
   esac
 }
 
-# run_bounded <seconds> <cmd...> — `timeout` where it exists. macOS runners
-# ship none (gtimeout only with coreutils), and a missing bound must not turn
-# into a missing command: without either, the command runs unbounded.
+# >>> run_bounded
+# run_bounded <seconds> <command> [args...]: runs the command, stopped after
+# <seconds>: timeout(1) where it exists, then gtimeout (Homebrew coreutils),
+# then a background-and-kill fallback. Stock macOS has neither, and a missing
+# bound must turn into neither a missing command nor a hang. Returns the
+# command's status, or 124 when it was stopped, as timeout(1) does. Variables
+# assigned on the call (`VAR=x run_bounded ...`) reach the command. Like
+# timeout(1), which signals its whole process group, the fallback stops what
+# the command started as well (found with pgrep), so a child left holding a
+# $( ) open cannot keep the hang going. The same block is in action/harden.sh,
+# action/verify.sh and templates/verify.sh.j2; tests/ci/07-verify.bats checks
+# that they match.
 run_bounded() {
-  local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
-  else "$@"
+  local _rb_secs="$1" _rb_pid _rb_w _rb_rc=0 _rb_t0="$SECONDS"
+  shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$_rb_secs" "$@"; return; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$_rb_secs" "$@"; return; fi
+  "$@" &
+  _rb_pid=$!
+  # The watcher writes nowhere: inside $( ), an inherited stdout would hold
+  # the substitution open until the watcher's own sleep ended.
+  ( _rb_n=0
+    while kill -0 "$_rb_pid" 2>/dev/null; do
+      if [ "$_rb_n" -ge "$_rb_secs" ]; then
+        _rb_all=$_rb_pid _rb_q=$_rb_pid
+        while _rb_q=$(pgrep -P "$(echo $_rb_q | tr ' ' ',')" 2>/dev/null | tr '\n' ' ') \
+              && [ -n "${_rb_q%% }" ]; do
+          _rb_all="$_rb_all $_rb_q"
+        done
+        kill -TERM $_rb_all 2>/dev/null || true
+        sleep 2
+        kill -KILL $_rb_all 2>/dev/null || true
+        exit 0
+      fi
+      sleep 1
+      _rb_n=$((_rb_n + 1))
+    done ) >/dev/null 2>&1 &
+  _rb_w=$!
+  # 2>/dev/null: bash 3.2 reports the stopped job ("Terminated") here.
+  wait "$_rb_pid" 2>/dev/null || _rb_rc=$?
+  kill "$_rb_w" 2>/dev/null || true
+  wait "$_rb_w" 2>/dev/null || true
+  if [ "$_rb_rc" -gt 128 ] && [ $((SECONDS - _rb_t0)) -ge "$_rb_secs" ]; then
+    return 124
   fi
+  return "$_rb_rc"
 }
+# <<< run_bounded
 
 # GitLab's collapsible sections require section_end to carry the SAME name
 # as its section_start, but every end_section call site is argument-less.
