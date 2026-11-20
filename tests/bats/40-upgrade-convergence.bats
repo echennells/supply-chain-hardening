@@ -201,12 +201,47 @@ sfw_cache_dir() {
   echo "$s/.sfw-cache"
 }
 
+# The sfw tests below change the suite's real sfw: they plant a writable cache
+# or install sfw@2.0.4. A test that fails partway would leave that for every
+# later file in the container (42-*, 49-*), which then fail for the wrong
+# reason: on a tree without the 2.0.4 replacement, 42-*'s real-sfw cargo test
+# failed with 2.0.4's "EACCES ... next-check". sfw_snapshot saves the clean
+# state; teardown puts it back only when a test left it otherwise.
+sfw_snapshot() {
+  SFW_SNAP_CACHE=$1
+  SFW_SNAP_BIN=$(command -v sfw)
+  SFW_SNAP_PIN=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  cp -a "$SFW_SNAP_CACHE" "$BATS_TEST_TMPDIR/sfw-cache-saved"
+}
+
+teardown() {
+  [ -n "${SFW_SNAP_CACHE:-}" ] || return 0
+  local c=$SFW_SNAP_CACHE shim t
+  hash -r
+  shim=$(readlink -f "$(command -v sfw 2>/dev/null)" 2>/dev/null)
+  if [ -z "$shim" ] || ! grep -q "\"version\": \"$SFW_SNAP_PIN\"" "${shim%/dist/*}/package.json" 2>/dev/null; then
+    echo "# teardown: restoring sfw@$SFW_SNAP_PIN" >&3
+    rm -f "$SFW_SNAP_BIN.broken"
+    npm install -g --ignore-scripts "sfw@$SFW_SNAP_PIN" >/dev/null 2>&1
+    hash -r
+  fi
+  t=$(readlink -f "$c/latest" 2>/dev/null)
+  if [ ! -d "$c" ] || [ -L "$c" ] || [[ "$t" != "$c"/* ]] \
+     || [ -n "$(find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]; then
+    echo "# teardown: restoring the clean sfw cache" >&3
+    rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
+  fi
+  rm -f /tmp/sfwprior-bin
+  return 0
+}
+
 @test "upgrade: a re-apply resets an sfw cache an earlier version left writable, and removes the stray tree" {
   command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
   [ "$(id -u)" = 0 ] || skip "needs root to seed root-owned state"
   c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
   [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
   id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+  sfw_snapshot "$c"
 
   # Seed both prior states on the real cache: 0777, and a `latest` owned by a
   # non-root account that points at a binary of its own.
@@ -313,9 +348,9 @@ sfw_cache_dir() {
   # The prior state: 2.0.4, installed and warmed by root. Installing it
   # replaces the package directory, so put the warm cache back afterwards;
   # that keeps this test to one binary download.
-  cp -a "$c" "$BATS_TEST_TMPDIR/cache"
+  sfw_snapshot "$c"
   npm install -g --ignore-scripts sfw@2.0.4 >/dev/null 2>&1 || skip "could not install sfw@2.0.4 (offline?)"
-  rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/cache" "$c"
+  rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
   shim=$(readlink -f "$(command -v sfw)")
   run grep -c SFW_SKIP_UPDATE_CHECK "$shim"
   [ "$output" = 0 ]
