@@ -1443,7 +1443,7 @@ harden_bun() {
   # Never interpolate a duration string ("2d") or a quoted number here.
   if [[ "$has_min_release_age" == "true" ]] && ! [[ "$BUN_AGE_SECONDS" =~ ^[0-9]+$ ]]; then
     has_min_release_age=false
-    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted: bun rejects the WHOLE bunfig on one bad value, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
+    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted rather than risk the file: bun 1.3.0 through 1.4.3 reject the WHOLE bunfig on a non-numeric minimumReleaseAge, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
   fi
 
   # WHERE THE GLOBAL BUNFIG LIVES — resolved from bun's environment, never
