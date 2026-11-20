@@ -38,7 +38,8 @@
       - "UV_LINK_MODE=copy"
       - "GOSUMDB={{ go_sumdb }}"
       - "GOPROXY={{ go_proxy }}"
-      - "GOFLAGS=-mod={{ goflags_mod }}"
+      # Empty when goflags_mod is "" (the default), so the reject() below drops it.
+      - "GOFLAGS={{ ('-mod=' ~ goflags_mod) if goflags_mod | length > 0 else '' }}"
       - "GOPRIVATE={{ go_private }}"
       - "GONOPROXY={{ go_noproxy }}"
       - "GOINSECURE={{ go_insecure }}"

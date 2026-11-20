@@ -1091,7 +1091,9 @@ harden_pnpm() {
   #
   # `ignoreScripts: false` with an allowlist is NOT a fail-open: pnpm 10+
   # default-denies dependency build scripts regardless (the approve-builds
-  # gate), and false is what lets a project's allowBuilds take effect.
+  # gate), and false is what lets a project's allowBuilds take effect. It does
+  # let the project's own lifecycle scripts run (MEASURED on pnpm 11.28.12 and
+  # 12.21.0); the role's pnpm-config.yaml.j2 makes the same trade.
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
@@ -2755,7 +2757,12 @@ harden_go() {
   # file, so both layers are written and they agree.
   write_env GOSUMDB     "sum.golang.org"
   write_env GOPROXY     "https://proxy.golang.org,direct"
-  write_env GOFLAGS     "-mod=readonly"
+  # GOFLAGS is NOT written (earlier versions wrote -mod=readonly). With no vendor/
+  # directory that is Go's default already, and with one it makes Go IGNORE
+  # vendor/: offline the build fails on a proxy.golang.org dial error that names
+  # neither GOFLAGS nor this action; online it compiles the proxy copy instead
+  # of the vendored one. MEASURED on go1.22.12 and go1.27.4 (defaults/main.yml,
+  # goflags_mod, has the detail; the role no longer sets it either).
   write_env GOTOOLCHAIN "local"
   # Empty knobs — explicit setting means no module bypasses sumdb / proxy / HTTPS.
   write_env GOPRIVATE   ""
@@ -2783,7 +2790,6 @@ harden_go() {
     for gokey in \
       "GOSUMDB=sum.golang.org" \
       "GOPROXY=https://proxy.golang.org,direct" \
-      "GOFLAGS=-mod=readonly" \
       "GOTOOLCHAIN=local" \
       "GOPRIVATE=" \
       "GONOPROXY=" \
@@ -2792,6 +2798,13 @@ harden_go() {
     do
       go env -w "$gokey" 2>/dev/null || failed+="${gokey%%=*} "
     done
+    # A runner hardened by an earlier version keeps GOFLAGS=-mod=readonly in its
+    # go env file (self-hosted runners persist it). Remove exactly that value so
+    # the host converges; any other GOFLAGS is the owner's and is left alone.
+    if [[ "$(env -u GOFLAGS go env GOFLAGS 2>/dev/null)" == "-mod=readonly" ]]; then
+      go env -u GOFLAGS 2>/dev/null \
+        && log "go: removed GOFLAGS=-mod=readonly left in $(go env GOENV 2>/dev/null) by an earlier version (it made go ignore vendor/)"
+    fi
     if [[ -n "$failed" ]]; then
       warn "go env -w rejected: ${failed% } — those settings rely on the env layer only on this host"
     else
@@ -2806,7 +2819,7 @@ harden_go() {
 
   HARDENED+=("go")
   set_tool_version "go" "$go_version"
-  log "go: GOSUMDB=sum.golang.org, GOPROXY=proxy.golang.org, GOFLAGS=-mod=readonly, GOTOOLCHAIN=local"
+  log "go: GOSUMDB=sum.golang.org, GOPROXY=proxy.golang.org, GOTOOLCHAIN=local (GOFLAGS left to go: its default keeps go.mod/go.sum read-only and honours vendor/)"
   end_section
 }
 

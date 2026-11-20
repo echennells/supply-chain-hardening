@@ -95,7 +95,7 @@
   ansible.builtin.debug:
     msg: |-
       pnpm allowlist exemptions active on this host:
-        build scripts allowed (flips ignore-scripts=false on pnpm <= 10) for:
+        build scripts allowed (ignore-scripts=false in both pnpm files; pnpm 10 builds only these, pnpm 11+ builds what each project's allowBuilds names and runs the project's own lifecycle scripts) for:
           {{ pnpm_built_dependencies | join(', ') if pnpm_built_dependencies | length > 0 else '(none — all build scripts blocked)' }}
         age gate skipped for:
           {{ pnpm_minimum_release_age_exclude | join(', ') if pnpm_minimum_release_age_exclude | length > 0 else '(none — all packages age-gated)' }}

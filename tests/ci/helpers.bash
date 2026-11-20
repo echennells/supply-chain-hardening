@@ -149,6 +149,38 @@ stub_symlink() {
   ln -s "$target" "${TEST_BIN}/${name}"
 }
 
+# stub_go_env [version]
+#
+# A go that implements just `version` and `go env` (read, -w, -u, GOENV)
+# against a GOENV file under $HOME, with go's precedence: the environment wins
+# over the file. Enough to observe what harden.sh persists with `go env -w`
+# and what verify.sh reads back with the environment stripped.
+#
+# version defaults to go1.27.4. Below go1.21 the stub has no GOTOOLCHAIN, as
+# MEASURED on go1.18.10, go1.19.13 and go1.20.14: `go env -w GOTOOLCHAIN=...`
+# fails with "unknown go command variable GOTOOLCHAIN", and `go env GOTOOLCHAIN`
+# prints an empty line even with GOTOOLCHAIN=local exported.
+stub_go_env() {
+  local ver="${1:-go1.27.4}" minor notc=0
+  minor=${ver#go1.}; minor=${minor%%.*}
+  [[ "$minor" -lt 21 ]] && notc=1
+  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; touch "$f"
+notc='"$notc"'
+case "${1:-}" in
+  version) echo "go version '"$ver"' linux/amd64" ;;
+  env) shift
+    case "${1:-}" in
+      -w) shift; for kv in "$@"; do k=${kv%%=*}
+            if [ "$notc" = 1 ] && [ "$k" = GOTOOLCHAIN ]; then echo "go: unknown go command variable GOTOOLCHAIN" >&2; exit 1; fi
+            grep -v "^$k=" "$f" > "$f.t" || true; mv "$f.t" "$f"; echo "$kv" >> "$f"; done ;;
+      -u) shift; for k in "$@"; do grep -v "^$k=" "$f" > "$f.t" || true; mv "$f.t" "$f"; done ;;
+      GOENV) echo "$f" ;;
+      *) if [ "$notc" = 1 ] && [ "$1" = GOTOOLCHAIN ]; then echo
+         elif v=$(printenv "$1"); then echo "$v"; else grep "^$1=" "$f" | cut -d= -f2-; fi ;;
+    esac ;;
+esac'
+}
+
 # The real binary harden.sh moved aside when it wrapped our stub.
 stub_real() { echo "${TEST_BIN}/${1}-real"; }
 

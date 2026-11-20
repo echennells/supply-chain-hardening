@@ -244,7 +244,23 @@ go_noproxy: ""
 go_insecure: ""
 # See templates/supply-chain-env.sh.j2 for why this one was missing.
 go_nosumdb: ""
-goflags_mod: "readonly"
+# GOFLAGS=-mod=<value>, written host-wide only when this is non-empty. Empty
+# (the default) leaves Go's own choice in place, which is already the strict one.
+# MEASURED on go1.22.12 and go1.27.4:
+#   - With no vendor/ directory, `-mod=readonly` IS Go's default (since 1.16).
+#     Setting it refused exactly the same builds as leaving it unset (a missing
+#     require, a missing go.sum entry), and `go get` / `go mod tidy` behaved the
+#     same. The only difference was the error text: it replaced Go's
+#     "to add it: go get <pkg>" hint with "import lookup disabled by -mod=readonly".
+#   - With a vendor/ directory, Go's default is `-mod=vendor`, and an explicit
+#     `-mod=readonly` makes Go IGNORE vendor/. Offline (--network none), the build
+#     failed with a proxy.golang.org dial error that names neither GOFLAGS nor this
+#     role. Online, it downloaded the module and compiled the proxy copy instead of
+#     the project's vendored copy, so a patched vendor/ was skipped without a word.
+# So the old default of "readonly" added nothing where it was harmless and broke
+# vendored projects where it was not. Set "vendor" or "readonly" only if every Go
+# project on the host wants that mode.
+goflags_mod: ""
 
 # pnpm settings
 # Strict mode: fail the install when an age-gate violation occurs instead of
@@ -255,19 +271,34 @@ pnpm_minimum_release_age_strict: true
 # updates and want to install them immediately rather than wait for the gate.
 # Example: pnpm_minimum_release_age_exclude: ["@myorg/internal-pkg", "scoped/own"]
 pnpm_minimum_release_age_exclude: []
-# Build-script allowlist (`only-built-dependencies`). TAKES EFFECT ON PNPM 10
-# ONLY: pnpm 11+ ignores it in the global config and has no global allowlist
-# (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, list the packages as
-# `allowBuilds` in the project's pnpm-workspace.yaml.
-# Empty list (default) → block all build scripts via ignore-scripts=true.
-# Non-empty list → only these packages' build scripts may run (pnpm 10);
-# everything else is blocked.
+# Build-script allowlist (`only-built-dependencies`). The NAMES take effect on
+# pnpm 10 only: pnpm 11+ ignores the list in the global config and has no
+# global allowlist (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, a project
+# lists the packages as `allowBuilds` in its own pnpm-workspace.yaml.
+# Empty list (default) → ignore-scripts=true / ignoreScripts: true: no build
+# script runs, for any package or project, on any pnpm.
+# Non-empty list → ignore-scripts=false in BOTH pnpm files (as the GitHub
+# Action does):
+#   pnpm 10: only these packages' build scripts may run.
+#   pnpm 11+: a dependency named in the project's `allowBuilds` builds, and any
+#     other is refused with ERR_PNPM_IGNORED_BUILDS. The project's own
+#     lifecycle scripts (package.json postinstall etc.) also run.
+# On pnpm 11+ with the DEFAULT empty list, `allowBuilds` alone does nothing:
+# MEASURED on 11.28.12 and 12.21.0, `allowBuilds: {esbuild: true}` under the
+# role's `ignoreScripts: true` installed with rc=0 and no message, and esbuild's
+# postinstall did not run. That project's pnpm-workspace.yaml needs
+#   ignoreScripts: false
+#   allowBuilds:
+#     esbuild: true
+# which re-enables scripts for that one project only (its own lifecycle scripts
+# included); every dependency it does not name is still refused, loudly.
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 #
 # IMPORTANT: this allowlist is user-scoped only. /etc/npmrc carries the
 # strict default (`ignore-scripts=true`) for sudo / other-user / cron
-# coverage. The allowlist is written to ~/.config/pnpm/rc (and pnpm 11's
-# ~/.config/pnpm/config.yaml) for the deploying user. Consequence:
+# coverage. The allowlist is written to ~/.config/pnpm/rc (and its
+# ignoreScripts: false to pnpm 11's ~/.config/pnpm/config.yaml) for the
+# deploying user. Consequence:
 # `sudo pnpm install` in a project requiring esbuild's postinstall will
 # hit /etc/npmrc's blanket block and the install will be broken, despite
 # the operator having configured the allowlist. This is intentional —

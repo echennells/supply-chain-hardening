@@ -249,3 +249,41 @@ J
   [ ! -f "$PLUGIN_MARK" ] || { echo "plugin ran: $(cat "$PLUGIN_MARK")" >&2; return 1; }
   [ ! -f "$SCRIPT_MARK" ] || { echo "the checkout's pre-command-run script ran" >&2; return 1; }
 }
+
+# ---- go: GOFLAGS is left to go ------------------------------------------------
+#
+# Earlier versions of harden.sh wrote GOFLAGS=-mod=readonly (env layer AND `go env -w`).
+# MEASURED on go1.22.12 and go1.27.4: without vendor/ that is go's default; with
+# vendor/ it makes go ignore the vendored copy (offline: a proxy dial error that
+# names neither GOFLAGS nor this action; online: the proxy copy is compiled
+# instead). go is a stub here, so this proves what harden.sh WRITES; the
+# container suite (05-go.bats) proves the build behaviour with the real go.
+# stub_go_env is in helpers.bash.
+
+@test "go: harden.sh writes no GOFLAGS, to the env layer or to go env -w" {
+  stub_go_env
+  run harden ECOSYSTEMS=go -- --emit=plain
+  [ "$status" -eq 0 ]
+  # Counted, not `! grep`: bats does not fail a test on a negated command
+  # unless it is the last line.
+  [ "$(grep -c "GOFLAGS" "$ENV_FILE")" = 0 ]
+  [ "$(grep -c "^GOFLAGS=" "$TEST_HOME/.config/go/env")" = 0 ]
+  # The settings that do differ from go's defaults are still persisted.
+  grep -qx "GOTOOLCHAIN=local" "$TEST_HOME/.config/go/env"
+  grep -qx "GOSUMDB=sum.golang.org" "$TEST_HOME/.config/go/env"
+}
+
+@test "go: an earlier version's GOFLAGS=-mod=readonly is removed from go env; anyone else's GOFLAGS is kept" {
+  stub_go_env
+  mkdir -p "$TEST_HOME/.config/go"
+  echo "GOFLAGS=-mod=readonly" > "$TEST_HOME/.config/go/env"
+  run harden ECOSYSTEMS=go -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "^GOFLAGS=" "$TEST_HOME/.config/go/env")" = 0 ]
+  [[ "$output" == *"removed GOFLAGS=-mod=readonly"* ]]
+
+  echo "GOFLAGS=-trimpath" > "$TEST_HOME/.config/go/env"
+  run harden ECOSYSTEMS=go -- --emit=plain
+  [ "$status" -eq 0 ]
+  grep -qx "GOFLAGS=-trimpath" "$TEST_HOME/.config/go/env"
+}

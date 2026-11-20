@@ -145,11 +145,11 @@ setup() { common_setup; }
   # without the source line, the file would be pointless and the docs wrong.
   harden ECOSYSTEMS=go -- --emit=plain >/dev/null
 
-  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c 'echo "${GOFLAGS:-ABSENT}"'
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c 'echo "${GOTOOLCHAIN:-ABSENT}"'
   [ "$output" = "ABSENT" ]
 
-  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; echo \"\$GOFLAGS\""
-  [ "$output" = "-mod=readonly" ]
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; echo \"\$GOTOOLCHAIN\""
+  [ "$output" = "local" ]
 }
 
 # ---- The shipped GitLab example, run as written ----
