@@ -30,11 +30,26 @@ setup() {
 }
 
 teardown() {
+  # Restore only what changed: a test that skipped as a normal user changed
+  # nothing, and cannot write /etc to put it back.
   local f i=0
   while read -r f; do
-    [ -f "$BATS_TEST_TMPDIR/orig.$i" ] && cp -p "$BATS_TEST_TMPDIR/orig.$i" "$f"
+    if [ -f "$BATS_TEST_TMPDIR/orig.$i" ] && ! cmp -s "$BATS_TEST_TMPDIR/orig.$i" "$f"; then
+      cp -p "$BATS_TEST_TMPDIR/orig.$i" "$f"
+    fi
     i=$((i + 1))
   done < <(files)
+}
+
+# The tests that stale and refresh rewrite the /etc cutoff files AND the
+# deploying account's own uv.toml/pip.conf, read here as root's ($HOME). So they
+# need root, and they need root to be the account the role was deployed for, as
+# it is in the container image. As a normal user they failed with "Permission
+# denied" on every VM; as root on a host deployed for someone else, root's own
+# files are not there to stale.
+require_root_deploy() {
+  require_root "rewrites /etc/uv/uv.toml, /etc/pip.conf and /etc/profile.d"
+  grep -qx 'deploy_uid=0' "$R" || skip "the role was deployed for another account; these tests stale root's own cutoff files"
 }
 
 stale_all() {
@@ -61,6 +76,7 @@ refresh() { "$R" --system && "$R" --user; }
 }
 
 @test "a stale cutoff in every file is advanced to today's rolling value" {
+  require_root_deploy
   stale_all
   run refresh
   echo "$output"
@@ -74,6 +90,7 @@ refresh() { "$R" --system && "$R" --user; }
 }
 
 @test "only the cutoff line changes, and owner and mode are kept" {
+  require_root_deploy
   stale_all
   local before="$BATS_TEST_TMPDIR/stale-uv.toml" mode
   cp -p /etc/uv/uv.toml "$before"
@@ -84,6 +101,7 @@ refresh() { "$R" --system && "$R" --user; }
 }
 
 @test "a second run finds everything current and rewrites nothing" {
+  require_root_deploy
   stale_all
   refresh
   local ino; ino=$(stat -c %i /etc/pip.conf)
@@ -94,6 +112,7 @@ refresh() { "$R" --system && "$R" --user; }
 }
 
 @test "a duplicated cutoff line is left alone and reported" {
+  require_root_deploy
   # Two role-shaped lines means someone edited the file's structure; the
   # refresher must not guess which one is ours. (A single line whose VALUE was
   # hand-edited is advanced like any other -- the next test pins that down.)
@@ -105,6 +124,7 @@ refresh() { "$R" --system && "$R" --user; }
 }
 
 @test "every rewrite is logged with the value it replaced" {
+  require_root_deploy
   # The files are role-managed, so a hand-set cutoff value is advanced like any
   # other. What makes that safe to operate is that the log says what it replaced.
   stale_all
@@ -129,6 +149,7 @@ refresh() { "$R" --system && "$R" --user; }
 
 @test "the verifier reads the stale gate as a freeze and the refreshed one as OK" {
   command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  require_root_deploy
   stale_all
   run "$VERIFY" --json
   [ "$(printf '%s' "$output" | jq -r '.rows[] | select(.protection == "uv age gate") | .status')" = WEAK ]
@@ -136,4 +157,41 @@ refresh() { "$R" --system && "$R" --user; }
   refresh
   run "$VERIFY" --json
   [ "$(printf '%s' "$output" | jq -r '.rows[] | select(.protection == "uv age gate") | .status')" = OK ]
+}
+
+# ---- Socket Firewall's update check ----
+#
+# The npm and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1, so a
+# non-root caller never writes sfw's root-owned cache (VM#1: without it every
+# non-root npm and cargo call failed an hour after each apply). The update
+# check they skip has to run somewhere: as root, from this refresher.
+
+@test "refresher --sfw runs sfw's update check as root, with the skip variable cleared and umask 022" {
+  grep -q -- '--sfw)' "$R" || skip "refresher rendered without the sfw step (socket_firewall_install=false)"
+  stub=$(mktemp -d)
+  cat > "$stub/sfw" <<STUB
+#!/bin/sh
+printf 'uid=%s skip=%s umask=%s args=%s\n' "\$(id -u)" "\${SFW_SKIP_UPDATE_CHECK:-unset}" "\$(umask)" "\$*" > "$stub/ran"
+STUB
+  chmod +x "$stub/sfw"
+  run env SFW_SKIP_UPDATE_CHECK=1 PATH="$stub:$PATH" sh -c "umask 077; '$R' --sfw"
+  echo "$output"
+  cat "$stub/ran"
+  [ "$status" -eq 0 ]
+  grep -q '^uid=0 skip=unset umask=0022 args=/.*/true$' "$stub/ran"
+  rm -rf "$stub"
+}
+
+@test "refresher --sfw keeps going when the update check fails" {
+  # A failed check leaves the cached binary in place, and it still works; the
+  # age-gate cutoffs in the same unit must not fail with it.
+  grep -q -- '--sfw)' "$R" || skip "refresher rendered without the sfw step (socket_firewall_install=false)"
+  stub=$(mktemp -d)
+  printf '#!/bin/sh\necho "[sfw] simulated failure" >&2\nexit 1\n' > "$stub/sfw"
+  chmod +x "$stub/sfw"
+  run env PATH="$stub:$PATH" "$R" --sfw
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not refresh its firewall binary: [sfw] simulated failure"* ]]
+  rm -rf "$stub"
 }

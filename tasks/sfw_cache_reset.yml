@@ -1,0 +1,199 @@
+---
+# Find sfw and reset a cache that anyone but root could have written, before
+# anything in the play runs sfw as root. tasks/main.yml includes this file
+# right after the preflight, ahead of npm.yml, because every root
+# `npm install -g` in the play (lockfile-lint in npm.yml, npq in npq.yml, sfw
+# itself in socket.yml) can run sfw: on a host an earlier version hardened,
+# root's npm is that version's /usr/local/bin/npm wrapper, which sends
+# installs through sfw, and sfw runs whatever .sfw-cache/latest points at.
+# MEASURED (Debian 13, apt npm, prefix /usr/local; 8281a6b applied, then the
+# cache made 0777 and `latest` repointed at a script by another account): while
+# these tasks opened socket.yml, an apply with refresh_tools=true ran that
+# script as root from "Install lockfile-lint globally", nine seconds before the
+# reset. The same happens whenever lockfile-lint or npq is missing on such a
+# host.
+#
+# socket.yml uses what this file registers (sfw_check, npm_for_socket,
+# node_major_version, sfw_cache_reset), and includes the file itself when
+# main.yml's include did not run (--skip-tags always).
+
+- name: Check if socket firewall is already installed
+  ansible.builtin.command: which sfw
+  register: sfw_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Check if npm is available for socket install
+  # Canonical-path-first detection across system + Node-manager install
+  # methods. See tasks/npm.yml for the same logic explained.
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm"; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "$HOME"/.nvm/versions/node/*/bin/npm; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
+        if [ -x "$p" ]; then
+          echo "$p"
+          exit 0
+        fi
+      done
+      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
+    executable: /bin/bash
+  register: npm_for_socket
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Check Node.js version (sfw requires >= 20)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      node --version | sed 's/v\([0-9]*\).*/\1/'
+    executable: /bin/bash
+  register: node_major_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: npm_for_socket.rc == 0
+
+- name: Reset an sfw cache that anyone but root could have written
+  # sfw runs the cached firewall binary (.sfw-cache/latest) without checking its
+  # digest again; the digest is checked once, when the file is downloaded
+  # (sfw 2.0.6 dist/sfw.mjs, findValidCachedReleaseSync). So a cache that a
+  # non-root account can write lets that account choose the binary every caller
+  # runs, root included: `sudo npm install` goes through the npm wrapper and so
+  # through sfw. Earlier versions of this role left the cache in exactly that
+  # state: v2.0.0 through 8281a6b chowned it to the deploying user, and a host
+  # hardened by an earlier version was found with it at mode 0777 and a
+  # user-owned `latest`. MEASURED with 8281a6b on Debian 13
+  # (Debian's npm, global prefix /usr/local): the deploying user repointed
+  # `latest` at a script, and `sudo npm view is-number version` ran it as uid 0.
+  #
+  # Changing the owner back to root does not repair that. The binary may
+  # already have been replaced, so the whole cache is removed, and the warm task
+  # in socket.yml downloads it again and checks the digest. This runs before
+  # the warm, because the warm runs sfw as root, and before every root
+  # `npm install -g` in the play (see the top of this file). If the cache
+  # cannot be removed, sfw is moved aside: root callers would otherwise keep
+  # running its binary through the wrappers.
+  #
+  # It also reports an sfw older than 2.0.6 ("old-shim"), which the install
+  # in socket.yml replaces. The wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1 so that a
+  # non-root caller never writes the root-owned cache, and only 2.0.6 reads
+  # that variable: 2.0.4's shouldCheckForUpdate() has no such test (both
+  # dist/sfw.mjs read), and there is no 2.0.5. Role releases before v2.0.0
+  # installed a floating `sfw@2`, which was 2.0.4 until 2026-05-22, and the
+  # install used to run only when sfw was absent, so those hosts kept
+  # it. MEASURED (NodeSource, sfw 2.0.4 installed by root, this branch applied
+  # by a non-root user before this check existed, next-check backdated): npm
+  # as that user and as a second user, and cargo, each exited 1 with
+  # "[sfw] Failed to prepare firewall binary: EACCES ... next-check", and a
+  # second apply did not repair it.
+  #
+  # The cache is found from the sfw that root runs. sfw keeps it inside its own
+  # package directory (the parent of the directory holding dist/sfw.mjs), so it
+  # moves with npm's global prefix: /usr/lib/node_modules/sfw on NodeSource,
+  # /usr/local/lib/node_modules/sfw on Debian's npm. The old tasks used a fixed
+  # /usr/local path. On a /usr host that missed the real cache and created a
+  # /usr/local/lib/node_modules/sfw/.sfw-cache instead (owned by the deploying
+  # user from v2.0.0, by root before). That stray tree is removed here too. It is only removed when it holds nothing but
+  # .sfw-cache: npm always writes package.json, so it is not an sfw install,
+  # and nothing reads it.
+  #
+  # The same script also refuses to touch an sfw that root does not own. If
+  # sudo keeps the applying user's PATH, root can resolve a per-user sfw, and
+  # the role never runs a user-writable program as root (the npm check in
+  # socket.yml follows the same rule).
+  #
+  # check_mode: false with the dry flag below, so a --check run reports what
+  # it would reset without changing anything, and the warm in socket.yml knows
+  # not to run sfw as root over a cache it could not reset.
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      dry={{ '1' if ansible_check_mode else '0' }}
+      s=/usr/local/lib/node_modules/sfw
+      if [ -d "$s" ] && [ ! -L "$s" ] && [ ! -e "$s/package.json" ] \
+         && [ "$(ls -A "$s")" = ".sfw-cache" ]; then
+        if [ "$dry" = 1 ]; then
+          echo "would-reset-stray $s"
+        else
+          rm -rf -- "$s" && echo "reset-stray $s"
+          # The parent too, but only when that left it empty and it is not
+          # root's: the old task created it, owned by the deploying user.
+          p=${s%/*}
+          if [ "$(stat -c %u "$p")" != 0 ] && rmdir -- "$p" 2>/dev/null; then
+            echo "reset-stray $p"
+          fi
+        fi
+      fi
+      sfw=$(command -v sfw 2>/dev/null) || { echo absent; exit 0; }
+      shim=$(readlink -f "$sfw")
+      pkg=${shim%/*}; pkg=${pkg%/*}
+      if [ ! -f "$pkg/package.json" ]; then echo "unresolved $sfw"; exit 0; fi
+      if [ "$(stat -c %u "$shim")" != 0 ] || [ "$(stat -c %u "$pkg")" != 0 ]; then
+        echo "not-root-owned $shim"
+        exit 0
+      fi
+      if ! grep -q SFW_SKIP_UPDATE_CHECK "$shim"; then
+        v=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg/package.json" | head -n 1)
+        echo "old-shim ${v:-unknown} $sfw"
+      fi
+      c=$pkg/.sfw-cache
+      if [ ! -e "$c" ] && [ ! -L "$c" ]; then echo "cold $c"; exit 0; fi
+      why=""
+      if [ -L "$c" ] || [ ! -d "$c" ]; then
+        why="it is not a directory"
+      else
+        # Symlinks are excluded from the mode test: theirs is always 0777.
+        bad=$(find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print -quit)
+        if [ -n "$bad" ]; then
+          why="$bad is $(stat -c '%U %a' "$bad")"
+        elif [ -L "$c/latest" ]; then
+          t=$(readlink -f "$c/latest")
+          case "$t" in "$c"/*) ;; *) why="latest points outside the cache, at $t" ;; esac
+        fi
+      fi
+      if [ -z "$why" ]; then echo "ok $c"; exit 0; fi
+      if [ "$dry" = 1 ]; then echo "would-reset $c: $why"; exit 0; fi
+      if rm -rf -- "$c"; then
+        echo "reset $c: $why"
+      else
+        mv -f -- "$sfw" "$sfw.broken" 2>/dev/null
+        echo "reset-failed $c: $why"
+      fi
+    executable: /bin/bash
+  register: sfw_cache_reset
+  changed_when: sfw_cache_reset.stdout is search('^((would-)?reset(-stray)?|reset-failed) ', multiline=True)
+  check_mode: false
+  failed_when: false
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+
+- name: Record skipped protection — Socket Firewall cache could not be reset
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — its cache could be written by an account other than root (' ~ (sfw_cache_reset.stdout | regex_search('^reset-failed (.*)$', '\1', multiline=True) | first) ~ '), so that account may have chosen the binary sfw runs, and removing the cache failed. sfw was moved aside and not run, so npm and cargo run unfiltered. Remove that cache as root and re-apply.'] }}
+  when:
+    - sfw_cache_reset is defined
+    - sfw_cache_reset.stdout | default('') is search('^reset-failed ', multiline=True)
+
+- name: Record skipped protection — Socket Firewall resolves to a program root does not own
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — root resolves sfw to ' ~ (sfw_cache_reset.stdout | regex_search('^not-root-owned (.*)$', '\1', multiline=True) | first) ~ ', which root does not own (sudo kept the PATH of whoever applied the role), so its cache was not checked or warmed: the role does not run a user-writable program as root.'] }}
+  when:
+    - sfw_cache_reset is defined
+    - sfw_cache_reset.stdout | default('') is search('^not-root-owned ', multiline=True)

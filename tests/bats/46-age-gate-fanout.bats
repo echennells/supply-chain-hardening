@@ -5,8 +5,8 @@
 # ecosystem: npm and bundler days, pnpm/yarn minutes, bun and composer seconds,
 # deno ISO-8601 duration.
 # Each is derived INDEPENDENTLY in defaults/main.yml, and the "unit/threshold"
-# bug recurred four times — a derivation going degenerate (0, "P0D", NaN,
-# wrong unit) silently DISABLES that ecosystem's age gate with no error. The
+# bug recurred four times — a derivation going degenerate (0, "P0D", a unit
+# suffix, wrong unit) silently DISABLES that ecosystem's age gate with no error. The
 # per-instance fixes floored each one, but nothing checked the whole fan-out
 # against a range of inputs. This test does: it renders the ACTUAL defaults
 # expressions for many release_age_hours values and asserts none is degenerate.

@@ -5,9 +5,9 @@
 [![Ansible Galaxy](https://img.shields.io/badge/Ansible%20Galaxy-echennells.supply__chain__hardening-blue?logo=ansible)](https://galaxy.ansible.com/ui/standalone/roles/echennells/supply_chain_hardening/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Safe defaults for 14 package managers, so a careless `npm install` or `pip install` gets age-gated and script-blocked without the caller knowing about it.**
+**Safe defaults for 14 package managers, so a careless `npm install` or `pip install` of a registry package gets age-gated and script-blocked without the caller knowing about it.**
 
-Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use.
+Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use. (A PATH wrapper only reaches a caller whose `PATH` includes it: Debian and Ubuntu cron run jobs with `PATH=/usr/bin:/bin`, which skips the `/usr/local/bin` wrappers, so a cron job gets the config files and `/etc/environment` but not the `/usr/local/bin` wrappers. A wrapper the role installs in place of a binary in `/usr/bin`, such as an apt-installed `composer` or `cargo`, still runs. See [docs/how-it-works.md](docs/how-it-works.md).)
 
 Then it **proves the policy is in effect.** Writing a config file is not the same as a protection being on: every real failure this project has shipped was a file that was exactly right and a tool that quietly ignored it. So the role asks the tools what they ended up believing, on the real host, against the real installed versions:
 
@@ -15,7 +15,7 @@ Then it **proves the policy is in effect.** Writing a config file is not the sam
 $ supply-chain-verify
 STATUS EVIDENCE    PROTECTION                       DETAIL
 OK     PARSED      npm lifecycle scripts blocked    npm reports ignore-scripts=true
-GAP    PARSED      yarn age gate                    yarn reports non-integer npmMinimalAgeGate='NaN'
+GAP    PARSED      yarn age gate                    yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0), so the...
 GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on Node v18.19.1
 WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
 ```
@@ -27,19 +27,25 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | Protection | npm | pnpm | Yarn | Bun | Deno | pip/uv | Cargo | Go | Composer | Bundler | Maven | Gradle | NuGet |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **48h release age gate** | x | x | x | x | x | x | * | | ‡ | ‡ | | | |
-| **Install script blocking** | x | x | x | x | x | x | | | x | | | | x |
+| **Install script blocking** | x | x | x | x | x | x§ | | | x | | | | x |
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
 | **Socket Firewall** | x | | | | | † | x | | | | | | |
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
-| **Hash/integrity verification** | x | | | | | x | | x | | | x | | x |
+| **Hash/integrity verification** | x | | | | | ¶ | | x | | | x | | x |
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
-| **Lockfile enforcement** | | | | | | | x | x | | x | | | |
+| **Lockfile enforcement** | | | | | | | x | | | x | | | |
 
-`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
+`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md). Cargo 1.100.0 and later also have a native gate (`registry.global-min-publish-age`), which the role does not write yet.
 
 `‡` = **needs Composer ≥ 2.11.0 or Bundler ≥ 4.0.13, which no stock distro package ships.** The role writes both settings everywhere and the verifier reports a GAP until you upgrade; see [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md). Bundler's gate covers `gem install` only from RubyGems 4.1.0, which reads the same `BUNDLE_COOLDOWN`; below that, `gem install` has no age gate.
 
-`†` = **not implemented for Python.** Socket Firewall is wired only into the npm/npx and cargo PATH wrappers. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
+`†` = **not implemented for Python.** Socket Firewall is wired only into the npm and cargo PATH wrappers, and in the GitHub Action also an npx wrapper. The role deploys no npx wrapper, so a bare `npx <pkg>` on a role-hardened host is not threat-intel filtered; `npm exec <pkg>` goes through the npm wrapper and is. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
+
+`§` = uv's `no-build` refuses every sdist. Where pip runs without the redirect to uv (no uv on the host, `python3 -m pip`, a venv's own `pip`), pip's `only-binary = :all:` refuses an sdist it resolves from an index or `--find-links`, but **not one named by path or URL**: `pip install ./x.tar.gz` still runs its `setup.py`. `supply-chain-verify` grades that row WEAK.
+
+`¶` = **uv's default, restated.** uv has verified any hashes a requirements file supplies since 0.5.3, and the role's `[pip] verify-hashes = true` only writes that default down. It does not require hashes, so an install that names none, which is most ad-hoc installs, is not hash-checked.
+
+Go has no lockfile-enforcement tick because the role adds nothing there: Go's own default already refuses to change `go.mod`/`go.sum` during a build. Earlier versions wrote `GOFLAGS=-mod=readonly`, which restated that default and made Go ignore a project's `vendor/` directory.
 
 Each protection is delivered in up to three overlapping layers — system-wide env vars, on-disk config files, `/usr/local/bin` PATH wrappers — so one covers another's gaps. What each layer reaches, and what it doesn't, is in [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -60,12 +66,23 @@ git clone https://github.com/echennells/supply-chain-hardening.git
 cd supply-chain-hardening
 
 # 3. Apply to this host. Run as your normal user with sudo rights; tasks
-#    escalate themselves. Add -K if sudo asks for a password.
+#    escalate themselves. Add -K if sudo asks for a password (on Ubuntu 26.04
+#    see the sudo-rs note below).
 ansible-playbook site.yml --limit localhost
 
 # 4. See what is actually enforcing (OK / WEAK / GAP per protection)
 supply-chain-verify
 ```
+
+**sudo-rs (Ubuntu 26.04's default sudo) and `-K`:** ansible-core cannot answer
+sudo-rs's password prompt before 2.20.11 (and in 2.21.0 to 2.21.5): every
+escalating task times out (measured on 2.19.9 to 2.20.10 and 2.21.0 to 2.21.5)
+or hangs (measured on 2.16 to 2.18). Ubuntu 26.04's apt package is 2.20.1.
+The preflight stops the play before the first escalation and says so. Either
+run a fixed ansible-core for your user (`pipx install 'ansible-core>=2.21.6'`, then
+`~/.local/bin/ansible-playbook ... -K`) or give the user NOPASSWD sudo for the
+apply. A user with no sudo rights at all gets the same refusal, and neither fix
+applies to them. Measured with sudo-rs 0.2.13.
 
 From your own playbook:
 
@@ -94,6 +111,7 @@ The order is the one thing you have to get right. Hardening wraps the binaries t
 - **Do not run with `sudo ansible-playbook` or global `--become`.** Facts get gathered as root, `HOME` becomes `/root`, and every per-user config lands in the wrong home while the recap reports success. The preflight refuses this.
 - **`N/A — not installed` rows are correct, not failures.** There is nothing to harden yet. Install the manager, re-apply.
 - **A pre-existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or `/etc/uv/uv.toml` stops the play.** It may be a corporate registry setting. Read it, then pass `-e accept_etc_overwrite=true` if overwriting is what you want.
+- **So does a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or `~/.nuget/NuGet/NuGet.Config` the role did not write.** The role replaces these whole, so a private registry and its credentials in them would be lost. Read them, then pass `-e accept_user_config_overwrite=true` if replacing them is what you want; each is backed up next to itself first.
 - **Stock distro toolchains often predate the age gates.** npm's `min-release-age` needs npm ≥ 11.10.0 ([docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) has the per-distro fix); Composer's needs ≥ 2.11.0 and Bundler's needs ≥ 4.0.13 ([docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md)); cargo's gate needs rustc ≥ 1.91.1 and falls back to `--locked` below that (Ubuntu 24.04 ships 1.75). The verifier reports both as a GAP rather than staying quiet.
 - **On agent hosts and CI images, make a GAP fatal:** `-e verify_fail_on_gap=true`. `supply-chain-verify --json` exits non-zero on any GAP, so it drops into a health check directly.
 - **Re-apply after toolchain upgrades.** `rustup update`, Deno's installer and a new Node all replace wrapped binaries. The verifier reports the drift; re-applying fixes it.
@@ -114,6 +132,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
 | [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
+| [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
 | [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
 | [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |

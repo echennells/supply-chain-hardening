@@ -30,7 +30,8 @@ pnpm_minimum_release_age_minutes: "{{ (release_age_hours | int * 60) | int }}" #
 # omits it below that and records the gap in skipped_protections.
 # Must render as a BARE INTEGER of seconds: bun rejects the ENTIRE bunfig on
 # one bad value ("Invalid Bunfig: failed to load bunfig", exit 1 — measured
-# with a quoted "2d"), which disarms every other key AND breaks bun.
+# with a quoted "2d" on bun 1.3.0 through 1.4.3; 1.4.4 accepts a duration
+# string), which disarms every other key AND breaks bun.
 # tasks/bun.yml asserts this is ^[0-9]+$ before the template renders.
 bun_minimum_release_age_seconds: "{{ (release_age_hours | int * 3600) | int }}"  # 172800 sec
 # Composer 2.11.0+ ONLY (MEASURED: config.policy.cooldown withholds versions on
@@ -50,13 +51,15 @@ bundler_cooldown_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  
 # Integer days, and 0 means off, so floored at 1 like npm and bundler. Poetry reads
 # neither pip.conf nor uv.toml, so the Python gates above do not reach it.
 poetry_min_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max }}"  # 2 days at the 48h default
-# uv requires an absolute RFC 3339 datetime here. MEASURED 2026-10-21 on the
+# The role writes an absolute RFC 3339 datetime here. MEASURED 2026-10-21 on the
 # real release binaries: a relative-duration string such as "48 hours" in a
 # config file is REJECTED on every uv <= 0.9.9 (rc=2, "failed to parse year in
 # date '48 hours'") — which breaks every uv invocation, and this template is
-# also written to /etc/uv/uv.toml for every user on the host. uv 0.10.0+ does
-# accept it (as Relative(ExcludeNewerSpan(..))), and 0.13.4 still rejects
-# calendar forms like "P1Y". The role pins an absolute instant because it does
+# also written to /etc/uv/uv.toml for every user on the host. MEASURED
+# 2026-11-19: 0.9.16 still rejects it and 0.9.17 accepts it, matching uv's
+# changelog (0.9.17: "Add support for relative durations in exclude-newer",
+# #16814); 0.13.4 still rejects calendar forms like "P1Y". The role pins an
+# absolute instant because it does
 # not control the host's uv version — do NOT override this with a span unless
 # you control every uv on every target. supply-chain-verify reports a span as
 # WEAK, never OK, because it cannot resolve one to an instant. Compute the cutoff via lookup('pipe', ...)
@@ -108,19 +111,26 @@ sch_pip_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | i
 # (an external review found hosts eight weeks behind, and an emergency
 # certifi fix that needed a manual override). A relative form would roll on
 # its own but is a hard error on the older tools this role must not break
-# (MEASURED: pip 26.0 exits 2 on `P2D`, uv <= 0.9.9 rejects "48 hours"), and
+# (MEASURED: pip 26.0 exits 2 on `P2D`, uv <= 0.9.16 rejects "48 hours"), and
 # /etc/pip.conf + /etc/uv/uv.toml are read by EVERY interpreter on the host.
 # So a systemd timer re-runs the apply-time formula every 6 hours and
 # rewrites only the role's own cutoff lines. Linux + systemd only; elsewhere
 # it is recorded in the run's skipped-protections summary.
+# With socket_firewall_install, the same timer also runs Socket Firewall's
+# update check as root (`--sfw`): the npm and cargo wrappers skip it
+# (SFW_SKIP_UPDATE_CHECK=1) so that a non-root caller never writes sfw's
+# root-owned cache. Where the timer is absent, sfw's binary updates at re-apply.
 age_gate_refresh: true
-# Yarn's npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES. A duration-suffix
-# string ("2d", "7d") hits a parser bug that yields NaN and silently disables
-# the gate entirely — and yarn has no second age-gate layer to fall back on.
-# Verified against yarn 4.10.3 (2026-08): "36500d" let a fresh package install;
-# 52560000 (minutes) correctly blocked it. Must also render UNQUOTED so it
-# lands as a YAML number rather than a string. Deriving in minutes also avoids
-# the /24 truncation that turned any release_age_hours < 24 into "0d" (gate off).
+# Yarn's npmMinimalAgeGate (Yarn 4.10+) is in MINUTES, and integer minutes are
+# the one form every yarn with the key reads the same way. MEASURED 2026-11-19:
+# yarn 4.10.3 reads a duration string as its leading integer, so "2d" (quoted
+# or not) is a 2-MINUTE gate and "36500d" is 36500 minutes; yarn 4.11.0 parses
+# durations ("2d" = 2880). Yarn has no second age-gate layer to fall back on.
+# (An earlier note here said "2d" parsed to NaN; re-measured, it does not.)
+# Below 4.10 the key is ignored silently in ~/.yarnrc.yml (MEASURED 4.1.0,
+# 4.9.4), which tasks/yarn.yml records and the verifier reports. Rendered
+# unquoted, as a YAML number. Deriving in minutes also avoids the /24
+# truncation that turned any release_age_hours < 24 into "0d" (gate off).
 yarn_minimal_age_gate: "{{ (release_age_hours | int * 60) | int }}"            # 2880 min
 # deno's --minimum-dependency-age takes an ISO 8601 duration. The /24 here has
 # the same truncation hazard the yarn gate above was fixed for: any
@@ -234,7 +244,23 @@ go_noproxy: ""
 go_insecure: ""
 # See templates/supply-chain-env.sh.j2 for why this one was missing.
 go_nosumdb: ""
-goflags_mod: "readonly"
+# GOFLAGS=-mod=<value>, written host-wide only when this is non-empty. Empty
+# (the default) leaves Go's own choice in place, which is already the strict one.
+# MEASURED on go1.22.12 and go1.27.4:
+#   - With no vendor/ directory, `-mod=readonly` IS Go's default (since 1.16).
+#     Setting it refused exactly the same builds as leaving it unset (a missing
+#     require, a missing go.sum entry), and `go get` / `go mod tidy` behaved the
+#     same. The only difference was the error text: it replaced Go's
+#     "to add it: go get <pkg>" hint with "import lookup disabled by -mod=readonly".
+#   - With a vendor/ directory, Go's default is `-mod=vendor`, and an explicit
+#     `-mod=readonly` makes Go IGNORE vendor/. Offline (--network none), the build
+#     failed with a proxy.golang.org dial error that names neither GOFLAGS nor this
+#     role. Online, it downloaded the module and compiled the proxy copy instead of
+#     the project's vendored copy, so a patched vendor/ was skipped without a word.
+# So the old default of "readonly" added nothing where it was harmless and broke
+# vendored projects where it was not. Set "vendor" or "readonly" only if every Go
+# project on the host wants that mode.
+goflags_mod: ""
 
 # pnpm settings
 # Strict mode: fail the install when an age-gate violation occurs instead of
@@ -245,19 +271,34 @@ pnpm_minimum_release_age_strict: true
 # updates and want to install them immediately rather than wait for the gate.
 # Example: pnpm_minimum_release_age_exclude: ["@myorg/internal-pkg", "scoped/own"]
 pnpm_minimum_release_age_exclude: []
-# Build-script allowlist (`only-built-dependencies`). TAKES EFFECT ON PNPM 10
-# ONLY: pnpm 11+ ignores it in the global config and has no global allowlist
-# (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, list the packages as
-# `allowBuilds` in the project's pnpm-workspace.yaml.
-# Empty list (default) → block all build scripts via ignore-scripts=true.
-# Non-empty list → only these packages' build scripts may run (pnpm 10);
-# everything else is blocked.
+# Build-script allowlist (`only-built-dependencies`). The NAMES take effect on
+# pnpm 10 only: pnpm 11+ ignores the list in the global config and has no
+# global allowlist (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, a project
+# lists the packages as `allowBuilds` in its own pnpm-workspace.yaml.
+# Empty list (default) → ignore-scripts=true / ignoreScripts: true: no build
+# script runs, for any package or project, on any pnpm.
+# Non-empty list → ignore-scripts=false in BOTH pnpm files (as the GitHub
+# Action does):
+#   pnpm 10: only these packages' build scripts may run.
+#   pnpm 11+: a dependency named in the project's `allowBuilds` builds, and any
+#     other is refused with ERR_PNPM_IGNORED_BUILDS. The project's own
+#     lifecycle scripts (package.json postinstall etc.) also run.
+# On pnpm 11+ with the DEFAULT empty list, `allowBuilds` alone does nothing:
+# MEASURED on 11.28.12 and 12.21.0, `allowBuilds: {esbuild: true}` under the
+# role's `ignoreScripts: true` installed with rc=0 and no message, and esbuild's
+# postinstall did not run. That project's pnpm-workspace.yaml needs
+#   ignoreScripts: false
+#   allowBuilds:
+#     esbuild: true
+# which re-enables scripts for that one project only (its own lifecycle scripts
+# included); every dependency it does not name is still refused, loudly.
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 #
 # IMPORTANT: this allowlist is user-scoped only. /etc/npmrc carries the
 # strict default (`ignore-scripts=true`) for sudo / other-user / cron
-# coverage. The allowlist is written to ~/.config/pnpm/rc (and pnpm 11's
-# ~/.config/pnpm/config.yaml) for the deploying user. Consequence:
+# coverage. The allowlist is written to ~/.config/pnpm/rc (and its
+# ignoreScripts: false to pnpm 11's ~/.config/pnpm/config.yaml) for the
+# deploying user. Consequence:
 # `sudo pnpm install` in a project requiring esbuild's postinstall will
 # hit /etc/npmrc's blanket block and the install will be broken, despite
 # the operator having configured the allowlist. This is intentional —
@@ -376,13 +417,19 @@ yarn_enable_hardened_mode: true         # lockfile-tampering defense (Yarn 4.0+)
 # socket firewall
 socket_firewall_install: true
 
-# Refresh auditing tools (cargo-audit, govulncheck, pip-audit, etc.) on this run.
-# Default false: installs only happen on first run (idempotent via `creates:`).
-# Set to true via CLI — `ansible-playbook site.yml -e refresh_tools=true` — to
-# re-install everything regardless of whether the binary already exists. Useful
-# after a toolchain upgrade (Go, Rust, etc.) where existing binaries are valid
-# but built against an older compiler, or when you want the latest @latest
-# versions of @latest-pinned tools.
+# Re-install the pinned auditing tools on this run. Default false: a tool is
+# installed when it is missing or when its installed version differs from the
+# pin below (govulncheck, pinact, zizmor, uv-secure, pip-audit, lockfile-lint
+# and cargo-cooldown compare versions, so bumping a pin reinstalls on the next
+# apply; cargo-audit and cargo-vet, installed only when cargo_audit_tools is on
+# (it is off by default), still only check that the binary exists). Every tool
+# is pinned below; nothing installs @latest. Set to true via CLI —
+# `ansible-playbook site.yml -e refresh_tools=true` — to re-install them all
+# regardless (except a zizmor / uv-secure / pip-audit that uv did not install,
+# which is always left alone: `uv tool install` would need --force). Not
+# covered: npq and sfw, which are installed only when missing (and sfw when
+# older than 2.0.6). Useful after a toolchain upgrade (Go, Rust, etc.) where
+# existing binaries are valid but built against an older compiler.
 refresh_tools: false
 
 # npm PATH wrapper (default on; the agent-relevant protection layer)
@@ -421,7 +468,7 @@ composer_audit_block_abandoned: true    # Composer >= 2.9 only
 # Setting to true is the documented opt-in path for users with legitimate
 # composer Plugin classes (composer/installers, phpstan/extension-installer,
 # etc.). Doing so still leaves --no-scripts injected, so post-install-cmd
-# and friends remain blocked. Default false = no plugins, no scripts.
+# and friends remain blocked. Default false = no plugins, no lifecycle scripts.
 #
 # (--no-plugins was previously hardcoded in the wrapper regardless of this
 # var, making this knob decorative whenever composer_path_wrapper was on.
@@ -432,16 +479,19 @@ composer_allow_plugins: false
 # Composer has no host-wide config/env knob for disabling script execution
 # — COMPOSER_NO_SCRIPTS and "scripts-are-disabled" are made-up names that
 # composer ignores entirely. The wrapper at /usr/local/bin/composer (or
-# /usr/bin/composer on apt-installed hosts) injects --no-scripts and
-# --no-plugins on every invocation. Belt-and-suspenders second layer is
-# COMPOSER_SKIP_SCRIPTS=<events> in /etc/environment + /etc/profile.d,
-# which catches composer-real and `php composer.phar` callers in PAM-
-# loaded shells (composer >= 2.8.0 — MEASURED: ignored on 2.2.6 and 2.7.1,
-# honoured on 2.8.12+; the wrapper is the only layer below 2.8, and the run
-# summary records that). Documented bypass for both layers:
-# `COMPOSER_SKIP_SCRIPTS= /usr/local/bin/composer-real install`. Set
-# this var to false to restore the real binary at the wrap location on
-# next apply (env-var layer remains).
+# /usr/bin/composer on apt-installed hosts) injects --no-plugins on every
+# invocation and --no-scripts on every invocation except a script run by
+# name (`composer test`, `composer run-script x`), which runs as asked.
+# Belt-and-suspenders second layer is COMPOSER_SKIP_SCRIPTS=<events> in
+# /etc/environment + /etc/profile.d, which catches composer-real and
+# `php composer.phar` callers in PAM-loaded shells (composer >= 2.8.6 —
+# MEASURED: ignored on 2.2.6, 2.7.1, 2.8.4 and 2.8.5, honoured from 2.8.6;
+# the wrapper is the only layer below that, and the run summary records it).
+# Documented bypass for both layers, with the real binary next to the
+# wrapper: `COMPOSER_SKIP_SCRIPTS= /usr/bin/composer-real install` on an apt
+# host, `/usr/local/bin/composer-real` for the upstream installer. Set this
+# var to false to restore the real binary at the wrap location on next apply
+# (env-var layer remains).
 composer_path_wrapper: true
 
 # cargo / Rust hardening.
@@ -515,8 +565,9 @@ cargo_cooldown_violation_action: deny
 # warm-up runs `sfw /bin/true`, and if sfw cannot run it is moved aside so both
 # wrappers' `command -v sfw` guard falls through to pass-through-with-warning.
 # So a broken sfw never breaks a build; it just means no threat-intel filtering,
-# recorded in the run summary. When sfw IS runnable, its own runtime posture is
-# fail-open on a network error (warns, exits 0, build proceeds unfiltered).
+# recorded in the run summary. When sfw IS runnable but cannot reach Socket's
+# API, the download fails and so does the build (MEASURED, sfw-free 1.16.0:
+# cargo fetch exit 101); see docs/limitations.md for each failure mode.
 cargo_socket_firewall: true
 
 # Exact (crate, version) pairs admitted regardless of age, e.g.
@@ -580,6 +631,11 @@ pinact_version: "v5.0.0"
 # firewall binary at runtime, which this pin does NOT cover.
 npq_version: "3.27.4"   # GHSA-mcxv-wphc-7xjm (high): <3.27.4 could audit a different version than npm installs
 lockfile_lint_version: "5.1.0"
+# sfw must be 2.0.6 or later: the npm and cargo wrappers run it with
+# SFW_SKIP_UPDATE_CHECK=1, which older versions ignore (there is no 2.0.5), and
+# then every non-root call through it fails an hour after each update check.
+# Unlike the other tools here, an installed sfw older than 2.0.6 is replaced at
+# re-apply, and moved aside (recorded) if the replacement is still too old.
 sfw_version: "2.0.6"
 
 # zizmor, installed via `uv tool install`.

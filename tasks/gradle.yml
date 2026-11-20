@@ -1,8 +1,24 @@
 ---
 # Gradle supply chain hardening
 
-- name: Check if gradle is installed
-  ansible.builtin.command: which gradle
+- name: Check for gradle, or a JDK a ./gradlew build would run on
+  # Most gradle builds never touch a `gradle` on PATH: they run the project's
+  # ./gradlew, which downloads its own distribution into the gradle user home
+  # and runs it on the host's java. That distribution loads init.d from the
+  # same gradle user home. Gating on `which gradle` alone (CMP 4.5) left
+  # such hosts with no init script at all. MEASURED (8281a6b, JDK 21 on PATH,
+  # no gradle or mvn): the apply reported "gradle is not installed", deployed
+  # nothing, and a 1.+ plugin resolved and ran under gradle 8.14.3.
+  # A wrapper cannot start without java, so java on PATH or $JAVA_HOME/bin/java
+  # is the trigger; a host with neither cannot run a gradle build yet.
+  ansible.builtin.shell:
+    cmd: |
+      for t in gradle java; do command -v "$t" && exit 0; done
+      if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        echo "$JAVA_HOME/bin/java"; exit 0
+      fi
+      exit 1
+    executable: /bin/bash
   register: gradle_check
   changed_when: false
   check_mode: false
@@ -86,11 +102,50 @@
       // version tier: an init script is CODE, and calling a method this gradle
       // lacks is a hard error that fails EVERY build (design-principles Axis 3).
       // An older gradle keeps the project + buildscript coverage below.
+      // Refuse dynamic / changing version selectors (1.+, latest.release,
+      // -SNAPSHOT): parity with action/harden.sh, which has emitted these two
+      // since it was written while this file emitted only the HTTP refusal.
+      //
+      // Applied to EVERY configuration gradle resolves code from, not only to
+      // project configurations (CMP 4.6). A plugin is resolved into a SCRIPT
+      // classpath: plugins{} and buildscript{} in a build script resolve into
+      // that project's buildscript.configurations, and the same blocks in
+      // settings.gradle into the settings script's. allprojects{configurations}
+      // reaches none of them. MEASURED (gradle 8.14.3 and 9.1.0, file:// repo):
+      // with only project configurations covered, `id '...' version '1.+'` in
+      // plugins{}, a 1.+ buildscript classpath entry, and both forms in
+      // settings.gradle all resolved and the plugin's code RAN, while a 1.+
+      // project dependency was refused.
+      //
+      // When this fires gradle reports "Resolution strategy disallows usage
+      // of dynamic versions" (or "... of changing versions"); that refusal
+      // comes from this file.
+      //
+      // Guarded by respondsTo() rather than by a version tier. An init
+      // script is CODE, not a key/value file: a method this gradle does not
+      // implement is a hard evaluation error that fails EVERY build on the
+      // host, not a silently-ignored key (design-principles Axis 3). Asking
+      // the object what it implements needs no version number at all and
+      // cannot brick a distro gradle old enough to lack the methods.
+      def refuseDynamic = { conf ->
+          def rs = conf.resolutionStrategy
+          if (rs.metaClass.respondsTo(rs, 'failOnDynamicVersions')) {
+              rs.failOnDynamicVersions()
+          }
+          if (rs.metaClass.respondsTo(rs, 'failOnChangingVersions')) {
+              rs.failOnChangingVersions()
+          }
+      }
+
       if (gradle.metaClass.respondsTo(gradle, 'beforeSettings')) {
           gradle.beforeSettings { settings ->
               settings.pluginManagement.repositories.all(rejectHttp)
               if (settings.metaClass.respondsTo(settings, 'getDependencyResolutionManagement')) {
                   settings.dependencyResolutionManagement.repositories.all(rejectHttp)
+              }
+              // settings plugins{} / buildscript{}: the settings script classpath
+              if (settings.metaClass.respondsTo(settings, 'getBuildscript')) {
+                  settings.buildscript.configurations.all(refuseDynamic)
               }
           }
       }
@@ -100,29 +155,10 @@
           repositories.all(rejectHttp)
           buildscript.repositories.all(rejectHttp)
 
-          // Refuse dynamic / changing version selectors (1.+, latest.release,
-          // -SNAPSHOT): parity with action/harden.sh, which has emitted these
-          // two since it was written while this file emitted only the HTTP
-          // refusal.
-          //
-          // Guarded by respondsTo() rather than by a version tier. An init
-          // script is CODE, not a key/value file: a method this gradle does
-          // not implement is a hard evaluation error that fails EVERY build on
-          // the host, not a silently-ignored key (design-principles Axis 3).
-          // The only gradle measured for this repo is 8.14.3, which has both
-          // methods; no threshold below that has been measured, and the house
-          // rule is that a version comment states the MEASURED number. Asking
-          // the object what it implements needs no number at all and cannot
-          // brick a distro gradle old enough to lack them.
-          configurations.all { conf ->
-              def rs = conf.resolutionStrategy
-              if (rs.metaClass.respondsTo(rs, 'failOnDynamicVersions')) {
-                  rs.failOnDynamicVersions()
-              }
-              if (rs.metaClass.respondsTo(rs, 'failOnChangingVersions')) {
-                  rs.failOnChangingVersions()
-              }
-          }
+          // project dependencies, and the plugin classpath plugins{} and
+          // buildscript{} resolve into
+          configurations.all(refuseDynamic)
+          buildscript.configurations.all(refuseDynamic)
       }
   when: gradle_check.rc == 0
 
@@ -139,8 +175,8 @@
     - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
     - ansible_user_dir | default('', true) | length == 0
 
-- name: Record skipped protection — gradle absent
+- name: Record skipped protection — neither gradle nor a JDK
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['gradle init script — gradle is not installed, so no init script was deployed. Installing gradle later will NOT pick up this hardening; re-run the role.'] }}
+      {{ (skipped_protections | default([])) + ['gradle init script — neither gradle nor a JDK (java on PATH, or $JAVA_HOME/bin/java) was found, so no init script was deployed. Installing either later will NOT pick up this hardening; re-run the role.'] }}
   when: gradle_check.rc != 0

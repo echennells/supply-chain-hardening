@@ -87,16 +87,32 @@ if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
 fi
 
 
-# cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup cargo
-# but NOT for a distro/apt cargo (whose ~/.cargo/bin is nowhere on PATH). Without
-# this, `command -v cargo-cooldown` below fails on apt-cargo hosts and cargo's
-# own `cargo cooldown` subcommand resolution (cargo-<name> on PATH) fails too —
-# so the age gate silently does nothing even though the backend built fine.
-# Prepend it, idempotently, so both lookups succeed on every host shape.
-COOLDOWN_BIN='{{ cargo_cooldown_bin | default("") }}'
-if [ -n "$COOLDOWN_BIN" ] && [ -d "$COOLDOWN_BIN" ]; then
-  case ":$PATH:" in *":$COOLDOWN_BIN:"*) ;; *) PATH="$COOLDOWN_BIN:$PATH"; export PATH ;; esac
-fi
+# THE GATE BACKEND, BY ABSOLUTE PATH, AND WHOSE IT IS.
+#
+# This wrapper used to PREPEND the deploying user's $CARGO_HOME/bin to PATH so
+# that cargo-cooldown was found on apt-cargo hosts. A wrapper at a SYSTEM path
+# (/usr/bin/cargo) runs for root and for every account, so that put one user's
+# home in front of all of them. MEASURED (VM#2, reproduced on Ubuntu 26.04 with
+# apt cargo 1.93.1 and cargo-cooldown 0.3.5):
+#   - `sudo -H cargo build` and a second account's `cargo build` ran the
+#     deployer's cargo-cooldown AND the deployer's ~/.cargo/bin/cargo, because
+#     cargo-cooldown starts `cargo` by PATH lookup: files that user can
+#     replace, executed as root and as the other account;
+#   - the deployer's own builds ran ~/.cargo/bin/cargo (a rustup proxy, on a
+#     host where it exists) instead of the apt cargo first on their PATH;
+#   - a second account's apply re-rendered this file with ITS home, and the
+#     first account's `cargo build` then resolved a fresh crate with no gate.
+# So the role renders the backend's absolute path: the one beside this wrapper
+# when the wrapper lives in a user's own ~/.cargo/bin, a ROOT-OWNED copy under
+# /usr/local/libexec/supply-chain-hardening/ when it sits at a system path.
+# PATH is never prepended, and use_cooldown below refuses a backend whose
+# owner is not the caller (or root). What this vouches for is the path below;
+# which cargo-cooldown cargo then STARTS is cargo's own lookup (use_cooldown).
+#
+# Empty when the gate is off (cargo_cooldown_enforce=false): nothing below
+# reads it then, and tasks/cargo.yml decides whether any wrapper still runs the
+# root-owned copy by this one line.
+COOLDOWN_EXE='{{ (cargo_wrapper_backend | default(cargo_cooldown_exe | default(""))) if cargo_cooldown_enforce | bool else "" }}'
 
 # Recursion guard — same pattern as the bun, composer, deno, npm and pip
 # wrappers.
@@ -111,6 +127,28 @@ if [ -n "${SUPPLY_CHAIN_CARGO_WRAPPED:-}" ]; then
   exec "$REAL_CARGO" "$@"
 fi
 
+{% if cargo_socket_firewall | bool %}
+# sfw runs read-only, as in the npm wrapper (templates/npm-wrapper.sh.j2 has
+# the measurements): SFW_SKIP_UPDATE_CHECK=1 stops a non-root caller trying to
+# rewrite sfw's root-owned .sfw-cache/next-check, which sfw treats as fatal, so
+# every cargo build failed one hour after each apply. A cold cache that this
+# caller cannot fill (only root can, unless sfw is the caller's own) warns and
+# runs cargo unfiltered instead of failing.
+SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+sfw_ready() {
+  local s p
+  [ "$(id -u)" = 0 ] && return 0
+  s=$(readlink -f "$(command -v sfw)" 2>/dev/null) || return 0
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 0
+  [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
+  echo "[supply-chain-hardening] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-apply the role. cargo call not filtered through threat intel" >&2
+  return 1
+}
+{% endif %}
+
 # ARGV[0] MUST BE "cargo". rustup's ~/.cargo/bin/cargo is a symlink to the
 # rustup binary, which dispatches on the name it was invoked as; a backup named
 # cargo-real is rejected with "unknown proxy name: 'cargo-real'". On a
@@ -118,7 +156,7 @@ fi
 run_real() {
   local pfx=""
 {% if cargo_socket_firewall | bool %}
-  if [ "${SCH_NET:-0}" = "1" ] && command -v sfw >/dev/null 2>&1; then
+  if [ "${SCH_NET:-0}" = "1" ] && command -v sfw >/dev/null 2>&1 && sfw_ready; then
     pfx="sfw"
   fi
 {% endif %}
@@ -128,6 +166,92 @@ run_real() {
     exec "$pfx" "$REAL_CARGO" "$@"
   fi
   exec -a cargo "$REAL_CARGO" "$@"
+}
+
+# May THIS caller run "$1" as the gate backend? Only when no other account can
+# choose what runs there. Walking up from the file: a file or directory the
+# caller owns (not root) ends the walk, yes, because what is in it is already
+# the caller's choice; that covers your own file, and a root-owned file in your
+# own directory (`sudo cargo install` into your ~/.cargo/bin). A root-owned one
+# must be writable by neither group nor others, or, for a directory, sticky
+# (/tmp), where only an entry's owner may rename or remove it; the walk goes on.
+# Anything else is no. find(1), not stat(1), because `stat -c` is GNU-only.
+# Sets _bt_why on no.
+backend_trusted() {
+  _bt_why=""
+  _bt_me=""
+  [ "$(id -u)" != 0 ] && _bt_me=$(id -un 2>/dev/null || id -u)
+  _bt_p=$(readlink -f "$1" 2>/dev/null) || _bt_p="$1"
+  case "$_bt_p" in /*) ;; *) _bt_why="$1 is not an absolute path"; return 1 ;; esac
+  if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
+  if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+    _bt_why="$_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
+    return 1
+  fi
+  while [ "$_bt_p" != "/" ]; do
+    _bt_p=$(dirname "$_bt_p")
+    if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
+    if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ]; then
+      _bt_why="directory $_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Is a backend installed at all? Decides which warning the WRITER arm prints and
+# whether to try the gate; it does not run anything.
+cooldown_installed() {
+  local c
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && return 0
+  done
+  return 1
+}
+
+# Pick the backend for a gated command, or REFUSE. Called only after
+# cooldown_installed, so an empty result means every candidate was refused.
+# Refusing rather than degrading to --locked: a quiet degrade would make the
+# command ungated exactly when it runs as root or as someone else.
+#
+# cargo still starts the backend itself (`cargo-real cooldown build`) rather
+# than this wrapper exec'ing it by path, because cargo is what consumes a
+# leading +toolchain, -C or --config and sets $CARGO for it. When neither
+# $CARGO_HOME/bin nor PATH covers the backend's directory it is APPENDED to
+# PATH, which cannot change what any name already on PATH resolves to;
+# prepending did.
+#
+# WHAT IS VOUCHED FOR IS NOT ALWAYS WHAT RUNS. cargo looks for cargo-cooldown
+# in $CARGO_HOME/bin first (unless that directory is on PATH, where PATH order
+# decides), then along PATH. The copy checked here is the one cargo starts only
+# when neither holds another cargo-cooldown ahead of it; otherwise cargo starts
+# THAT file, and nothing here checked it. MEASURED (rust:1.100.0-slim-trixie,
+# where CARGO_HOME=/usr/local/cargo is on PATH and 0777; this role and
+# harden.sh alike): with COOLDOWN_EXE the root-owned libexec copy, root's
+# `cargo build` ran /usr/local/cargo/bin/cargo-cooldown, including after
+# another account had replaced it; that directory also holds this wrapper and
+# cargo-real, so in that image any account can replace the toolchain itself.
+# MEASURED likewise (Ubuntu 26.04, apt cargo): root with another account's
+# ~/.cargo/bin late on its own PATH (`sudo env PATH=...`) ran that account's
+# cargo-cooldown. Checking or steering cargo's lookup would refuse root in the
+# stock rust images, so it is left as a decision (docs/limitations.md).
+use_cooldown() {
+  local c d refused=""
+  COOLDOWN=""
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if backend_trusted "$c"; then COOLDOWN="$c"; break; fi
+    refused="$_bt_why"
+  done
+  if [ -z "$COOLDOWN" ]; then
+    echo "[supply-chain-hardening] error: refusing to run the cargo publish-age gate backend as $(id -un): $refused, so another account could choose what runs here. Re-apply the role to give a shared cargo a root-owned backend, or run cargo as the account that owns this one. (cargo wrapper: $0)" >&2
+    exit 126
+  fi
+  d=$(dirname "$COOLDOWN")
+  case ":$PATH:" in
+    *":$d:"*) ;;
+    *) [ "$d" = "${CARGO_HOME:-$HOME/.cargo}/bin" ] || { PATH="$PATH:$d"; export PATH; } ;;
+  esac
 }
 
 # --- find the subcommand: first non-flag argument ---
@@ -157,14 +281,35 @@ has_resolution_flag() {
 
 # Walk up for a lockfile. Cargo is routinely run from a workspace subdirectory,
 # so checking only ./Cargo.lock would skip --locked for most real invocations.
-# Stops at the first directory containing one.
+# Stops at the first directory containing one, and records it in LOCK_DIR.
 has_lockfile() {
   local d="$PWD"
+  LOCK_DIR=""
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -f "$d/Cargo.lock" ] && return 0
+    [ -f "$d/Cargo.lock" ] && { LOCK_DIR="$d"; return 0; }
     d="$(dirname "$d")"
   done
-  [ -f "/Cargo.lock" ]
+  [ -f "/Cargo.lock" ] && { LOCK_DIR="/"; return 0; }
+  return 1
+}
+
+# --locked IS OURS, SO SAY SO WHEN IT IS ABOUT TO BITE. After a Cargo.toml edit
+# cargo stops with "error: cannot update the lock file <path> because --locked
+# was passed to prevent this" (MEASURED, cargo 1.93.1), naming a flag the caller
+# never typed and nothing that points here (VM test report, section 6, Rust
+# row). A manifest newer than the lockfile is when that happens, so the note
+# fires only then. The advice is measured too: after adding ryu to a manifest
+# whose lockfile pinned itoa 1.0.10, `cargo update --workspace` added ryu and
+# left itoa at 1.0.10.
+locked_note() {
+  local m
+  for m in "$PWD/Cargo.toml" "${LOCK_DIR%/}/Cargo.toml"; do
+    if [ -f "$m" ] && [ "$m" -nt "${LOCK_DIR%/}/Cargo.lock" ]; then
+      echo "[supply-chain-hardening] note: this cargo wrapper adds --locked because a Cargo.lock exists, and $m is newer than it. If cargo stops with \"--locked was passed\", that flag is ours: record the change with 'cargo update --workspace', then build again." >&2
+      return 0
+    fi
+  done
+  return 0
 }
 
 # Re-emit argv with EXTRA inserted immediately after the subcommand. Never
@@ -316,13 +461,17 @@ sanitize_cooldown_env() {
     echo "[supply-chain-hardening] note: overriding caller publish-age setting(s):$_sc_had - this host's {{ release_age_hours }}h/{{ cargo_cooldown_violation_action }} policy applies instead. For a per-crate exception use cargo_cooldown_allow_exact, which writes an [[allow.exact]] rule this override does not touch." >&2
   fi
   export COOLDOWN_MINUTES={{ release_age_hours | int * 60 }}
-  # The crates.io window. Without it a repo cooldown.toml's
-  # `[registry] min-publish-age = "0"` beats COOLDOWN_MINUTES (MEASURED: built a
-  # crate published hours earlier). Cargo reads the same variable as its own
-  # unstable registry.min-publish-age and prints `warning: ignoring
-  # registry.min-publish-age without -Zmin-publish-age` once or twice per build
-  # (cargo 1.99). Harmless, and if cargo stabilises the setting it will enforce
-  # this same window itself.
+  # The crates.io window, read by CARGO-COOLDOWN, not by cargo. Without it a
+  # repo cooldown.toml's `[registry] min-publish-age = "0"` beats
+  # COOLDOWN_MINUTES. MEASURED on cargo-cooldown 0.3.5 (itoa = "1", one-year
+  # window): with that repo file, COOLDOWN_MINUTES alone resolved the newest
+  # itoa, 1.0.19, published 11 days earlier; adding this variable cooled it to
+  # 1.0.15. Cargo itself ignores this name. MEASURED on cargo 1.100.0: set
+  # alone, plain `cargo generate-lockfile` took 1.0.19 and printed nothing.
+  # Cargo's own stabilised gate reads registry.global-min-publish-age
+  # (CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE) and [registries.crates-io]
+  # min-publish-age, and calls a [registry] min-publish-age key in config.toml
+  # unused.
   export CARGO_REGISTRY_MIN_PUBLISH_AGE="{{ release_age_hours | int }} hours"
   export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE={{ cargo_cooldown_violation_action }}
   export COOLDOWN_LOCKFILE_BASELINE=floor
@@ -410,9 +559,10 @@ case "$KIND" in
     # `cargo update` is also the one resolution path --locked can never cover,
     # which is why the age gate matters most here.
 {% if cargo_cooldown_enforce | bool %}
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         update)
+          use_cooldown
           sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
@@ -437,7 +587,7 @@ case "$KIND" in
 
   RESOLVING)
 {% if cargo_cooldown_enforce | bool %}
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -453,6 +603,7 @@ case "$KIND" in
         # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
         # and fetch then resolved a version real cargo refused, and add wrote
         # it, while the note claimed this policy "applies instead".
+        use_cooldown
         sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
@@ -466,6 +617,7 @@ case "$KIND" in
       SCH_NET=1 run_real "$@"
     fi
     if has_lockfile; then
+      locked_note
       SCH_NET=1 exec_with "--locked" "$@"
     fi
     echo "[supply-chain-hardening] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2

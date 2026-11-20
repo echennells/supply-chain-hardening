@@ -1,8 +1,23 @@
 ---
 # Maven supply chain hardening
 
-- name: Check if mvn is installed
-  ansible.builtin.command: which mvn
+- name: Check for mvn, or a JDK a ./mvnw build would run on
+  # Many maven builds run the project's ./mvnw instead of an `mvn` on PATH. The
+  # wrapper downloads a maven distribution and runs it on the host's java, and
+  # that maven reads the same ~/.m2/settings.xml. Gating on `which mvn` alone
+  # (CMP 4.5) left such hosts with no settings at all. MEASURED (8281a6b, JDK
+  # 21 on PATH, no mvn): nothing was deployed and nothing was recorded, and
+  # maven 3.9.11 then read "user settings from ~/.m2/settings.xml", which did
+  # not exist. A wrapper cannot start without java, so java on PATH or
+  # $JAVA_HOME/bin/java is the trigger.
+  ansible.builtin.shell:
+    cmd: |
+      for t in mvn java; do command -v "$t" && exit 0; done
+      if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        echo "$JAVA_HOME/bin/java"; exit 0
+      fi
+      exit 1
+    executable: /bin/bash
   register: mvn_check
   changed_when: false
   check_mode: false
@@ -16,10 +31,16 @@
   when: mvn_check.rc == 0
 
 - name: Deploy Maven settings.xml with HTTPS-only mirror and strict checksums
+  # Replaces the file whole. A settings.xml this project did not write
+  # (mirrors, <servers> credentials) stops the play in preflight unless
+  # accept_user_config_overwrite=true, and is backed up here first
+  # (tasks/preflight.yml, CMP 4.7).
   ansible.builtin.copy:
     dest: "{{ ansible_env.HOME }}/.m2/settings.xml"
     mode: "0644"
+    backup: "{{ (ansible_env.HOME ~ '/.m2/settings.xml') in (sch_user_cfg_backup | default([])) }}"
     content: |
+      <!-- Managed by ansible-supply-chain-security -->
       <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                 xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0
@@ -32,6 +53,23 @@
             <mirrorOf>*</mirrorOf>
           </mirror>
         </mirrors>
+        <!-- Refuse an artifact whose content does not match its published
+             checksum (Maven's default is 'warn', which installs it anyway).
+             Maven keeps TWO repository lists: <repositories> for dependencies
+             and <pluginRepositories> for plugins. The super POM declares
+             'central' in both, so redefining it only under <repositories>
+             left plugin jars - code that runs inside the build - on 'warn'.
+             MEASURED (maven 3.9.11, a plugin jar served with a wrong .sha1
+             through this file's mirror): two checksum WARNINGs and BUILD
+             SUCCESS; a dependency jar with a wrong .sha1 failed the build.
+             A mirror does not close that: it inherits the policy of the
+             repository it replaces, per list.
+             Both entries also restore the super POM's
+             <snapshots><enabled>false</enabled>: a redefinition without it
+             turned snapshot lookups on Central back on (MEASURED: a
+             1.0-SNAPSHOT dependency resolved from Central with this file and
+             was not looked up there with no settings at all). The plugin
+             entry keeps the super POM's releases updatePolicy=never. -->
         <profiles>
           <profile>
             <id>strict-checksums</id>
@@ -43,10 +81,23 @@
                   <checksumPolicy>fail</checksumPolicy>
                 </releases>
                 <snapshots>
-                  <checksumPolicy>fail</checksumPolicy>
+                  <enabled>false</enabled>
                 </snapshots>
               </repository>
             </repositories>
+            <pluginRepositories>
+              <pluginRepository>
+                <id>central</id>
+                <url>https://repo.maven.apache.org/maven2</url>
+                <releases>
+                  <updatePolicy>never</updatePolicy>
+                  <checksumPolicy>fail</checksumPolicy>
+                </releases>
+                <snapshots>
+                  <enabled>false</enabled>
+                </snapshots>
+              </pluginRepository>
+            </pluginRepositories>
           </profile>
         </profiles>
         <activeProfiles>
@@ -54,3 +105,9 @@
         </activeProfiles>
       </settings>
   when: mvn_check.rc == 0
+
+- name: Record skipped protection — neither mvn nor a JDK
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['maven settings.xml — neither mvn nor a JDK (java on PATH, or $JAVA_HOME/bin/java) was found, so no settings were deployed. Installing either later will NOT pick up this hardening; re-run the role.'] }}
+  when: mvn_check.rc != 0

@@ -25,9 +25,11 @@ load setup
 }
 
 @test "uv.toml: exclude-newer is RFC 3339 (NOT a relative duration like '48 hours')" {
-  # uv requires absolute RFC 3339 datetimes here. Relative strings ("48 hours",
-  # "2d") fail uv's TOML parser and break every uv invocation. Regression
-  # catcher for the bug introduced + fixed in the uv exclude-newer commit.
+  # The role writes absolute RFC 3339 datetimes here. uv before 0.9.17 fails
+  # its TOML parse on a relative string ("48 hours") and breaks every uv
+  # invocation; 0.9.17 added relative durations, but the role cannot know
+  # which uv will read the file. Regression catcher for the bug introduced +
+  # fixed in the uv exclude-newer commit.
   # Match "YYYY-MM-DDTHH:MM:SSZ" format on the exclude-newer line.
   grep -qE '^exclude-newer = "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"$' "$HOME/.config/uv/uv.toml"
   # Explicit: the file must NOT contain the broken "N hours" pattern

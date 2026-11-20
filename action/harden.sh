@@ -224,13 +224,37 @@ suggest_for_repo() {
   # --- npm/pnpm/yarn/bun: packages whose install runs code ---
   local scripted
   scripted=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//') || true
+  # THE FIX DEPENDS ON THE PACKAGE MANAGER. pnpm_built_dependencies writes
+  # pnpm's config and nothing else. MEASURED (VM#9): a package-lock.json repo
+  # with sqlite3 was told to set it, did, and the binding was still missing,
+  # because only ~/.config/pnpm changed. npm has no per-package allowlist that
+  # survives ignore-scripts=true; what works is an explicit rebuild step.
+  # MEASURED 2026-11-19 with a dependency whose install script writes a
+  # marker, under ~/.npmrc + NPM_CONFIG_IGNORE_SCRIPTS=true:
+  #   npm rebuild <pkg>                         did nothing    9.2.0, 11.19.1, 12.2.3
+  #   npm rebuild <pkg> --ignore-scripts=false  ran it         9.2.0, 11.19.1
+  #                                             did nothing    12.2.3 (allowScripts gate)
+  #   npm approve-scripts <pkg>, then the same  ran it         12.2.3
+  # and npm config get ignore-scripts still answered true afterwards.
+  local scripted_sp="${scripted//,/ }"
+  local npm_fix="\`- run: npm rebuild ${scripted_sp} --ignore-scripts=false\` as its own step after the install. On npm 12, run \`npm approve-scripts ${scripted_sp}\` once and commit the allowScripts entry it adds to package.json, or that rebuild skips them too"
   if [ -n "$scripted" ]; then
     found_any=1
-    with_lines+=("          pnpm_built_dependencies: '$scripted'")
-    notes+=("These packages run code at install time. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing. Allowlisting them restores their build scripts and nothing else.")
-    notes+=("On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
+    notes+=("These packages run code at install time: ${scripted}. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing.")
+    if [ -f "$dir/pnpm-lock.yaml" ]; then
+      with_lines+=("          pnpm_built_dependencies: '$scripted'")
+      notes+=("pnpm: allowlisting them restores their build scripts and nothing else. On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
+    fi
+    if [ -f "$dir/package-lock.json" ]; then
+      notes+=("npm (package-lock.json): there is no per-package build allowlist for npm here; \`pnpm_built_dependencies\` changes pnpm's config only. To build the ones you trust, add ${npm_fix}.")
+    fi
     if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ]; then
       notes+=("This list came from a known-names scan, not a lockfile — treat it as a floor, not the full set. Commit a package-lock.json or pnpm-lock.yaml and re-run for the exact answer.")
+      if [ -f "$dir/yarn.lock" ] || [ -f "$dir/bun.lock" ] || [ -f "$dir/bun.lockb" ]; then
+        notes+=("yarn and bun: this action has no per-package build allowlist for either, so these builds stay blocked under it. \`pnpm_built_dependencies\` changes pnpm's config only.")
+      else
+        notes+=("With no lockfile it is not known which package manager installs these. pnpm: set \`pnpm_built_dependencies: '$scripted'\` (and \`allowBuilds\` on pnpm 11+). npm: add ${npm_fix}.")
+      fi
     fi
   fi
 
@@ -267,7 +291,7 @@ suggest_for_repo() {
     fi
     if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
       found_any=1
-      notes+=("composer.json defines scripts — the wrapper injects \`--no-scripts\` unconditionally and there is no input to disable it. Run any required script as its own explicit step.")
+      notes+=("composer.json defines scripts. Lifecycle scripts (post-install-cmd, post-update-cmd, post-autoload-dump, ...) are skipped: the wrapper injects \`--no-scripts\`, COMPOSER_SKIP_SCRIPTS lists them as well, and there is no input to disable either. A script run by name still runs (\`composer test\`, \`composer run-script lint\`); one whose name is also a prefix of a built-in command (\`check\`, \`req\`) is refused, so run it as \`composer run-script <name>\`. Run a lifecycle event you need as its own step: \`COMPOSER_SKIP_SCRIPTS= composer run-script post-install-cmd\`.")
     fi
   fi
 
@@ -303,7 +327,7 @@ suggest_for_repo() {
     printf '%s\n' "${with_lines[@]}"
     echo ""
   else
-    echo "No inputs need changing — the defaults fit this repo."
+    echo "No action inputs need changing. Read the notes below before your first build."
     echo ""
   fi
 
@@ -351,15 +375,6 @@ case "$PLATFORM" in
     ;;
 esac
 
-# The canonical, platform-neutral artifact. Written on EVERY platform, so
-# there is always one sourceable file containing the full env layer even
-# when the platform has no native step-to-step mechanism:
-#
-#   source /tmp/supply-chain-hardening.env
-#
-# On Drone/Woodpecker and other per-step-container runners this file is
-# the only way the env layer survives a step boundary (config files and
-# wrappers still work via the shared workspace volume).
 # ---- privilege: resolve ONCE, never assume ----
 #
 # MEASURED DEFECT. This script called `sudo` unconditionally in 24 places with
@@ -397,19 +412,6 @@ else
   SUDO=""
   CAN_ESCALATE=0
 fi
-
-HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
-HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
-# The chosen temp dir is not guaranteed to exist — a caller can point TMPDIR
-# at a path it has not created yet, and the bare redirect below would then
-# fail with an opaque "no such file or directory" before any hardening ran.
-mkdir -p "$(dirname "$HARDENING_ENV_FILE")" "$(dirname "$HARDENING_OUTPUT_FILE")" 2>/dev/null || true
-if ! : > "$HARDENING_ENV_FILE" 2>/dev/null; then
-  echo "[supply-chain-harden] error: cannot write the env file at '$HARDENING_ENV_FILE'" >&2
-  echo "  set HARDENING_ENV_FILE to a writable path" >&2
-  exit 2
-fi
-: > "$HARDENING_OUTPUT_FILE"
 
 # ---- Log annotations (platform-specific markup, identical semantics) ----
 log()  { echo "[supply-chain-harden] $*"; }
@@ -475,6 +477,173 @@ end_section() {
   CURRENT_SECTION=""
 }
 
+if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
+  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
+  exit 2
+fi
+
+# ---- The env file and the run record: where they go, and who else can touch them ----
+#
+# The env file is the canonical, platform-neutral artifact. It is written on
+# EVERY platform, so there is always one sourceable file holding the whole env
+# layer even where the platform has no step-to-step mechanism. On
+# Drone/Woodpecker and other per-step-container runners it is the only way the
+# env layer survives a step boundary. The run record (.outputs) beside it is
+# what verify.sh reads to learn what this job promised.
+#
+# MEASURED DEFECT (VM#3, Ubuntu 26.04, --emit=plain). Both used a FIXED NAME
+# under ${RUNNER_TEMP:-${TMPDIR:-/tmp}}, which outside a CI runner is /tmp, a
+# directory every local user can write. Another user pre-created
+# /tmp/supply-chain-hardening.env holding a payload. harden.sh refused to
+# overwrite it (rc=2), the documented recipe's next line sourced it anyway, and
+# the payload ran as the person hardening. A forged .outputs beside it scoped
+# the verifier down to "this job hardened: npm". Where fs.protected_regular=0, a
+# 0666 file the other user owned was even written INTO, because `: >` keeps an
+# existing file's owner, and they appended to it afterwards.
+#
+# Three changes:
+#   1. With no RUNNER_TEMP the default directory is per-user,
+#      $HOME/.cache/supply-chain-hardening, created 0700. Not $TMPDIR, which is
+#      often /tmp itself. Not $XDG_RUNTIME_DIR, which cron, `su` and most
+#      containers do not set, so a later verify.sh could look somewhere else.
+#      RUNNER_TEMP is GitHub's per-job directory, owned by the runner user, so
+#      that path is unchanged. action/verify.sh resolves the same default.
+#   2. A file that already exists must be a regular file we own that group and
+#      others cannot write. The directory it is in, and every directory above
+#      that, must not let another user swap what is below it: world-writable
+#      only with the sticky bit, and then only when we or root own it.
+#      Anything else is refused before a byte is written, with the reason.
+#   3. Each file is created by mktemp in its own directory and renamed over the
+#      target. An existing inode, and any descriptor someone holds on it, is
+#      never written through.
+SCH_STATE_DIR="${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}"
+HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-$SCH_STATE_DIR/supply-chain-hardening.env}"
+HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-$SCH_STATE_DIR/supply-chain-hardening.outputs}"
+
+# The 10-character mode string, as `ls -ld` prints it on GNU and BSD alike.
+# -L: a symlink's own mode is lrwxrwxrwx on Linux whatever it points to.
+_sch_mode() { ls -ldL -- "$1" 2>/dev/null | cut -c1-10; }
+
+# _sch_unsafe_target <file>: prints why <file> must not be (re)created; silent when it may.
+_sch_unsafe_target() {
+  local f="$1" d m
+  d=$(dirname -- "$f")
+  if [ -L "$f" ]; then echo "is a symbolic link"; return 0; fi
+  if [ -e "$f" ]; then
+    [ -f "$f" ] || { echo "exists and is not a regular file"; return 0; }
+    [ -O "$f" ] || { echo "already exists and belongs to another user ($(ls -ld -- "$f" | awk '{print $3}'))"; return 0; }
+    m=$(_sch_mode "$f")
+    case "$m" in ?????w*|????????w*) echo "already exists and is writable by group or others ($m)"; return 0 ;; esac
+  fi
+  _sch_dir_walk "$d"
+}
+
+# _sch_dir_walk <dir>: prints why another user could swap the file in <dir>,
+# or <dir> itself, or any directory above it; silent when no one can.
+#
+# Every directory from <dir> up to /, as written and as resolved (a symlinked
+# component is judged by where it points). Each one decides who can rename the
+# entry below it, so one open directory anywhere above lets that user move ours
+# aside and put their own in its place. For each directory:
+#   world-writable, no sticky bit -> anyone can.
+#   world-writable, sticky        -> its owner still can: the sticky bit
+#                                    restricts everyone EXCEPT the directory's
+#                                    owner. Accepted only when that is us or root.
+# MEASURED (review of the VM#3 fix): HARDENING_ENV_FILE in another user's 1777
+# directory was accepted with a warning, and that user deleted and replaced
+# the file; a later `source` ran their code. Under `umask 0000` (GitLab's
+# Docker and Kubernetes executors) `mkdir -p` made ~/.cache drwxrwxrwx, the
+# parent of the 0700 leaf, and the old check looked at the leaf only.
+#
+# Group-writable is not refused: with per-user groups and umask 002 (the Ubuntu
+# default) every project directory is 0775, and the group is a trust grant
+# somebody made on purpose. Nor is a directory merely OWNED by another user, if
+# it is not world-writable. A GitHub `container:` job is the case in mind: it
+# runs as root by default, and its RUNNER_TEMP is a host directory bind-mounted
+# in, owned by the runner's uid (no smoke job runs in a container, so this is
+# not exercised by CI).
+_sch_dir_walk() {
+  local d="$1" phys p m o me
+  me=$(id -u)
+  case "$d" in /*) ;; *) d="$PWD/$d" ;; esac
+  phys=$(cd -P -- "$d" 2>/dev/null && pwd -P) || phys=""
+  [ "$phys" = "$d" ] && phys=""
+  for p in "$d" ${phys:+"$phys"}; do
+    while :; do
+      m=$(_sch_mode "$p")
+      case "$m" in
+        ????????w[tT])
+          o=$(ls -ldnL -- "$p" 2>/dev/null | awk '{print $3}')
+          if [ "$o" != "$me" ] && [ "$o" != 0 ]; then
+            if [ "$p" = "$d" ] || [ "$p" = "$phys" ]; then
+              echo "is in $p, a sticky directory that another user ($(ls -ldL -- "$p" | awk '{print $3}')) owns. The sticky bit stops everyone except the directory's owner, who can delete the file and put their own in its place"
+            else
+              echo "is below $p, a sticky directory that another user ($(ls -ldL -- "$p" | awk '{print $3}')) owns, who can rename the directory under it and put their own in its place"
+            fi
+            return 0
+          fi ;;
+        ????????w*)
+          if [ "$p" = "$d" ] || [ "$p" = "$phys" ]; then
+            echo "is in $p, which every user can write to and which has no sticky bit ($m), so anyone could replace the file after it is written"
+          else
+            echo "is below $p, which every user can write to and which has no sticky bit ($m), so anyone could rename the directory under it and put their own in its place"
+          fi
+          return 0 ;;
+      esac
+      [ "$p" = / ] && break
+      p=$(dirname -- "$p")
+    done
+  done
+  return 0
+}
+
+# _sch_create <file> <what> <override var>: <file> now exists, empty, 0644, ours. Exits 2 otherwise.
+_sch_create() {
+  local f="$1" what="$2" var="$3" d why tmp=""
+  d=$(dirname -- "$f")
+  # The directory is not guaranteed to exist: a caller can point the override
+  # at a path it has not created yet. Whatever we create is never
+  # world-writable, whatever the caller's umask: under GitLab's `umask 0000`
+  # a plain `mkdir -p` made every new directory 0777, which the walk above
+  # then refuses.
+  if [ "$d" = "$HOME/.cache/supply-chain-hardening" ]; then
+    # 077 for every directory this creates, ~/.cache included, not the leaf alone.
+    [ -d "$d" ] || ( umask 077 && mkdir -p -- "$d" ) 2>/dev/null || true
+  else
+    # The caller's umask plus o-w: a group-shared directory stays group-shared.
+    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$(umask) | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
+  fi
+  why=$(_sch_unsafe_target "$f")
+  if [ -n "$why" ]; then
+    err "refusing to write the $what: '$f' $why. Another user may control what a later step sources or trusts. Remove it, or set $var to a path in a directory only you can write."
+    exit 2
+  fi
+  # 0644, not mktemp's 0600: the file holds no secret, and a profile.d line
+  # that sources it for every user (action/examples/Dockerfile) must be able to
+  # read it. What matters is who can WRITE it.
+  if ! tmp=$(mktemp "$d/.supply-chain-hardening.XXXXXX" 2>/dev/null) \
+     || ! chmod 644 "$tmp" 2>/dev/null \
+     || ! mv -f -- "$tmp" "$f" 2>/dev/null; then
+    [ -n "$tmp" ] && rm -f -- "$tmp" 2>/dev/null
+    err "cannot write the $what at '$f'"
+    echo "  set $var to a writable path" >&2
+    exit 2
+  fi
+  # What the refusals leave: the file directly in a sticky world-writable
+  # directory that we or root own, such as /tmp. No other user can replace it
+  # while it exists. Once a reboot or a cleanup removes it, anyone can put a
+  # file at the same path, and a `source` of that path runs it.
+  if [ "$what" = "env file" ]; then
+    case "$(_sch_mode "$d")" in
+      ????????w*)
+        warn "the $what is in $d, which every user can write to. While the file exists no other user can replace it, but once a reboot or a cleanup removes it anyone can put a file at that path, and a later \`source\` of it, in a shell where this harden.sh run did not just succeed, runs their file. Prefer a per-user directory." ;;
+    esac
+  fi
+  return 0
+}
+_sch_create "$HARDENING_ENV_FILE"    "env file"    HARDENING_ENV_FILE
+_sch_create "$HARDENING_OUTPUT_FILE" "run record"  HARDENING_OUTPUT_FILE
+
 # ---- Validation ----
 if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   err "release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
@@ -487,10 +656,6 @@ fi
 RELEASE_AGE_HOURS=$((10#$RELEASE_AGE_HOURS))
 if [[ "$RELEASE_AGE_HOURS" -lt 1 ]]; then
   err "release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
-  exit 2
-fi
-if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
-  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
   exit 2
 fi
 
@@ -512,8 +677,11 @@ write_env() {
     # calling job shell does not inherit it. On these targets the env file is
     # the mechanism and the caller must source it:
     #
-    #   ./harden.sh --emit=gitlab
-    #   source "${RUNNER_TEMP:-/tmp}/supply-chain-hardening.env"
+    #   ./harden.sh --emit=gitlab &&
+    #     source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}"
+    #
+    # (that expansion is the default path: see "The env file and the run
+    # record" above)
     #
     # The config-file and wrapper layers need no such step; they are already
     # on disk. Buildkite conventionally does the source in a pre-command hook.
@@ -590,24 +758,23 @@ COMPOSER_COOLDOWN_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
 POETRY_AGE_DAYS=$NPM_AGE_DAYS                     # integer days, floored at 1 like npm
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
-# INTEGER MINUTES, and rendered UNQUOTED. A duration-suffix string ("2d")
-# hits a yarn parser bug that yields NaN and silently disables the gate
-# entirely, and yarn has no second age-gate layer to fall back on.
-# MEASURED against yarn 4.10.3 (2026-08), recorded in defaults/main.yml:53:
-# "36500d" let a fresh package install; 52560000 (minutes) blocked it.
-# Quoting it lands a YAML string where yarn wants a number, which fails
-# the same way. The role has derived this in minutes since c9a250f; the
-# action was still shipping the exact bug the role documented.
+# INTEGER MINUTES, rendered unquoted. Yarn 4.10.x reads a duration string as
+# its leading integer, in minutes: "2d" is a 2-minute gate, quoted or not
+# (MEASURED 2026-11-19, yarn 4.10.3; "36500d" read as 36500). Yarn 4.11.0
+# parses durations ("2d" = 2880). Integer minutes mean the same on every yarn
+# that has the key, and yarn has no second age-gate layer to fall back on. The
+# role has derived this in minutes since c9a250f; the action once shipped "2d".
+# (An older note here said "2d" parsed to NaN. Re-measured, it does not.)
 YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
-# uv requires an absolute RFC 3339 datetime — "48 hours" or similar
-# relative-duration strings fail uv's TOML parser with
-# "failed to parse year in date '48 hours'", breaking every uv
-# invocation. Same bug the Ansible role had in defaults/main.yml
-# (fixed in b96bb7e); the action re-introduced it independently
-# at the bash layer.
-# (uv 0.11.4+ added relative-duration support for pylock.toml
-# lockfiles, NOT for the config-file exclude-newer setting; config
-# requires absolute datetimes on all uv versions.)
+# uv's exclude-newer is written as an absolute RFC 3339 datetime. A
+# relative span such as "48 hours" is accepted only from uv 0.9.17 (its
+# changelog: "Add support for relative durations in exclude-newer",
+# #16814). MEASURED: 0.9.16 fails the whole config with "failed to parse
+# year in date", breaking every uv invocation; 0.9.17 resolves the span to
+# now minus 48h. The runner's uv version is not known here, so the absolute
+# form is the one every uv reads. Same bug the Ansible role had in
+# defaults/main.yml (fixed in b96bb7e); the action re-introduced it
+# independently at the bash layer.
 #
 # BSD date (macOS runners) takes -v-Nh where GNU takes -d "N hours ago".
 # Try GNU first, fall back to BSD — CI runners are usually Linux but
@@ -657,6 +824,58 @@ can_write() {
   [ -w "$dir" ] && return 0                 # ours outright — no escalation needed
   [ "${CAN_ESCALATE:-0}" -eq 1 ] && return 0
   return 1
+}
+
+# keep_user_copy <kind> <path> — call before REPLACING a per-user config file
+# whole (cargo config.toml, ~/.m2/settings.xml, NuGet.Config). Those files are
+# where a private registry or mirror and its credentials live, and the writers
+# below do not merge into them. MEASURED (8281a6b): the role replaced all three
+# with no copy and no message; this script did the same. The role now refuses
+# unless accept_user_config_overwrite=true (tasks/preflight.yml, CMP 4.7). This
+# script runs in CI jobs and keeps replacing, but it no longer does so
+# silently: a file this project did not write is copied next to itself first,
+# as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~ (the name ansible's backup uses), and
+# the replacement is a warning that names it. Recognition matches the role's
+# preflight: either project's marker, or what the role wrote before it had a
+# marker, counts as ours; dotnet's own first-run NuGet.Config (nuget.org and
+# nothing else; MEASURED on SDK 8.0.134 it opens with a UTF-8 BOM) is copied
+# without a warning.
+user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
+  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
+  case "$1" in
+    cargo)
+      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
+        && { echo ours; return 0; } ;;
+    maven)
+      grep -q '<id>central-https</id>' "$2" \
+        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
+        && { echo ours; return 0; } ;;
+    nuget)
+      grep -q 'key="signatureValidationMode" value="require"' "$2" \
+        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
+        && { echo ours; return 0; }
+      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+        echo stock; return 0
+      fi ;;
+  esac
+  echo foreign
+}
+keep_user_copy() {
+  local kind="$1" path="$2" cls bak
+  [[ -e "$path" ]] || return 0
+  cls=$(user_cfg_class "$kind" "$path")
+  [[ "$cls" == ours ]] && return 0
+  bak="${path}.$$.$(date +%Y-%m-%d@%H:%M:%S)~"
+  if ! cp -p "$path" "$bak"; then
+    err "$kind: could not copy $path to $bak before replacing it; refusing to replace a file this project did not write without a copy"
+    exit 1
+  fi
+  if [[ "$cls" == foreign ]]; then
+    warn "$kind: replaced $path, which this project did not write. Any registry mirror, private source or credentials in it no longer apply; the previous file is at $bak"
+  else
+    log "$kind: replaced dotnet's first-run $path (nuget.org only); copy at $bak"
+  fi
 }
 
 # require_privilege <tool> <target> — gate for wrapper deployment.
@@ -924,7 +1143,9 @@ harden_pnpm() {
   #
   # `ignoreScripts: false` with an allowlist is NOT a fail-open: pnpm 10+
   # default-denies dependency build scripts regardless (the approve-builds
-  # gate), and false is what lets a project's allowBuilds take effect.
+  # gate), and false is what lets a project's allowBuilds take effect. It does
+  # let the project's own lifecycle scripts run (MEASURED on pnpm 11.28.12 and
+  # 12.21.0); the role's pnpm-config.yaml.j2 makes the same trade.
   {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
@@ -1024,7 +1245,24 @@ harden_yarn() {
 
   HARDENED+=("yarn")
   set_tool_version "yarn" "$yarn_version"
-  log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  # SAY IT HERE, NOT ONLY IN THE VERIFIER — the npm rule above, for yarn.
+  #
+  # npmMinimalAgeGate arrived in Yarn 4.10.0. Older Berry ignores the key in
+  # ~/.yarnrc.yml without a word (MEASURED: 4.1.0, the apt yarnpkg on Debian 13
+  # and Ubuntu 26.04, and 4.9.4: exit 0, no warning), and Yarn 1.x (classic)
+  # never reads .yarnrc.yml at all. This used to report yarn as "Fully
+  # applied" on 4.1.0 while a release 13 hours old installed (VM#10).
+  if [[ -n "$yarn_version" ]] && ! version_ge "$yarn_version" "2.0.0"; then
+    warn "yarn $yarn_version is Yarn 1.x (classic), which never reads .yarnrc.yml — none of the yarn settings are in force: no age gate and no enableScripts. Yarn 4.10 or later is needed."
+    set_eco_status yarn NONE "yarn $yarn_version is classic and never reads .yarnrc.yml; nothing written for yarn is in force"
+    log "yarn: .yarnrc.yml written but NOT read by yarn $yarn_version (classic)"
+  elif [[ -n "$yarn_version" ]] && ! version_ge "$yarn_version" "4.10.0"; then
+    warn "yarn $yarn_version does NOT implement npmMinimalAgeGate (added in Yarn 4.10.0) — the age gate is written and NOT enforced. enableScripts=false still applies. Install Yarn 4.10 or later before this step to make it effective."
+    set_eco_status yarn INERT "age gate written but yarn $yarn_version does not implement npmMinimalAgeGate (Yarn 4.10.0); enableScripts=false still applies"
+    log "yarn: enableScripts=false (age gate written but INERT on yarn $yarn_version)$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  else
+    log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  fi
   end_section
 }
 
@@ -1141,7 +1379,19 @@ harden_composer() {
   mkdir -p "$HOME/.config/composer"
 
   local composer_version
-  composer_version=$(detect_version composer "composer --version --no-ansi")
+  # --no-plugins, and the home lookup below runs from an empty directory:
+  # MEASURED on composer 2.11.2, run with a checkout as the working directory
+  # (the GitHub workspace), `composer --version` activated the plugin that
+  # checkout's allow-plugins enables, and `composer config --global home` also
+  # ran its root "pre-command-run" script, before any wrapper existed.
+  # The version probe also gives composer no project (COMPOSER names a file that
+  # cannot exist; reading a version needs none, and a step that only looks must
+  # not boot the checkout it runs in), and both probes run with
+  # COMPOSER_ALLOW_SUPERUSER=1 and -n, so a root run on a terminal does not stop
+  # at composer's hidden "Continue as root/super user?" prompt. See the composer
+  # version probe in files/verify-probes.sh.
+  composer_version=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 \
+    detect_version composer "composer --version --no-ansi --no-plugins --no-interaction")
   # Tier-render:
   #   composer >= 2.9 : audit.block-insecure + block-abandoned + abandoned=fail
   #   composer 2.7-2.8: audit.abandoned=fail only
@@ -1217,9 +1467,10 @@ harden_composer() {
   # ~/.config/composer is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
   # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
-  local composer_home=""
-  if command -v composer >/dev/null 2>&1; then
-    composer_home=$(composer config --global home --no-ansi 2>/dev/null | tail -1)
+  local composer_home="" composer_cwd
+  if command -v composer >/dev/null 2>&1 && composer_cwd=$(mktemp -d 2>/dev/null); then
+    composer_home=$(cd "$composer_cwd" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
+    rmdir "$composer_cwd" 2>/dev/null || true
   fi
   case "$composer_home" in
     /*)
@@ -1242,7 +1493,11 @@ harden_composer() {
   # log that reads as coverage.
   write_env COMPOSER_SKIP_SCRIPTS \
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
-  write_env COMPOSER_ALLOW_SUPERUSER 1
+  # No COMPOSER_ALLOW_SUPERUSER here: the wrapper sets it for its own run only.
+  # In the job's environment it switched off composer's root guard for every
+  # caller that bypasses the wrapper (MEASURED 2.7.1/2.11.2: without it a
+  # non-interactive root run disables plugins; with it a checkout-allowed plugin
+  # ran). See templates/supply-chain-env.sh.j2.
   # The env form outranks a checked-out composer.json (MEASURED on 2.11.1: a
   # repo's "period": null or "block": false turns off the config.json gate and
   # not these). A repo's "ignore" list still wins; verify.sh reports that.
@@ -1287,10 +1542,8 @@ harden_composer() {
     real_composer="${real_composer}-real"
   fi
 
-  local plugins_flag_line="FLAGS+=(--no-plugins)"
-  if [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]]; then
-    plugins_flag_line="# composer_allow_plugins=true — --no-plugins deliberately not injected"
-  fi
+  local inject_no_plugins=true
+  [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] && inject_no_plugins=false
 
   # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
   # MEASURED (2.0.14 -> 2.10.3): on 2.0/2.1 only install, update, require,
@@ -1307,7 +1560,12 @@ harden_composer() {
     no_scripts_is_global=true
   fi
 
-  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
+  # Two heredocs: the first is UNQUOTED and carries only the values decided
+  # here; the second is QUOTED, so the wrapper's own $variables, $(...) and
+  # backticks reach the file as written (tests/ci/heredoc-scan.py). The body
+  # is the same logic as templates/composer-wrapper.sh.j2.
+  {
+    cat <<EOF
 #!/bin/bash
 # Managed by supply-chain-harden action
 #
@@ -1319,6 +1577,35 @@ harden_composer() {
 # injecting it elsewhere there fails with
 #     The "--no-scripts" option does not exist.
 REAL_COMPOSER='$real_composer'
+WRAPPER_PATH='$wrapper_target'
+NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+# false when the composer_allow_plugins input is true.
+INJECT_NO_PLUGINS=$inject_no_plugins
+COOLDOWN_SECONDS=$COMPOSER_COOLDOWN_SECONDS
+EOF
+    cat <<'EOF'
+#
+# LIFECYCLE SCRIPTS ARE BLOCKED; A SCRIPT YOU ASK FOR BY NAME RUNS.
+# Composer only ever runs scripts from the ROOT composer.json, never a
+# dependency's; dependency code reaches composer through plugins, which
+# --no-plugins and allow-plugins block separately. Lifecycle events
+# (post-install-cmd, post-update-cmd, post-autoload-dump, pre-command-run, ...)
+# fire as a side effect of install, update, require and the rest, and get
+# --no-scripts. `composer run-script <name>`, `composer run <name>` and
+# `composer <name>` for a name under "scripts" are explicit runs, like
+# `npm test`, and get none: --no-scripts does not refuse them, it empties them.
+# MEASURED on composer 2.2.6 -> 2.11.2: `composer test` exited 0 having run
+# nothing, and `composer run-script test` said 'Script "test" is not defined'.
+# A name counts as a script only when it is a "scripts" key (or one of its
+# "scripts-aliases") in the composer.json composer will read AND is not a
+# built-in command or a script event name; composer never lets a script shadow
+# a built-in, so a checkout with a script called "install" still gets
+# `composer install --no-scripts`. A name that is a script AND a prefix of a
+# built-in (`req`, `upd`, `check`), or a "scripts-aliases" alias spelled like a
+# built-in (`i`, `upgrade`), is refused: composer runs the script there
+# (MEASURED on 2.7.1 and 2.11.2) although the caller typed a built-in.
+# Full reasoning: templates/composer-wrapper.sh.j2.
+
 # RUN-PROBE. Record that this wrapper actually executed.
 #
 # Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
@@ -1334,52 +1621,165 @@ REAL_COMPOSER='$real_composer'
 #
 # The value is caller-controlled, so it is only ever a redirect target. Never
 # interpolate it into a command.
-if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
-  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
 fi
 
-if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "$wrapper_target" ]; then
-  echo "[supply-chain-harden] error: real composer not found at '\$REAL_COMPOSER'; refusing to recurse" >&2
+if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = "$WRAPPER_PATH" ]; then
+  echo "[supply-chain-harden] error: real composer not found at '$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
 fi
+# Only here, not in the job's environment: wrapped runs carry --no-plugins, and
+# composer's own root guard (a non-interactive root run disables plugins) stays
+# on for anything that bypasses this wrapper.
 export COMPOSER_ALLOW_SUPERUSER=1
 # Publish-age gate (composer >= 2.11.0). Set unconditionally so a step's own env
-# cannot shorten the window; \`composer --no-cooldown\` still gets through, on
+# cannot shorten the window; `composer --no-cooldown` still gets through, on
 # purpose, as composer's escape hatch for an urgent fix.
-export COMPOSER_POLICY_COOLDOWN_PERIOD=$COMPOSER_COOLDOWN_SECONDS
+export COMPOSER_POLICY_COOLDOWN_PERIOD="$COOLDOWN_SECONDS"
 export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 
-NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+# The subcommand is the first non-option token. -d/--working-dir is composer's
+# only value-taking global option, so its value is not the subcommand; it is
+# kept because it moves the composer.json composer reads. In a cluster of short
+# options that ends in d (`-nd DIR`), d still takes the next token, but composer
+# does not change directory for it (MEASURED on 2.5.5, 2.7.1 and 2.11.2:
+# `composer -nd DIR test` ran the test script of the current directory), so
+# that value is skipped and not kept.
+SUBCOMMAND=""; WORKDIR=""; skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; WORKDIR="$arg"; continue; fi
+  if [ "$skip_next" = 2 ]; then skip_next=0; continue; fi
+  case "$arg" in
+    -d|--working-dir) skip_next=1; continue ;;
+    --working-dir=*) WORKDIR="${arg#--working-dir=}"; continue ;;
+    -d?*) WORKDIR="${arg#-d}"; continue ;;
+    --*) continue ;;
+    -?*d) case "${arg%d}" in *d*) ;; *) skip_next=2 ;; esac; continue ;;
+    -*) continue ;;
+  esac
+  SUBCOMMAND="$arg"; break
+done
+
+# Every built-in command and alias of composer 2.1.14, 2.2.6, 2.5.5, 2.7.1,
+# 2.8.8, 2.9.5 and 2.11.2 (MEASURED: `composer list --format=json --no-plugins`
+# in an empty directory). A script cannot shadow one of these names.
+# This is a fixed list, not an answer from the composer on this host. A built-in
+# added after 2.11.2 is missing from it, so a project script of that name would
+# not get --no-scripts while composer runs the built-in; and on a composer older
+# than a name here (audit and bump on 2.2), a script of that name gets
+# --no-scripts and runs nothing. Add new built-ins here when composer ships them.
+BUILTIN_COMMANDS=' _complete about archive audit browse bump cc check-platform-reqs clear-cache clearcache completion config create-project depends diagnose dump-autoload dumpautoload exec fund global help home i info init install licenses list outdated policy prohibits r reinstall remove repo repository require rm run run-script search self-update selfupdate show status suggests u uninstall update upgrade validate why why-not '
+# The twelve script event names (Composer\Script\ScriptEvents, identical in
+# 2.1.14, 2.2.6 and 2.11.2). Composer never registers them as commands.
+SCRIPT_EVENTS=' pre-install-cmd post-install-cmd pre-update-cmd post-update-cmd pre-status-cmd post-status-cmd pre-autoload-dump post-autoload-dump post-root-package-install post-create-project-cmd pre-archive-cmd post-archive-cmd '
+
+# The built-ins whose name starts with $1, ignoring case: what composer's console
+# resolves a name to when no command has exactly that name (a unique prefix,
+# case-sensitive first, then case-insensitive).
+builtins_starting_with() {
+  local want b out=""
+  want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  for b in $BUILTIN_COMMANDS; do
+    case "$b" in "$want"*) out="${out:+$out, }$b" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# How the composer.json composer will read defines the name $1: prints "key"
+# for a "scripts" key, "alias<TAB><key>" for a "scripts-aliases" alias of a
+# key, and nothing otherwise. It finds the file the way composer does:
+# $COMPOSER (default composer.json) in the -d directory or the current one, else
+# the nearest parent below $HOME that has one (composer's use-parent-dir walk).
+# It decodes it with json_decode, as composer does when it registers script
+# commands, so the two read the same file the same way. php is whatever runs
+# composer itself. Nothing is executed from the project.
+root_script_def() {
+  local f="${COMPOSER:-composer.json}" dir home
+  case "$f" in
+    /*) ;;
+    *)
+      if [ -n "$WORKDIR" ]; then
+        f="$WORKDIR/$f"
+      elif [ ! -e "$f" ]; then
+        home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P)
+        dir=$(dirname "$(pwd -P)")
+        while [ "$dir" != "/" ] && [ "$dir" != "$home" ]; do
+          if [ -e "$dir/$f" ]; then f="$dir/$f"; break; fi
+          dir=$(dirname "$dir")
+        done
+      fi ;;
+  esac
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  php -r '
+    $j = json_decode((string) file_get_contents($argv[1]), true);
+    $n = $argv[2];
+    if (!is_array($j) || !isset($j["scripts"]) || !is_array($j["scripts"])) exit(0);
+    if (array_key_exists($n, $j["scripts"])) { echo "key\n"; exit(0); }
+    if (!isset($j["scripts-aliases"]) || !is_array($j["scripts-aliases"])) exit(0);
+    foreach ($j["scripts-aliases"] as $script => $aliases) {
+      if (isset($j["scripts"][$script]) && in_array($n, (array) $aliases, true)) {
+        echo "alias\t", preg_replace("/[[:cntrl:]]/", "?", (string) $script), "\n"; exit(0);
+      }
+    }' "$f" "$1" 2>/dev/null
+}
+
+# A name composer may run as a project script while the caller typed a built-in
+# (see the header): refuse it, and say how to ask for each one unambiguously.
+refuse_script_name() { # $1 = what the project defines it as, $2 = the built-in(s), $3 = the script
+  echo "[supply-chain-harden] refusing 'composer $SUBCOMMAND': '$SUBCOMMAND' is $1 in this project's composer.json and also names composer's built-in '$2'. Composer would run the project's script, with scripts enabled, instead of the built-in. Run the script with 'composer run-script $3', or the built-in by its full name." >&2
+  exit 2
+}
+
+EXPLICIT_SCRIPT=false
+case "$SUBCOMMAND" in
+  run-script|run) EXPLICIT_SCRIPT=true ;;
+  '') ;;
+  *)
+    case "$SCRIPT_EVENTS" in *" $SUBCOMMAND "*) ;; *)
+      SCRIPT_DEF=$(root_script_def "$SUBCOMMAND")
+      case "$BUILTIN_COMMANDS" in
+        *" $SUBCOMMAND "*)
+          # composer skips a scripts KEY named after a built-in, not an alias
+          case "$SCRIPT_DEF" in
+            alias*) refuse_script_name "a scripts-aliases alias" "$SUBCOMMAND" "${SCRIPT_DEF#alias?}" ;;
+          esac ;;
+        *)
+          case "$SCRIPT_DEF" in
+            key|alias*)
+              also=$(builtins_starting_with "$SUBCOMMAND")
+              script="$SUBCOMMAND"; kind="a script"
+              case "$SCRIPT_DEF" in alias*) script="${SCRIPT_DEF#alias?}"; kind="a scripts-aliases alias" ;; esac
+              [ -z "$also" ] || refuse_script_name "$kind" "$also" "$script"
+              EXPLICIT_SCRIPT=true ;;
+          esac ;;
+      esac ;;
+    esac ;;
+esac
 
 FLAGS=()
-if [ "\$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
+if [ "$EXPLICIT_SCRIPT" = "true" ]; then
+  :  # the caller named a root script: run it
+elif [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
   FLAGS+=(--no-scripts)
 else
-  # First non-option token is the subcommand. -d/--working-dir takes a value,
-  # so its argument must not be mistaken for the subcommand.
-  skip_next=0
-  for arg in "\$@"; do
-    if [ "\$skip_next" = 1 ]; then skip_next=0; continue; fi
-    case "\$arg" in
-      -d|--working-dir) skip_next=1; continue ;;
-      -*) continue ;;
-    esac
-    case "\$arg" in
-      install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
-        FLAGS+=(--no-scripts) ;;
-    esac
-    break
-  done
+  case "$SUBCOMMAND" in
+    install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+      FLAGS+=(--no-scripts) ;;
+  esac
 fi
-$plugins_flag_line
+if [ "$INJECT_NO_PLUGINS" = "true" ]; then
+  FLAGS+=(--no-plugins)
+fi
 
-exec "\$REAL_COMPOSER" \${FLAGS[@]+"\${FLAGS[@]}"} "\$@"
+exec "$REAL_COMPOSER" ${FLAGS[@]+"${FLAGS[@]}"} "$@"
 EOF
+  } | $SUDO tee "$wrapper_target" >/dev/null
   $SUDO chmod 755 "$wrapper_target"
-  local wrap_desc="--no-scripts on every invocation"
+  local wrap_desc="--no-scripts on every invocation except a script run by name"
   if [[ "$no_scripts_is_global" != "true" ]]; then
     wrap_desc="--no-scripts on install/update/require/remove/dump-autoload only"
-    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project, run-script and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
+    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
   fi
   [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] || wrap_desc="$wrap_desc, --no-plugins"
   log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"
@@ -1430,16 +1830,20 @@ harden_bun() {
 
   # FAIL-WHOLE HAZARD, not fail-silent. bun rejects the ENTIRE bunfig on ONE
   # bad value — "Invalid Bunfig: failed to load bunfig", exit 1 — MEASURED
-  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d"). One malformed
-  # key disarms every other key in the file AND breaks bun itself, so a bad
-  # value here is strictly worse than writing nothing. BUN_AGE_SECONDS is
+  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d") on bun 1.3.0
+  # through 1.4.3, which want a number of seconds there. bun 1.4.4 accepts a
+  # duration string (MEASURED), but the runner's bun version is not known
+  # here, and a bare integer of seconds works on every bun from 1.3.0. On
+  # the versions that reject it, one malformed key disarms every other key
+  # in the file AND breaks bun itself, so a bad value here is strictly worse
+  # than writing nothing. BUN_AGE_SECONDS is
   # $(( RELEASE_AGE_HOURS * 3600 )), i.e. always a bare integer and never
   # quoted — but RELEASE_AGE_HOURS is caller-supplied, so a negative or
   # otherwise non-integer value drops the key rather than risking the file.
   # Never interpolate a duration string ("2d") or a quoted number here.
   if [[ "$has_min_release_age" == "true" ]] && ! [[ "$BUN_AGE_SECONDS" =~ ^[0-9]+$ ]]; then
     has_min_release_age=false
-    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted: bun rejects the WHOLE bunfig on one bad value, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
+    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted rather than risk the file: bun 1.3.0 through 1.4.3 reject the WHOLE bunfig on a non-numeric minimumReleaseAge, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
   fi
 
   # WHERE THE GLOBAL BUNFIG LIVES — resolved from bun's environment, never
@@ -1703,6 +2107,7 @@ harden_cargo() {
   local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   mkdir -p "$cargo_home"
 
+  keep_user_copy cargo "$cargo_home/config.toml"
   cat > "$cargo_home/config.toml" <<'EOF'
 # Managed by supply-chain-harden
 # Note: build.rs / proc-macro execution CANNOT be blocked by cargo config —
@@ -1857,6 +2262,41 @@ EOF
     log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
+  # ---- which backend the wrapper runs (absolute path) ----
+  #
+  # A wrapper the invoking user does not own (apt's /usr/bin/cargo, a root
+  # job's /usr/local/cargo/bin) runs for root and for every other account, so
+  # its backend must not be a file in this user's $CARGO_HOME/bin, which this
+  # user can rewrite. MEASURED (VM#2, role and plain path alike): the old
+  # wrapper prepended that directory to PATH, and root and a second account
+  # then ran this user's cargo-cooldown and ~/.cargo/bin/cargo. A shared
+  # wrapper therefore gets a ROOT-OWNED copy under /usr/local/libexec; if that
+  # cannot be made, the wrapper still works for this user and refuses, with a
+  # message, for everyone else. Numeric 0 for owner and group: macOS has no
+  # group named root.
+  local cooldown_exe=""
+  if [[ -n "$cooldown_bin" ]]; then
+    cooldown_exe="$cooldown_bin/cargo-cooldown"
+    if [[ "$(id -u)" -eq 0 || ! -O "$(dirname "$wrapper_target")" ]]; then
+      local sys_cooldown=/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown
+      if [[ "${CAN_ESCALATE:-0}" -eq 1 ]] \
+         && $SUDO install -d -o 0 -g 0 -m 0755 "$(dirname "$sys_cooldown")" \
+         && $SUDO install -o 0 -g 0 -m 0755 "$cooldown_exe" "$sys_cooldown"; then
+        cooldown_exe="$sys_cooldown"
+        log "cargo: $wrapper_target is shared, so its wrapper names a root-owned copy of the gate backend, $sys_cooldown"
+        # cargo, not the wrapper, starts the backend, and it looks in
+        # $CARGO_HOME/bin before the directory the wrapper appends to PATH.
+        # MEASURED (rust:1.100.0-slim-trixie): root's builds there ran
+        # /usr/local/cargo/bin/cargo-cooldown, not the copy above.
+        if [[ -x "$cooldown_bin/cargo-cooldown" ]]; then
+          log "cargo: note: cargo starts the first cargo-cooldown in \$CARGO_HOME/bin, then PATH, so $(id -un)'s builds run $cooldown_bin/cargo-cooldown (or one earlier on PATH), not that copy; see docs/limitations.md"
+        fi
+      else
+        warn "cargo: $wrapper_target is shared, but no root-owned copy of cargo-cooldown could be installed; the wrapper gates builds for $(id -un) and refuses the backend for root and other accounts"
+      fi
+    fi
+  fi
+
   # Written via placeholders + sed rather than an interpolating heredoc: the
   # wrapper is dense with $ and the escaping is where this kind of code goes
   # wrong silently.
@@ -1915,15 +2355,16 @@ if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
 fi
 
 
-# cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup
-# cargo but NOT for a distro/apt cargo. Without this prepend, both
-# `command -v cargo-cooldown` and cargo's own cargo-<name> subcommand
-# resolution fail on apt-cargo hosts, so the gate silently does nothing even
-# though the backend installed fine.
-COOLDOWN_BIN='__COOLDOWN_BIN__'
-if [ -n "$COOLDOWN_BIN" ] && [ -d "$COOLDOWN_BIN" ]; then
-  case ":$PATH:" in *":$COOLDOWN_BIN:"*) ;; *) PATH="$COOLDOWN_BIN:$PATH"; export PATH ;; esac
-fi
+# THE GATE BACKEND, BY ABSOLUTE PATH, AND WHOSE IT IS. Parity with the role's
+# templates/cargo-wrapper.sh.j2, which carries the measurement record (VM#2):
+# this wrapper used to PREPEND $CARGO_HOME/bin to PATH, and at a system path
+# (/usr/bin/cargo) that made root and every other account run the hardening
+# user's cargo-cooldown and ~/.cargo/bin/cargo, files that user can replace.
+# harden.sh now renders the backend's absolute path: the one in $CARGO_HOME/bin
+# when the wrapped cargo is the invoking user's own, a ROOT-OWNED copy under
+# /usr/local/libexec/supply-chain-hardening/ otherwise. Nothing is prepended,
+# and use_cooldown refuses a backend whose owner is neither the caller nor root.
+COOLDOWN_EXE='__COOLDOWN_EXE__'
 
 if [ -z "$REAL_CARGO" ] || [ ! -x "$REAL_CARGO" ] || [ "$REAL_CARGO" = "$0" ]; then
   echo "[supply-chain-harden] error: real cargo not found at '$REAL_CARGO'; refusing to recurse" >&2
@@ -1949,10 +2390,36 @@ fi
 # Guarded by `command -v sfw` rather than assumed: sfw is opt-in
 # (install_sfw), and a cargo wrapper that hard-required it would break every
 # build on a runner that did not install it. Absent sfw, this is a no-op.
+#
+# sfw runs READ-ONLY. Its cache sits in its own package directory, which a
+# root `npm install -g` makes root-owned, and by default it rewrites
+# .sfw-cache/next-check there once the last update check is an hour old; a
+# non-root caller cannot, and sfw treats that as fatal. MEASURED (sfw 2.0.6,
+# this action at 8281a6b, a non-root user): one hour after hardening, every
+# npm, npx and cargo call through sfw failed with "[sfw] Failed to prepare
+# firewall binary: EACCES ... next-check". SFW_SKIP_UPDATE_CHECK=1 runs the
+# cached binary without writing (MEASURED). A COLD cache still needs a
+# download, which only root can do unless the caller can write the cache, so
+# otherwise it warns and runs cargo unfiltered.
+if [ "__CARGO_SFW__" = "true" ]; then
+  SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+fi
+sfw_ready() {
+  local s p
+  [ "$(id -u)" = 0 ] && return 0
+  s=$(readlink -f "$(command -v sfw)" 2>/dev/null) || return 0
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 0
+  [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
+  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. cargo call not filtered through threat intel" >&2
+  return 1
+}
 run_real() {
   local pfx=""
   if [ "__CARGO_SFW__" = "true" ] && [ "${SCH_NET:-0}" = "1" ] \
-     && command -v sfw >/dev/null 2>&1; then
+     && command -v sfw >/dev/null 2>&1 && sfw_ready; then
     pfx="sfw"
   fi
   if [ -n "$pfx" ]; then
@@ -1961,6 +2428,74 @@ run_real() {
     exec "$pfx" "$REAL_CARGO" "$@"
   fi
   exec -a cargo "$REAL_CARGO" "$@"
+}
+
+# May THIS caller run "$1" as the gate backend? Only when no other account can
+# choose what runs there. Walking up from the file: one the caller owns (not
+# root) ends the walk, yes (your own file, or a root-owned file in your own
+# directory); a root-owned one must be writable by neither group nor others, or
+# for a directory be sticky (/tmp), and the walk goes on; anything else is no.
+# Parity with the role's templates/cargo-wrapper.sh.j2. find(1), not stat(1):
+# `stat -c` is GNU-only and this runs on macOS runners.
+backend_trusted() {
+  _bt_why=""
+  _bt_me=""
+  [ "$(id -u)" != 0 ] && _bt_me=$(id -un 2>/dev/null || id -u)
+  _bt_p=$(readlink -f "$1" 2>/dev/null) || _bt_p="$1"
+  case "$_bt_p" in /*) ;; *) _bt_why="$1 is not an absolute path"; return 1 ;; esac
+  if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
+  if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+    _bt_why="$_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
+    return 1
+  fi
+  while [ "$_bt_p" != "/" ]; do
+    _bt_p=$(dirname "$_bt_p")
+    if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
+    if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ]; then
+      _bt_why="directory $_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
+      return 1
+    fi
+  done
+  return 0
+}
+
+cooldown_installed() {
+  local c
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && return 0
+  done
+  return 1
+}
+
+# Pick the backend for a gated command or REFUSE (exit 126); a quiet degrade
+# would leave the command ungated exactly when it runs as someone else. cargo
+# still starts the backend (`cargo-real cooldown build`), because cargo is what
+# consumes a leading +toolchain / -C / --config, so the backend's directory is
+# APPENDED to PATH when neither $CARGO_HOME/bin nor PATH covers it: appending
+# cannot change what any name already on PATH resolves to. What is vouched for
+# here is not always what runs: cargo looks in $CARGO_HOME/bin first (unless it
+# is on PATH, where PATH order decides), then along PATH, and starts any other
+# cargo-cooldown it finds there unchecked. MEASURED in rust:1.100.0-slim-trixie:
+# root's build ran /usr/local/cargo/bin/cargo-cooldown (a 0777 directory), not
+# the root-owned libexec copy this wrapper named. See the role template and
+# docs/limitations.md.
+use_cooldown() {
+  local c d refused=""
+  COOLDOWN=""
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if backend_trusted "$c"; then COOLDOWN="$c"; break; fi
+    refused="$_bt_why"
+  done
+  if [ -z "$COOLDOWN" ]; then
+    echo "[supply-chain-harden] error: refusing to run the cargo publish-age gate backend as $(id -un): $refused, so another account could choose what runs here. Re-run harden.sh with sudo available to give a shared cargo a root-owned backend, or run cargo as the account that owns this one. (cargo wrapper: $0)" >&2
+    exit 126
+  fi
+  d=$(dirname "$COOLDOWN")
+  case ":$PATH:" in
+    *":$d:"*) ;;
+    *) [ "$d" = "${CARGO_HOME:-$HOME/.cargo}/bin" ] || { PATH="$PATH:$d"; export PATH; } ;;
+  esac
 }
 
 subcmd=""
@@ -1987,14 +2522,32 @@ has_resolution_flag() {
 
 # Walk up for a lockfile: cargo is routinely run from a workspace
 # subdirectory, so checking only ./Cargo.lock would skip --locked for most
-# real invocations.
+# real invocations. Records the directory in LOCK_DIR.
 has_lockfile() {
   local d="$PWD"
+  LOCK_DIR=""
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -f "$d/Cargo.lock" ] && return 0
+    [ -f "$d/Cargo.lock" ] && { LOCK_DIR="$d"; return 0; }
     d="$(dirname "$d")"
   done
-  [ -f "/Cargo.lock" ]
+  [ -f "/Cargo.lock" ] && { LOCK_DIR="/"; return 0; }
+  return 1
+}
+
+# --locked is OURS, so say so when it is about to bite: after a Cargo.toml edit
+# cargo stops with "cannot update the lock file ... because --locked was passed
+# to prevent this" (MEASURED, cargo 1.93.1, on this plain path), naming a flag
+# the caller never typed. Parity with the role wrapper, which records the
+# measurement; fires only when a manifest is newer than the lockfile.
+locked_note() {
+  local m
+  for m in "$PWD/Cargo.toml" "${LOCK_DIR%/}/Cargo.toml"; do
+    if [ -f "$m" ] && [ "$m" -nt "${LOCK_DIR%/}/Cargo.lock" ]; then
+      echo "[supply-chain-harden] note: this cargo wrapper adds --locked because a Cargo.lock exists, and $m is newer than it. If cargo stops with \"--locked was passed\", that flag is ours: record the change with 'cargo update --workspace', then build again." >&2
+      return 0
+    fi
+  done
+  return 0
 }
 
 # Insert EXTRA immediately after the subcommand, never appended:
@@ -2090,9 +2643,11 @@ sanitize_cooldown_env() {
     echo "[supply-chain-harden] note: overriding caller publish-age setting(s):$_sc_had - this run's __RELEASE_AGE_HOURS__h/__VIOLATION_ACTION__ policy applies instead." >&2
   fi
   export COOLDOWN_MINUTES=__MIN_AGE_MIN__
-  # The crates.io window, which a repo cooldown.toml's `[registry]
-  # min-publish-age` otherwise sets. Cargo also reads this name (its unstable
-  # registry.min-publish-age) and warns that it is ignoring it; harmless.
+  # The crates.io window, read by CARGO-COOLDOWN (a repo cooldown.toml's
+  # `[registry] min-publish-age` otherwise sets it). Cargo itself ignores this
+  # name: MEASURED on cargo 1.100.0, set alone it neither gated nor warned.
+  # Cargo's own gate is CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE. See the role's
+  # templates/cargo-wrapper.sh.j2 for the measurement.
   export CARGO_REGISTRY_MIN_PUBLISH_AGE="__RELEASE_AGE_HOURS__ hours"
   export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=__VIOLATION_ACTION__
   export COOLDOWN_LOCKFILE_BASELINE=floor
@@ -2160,9 +2715,10 @@ case "$KIND" in
     # These exist to change the lockfile, so --locked is contradictory.
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         update)
+          use_cooldown
           sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
@@ -2180,7 +2736,7 @@ case "$KIND" in
     ;;
 
   RESOLVING)
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -2196,6 +2752,7 @@ case "$KIND" in
         # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
         # and fetch then resolved a version real cargo refused, and add wrote
         # it, while the note claimed this policy "applies instead".
+        use_cooldown
         sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
@@ -2208,6 +2765,7 @@ case "$KIND" in
       SCH_NET=1 run_real "$@"
     fi
     if has_lockfile; then
+      locked_note
       SCH_NET=1 exec_with "--locked" "$@"
     fi
     echo "[supply-chain-harden] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2
@@ -2216,7 +2774,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_BIN__|$(sed_repl "$cooldown_bin")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_EXE__|$(sed_repl "$cooldown_exe")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
   $SUDO cp "$tmp_wrapper" "$wrapper_target"
   $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo
@@ -2225,7 +2783,12 @@ WRAPPER
   if [[ -n "$cooldown_bin" ]]; then
     log "cargo: wrapper at $wrapper_target (--locked injection + ${RELEASE_AGE_HOURS}h publish-age gate via cargo-cooldown)"
   else
-    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. Set install_cargo_cooldown: true, or install cargo-cooldown in an earlier step."
+    # Name the switch the way THIS caller sets it: the action input on GitHub,
+    # the env var everywhere else (VM#14: plain mode was told to set an input
+    # it does not have).
+    local _cc_how="set INSTALL_CARGO_COOLDOWN=true in harden.sh's environment"
+    [[ "$PLATFORM" == "github" ]] && _cc_how="set the action input install_cargo_cooldown: true"
+    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. To enforce it, ${_cc_how}, or install cargo-cooldown in an earlier step."
     set_eco_status cargo PARTIAL "--locked injection active; publish-age gate written but no cargo-cooldown backend to enforce it"
     log "cargo: wrapper at $wrapper_target (--locked injection; age gate written but inert without cargo-cooldown)"
   fi
@@ -2247,7 +2810,12 @@ harden_go() {
   # file, so both layers are written and they agree.
   write_env GOSUMDB     "sum.golang.org"
   write_env GOPROXY     "https://proxy.golang.org,direct"
-  write_env GOFLAGS     "-mod=readonly"
+  # GOFLAGS is NOT written (earlier versions wrote -mod=readonly). With no vendor/
+  # directory that is Go's default already, and with one it makes Go IGNORE
+  # vendor/: offline the build fails on a proxy.golang.org dial error that names
+  # neither GOFLAGS nor this action; online it compiles the proxy copy instead
+  # of the vendored one. MEASURED on go1.22.12 and go1.27.4 (defaults/main.yml,
+  # goflags_mod, has the detail; the role no longer sets it either).
   write_env GOTOOLCHAIN "local"
   # Empty knobs — explicit setting means no module bypasses sumdb / proxy / HTTPS.
   write_env GOPRIVATE   ""
@@ -2275,7 +2843,6 @@ harden_go() {
     for gokey in \
       "GOSUMDB=sum.golang.org" \
       "GOPROXY=https://proxy.golang.org,direct" \
-      "GOFLAGS=-mod=readonly" \
       "GOTOOLCHAIN=local" \
       "GOPRIVATE=" \
       "GONOPROXY=" \
@@ -2284,6 +2851,13 @@ harden_go() {
     do
       go env -w "$gokey" 2>/dev/null || failed+="${gokey%%=*} "
     done
+    # A runner hardened by an earlier version keeps GOFLAGS=-mod=readonly in its
+    # go env file (self-hosted runners persist it). Remove exactly that value so
+    # the host converges; any other GOFLAGS is the owner's and is left alone.
+    if [[ "$(env -u GOFLAGS go env GOFLAGS 2>/dev/null)" == "-mod=readonly" ]]; then
+      go env -u GOFLAGS 2>/dev/null \
+        && log "go: removed GOFLAGS=-mod=readonly left in $(go env GOENV 2>/dev/null) by an earlier version (it made go ignore vendor/)"
+    fi
     if [[ -n "$failed" ]]; then
       warn "go env -w rejected: ${failed% } — those settings rely on the env layer only on this host"
     else
@@ -2298,7 +2872,7 @@ harden_go() {
 
   HARDENED+=("go")
   set_tool_version "go" "$go_version"
-  log "go: GOSUMDB=sum.golang.org, GOPROXY=proxy.golang.org, GOFLAGS=-mod=readonly, GOTOOLCHAIN=local"
+  log "go: GOSUMDB=sum.golang.org, GOPROXY=proxy.golang.org, GOTOOLCHAIN=local (GOFLAGS left to go: its default keeps go.mod/go.sum read-only and honours vendor/)"
   end_section
 }
 
@@ -2592,6 +3166,7 @@ DENOWRAP
 harden_maven() {
   section "maven"
   mkdir -p "$HOME/.m2"
+  keep_user_copy maven "$HOME/.m2/settings.xml"
   cat > "$HOME/.m2/settings.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by supply-chain-harden action -->
@@ -2611,7 +3186,16 @@ harden_maven() {
        checksum (Maven's default is 'warn', which installs anyway). This covers
        Central-sourced artifacts; the role additionally routes ALL repos through
        Central (mirrorOf=*), which the action does not, to avoid breaking a
-       project's own HTTPS repositories. -->
+       project's own HTTPS repositories.
+       Maven keeps TWO repository lists, and the super POM declares 'central'
+       in both: <repositories> for dependencies, <pluginRepositories> for
+       plugins. Redefining it only under <repositories> left plugin jars, code
+       that runs inside the build, on 'warn'. MEASURED (maven 3.9.11, a plugin
+       jar served with a wrong .sha1): two checksum WARNINGs and BUILD SUCCESS,
+       while a dependency jar with a wrong .sha1 failed the build.
+       Both entries restore the super POM's <snapshots><enabled>false</enabled>
+       too: without it the redefinition turned snapshot lookups on Central back
+       on (MEASURED). The plugin entry keeps the super POM's updatePolicy=never. -->
   <profiles>
     <profile>
       <id>strict-checksums</id>
@@ -2620,9 +3204,17 @@ harden_maven() {
           <id>central</id>
           <url>https://repo.maven.apache.org/maven2</url>
           <releases><checksumPolicy>fail</checksumPolicy></releases>
-          <snapshots><checksumPolicy>fail</checksumPolicy></snapshots>
+          <snapshots><enabled>false</enabled></snapshots>
         </repository>
       </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><updatePolicy>never</updatePolicy><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
     </profile>
   </profiles>
   <activeProfiles>
@@ -2632,7 +3224,7 @@ harden_maven() {
 EOF
   HARDENED+=("maven")
   set_tool_version "maven" "$(detect_version maven "mvn --version")"
-  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central"
+  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central, for dependencies and plugins"
   end_section
 }
 
@@ -2713,20 +3305,30 @@ val rejectHttp: (org.gradle.api.artifacts.repositories.ArtifactRepository) -> Un
     throw GradleException("supply-chain-harden: refusing HTTP repo: $url (use HTTPS)")
   }
 }
+// Refuse dynamic / changing version selectors (1.+, latest.release, -SNAPSHOT)
+// in EVERY configuration gradle resolves code from (CMP 4.6). Plugins resolve
+// into a SCRIPT classpath - a project's buildscript.configurations for its
+// plugins{} / buildscript{}, the settings script's for the same blocks in
+// settings.gradle - which allprojects{configurations} does not reach. MEASURED
+// (gradle 8.14.3 and 9.1.0): with project configurations only, a 1.+ plugin in
+// any of those four places resolved and its code RAN.
+// When this fires gradle reports "Resolution strategy disallows usage of
+// dynamic versions" (or "... of changing versions"); that refusal comes from
+// this file.
+val refuseDynamic: (org.gradle.api.artifacts.Configuration) -> Unit = { conf ->
+  conf.resolutionStrategy.failOnDynamicVersions()
+  conf.resolutionStrategy.failOnChangingVersions()
+}
 beforeSettings {
   pluginManagement.repositories.all { rejectHttp(this) }
   dependencyResolutionManagement.repositories.all { rejectHttp(this) }
+  buildscript.configurations.all { refuseDynamic(this) }
 }
 allprojects {
   repositories.all { rejectHttp(this) }
   buildscript.repositories.all { rejectHttp(this) }
-  configurations.all {
-    resolutionStrategy {
-      // Refuse dynamic / changing version selectors (1.+, latest.release).
-      failOnDynamicVersions()
-      failOnChangingVersions()
-    }
-  }
+  configurations.all { refuseDynamic(this) }
+  buildscript.configurations.all { refuseDynamic(this) }
 }
 EOF
   # Layer 2 of the fix above. Written AFTER the file exists so the value we
@@ -2734,7 +3336,7 @@ EOF
   write_env GRADLE_USER_HOME "$gradle_home"
   HARDENED+=("gradle")
   set_tool_version "gradle" "$(detect_version gradle "gradle --version")"
-  log "gradle: HTTPS-only repos enforced, dynamic versions blocked (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
+  log "gradle: HTTPS-only repos enforced, dynamic versions blocked for dependencies and plugin classpaths (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
   end_section
 }
 
@@ -2754,6 +3356,7 @@ harden_nuget() {
   # b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5).
   local nuget_home="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet"
   mkdir -p "$nuget_home"
+  keep_user_copy nuget "$nuget_home/NuGet.Config"
   cat > "$nuget_home/NuGet.Config" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Managed by supply-chain-harden action -->
@@ -2768,15 +3371,22 @@ harden_nuget() {
   <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
        packages signed under a rotation we do not trust fail with NU3034 and the
        install is refused — signatureValidationMode=require makes that fatal.
-       Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
-       Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
+       SOURCE OF TRUTH: nuget.org's repository-signatures index,
+         https://api.nuget.org/v3-index/repository-signatures/5.0.0/index.json
+       These three SHA-256 fingerprints match the three it lists, exactly (checked
+       2026-11-19); the validity windows below are its notBefore / notAfter.
+       THE CURRENT CERTIFICATE EXPIRES 2027-05-18. nuget.org has to rotate before
+       then: add the new fingerprint as soon as that index lists it, or every
+       package repository-signed after the rotation is refused.
+       2024 rotation notice:
+         https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/ -->
   <trustedSigners>
     <repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">
-      <!-- current; deployed 2024-04-08 -->
+      <!-- current: valid 2024-02-23 to 2027-05-18 -->
       <certificate fingerprint="1F4B311D9ACC115C8DC8018B5A49E00FCE6DA8E2855F9F014CA6F34570BC482D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
-      <!-- previous; renewed 2021-03-15, expired 2024-05-15 -->
+      <!-- previous: valid 2021-02-16 to 2024-05-15 -->
       <certificate fingerprint="5A2901D6ADA3D18260B9C6DFE2133C95D74B9EEF6AE0E5DC334C8454D1477DF4" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
-      <!-- intermediate/original; still required for older packages -->
+      <!-- original (not an intermediate): valid 2018-04-10 to 2021-04-14; kept for packages whose repository signature was made with it -->
       <certificate fingerprint="0E5F38F57DC1BCC806D8494F4F90FBCEDD988B46760709CBEEC6F4219AA6157D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
     </repository>
   </trustedSigners>
@@ -2851,8 +3461,10 @@ install_sfw_and_wrap() {
   # root-owned: a warm run as the user failed on a GitHub runner with "EACCES:
   # permission denied, mkdir '/usr/local/lib/node_modules/sfw/.sfw-cache'".
   #   1. warm with the install's privilege, so the download can land;
-  #   2. run as THIS user, exactly as the npm/npx wrappers will. Only if that
-  #      works is anything wrapped.
+  #   2. run as THIS user, exactly as the npm/npx wrappers will: with
+  #      SFW_SKIP_UPDATE_CHECK=1, so sfw never tries to write the root-owned
+  #      cache (see the wrappers below). Only if that works is anything
+  #      wrapped.
   # If either fails, sfw is MOVED ASIDE so `command -v sfw` fails for the cargo
   # wrapper too, no npm/npx wrapper is deployed, and sfw_installed stays false:
   # the job runs unfiltered, says so, and builds. The target is whichever
@@ -2866,9 +3478,12 @@ install_sfw_and_wrap() {
   fi
   true_bin=/usr/bin/true; [[ -x "$true_bin" ]] || true_bin=/bin/true
   sfw_rc=0
-  sfw_out=$(run_bounded 180 $SUDO "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  # umask 022 for the root warm: sudo applies the union of the caller's umask
+  # and its own, and a 077 caller would leave the binary in a 0700 directory
+  # that the user check below (and every other account) cannot reach.
+  sfw_out=$(run_bounded 180 $SUDO sh -c 'umask 022; exec "$@"' sh "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   if [[ "$sfw_rc" -eq 0 ]]; then
-    sfw_out=$(run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+    sfw_out=$(SFW_SKIP_UPDATE_CHECK=1 run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   fi
   if [[ "$sfw_rc" -ne 0 ]]; then
     $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
@@ -2892,6 +3507,39 @@ install_sfw_and_wrap() {
   real_npm=$(command -v npm)
   wrapper_target="$real_npm"
   require_privilege npm "$wrapper_target" || { end_section; return 0; }
+
+  # Shared by the npm and npx wrappers below; the cargo wrapper carries the
+  # same logic. Quoted here so nothing in it expands while harden writes it.
+  local sfw_guard
+  sfw_guard=$(cat <<'GUARD'
+# sfw runs READ-ONLY. Its cache sits in its own package directory, which a
+# root `npm install -g` makes root-owned, and by default it rewrites
+# .sfw-cache/next-check there once the last update check is an hour old; a
+# non-root caller cannot, and sfw treats that as fatal. MEASURED (sfw 2.0.6,
+# this action at 8281a6b, a non-root user): one hour after hardening, every
+# npm, npx and cargo call through sfw failed with "[sfw] Failed to prepare
+# firewall binary: EACCES ... next-check". SFW_SKIP_UPDATE_CHECK=1 runs the
+# cached binary without writing (MEASURED: no file under the cache changed).
+SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+# A COLD cache still needs a download that only root can do (MEASURED:
+# "EACCES ... mkdir .sfw-cache"), unless the caller can write the cache; a
+# root reinstall of sfw leaves it cold. That warns and passes through, the way
+# an absent sfw does, instead of failing.
+sfw_ready() {
+  local s p
+  command -v sfw >/dev/null 2>&1 || return 1
+  [ "$(id -u)" = 0 ] && return 0
+  s=$(readlink -f "$(command -v sfw)" 2>/dev/null) || return 0
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 0
+  [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
+  echo "[supply-chain-harden] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-run the hardening step. Call not filtered through threat intel" >&2
+  return 1
+}
+GUARD
+)
 
   if grep -q "supply-chain-harden" "$real_npm" 2>/dev/null; then
     # Already wrapped in a previous run within this job — re-wrap the original.
@@ -2934,6 +3582,7 @@ if [ -z "\$REAL_NPM" ] || [ ! -x "\$REAL_NPM" ] || [ "\$REAL_NPM" = "$wrapper_ta
   echo "[supply-chain-harden] error: real npm not found at '\$REAL_NPM'; refusing to recurse" >&2
   exit 127
 fi
+${sfw_guard}
 # Find the npm subcommand. Reading argv[1] directly was wrong: any leading
 # global flag defeated it, so npm --registry <url> install <pkg> exec'd the
 # real npm with sfw skipped (ECH-197) — the registry-redirection shape from
@@ -2959,7 +3608,7 @@ case "\$subcmd" in
   # link/view/info/show/search/outdated also touch the registry and were routed
   # there but not here, so \`npm exec\`/\`npx\`-style fetch-and-run went unfiltered.
   install|i|add|ci|update|up|rebuild|exec|x|dedupe|link|audit|view|info|show|search|outdated)
-    if command -v sfw >/dev/null 2>&1; then
+    if sfw_ready; then
       exec sfw "\$REAL_NPM" "\$@"
     fi
     ;;
@@ -3017,9 +3666,10 @@ if [ -z "\$REAL_NPX" ] || [ ! -x "\$REAL_NPX" ] || [ "\$REAL_NPX" = "$npx_target
   echo "[supply-chain-harden] error: real npx not found at '\$REAL_NPX'; refusing to recurse" >&2
   exit 127
 fi
+${sfw_guard}
 # EVERY npx invocation may fetch. Unlike npm there is no local-only subcommand
 # to exempt, so there is no argv scan here and nothing to drift out of sync.
-if command -v sfw >/dev/null 2>&1; then
+if sfw_ready; then
   exec sfw "\$REAL_NPX" "\$@"
 fi
 exec "\$REAL_NPX" "\$@"
@@ -3175,4 +3825,12 @@ if [ -n "$part_list$none_list" ]; then
   log "done (emit=$PLATFORM). applied: ${eff_list:-none}${part_list:+ | degraded: $part_list}${none_list:+ | NOT applied: $none_list}"
 else
   log "done (emit=$PLATFORM). applied: ${eff_list:-none}"
+fi
+
+# The uv and pip gates are an ABSOLUTE cutoff computed above, so on a host that
+# keeps this hardening they freeze at this run (VM#16: the plain path has no
+# refresh, by design). A CI job re-hardens every run and never notices; a
+# long-lived host does, so plain mode says so once, at the end.
+if [[ "$PLATFORM" == "plain" ]] && [[ " ${HARDENED[*]:-} " == *" uv "* || " ${HARDENED[*]:-} " == *" pip "* ]]; then
+  notice "the uv/pip age-gate cutoff is fixed at $UV_EXCLUDE_NEWER and nothing advances it. On a long-lived host, re-run harden.sh (and re-source $HARDENING_ENV_FILE) to move it, or apply the Ansible role, which installs a refresh timer."
 fi

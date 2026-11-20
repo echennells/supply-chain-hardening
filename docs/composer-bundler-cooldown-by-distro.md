@@ -52,8 +52,9 @@ curl -fsSL "https://getcomposer.org/download/$V/composer.phar.sha256sum" | sha25
 sudo install -m 0755 composer.phar /usr/local/bin/composer
 ```
 
-`composer self-update` also works, but it overwrites the role's wrapper, so re-apply
-afterwards either way.
+Installing over `/usr/local/bin/composer` like this replaces the role's wrapper.
+`composer self-update` also works and leaves the wrapper in place (it replaces
+`composer-real`). Re-apply afterwards either way, so the version-tiered settings follow.
 
 ## Bundler, where Ruby is 3.2 or newer
 

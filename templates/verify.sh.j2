@@ -6,11 +6,12 @@
 #
 #   00-context.sh   templates/verify.sh.j2         (this file)
 #                   the CONTEXT PREAMBLE, the row/expectation API, and the
-#                   probes that are still host-only (npm, yarn, pnpm, npq,
-#                   sfw, PATH wrappers, go, pip)
+#                   probes that are still host-only (npm, pnpm, npq,
+#                   sfw, PATH wrappers, go GOFLAGS, pip)
 #   50-probes.sh    files/verify-probes.sh         (SHARED, byte-identical
-#                   with the CI surface: bun, deno, uv, composer, cargo,
-#                   bundler, maven, gradle, nuget)
+#                   with the CI surface: yarn, bun, deno, uv, pip age gates,
+#                   go checksum db + toolchain, composer, cargo, bundler,
+#                   maven, gradle, nuget)
 #   90-report.sh    templates/verify-report.sh.j2  (renderer + exit code)
 #
 # The shared body is plain bash with no Jinja in it, which is what lets it be
@@ -22,7 +23,7 @@
 #
 # Every protection in this role has failed at least once in the same way: the
 # config file was written correctly, the tool ignored it, and nothing said so.
-#   yarn npmMinimalAgeGate: "2d"     -> parsed to NaN, gate silently absent
+#   yarn npmMinimalAgeGate: "2d"     -> 2 MINUTES on yarn 4.10.x, gate effectively absent
 #   npm  MINIMUM_RELEASE_AGE         -> key npm does not read, gate absent
 #   pnpm 11                          -> stopped reading rc/npmrc entirely
 #   pnpm 10 block-exotic-subdeps     -> accepted the key, ignored it
@@ -72,6 +73,11 @@ set -u
 # This is executed bash, not rendered text: $(hostname) below runs when the
 # verifier runs. Only the literal string is frozen at apply time.
 
+# Which delivery path deployed this host. The shared probe body reads it to
+# word a remediation for THIS path ("re-apply the role" here, "re-run
+# action/harden.sh" in CI); action/verify.sh declares SCV_SURFACE=ci.
+# shellcheck disable=SC2034  # read by the shared probe body
+SCV_SURFACE=role
 SCV_SCOPE_LABEL="on $(hostname)"
 
 # When this host's intent was recorded. A stale preamble is the one failure
@@ -184,6 +190,11 @@ pip3=/usr/local/bin/pip3
 # END OF PREAMBLE — nothing below this line is rendered from role variables
 # =========================================================================
 
+# Where a row's doc pointer leads. The role deploys no docs to the host, so a
+# repo-relative path pointed nowhere. Nothing records which release of the role
+# rendered this file, so this is the main branch, not a tag.
+SCV_DOCS_URL="https://github.com/echennells/supply-chain-hardening/blob/main"
+
 STRICT=0
 QUIET=0
 VERBOSE=0
@@ -196,8 +207,9 @@ supply-chain-verify — what is ACTUALLY enforcing on this host
 USAGE
   supply-chain-verify [--strict] [--verbose] [--json] [--quiet] [--help]
 
-  --strict   also exit non-zero when a row could only be established as
-             PRESENT (a protection that looks deployed but was not proven)
+  --strict   also exit non-zero on any WEAK row: a protection that looks
+             deployed but was only established as PRESENT, or one in effect
+             with a caveat the row states
   --verbose  show the full rationale for each row. The default prints a
              one-line summary per row so the table is scannable; -v is an alias
   --json     emit the rows and result as JSON instead of the table — the shape
@@ -220,10 +232,13 @@ EVIDENCE STRENGTH — reported per row, because it is the whole point
 STATUS
   OK        protection verified at the stated evidence strength
   GAP       the protection this host asked for is NOT in effect
-  WEAK      protection looks present, but we could only establish PRESENT —
-            treat as unverified, not as covered
+  WEAK      not counted as coverage: either the protection looks present
+            but we could only establish PRESENT, or the tool reported or showed
+            it in effect with a caveat the row names (a stale cutoff, a narrow
+            exemption, a default that proves nothing). Treat as unverified
   N/A       nothing to report. The EVIDENCE column says which kind:
-              -         the tool is not installed on this host
+              -         nothing here to check: the tool is not installed, or
+                        what the row looks for (a project config) is not here
               BYDESIGN  this host's role configuration never asked for it
 
   A GAP is measured against what THIS host declared, recorded at apply time
@@ -251,6 +266,7 @@ done
 
 GAPS=0
 WEAKS=0
+WEAK_PRESENT=0   # the WEAK rows whose evidence is only PRESENT; the footer reports both
 NA_DESIGN=0
 ROWS=""
 
@@ -276,6 +292,7 @@ row() { # status, strength, protection, detail
   ROWS="${ROWS}${s}\t${e}\t${p}\t${d}\n"
   [ "$s" = "GAP" ]  && GAPS=$((GAPS + 1))
   [ "$s" = "WEAK" ] && WEAKS=$((WEAKS + 1))
+  [ "$s" = "WEAK" ] && [ "$e" = "PRESENT" ] && WEAK_PRESENT=$((WEAK_PRESENT + 1))
   [ "$e" = "BYDESIGN" ] && NA_DESIGN=$((NA_DESIGN + 1))
   return 0
 }
@@ -590,7 +607,7 @@ scv_hooks_k=$(printf '%s\n' "$scv_hooks" | awk -F'\t' '$1 == "K" { print $2 }')
 if [ -n "$scv_hooks_u" ]; then
   scv_hook_n=$(printf '%s\n' "$scv_hooks_u" | wc -l | tr -d ' ')
   scv_hook_list=$(printf '%s\n' "$scv_hooks_u" | scv_hook_join)
-  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" in docs/verify.md." >&2
+  [ "${QUIET:-0}" = 1 ] || echo "[supply-chain-verify] warning: $scv_hook_n Python startup hook(s) with nothing vouching for them: $scv_hook_list. The checks below start python3 and pip, which will run them; see \"Don't run it on a host you suspect is compromised\" at ${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}/docs/verify.md#dont-run-it-on-a-host-you-suspect-is-compromised" >&2
   row WEAK PRESENT "python startup hooks" \
     "$scv_hook_n file(s) that run code on every Python start with nothing vouching for them: $scv_hook_list. A wheel's .data/purelib can install these, as the October 2026 litellm wheels did. Detection only, nothing was changed: check each against the distribution named"
 elif [ -n "$scv_hooks_k" ]; then
@@ -599,6 +616,95 @@ elif [ -n "$scv_hooks_k" ]; then
     "$scv_hook_n startup hook file(s), each unchanged from a Debian package or matching a known tool's generated line: $(printf '%s\n' "$scv_hooks_k" | scv_hook_join). That recognises the file named, not the module it imports, and it is not a clean bill for the host"
 fi
 # <<< python startup hooks
+
+# >>> npm exclude scope
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them). Both
+# npm rows live in the preambles, which run before the shared body, so this
+# cannot live in files/verify-probes.sh.
+#
+# WHICH NAMES DOES A min-release-age-exclude LIST EXEMPT? npm's own test is
+#   name === pattern || minimatch(name, pattern, {nonegate, nocomment, noext})
+# (@npmcli/arborist lib/release-age-exclude.js, read on npm 11.19.1), and the
+# rows used to compare entries with a literal '*' instead. MEASURED on npm
+# 11.19.1 with a repo .npmrc and a 99999-day window: '*' exempted lodash but
+# NOT @types/node (minimatch's '*' does not cross the '/' of a scoped name), so
+# "every package skips the gate" overstated it; '**' exempted both, and '@*/*'
+# and '*/*' every scoped package, while the row graded all three WEAK.
+#
+# So ask the minimatch npm itself loads, about sentinel names of each kind. A
+# list that matches every sentinel of a kind ("a" and the made-up ones) matches
+# that whole kind. A list that matches ANY made-up sentinel is broad even when
+# it misses some: no list that names real packages names zz9-sch-sentinel, and
+# MEASURED on npm 11.19.1 with a 99999-day window, '??*' and '[!z]*' each
+# exempted lodash AND express, while 'lodash' alone left express refused
+# (ENOVERSIONS), yet requiring every sentinel to match graded both WEAK as narrow.
+# Prints "unscoped", "scoped", "broad", any two or three of them, or nothing.
+# When npm's matcher cannot be found (a version-manager shim, an npm laid out
+# differently) only '*' and '**', whose meaning is fixed, are judged, and
+# anything else prints "unknown".
+scv_npm_exclude_scope() { # <the list as `npm config get` prints it: comma-separated>
+  local npmjs npmdir out
+  npmjs=$(command -v npm 2>/dev/null)
+  # Our npm wrapper names the real npm it execs.
+  if [ -n "$npmjs" ] && grep -q 'supply-chain-harden' "$npmjs" 2>/dev/null; then
+    npmjs=$(grep -oE "^REAL_NPM='[^']*'" "$npmjs" 2>/dev/null | head -1 | sed "s/^REAL_NPM='//; s/'\$//")
+  fi
+  [ -n "$npmjs" ] && npmjs=$(readlink -f "$npmjs" 2>/dev/null)
+  npmdir=${npmjs%/bin/npm-cli.js}
+  out=unknown
+  if [ -n "$npmjs" ] && [ "$npmdir" != "$npmjs" ] && [ -d "$npmdir/node_modules/@npmcli/arborist/lib" ]; then
+    out=$(node -e '
+const path = require("path");
+const lib = path.join(process.argv[1], "node_modules", "@npmcli", "arborist", "lib");
+let mm;
+try { mm = require(require.resolve("minimatch", { paths: [lib] })).minimatch; } catch (e) { process.exit(3); }
+if (typeof mm !== "function") process.exit(3);
+const opts = { nonegate: true, nocomment: true, noext: true };
+const pats = process.argv[2].split(",").map(s => s.trim()).filter(Boolean);
+const hit = n => pats.some(p => n === p || mm(n, p, opts));
+const kinds = [];
+const made = ["zz9-sch-sentinel", "q7x-sch-sentinel", "m3k-sch-sentinel", "e5w-sch-sentinel"];
+const madeS = made.map(n => "@" + n + "/sentinel");
+const unsc = ["a"].concat(made).every(hit), scop = ["@a/b"].concat(madeS).every(hit);
+if (unsc) kinds.push("unscoped");
+if (scop) kinds.push("scoped");
+if ((!unsc && made.some(hit)) || (!scop && madeS.some(hit))) kinds.push("broad");
+process.stdout.write(kinds.join(" "));
+' "$npmdir" "$1" 2>/dev/null) || out=unknown
+  fi
+  if [ "$out" = unknown ]; then
+    case ",$(printf '%s' "$1" | tr -d ' ')," in
+      *",**,"*) out="unscoped scoped" ;;
+      *",*,"*)  out="unscoped" ;;
+    esac
+  fi
+  printf '%s\n' "$out"
+}
+
+# The age-gate row's verdict on an exclude list, as "STATUS<TAB>detail".
+scv_npm_exclude_verdict() { # <npm version> <window days> <list>
+  local where sc; where=$(pwd); sc=$(scv_npm_exclude_scope "$3")
+  case "$sc" in
+    "unscoped scoped")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches EVERY package name, scoped or not (asked of the matcher npm uses) - the gate is off for every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    unscoped)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name (asked of the matcher npm uses) - the gate is off for every package except scoped @org/name ones, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    scoped)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name (asked of the matcher npm uses) - the gate is off for every @org/name package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    "unscoped broad")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name, and made-up scoped names too (asked of the matcher npm uses) - the gate is off for nearly every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    "scoped broad")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name, and made-up unscoped names too (asked of the matcher npm uses) - the gate is off for nearly every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    broad)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches made-up package names no exclude list would name (zz9-sch-sentinel and the like, asked of the matcher npm uses) - a wildcard that broad exempts arbitrary packages, not a named few, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    unknown)
+      printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude). The matcher npm uses could not be loaded, so whether these patterns match every package was not tested' "$1" "$2" "$where" "$3" ;;
+    *)
+      printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude)' "$1" "$2" "$where" "$3" ;;
+  esac
+}
+# <<< npm exclude scope
 
 # ---------------------------------------------------------------- npm --------
 if have npm; then
@@ -660,7 +766,7 @@ if have npm; then
         # A repo .npmrc can exempt packages (min-release-age-exclude, npm 11.17)
         # or pin a cutoff date (before, npm 11.15), and both are read from the
         # working directory, as here. MEASURED on npm 11.19.1 and 12.2.2: a
-        # project `min-release-age-exclude[]=*` let every package through even
+        # project `min-release-age-exclude[]=*` let every UNSCOPED package through (scoped ones stayed gated on 11.19.1: see scv_npm_exclude_scope) even
         # with the env layer set (an exported empty list does NOT override it)
         # while this row printed OK. npm_age_gate_behaves below runs in a temp
         # dir and cannot see a repo file, so this check is not optional there.
@@ -669,16 +775,14 @@ if have npm; then
         case "$nexcl" in null|undefined) nexcl="" ;; esac
         nbefore=$(npm config get before 2>/dev/null | tr -d '\r')
         case "$nbefore" in null|undefined) nbefore="" ;; esac
-        case ",$(printf '%s' "$nexcl" | tr -d ' ')," in
-          *",*,"*) nexcl_all=1 ;;
-          *) nexcl_all=0 ;;
-        esac
-        if [ "$nexcl_all" -eq 1 ]; then
-          row GAP PARSED "npm age gate" "npm $nv reports min-release-age=$v but min-release-age-exclude=* in $(pwd) - every package skips the gate, and no exported setting overrides a repo's exclude list"
+        nxv=""
+        [ -n "$nexcl" ] && nxv=$(scv_npm_exclude_verdict "$nv" "$v" "$nexcl")
+        if [ "${nxv%%$'\t'*}" = GAP ]; then
+          row GAP PARSED "npm age gate" "${nxv#*$'\t'}"
         elif [ -n "$nbefore" ] && [ -z "${NPM_CONFIG_MIN_RELEASE_AGE:-}${npm_config_min_release_age:-}" ]; then
           row GAP PARSED "npm age gate" "npm $nv reports before=$nbefore in $(pwd), which replaces the min-release-age window when no NPM_CONFIG_MIN_RELEASE_AGE is set"
         elif [ -n "$nexcl" ]; then
-          row WEAK PARSED "npm age gate" "npm $nv enforces $v day(s) but $(pwd) exempts: $nexcl (min-release-age-exclude)"
+          row WEAK PARSED "npm age gate" "${nxv#*$'\t'}"
         elif [ -n "$nwant" ] && [ "$v" -lt "$nwant" ]; then
           row WEAK PARSED "npm age gate" "npm $nv reports $v day(s), below the $nwant day(s) this host declared${NPM_CONFIG_MIN_RELEASE_AGE:+ - NPM_CONFIG_MIN_RELEASE_AGE in the environment outranks both npmrc files}"
         elif [ "${SCV_BEHAVIORAL:-0}" = "1" ]; then
@@ -697,42 +801,8 @@ else
 fi
 
 # ---------------------------------------------------------------- yarn -------
-if have yarn; then
-  yv=$(yarn --version 2>/dev/null)
-  case "$yv" in
-    1.*)
-      # Yarn classic never reads .yarnrc.yml, so none of our yarn hardening
-      # applies. Silent today; reported here.
-      row GAP FUNCTIONAL "yarn hardening" "yarn $yv is classic and ignores .yarnrc.yml entirely" ;;
-    *)
-      # The "2d" bug: yarn accepted the file, parsed the value to NaN, and
-      # applied no gate. Asking yarn for the value is what exposes that.
-      v=$(yarn config get npmMinimalAgeGate 2>/dev/null | tr -d '\r' | tr -d ' ')
-      case "$v" in
-        ''|undefined|null)
-          row GAP PARSED "yarn age gate" "yarn does not report npmMinimalAgeGate (needs yarn >= 4.10; found $yv)" ;;
-        *[!0-9]*)
-          row GAP PARSED "yarn age gate" "yarn reports non-integer npmMinimalAgeGate='$v' (this is the NaN failure)" ;;
-        0)
-          row GAP PARSED "yarn age gate" "npmMinimalAgeGate=0 disables the gate" ;;
-        *)
-          if [ -n "$SCV_MIN_AGE_HOURS" ] && [ "$v" -lt "$((SCV_MIN_AGE_HOURS * 60))" ] 2>/dev/null; then
-            row WEAK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes, below the ${SCV_MIN_AGE_HOURS}h this host declared"
-          else
-            row OK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes"
-          fi ;;
-      esac
-      v=$(yarn config get enableScripts 2>/dev/null | tr -d '\r' | tr -d ' ')
-      if [ "$v" = "false" ]; then
-        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
-      else
-        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}"
-      fi
-      ;;
-  esac
-else
-  row "N/A" - "yarn" "yarn not installed"
-fi
+# The yarn probe is in the shared body (files/verify-probes.sh), so the CI
+# surface asks yarn the same question instead of grepping our own file.
 
 # ---------------------------------------------------------------- pnpm -------
 if have pnpm; then
@@ -786,10 +856,53 @@ fi
 
 # ------------------------------------------------- sfw (reputation layer) ----
 if have sfw; then
-  if sfw --version >/dev/null 2>&1; then
+  # The wrappers' sfw_ready test: a non-root caller, the npm shim, nothing
+  # cached, and a cache this caller cannot fill. The wrappers then run npm and
+  # cargo WITHOUT sfw and warn, which is not the same as an sfw that fails.
+  sfw_cold=""
+  if [ "$(id -u)" != 0 ]; then
+    _s=$(readlink -f "$(command -v sfw)" 2>/dev/null); _p=${_s%/*}; _p=${_p%/*}
+    if [ -n "$_s" ] && [ -f "$_p/package.json" ] && [ ! -e "$_p/.sfw-cache/latest" ]; then
+      if [ -e "$_p/.sfw-cache" ]; then [ -w "$_p/.sfw-cache" ] || sfw_cold="$_p/.sfw-cache"
+      else [ -w "$_p" ] || sfw_cold="$_p/.sfw-cache"; fi
+    fi
+  fi
+  # Who can change the binary sfw runs. sfw runs .sfw-cache/latest without
+  # checking its digest again, for every caller, root included (`sudo npm
+  # install` goes through the npm wrapper), so a cache another account can
+  # write lets that account choose what root runs. Earlier role versions left
+  # it that way (VM#1: mode 0777 and a user-owned `latest`). The apply resets
+  # such a cache, but only when it runs; between applies this row is the only
+  # place it shows. Same test as that reset in tasks/socket.yml, and only for
+  # a root-owned sfw: a per-user sfw's cache is its owner's to write.
+  sfw_foreign=""
+  _s=$(readlink -f "$(command -v sfw)" 2>/dev/null); _p=${_s%/*}; _p=${_p%/*}
+  if [ -n "$_s" ] && [ -f "$_p/package.json" ] && [ "$(stat -c %u "$_p" 2>/dev/null)" = 0 ] \
+     && { [ -e "$_p/.sfw-cache" ] || [ -L "$_p/.sfw-cache" ]; }; then
+    if [ -L "$_p/.sfw-cache" ] || [ ! -d "$_p/.sfw-cache" ]; then
+      sfw_foreign="$_p/.sfw-cache is not a directory"
+    else
+      _b=$(find "$_p/.sfw-cache" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)
+      if [ -n "$_b" ]; then
+        sfw_foreign="$_b is $(stat -c '%U %a' "$_b" 2>/dev/null)"
+      elif [ -L "$_p/.sfw-cache/latest" ]; then
+        _t=$(readlink -f "$_p/.sfw-cache/latest" 2>/dev/null)
+        case "$_t" in "$_p/.sfw-cache"/*) ;; *) sfw_foreign="$_p/.sfw-cache/latest points outside the cache, at $_t" ;; esac
+      fi
+    fi
+  fi
+  # SFW_SKIP_UPDATE_CHECK=1 because that is how the npm and cargo wrappers run
+  # it. Without it, sfw run by a non-root account fails from one hour after the
+  # apply (it tries to rewrite its root-owned .sfw-cache/next-check), and this
+  # row reported a GAP for wrappers that were working.
+  if [ -n "$sfw_foreign" ]; then
+    row GAP FUNCTIONAL "Socket Firewall" "sfw's cache is not root-only ($sfw_foreign). sfw runs the cached binary without checking it again, for root too, so whoever can write there chooses what the npm and cargo wrappers run, including under sudo. Re-apply the role: it removes the cache and downloads the binary again"
+  elif [ -n "$sfw_cold" ]; then
+    row GAP FUNCTIONAL "Socket Firewall" "sfw has no firewall binary cached that this account can run ($sfw_cold), and only root can fetch it, so the npm and cargo wrappers run without sfw and warn - installs work, unfiltered. Re-apply the role, or run 'sudo sfw true' once"
+  elif sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
     row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
   else
-    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully"
+    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully: $(printf '%s' "$sfw_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
   fi
 elif expected tool.sfw; then
   row GAP PRESENT "Socket Firewall" "sfw not installed — npm installs are not threat-intel filtered"
@@ -864,7 +977,22 @@ describe_binary() {
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     *)
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      # A script is not necessarily a wrapper. Most of what PATH resolves to on
+      # a stock host is a launcher: Debian's /usr/bin/pip3 and /usr/bin/npm and
+      # a venv's bin/pip are python or node scripts, NodeSource's npm is
+      # npm-cli.js under node, a composer.phar is php. Calling those "another
+      # wrapper script" sent a reader looking for a second security tool that
+      # does not exist. Name the interpreter instead.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then
+        interp=$(head -n 1 "$f" 2>/dev/null | sed 's/^#![[:space:]]*//' | awk '{
+          b = $1; sub(".*/", "", b)
+          if (b == "env") { b = ""; for (i = 2; i <= NF; i++) if ($i !~ /^-/) { b = $i; sub(".*/", "", b); break } }
+          print b }')
+        case "$interp" in
+          sh|bash|dash|zsh|ksh|mksh|ash|busybox) echo "a shell script that is not ours" ;;
+          '') echo "a script with no interpreter named" ;;
+          *) echo "an unwrapped $interp launcher" ;;
+        esac
       else echo "an unwrapped binary"; fi ;;
   esac
 }
@@ -888,18 +1016,37 @@ describe_binary() {
 # can observe instead of infer — which is what upgrades the row from PRESENT
 # to genuine FUNCTIONAL evidence.
 SCV_WRAPPER_RAN_PATH=""
+SCV_WRAPPER_REFUSAL=""
 wrapper_ran() {
   w="$1"
   SCV_WRAPPER_RAN_PATH=""
+  SCV_WRAPPER_REFUSAL=""
   probe=$(mktemp 2>/dev/null) || return 2
   # RUSTUP_AUTO_INSTALL=0: one of these tools is cargo, a rustup proxy that
   # downloads its toolchain to answer --version when it is not installed
   # (MEASURED: 757 MB). Only rustup reads the variable.
+  # --no-plugins for composer: an unwrapped `composer --version` inside a
+  # checkout activates the checkout's allowed plugin (MEASURED, 2.11.2).
+  # --no-interaction, COMPOSER_ALLOW_SUPERUSER=1 and COMPOSER (a file that cannot
+  # exist): see the composer version probe in files/verify-probes.sh. An
+  # unwrapped composer run as root on a terminal otherwise waits at a hidden
+  # prompt, and a version probe must not boot the checkout it is standing in.
+  # Only composer reads those two variables.
+  wa=""; case "${w##*/}" in composer) wa="--no-plugins --no-interaction" ;; esac
   if have timeout; then
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version >/dev/null 2>&1 || true
+    _wr_err=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
   else
-    RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version >/dev/null 2>&1 || true
+    _wr_err=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
   fi
+  # RAN IS NOT WORKS. The run-probe fires first thing, so a wrapper that then
+  # REFUSES this account still records a run. The pip-to-uv wrapper exits 126
+  # with a [supply-chain-hardening] error when the only uv it finds belongs to
+  # another account (VM#2): pip does not work for this account at all, yet this
+  # row read OK FUNCTIONAL for root on such a host. Exit 126 plus an attributed
+  # error line, so a shell's own 126 (not executable) is not mistaken for it.
+  case "$_wr_err" in
+    *"rc=126") SCV_WRAPPER_REFUSAL=$(printf '%s\n' "$_wr_err" | grep -m1 'supply-chain-harden[a-z]*\] error: ') ;;
+  esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if [ -f "$line" ] && grep -q "supply-chain-harden" "$line" 2>/dev/null; then
@@ -926,7 +1073,9 @@ for w in $SCV_WRAPPERS; do
     # before the recursion guard, so an orphaned wrapper records a run and
     # then exits 127 on every call. Running is necessary, not sufficient.
     target=$(grep -oE "^(REAL_[A-Z]+|UV)='[^']*'" "$SCV_WRAPPER_RAN_PATH" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
-    if [ -n "$target" ] && [ -x "$target" ]; then
+    if [ -n "$SCV_WRAPPER_REFUSAL" ]; then
+      row GAP FUNCTIONAL "$w PATH wrapper" "wrapper at $SCV_WRAPPER_RAN_PATH ran but REFUSES this account ($(id -un 2>/dev/null)), exit 126, so \`$w\` does not work here: ${SCV_WRAPPER_REFUSAL#*error: }"
+    elif [ -n "$target" ] && [ -x "$target" ]; then
       if [ "$SCV_WRAPPER_RAN_PATH" = "$p" ]; then
         row OK FUNCTIONAL "$w PATH wrapper" "observed running when $w was invoked (at $p); callers bypassing PATH are unaffected"
       else
@@ -969,30 +1118,62 @@ for w in $SCV_WRAPPERS; do
 done
 
 # ---------------------------------------------------------------- go ---------
+# >>> go discovery
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them, and
+# checks the directories against `discover go` in files/verify-probes.sh).
+# The shared body's discovery (ECH-189) runs AFTER this preamble, so a go that
+# is installed at /usr/local/go/bin but not on this PATH (a non-login PATH,
+# another user's) read "go not installed" here, while the shared go rows below
+# found it and graded it OK in the same table (MEASURED). Look in the same
+# fixed directories, in the same order, before the go rows below.
+if ! have go; then
+  for scv__gd in /usr/local/go/bin "$HOME/go/bin"; do
+    if [ -x "$scv__gd/go" ]; then PATH="$scv__gd:$PATH"; export PATH; break; fi
+  done
+fi
+# <<< go discovery
+
 if have go; then
   # `go env` is go's effective config, not our file.
   v=$(go env GOFLAGS 2>/dev/null)
+{% if goflags_mod | length > 0 %}
+  # goflags_mod was set, so the role wrote GOFLAGS=-mod={{ goflags_mod }}.
   case "$v" in
-    *-mod=readonly*)
-      row OK PARSED "go module integrity" "go env GOFLAGS contains -mod=readonly" ;;
+    *-mod={{ goflags_mod }}*)
+      row OK PARSED "go module mode" "go env GOFLAGS contains -mod={{ goflags_mod }} (goflags_mod)" ;;
     *)
       # The role delivers GOFLAGS through /etc/profile.d + /etc/environment,
       # which only a PAM-launched or login shell loads. An empty value in a
       # docker exec / systemd / CMD context is the DOCUMENTED non-PAM gap, not
       # a misconfiguration — and saying "not configured" would send an operator
       # to fix a file that is already correct. Distinguish the two.
-      if grep -qs -- "-mod=readonly" /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
-        row WEAK PRESENT "go module integrity" "GOFLAGS is empty in THIS process, but -mod=readonly is present in /etc/environment or /etc/profile.d — non-PAM contexts (docker exec, systemd, CMD) do not load it. Verify from a login shell."
+      if grep -qs -- "-mod={{ goflags_mod }}" /etc/environment /etc/profile.d/*.sh 2>/dev/null; then
+        row WEAK PRESENT "go module mode" "GOFLAGS is empty in THIS process, but -mod={{ goflags_mod }} is present in /etc/environment or /etc/profile.d — non-PAM contexts (docker exec, systemd, CMD) do not load it. Verify from a login shell."
       else
-        row GAP PARSED "go module integrity" "GOFLAGS='${v:-<empty>}' and -mod=readonly is not in /etc/environment or /etc/profile.d either"
+        row GAP PARSED "go module mode" "GOFLAGS='${v:-<empty>}' and -mod={{ goflags_mod }} is not in /etc/environment or /etc/profile.d either"
       fi ;;
   esac
-  v2=$(go env GOPRIVATE 2>/dev/null)
-  if [ -z "$v2" ]; then
-    row OK PARSED "go checksum verification" "GOPRIVATE empty — sumdb checks apply to all modules"
-  else
-    row GAP PARSED "go checksum verification" "GOPRIVATE='$v2' exempts modules from sumdb verification"
-  fi
+{% else %}
+  # The role does not set GOFLAGS (goflags_mod is empty), so this row reports
+  # Go's own module mode rather than a protection of ours. Go's default already
+  # refuses to change go.mod/go.sum during a build: readonly, or vendor/ when the
+  # module vendors (MEASURED on go1.22.12 and go1.27.4; see defaults/main.yml).
+  # The one value that undoes that is -mod=mod, which lets `go build`/`go test`
+  # resolve a missing import and rewrite go.mod/go.sum with no `go get` (MEASURED
+  # on go1.27.4: it downloaded the latest uuid and wrote both files). The row
+  # is WEAK rather than GAP because the role never promised to override it, and
+  # N/A otherwise: an OK here would count Go's default as a protection of ours.
+  case "$v" in
+    *-mod=mod*)
+      row WEAK PARSED "go module mode" "go env GOFLAGS='$v' contains -mod=mod: a build may add requirements and rewrite go.mod/go.sum without go get. The role does not set GOFLAGS; find where this comes from (go env GOENV, the environment)" ;;
+    *)
+      na_design "go module mode" "goflags_mod is empty, so the role does not set GOFLAGS. go env GOFLAGS='${v:-<empty>}' has no -mod=mod, so Go's default applies: a build refuses to change go.mod/go.sum (readonly, or vendor/ when the module vendors)" ;;
+  esac
+{% endif %}
+  # "go checksum verification" and "go toolchain switching" are in the shared
+  # body (files/verify-probes.sh), so the action reports them too. The row that
+  # was here read only GOPRIVATE, and printed OK under GOSUMDB=off.
 else
   row "N/A" - "go" "go not installed"
 fi
@@ -1003,30 +1184,81 @@ if have pip3 || have pip; then
   # wrapper, which has NO `config` subcommand — so `pip config list` errored and
   # this row false-GAP'd while the protection was actually in effect. Two paths,
   # two sources of truth; do NOT shell `config` through a wrapper:
-  #   - pip is our wrapper  -> the source-build block is uv's `no-build`, read
-  #     from the uv config FILE (pip.conf is inert for uv pip).
-  #   - pip is a real pip   -> read `only-binary` from the pip config FILES pip
-  #     actually consults.
+  #   - pip is our wrapper  -> the source-build block is uv's `no-build`. Ask the
+  #     uv the wrapper execs, not the uv.toml we wrote: this row used to grep
+  #     /etc/uv/uv.toml and print OK PARSED, and from inside a repo whose uv.toml
+  #     says no-build = false it still printed OK while `uv pip install` there
+  #     ran a setup.py (MEASURED, uv 0.13.9). So it asks twice, from "/" (the
+  #     host config, where nobody but root can plant an ancestor uv.toml) and
+  #     from the working directory (where a repo's config outranks the host's),
+  #     and is OK only when both say no_build=All.
+  #   - pip is a real pip   -> ask pip (`config list`) for `only-binary`. Even
+  #     :all: is WEAK, never OK: only-binary refuses an sdist pip RESOLVES from
+  #     an index or --find-links, and not one named by path or URL, which still
+  #     runs setup.py (MEASURED on pip 22.0.2, 23.0.1, 24.0, 25.1.1 and 26.0.1,
+  #     in a venv and with system pip). This row was OK PARSED from a grep.
   PIPBIN=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null)
   if grep -q 'supply-chain-hardening' "$PIPBIN" 2>/dev/null; then
-    uv_nb=""
-    for f in "${UV_CONFIG_FILE:-}" /etc/uv/uv.toml "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" "$HOME/.config/uv/uv.toml"; do
-      [ -n "$f" ] && [ -f "$f" ] && grep -qiE '^[[:space:]]*no-build[[:space:]]*=[[:space:]]*true' "$f" && { uv_nb="$f"; break; }
-    done
-    if [ -n "$uv_nb" ]; then
-      row OK PARSED "pip source-build blocking" "pip delegates to uv; no-build=true in $uv_nb"
+    pipuv=$(grep -oE "^UV='[^']*'" "$PIPBIN" 2>/dev/null | head -1 | sed "s/^UV='//; s/'\$//")
+    { [ -n "$pipuv" ] && [ -x "$pipuv" ]; } || pipuv=$(command -v uv 2>/dev/null)
+    pipnbr=""; pipnbc=""; piprr=1; piprc=1; pipwhy=""
+    if [ -n "$pipuv" ]; then
+      pipdr=$( (cd / && "$pipuv" pip list --show-settings) 2>&1 ); piprr=$?
+      pipnbr=$(printf '%s\n' "$pipdr" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
+      pipdc=$("$pipuv" pip list --show-settings 2>&1); piprc=$?
+      pipnbc=$(printf '%s\n' "$pipdc" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
+      pipwhy=$(printf '%s' "$pipdc" | grep -i 'failed to parse\|^error:' | head -1 | cut -c1-150)
+    fi
+    if [ "$piprr" -eq 0 ] && [ -n "$pipnbr" ]; then
+      if [ "$pipnbr" != All ]; then
+        row GAP PARSED "pip source-build blocking" "pip delegates to uv ($pipuv), but uv reports no_build=$pipnbr - no config uv reads sets no-build, so every sdist pip installs runs its setup.py"
+      elif [ "$piprc" -ne 0 ]; then
+        row WEAK PARSED "pip source-build blocking" "pip delegates to uv, and the host config sets no-build, but in $PWD uv refuses to run (${pipwhy:-exit $piprc}) - nothing installs here, and whatever config uv found here could not be compared"
+      elif [ "$pipnbc" = All ]; then
+        row OK PARSED "pip source-build blocking" "pip delegates to uv ($pipuv), which reports no_build=All from / and from $PWD - it refuses every sdist, one named by path or URL included"
+      else
+        row GAP PARSED "pip source-build blocking" "pip delegates to uv, and the host config sets no-build, but in $PWD uv reports no_build=${pipnbc:-<absent>} - a uv.toml or pyproject.toml [tool.uv] at or above this directory outranks the host config, so a pip install run here builds sdists and runs setup.py"
+      fi
     else
-      row GAP PARSED "pip source-build blocking" "pip delegates to uv but no-build=true is not set in any uv config"
+      # This uv cannot report its settings back: the file grep is all there
+      # is, and a grep is PRESENT evidence, whatever this row used to call it.
+      uv_nb=""
+      for f in "${UV_CONFIG_FILE:-}" /etc/uv/uv.toml "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" "$HOME/.config/uv/uv.toml"; do
+        [ -n "$f" ] && [ -f "$f" ] && grep -qiE '^[[:space:]]*no-build[[:space:]]*=[[:space:]]*true' "$f" && { uv_nb="$f"; break; }
+      done
+      if [ -n "$uv_nb" ]; then
+        row WEAK PRESENT "pip source-build blocking" "pip delegates to uv; no-build=true is in $uv_nb, but ${pipuv:-uv} does not report its settings back, so nothing confirms uv reads that file or that no repo config overrides it"
+      else
+        row GAP PRESENT "pip source-build blocking" "pip delegates to uv but no-build=true is not set in any uv config"
+      fi
     fi
   else
-    pip_ob=""
-    for f in "${PIP_CONFIG_FILE:-}" /etc/pip.conf "${XDG_CONFIG_HOME:-$HOME/.config}/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf"; do
-      [ -n "$f" ] && [ -f "$f" ] && grep -qi 'only-binary' "$f" && { pip_ob="$f"; break; }
-    done
-    if [ -n "$pip_ob" ]; then
-      row OK PARSED "pip source-build blocking" "only-binary set in $pip_ob"
+    pipv=$("$PIPBIN" --version 2>/dev/null | awk '{print $2}')
+    pipcl=$("$PIPBIN" config list 2>/dev/null); pipclrc=$?
+    if [ "$pipclrc" -eq 0 ]; then
+      # Environment beats a [install] section, which beats [global].
+      pipcl=$(printf '%s\n' "$pipcl" | tr -d " '\"\r")
+      pipob=$(printf '%s\n' "$pipcl" | sed -n 's/^:env:\.only-binary=//p' | tail -1)
+      [ -n "$pipob" ] || pipob=$(printf '%s\n' "$pipcl" | sed -n 's/^install\.only-binary=//p' | tail -1)
+      [ -n "$pipob" ] || pipob=$(printf '%s\n' "$pipcl" | sed -n 's/^global\.only-binary=//p' | tail -1)
+      case "$pipob" in
+        :all:)
+          row WEAK PARSED "pip source-build blocking" "pip ${pipv:-?} ($PIPBIN) reports only-binary=:all: - it refuses an sdist it resolves from an index or --find-links, but NOT one named by path or URL (pip install ./x.tar.gz), which still runs setup.py (MEASURED on pip 22.0.2 to 26.0.1). uv's no-build refuses both: prefer uv pip" ;;
+        '')
+          row GAP PARSED "pip source-build blocking" "pip ${pipv:-?} ($PIPBIN) reports no only-binary - every sdist it installs runs its setup.py" ;;
+        *)
+          row GAP PARSED "pip source-build blocking" "pip ${pipv:-?} ($PIPBIN) reports only-binary=$pipob, not :all: - sdists of every other package build and run setup.py" ;;
+      esac
     else
-      row GAP PARSED "pip source-build blocking" "no only-binary in any pip config file pip reads"
+      pip_ob=""
+      for f in "${PIP_CONFIG_FILE:-}" /etc/pip.conf "${XDG_CONFIG_HOME:-$HOME/.config}/pip/pip.conf" "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf"; do
+        [ -n "$f" ] && [ -f "$f" ] && grep -qi 'only-binary' "$f" && { pip_ob="$f"; break; }
+      done
+      if [ -n "$pip_ob" ]; then
+        row WEAK PRESENT "pip source-build blocking" "only-binary is in $pip_ob, but '$PIPBIN config list' failed, so pip never confirmed it; and even :all: does not cover an sdist named by path or URL"
+      else
+        row GAP PRESENT "pip source-build blocking" "no only-binary in any pip config file pip reads"
+      fi
     fi
   fi
 else
@@ -1076,6 +1308,7 @@ else
 fi
 
 # =========================================================================
-# Fragment 50 (files/verify-probes.sh) follows: bun, deno, uv, composer,
-# cargo, bundler, maven, gradle, nuget. Fragment 90 renders the table.
+# Fragment 50 (files/verify-probes.sh) follows: bun, deno, uv, pip age gates,
+# go checksum db + toolchain, composer, cargo, bundler, maven, gradle, nuget.
+# Fragment 90 renders the table.
 # =========================================================================

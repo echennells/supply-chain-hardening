@@ -31,7 +31,10 @@ the user hasn't already agreed to that, tell them first:
 - Releases newer than 48 hours are refused, wherever the tool supports it.
 - Install scripts are blocked, so a package that depends on one fails to build.
 - Source distributions are refused, and `pip` is redirected to `uv` where `uv` exists.
-- `composer` runs with `--no-scripts` and `--no-plugins`, and `bundle` runs frozen.
+  Without `uv`, pip's own `only-binary` refuses an sdist from an index but not one named
+  by path or URL.
+- `composer` runs with `--no-plugins`, and with `--no-scripts` except for a script
+  named on the command line (`composer test`); `bundle` runs frozen.
 - Several package managers are replaced by wrappers at their current path.
 - There is no single uninstall command.
 
@@ -51,9 +54,16 @@ supply-chain-verify
 
 - Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or global
   `--become`: per-user config would land in root's home. The preflight refuses this.
+- If the preflight says ansible-core cannot answer the sudo-rs password prompt (Ubuntu
+  26.04 with apt ansible-core 2.20.1 and `-K`), tell the user. The fix is a newer
+  ansible-core for their user (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo
+  for the apply. Don't change their sudoers yourself.
 - If the play stops on an existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or
   `/etc/uv/uv.toml`, don't override it yourself. It may be a corporate registry setting.
   Show it to the user, and pass `-e accept_etc_overwrite=true` only if they agree.
+- The same goes for a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or
+  `~/.nuget/NuGet/NuGet.Config` the role did not write: show it to the user, and pass
+  `-e accept_user_config_overwrite=true` only if they agree.
 - On agent hosts and CI images, add `-e verify_fail_on_gap=true` so a gap fails the play.
 - If Ansible stops with "could not initialize the preferred locale", run it with
   `LC_ALL=C.UTF-8`. Over SSH the client's locale is often forwarded and missing on the
@@ -67,16 +77,30 @@ Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/
 ## Apply without Ansible
 
 ```bash
-./action/harden.sh --emit=plain
-source "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env"
-./action/verify.sh --emit=plain
+./action/harden.sh --emit=plain &&
+  source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}" &&
+  ./action/verify.sh --emit=plain
 ```
+
+Keep the `&&`. If `harden.sh` fails, nothing after it should run, least of all
+the `source`. Outside a CI runner the env file goes in
+`~/.cache/supply-chain-hardening/` (created with mode 0700), never a shared
+directory. `HARDENING_ENV_FILE` moves it, and the `source` line follows. `harden.sh`
+refuses a file that is not yours or that group or others can write, and a path
+through a world-writable directory without the sticky bit, or through a sticky
+one another user owns. It accepts group-writable directories. Run `verify.sh` as
+the same user: it will not read a record another user owns, and fails instead.
 
 This path was built for CI, so it is narrower than the role:
 
 - The env file only reaches shells that source it.
 - It wraps binaries and writes `/etc` with `sudo` where it can.
-- CI only exercises the GitHub path, so treat `plain` as less tested.
+- **Nothing refreshes the uv and pip cutoffs.** They are a fixed date, set when
+  `harden.sh` runs. On a host you keep, re-run the three lines above to move
+  them, and re-source the env file in any shell that sourced the old one. The
+  role installs a timer for this.
+- CI only exercises the GitHub path, so treat `plain` as less tested. GitLab and
+  Buildkite shell runners are not tested at all.
 
 ## If you copy settings anyway
 
@@ -92,9 +116,9 @@ This is the weakest option. Use it only when neither path above is possible, and
 |---|---|---|---|---|
 | npm | `min-release-age` | `2` | npm 11.10.0 | Integer days. `48h` fails installs, and `2880` means about 8 years. |
 | pnpm | `minimumReleaseAge` | `2880` | | Minutes. pnpm 11 no longer reads `~/.npmrc` or `/etc/npmrc`. |
-| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. `"2d"` parses to NaN and disables the gate. |
-| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds. One bad value makes Bun reject the whole file. |
-| uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. |
+| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. Yarn 4.10 reads `"2d"` as 2 minutes; 4.11+ parses it. Below 4.10 the key is ignored in `~/.yarnrc.yml` and rejected in a project's. |
+| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds, which every Bun from 1.3.0 reads. On 1.3.0 to 1.4.3 a quoted value such as `"2d"` makes Bun reject the whole file. |
+| uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. A span such as `"48 hours"` needs uv 0.9.17; older uv rejects the whole file. |
 | pip | `uploaded-prior-to` | a date | pip 26.0 | Same, with a literal `Z`. |
 | Deno | `--minimum-dependency-age` | `P2D` | | A flag, not a config key. Deno has no config file for it. |
 | Composer | `config.policy.cooldown.period` | `172800` | Composer 2.11.0 | Seconds. Also set `COMPOSER_POLICY_COOLDOWN_PERIOD`, which outranks a repo. |
@@ -169,6 +193,10 @@ If a fresh release is refused or an install script is blocked, the control is wo
 
 An agent fails closed. A person can vouch for a specific build they trust, and
 `supply-chain-allow-build` exists for that person. It is not for you to reach for.
+
+Several of these refusals don't name this project (npm `ETARGET`, a native module that
+fails when loaded, Yarn `YN0028`, Bundler frozen mode). [docs/day-one.md](docs/day-one.md)
+explains each one, so you can tell the user what was refused and what their options are.
 
 ## What this does not cover
 

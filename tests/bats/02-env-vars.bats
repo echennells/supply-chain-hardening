@@ -55,8 +55,15 @@ setup() {
   assert_env_equals GOPROXY "https://proxy.golang.org,direct"
 }
 
-@test "env: GOFLAGS=-mod=readonly" {
-  assert_env_equals GOFLAGS "-mod=readonly"
+@test "env: GOFLAGS is not written by default (an explicit -mod=readonly makes go ignore vendor/)" {
+  # goflags_mod defaults to "". MEASURED on go1.22.12 / go1.27.4: -mod=readonly
+  # is go's own default without vendor/, and with vendor/ it makes go skip the
+  # vendored copy. 05-go.bats builds a vendored module to prove the effect.
+  # Counted, not `! grep`: bats does not fail a test on a negated command
+  # unless it is the last line.
+  [ "$(grep -c "^export GOFLAGS=" /etc/profile.d/supply-chain-hardening.sh)" = 0 ]
+  [ "$(grep -c "^GOFLAGS=" /etc/environment)" = 0 ]
+  [ -z "${GOFLAGS:-}" ]
 }
 
 @test "env: GOTOOLCHAIN=local" {
@@ -74,8 +81,20 @@ setup() {
   [[ "$COMPOSER_SKIP_SCRIPTS" == *"post-install-cmd"* ]]
 }
 
-@test "env: COMPOSER_ALLOW_SUPERUSER=1 (suppress 'do not run as root' noise in CI/agent contexts)" {
-  assert_env_equals COMPOSER_ALLOW_SUPERUSER 1
+@test "env: COMPOSER_ALLOW_SUPERUSER is NOT exported host-wide (only the composer wrapper sets it)" {
+  # Exported host-wide it switched off composer's root guard for every caller
+  # that bypasses the wrapper. MEASURED (2.7.1, 2.11.2, outside a container): a
+  # non-interactive root run without it disables plugins and runs `sudo -K`;
+  # with it, a plugin the checkout's own allow-plugins enables ran as root.
+  [ -z "${COMPOSER_ALLOW_SUPERUSER+x}" ] || { echo "COMPOSER_ALLOW_SUPERUSER=$COMPOSER_ALLOW_SUPERUSER is exported" >&2; return 1; }
+  ! grep -qE '^[[:space:]]*(export[[:space:]]+)?COMPOSER_ALLOW_SUPERUSER=' /etc/profile.d/supply-chain-hardening.sh
+  ! grep -qE '^[[:space:]]*COMPOSER_ALLOW_SUPERUSER=' /etc/environment
+}
+
+@test "the composer wrapper sets COMPOSER_ALLOW_SUPERUSER for its own run" {
+  composer_path=$(command -v composer)
+  grep -q 'supply-chain-harden' "$composer_path" || skip "composer is not wrapped"
+  grep -qx 'export COMPOSER_ALLOW_SUPERUSER=1' "$composer_path"
 }
 
 @test "/etc/environment has NPM_CONFIG_IGNORE_SCRIPTS" {

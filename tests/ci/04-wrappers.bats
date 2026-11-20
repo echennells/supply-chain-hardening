@@ -356,6 +356,86 @@ cooldown_stubs() {
   chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
 }
 
+# ---- the gate backend: absolute path, never a PATH prepend, and whose it is ----
+#
+# MEASURED (VM#2; reproduced on Ubuntu 26.04 with apt cargo 1.93.1): the
+# wrapper PREPENDED $CARGO_HOME/bin to PATH, so at a system path root and every
+# other account ran the hardening user's cargo-cooldown and ~/.cargo/bin/cargo.
+
+# cooldown_stubs plus a cargo stub that also prints the PATH it was given, and
+# a pass-through sfw so a real one cannot change PATH under the test.
+path_stubs() {
+  cooldown_stubs
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]"; echo "PATH=$PATH";; esac'
+  stub_bin sfw 'exec "$@"'
+}
+
+@test "cargo-cooldown: the backend is named by absolute path and PATH is left alone" {
+  path_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  grep -q "^COOLDOWN_EXE='$TEST_HOME/.cargo/bin/cargo-cooldown'\$" "$TEST_BIN/cargo"
+  ! grep -q 'PATH="$COOLDOWN' "$TEST_BIN/cargo"
+  # HOME as the user's own: cargo searches $CARGO_HOME/bin itself, so nothing changes.
+  run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [ "$(printf '%s\n' "$output" | sed -n 's/^PATH=//p')" = "$TEST_BIN:/usr/bin:/bin" ]
+  # A caller whose CARGO_HOME is elsewhere: the backend's directory is APPENDED.
+  run bash -c "cd '$(lockdir)' && HOME=/nonexistent PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [ "$(printf '%s\n' "$output" | sed -n 's/^PATH=//p')" = "$TEST_BIN:/usr/bin:/bin:$TEST_HOME/.cargo/bin" ]
+}
+
+@test "cargo-cooldown: a backend another account owns is refused" {
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to another account"
+  path_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  # Another account owns the file, so that account can rewrite it, even though
+  # it sits in this user's directory.
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown" "$TEST_HOME/.cargo/bin"
+  sudo chown 65534 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' '$TEST_BIN/cargo' build 2>&1"
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  printf '%s\n' "$output"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"[supply-chain-harden] error: refusing to run the cargo publish-age gate backend"* ]]
+  [[ "$output" == *"cargo-cooldown is not owned by root or by $(id -un)"* ]]
+  [[ "$output" != *"STUB:cargo"* ]]
+}
+
+@test "cargo-cooldown: a root-owned backend in the caller's own directory is the caller's to run" {
+  # Only this user and root can change what is in this user's directory, so
+  # refusing a root-owned file there (`sudo cargo install` into ~/.cargo/bin)
+  # was a false refusal. An earlier test here asserted that refusal.
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to root"
+  path_stubs
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown" "$TEST_HOME/.cargo/bin"
+  sudo chown 0 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build 2>&1"
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  printf '%s\n' "$output"
+  [[ "$output" == *"ARGS=[cooldown build"* ]]
+  [[ "$output" != *"refusing"* ]]
+}
+
+@test "cargo: a manifest newer than the lockfile gets a note naming the wrapper's --locked" {
+  stub_bin cargo
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  d=$(lockdir)
+  # -t, not -d: BSD touch on the macOS runners has no -d.
+  touch -t 202001010000 "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  : > "$BATS_TEST_TMPDIR/proj/Cargo.toml"
+  run bash -c "cd '$d' && '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+  [[ "$output" == *"[supply-chain-harden] note: this cargo wrapper adds --locked"* ]]
+  [[ "$output" == *"cargo update --workspace"* ]]
+  touch "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  run bash -c "cd '$d' && '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" != *"adds --locked"* ]]
+}
+
 @test "cargo-cooldown: the crates.io window, clock and skip list are pinned over the caller's" {
   # Each has a cooldown.toml form a committed repo file can set
   # ([registry] min-publish-age, now, skip_registries), and MEASURED on
@@ -449,10 +529,91 @@ cooldown_stubs() {
 
 # --- composer --------------------------------------------------------------
 
-@test "composer: --no-scripts is injected on every invocation" {
+@test "composer: --no-scripts is injected on lifecycle invocations" {
   stub_bin composer
   harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
   run "$TEST_BIN/composer" install
+  [[ "$output" == *"--no-scripts"* ]]
+}
+
+# MEASURED before this routing (composer 2.2.6 -> 2.11.2, this action's wrapper
+# included): with --no-scripts injected, `composer test` exited 0 having run
+# nothing and `composer run-script test` said 'Script "test" is not defined'.
+composer_route_project() {
+  have php || skip "php not installed (the wrapper reads composer.json with php)"
+  PROJ="$BATS_TEST_TMPDIR/proj"
+  mkdir -p "$PROJ/sub"
+  cat > "$PROJ/composer.json" <<'J'
+{ "name": "t/t",
+  "scripts": { "test": "echo t", "install": "echo x", "post-install-cmd": "echo p" },
+  "scripts-aliases": { "test": ["t"] } }
+J
+  stub_bin composer
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+}
+
+@test "composer: a root script run by name gets no --no-scripts" {
+  composer_route_project
+  local args
+  for args in "test" "t" "run-script test" "run test" "-n test"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$PROJ" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* ]] || { echo "'$args': $output"; return 1; }
+    [[ "$output" != *"--no-scripts"* ]] || { echo "'$args' got --no-scripts: $output"; return 1; }
+    [[ "$output" == *"--no-plugins"* ]] || { echo "'$args' lost --no-plugins: $output"; return 1; }
+  done
+  run bash -c 'cd / && "$1" -d "$2" test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  run bash -c 'cd "$2/sub" && "$1" test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+}
+
+@test "composer: a script named after a built-in, or an event, does not lift --no-scripts" {
+  composer_route_project
+  local args
+  for args in "install" "post-install-cmd" "show" "nosuchscript" ""; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$PROJ" "$TEST_BIN/composer" $args
+    [[ "$output" == *"--no-scripts"* ]] || { echo "'$args' did not get --no-scripts: $output"; return 1; }
+  done
+}
+
+# MEASURED on 2.7.1 and 2.11.2 (this action's wrapper included): a checkout
+# defining scripts named after unique prefixes of built-ins (req, du, dump, up,
+# upd, ins, rem) had them run, scripts enabled, on `composer req psr/log` and the
+# rest, because composer resolves an exact command name before an abbreviation.
+# A "scripts-aliases" alias spelled like a built-in ("i") ran in its place.
+@test "composer: a script or alias that also names a built-in is refused, not run" {
+  composer_route_project
+  local hij="$BATS_TEST_TMPDIR/hijack" args
+  mkdir -p "$hij"
+  cat > "$hij/composer.json" <<'J'
+{ "name": "t/h",
+  "scripts": { "req": "echo h", "du": "echo h", "upd": "echo h", "check": "echo h", "foo": "echo h" },
+  "scripts-aliases": { "foo": ["i", "upgrade"] } }
+J
+  for args in "req psr/log" "du" "upd" "check" "i" "upgrade"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$hij" "$TEST_BIN/composer" $args
+    [ "$status" -eq 2 ] || { echo "'$args' exited $status: $output"; return 1; }
+    [[ "$output" != *"STUB:composer"* ]] || { echo "'$args' reached composer: $output"; return 1; }
+    [[ "$output" == *"[supply-chain-harden] refusing 'composer "* && "$output" == *"composer run-script "* ]] \
+      || { echo "'$args' refusal does not name the control and the way out: $output"; return 1; }
+  done
+  run bash -c 'cd "$1" && "$2" run-script req' _ "$hij" "$TEST_BIN/composer"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  # With no such script, the abbreviation is the built-in and keeps --no-scripts.
+  run bash -c 'cd "$1" && "$2" req psr/log' _ "$PROJ" "$TEST_BIN/composer"
+  [[ "$output" == *"STUB:composer"* && "$output" == *"--no-scripts"* ]]
+}
+
+@test "composer: in -nd DIR the DIR is a value, and composer does not change to it" {
+  composer_route_project
+  # MEASURED on 2.5.5, 2.7.1 and 2.11.2: `composer -nd DIR test` runs the test
+  # script of the current directory; the wrapper took DIR for the subcommand.
+  run bash -c 'cd "$2" && "$1" -nd /tmp test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  run bash -c 'cd / && "$1" -nd "$2" test' _ "$TEST_BIN/composer" "$PROJ"
   [[ "$output" == *"--no-scripts"* ]]
 }
 
@@ -846,6 +1007,106 @@ esac'
 esac'
   harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
   assert_file_contains "$TEST_TMP/sfw-install-args" "PINNED-INSTALL"
+}
+
+# --- sfw runs read-only ----------------------------------------------------
+#
+# sfw keeps its cache in its own package directory, root-owned after the root
+# `npm install -g`, and by default rewrites .sfw-cache/next-check there once
+# the last update check is an hour old. A non-root caller cannot, and sfw
+# treats that as fatal. MEASURED (sfw 2.0.6, this action at 8281a6b, a
+# non-root user, next-check backdated): npm, npx and cargo through sfw all
+# failed with "[sfw] Failed to prepare firewall binary: EACCES ... next-check".
+# SFW_SKIP_UPDATE_CHECK=1 runs the cached binary without writing. The stubs
+# here record what sfw was handed.
+
+@test "sfw: the npm, npx and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1" {
+  sfw_stubs
+  stub_bin sfw 'echo "SFW SKIP=${SFW_SKIP_UPDATE_CHECK:-unset}"; exec "$@"'
+  stub_bin npx
+  cargo_sfw_stubs
+  stub_bin sfw 'echo "SFW SKIP=${SFW_SKIP_UPDATE_CHECK:-unset}"; exec "$@"'
+  harden ECOSYSTEMS=npm,cargo INSTALL_SFW=true -- --emit=plain >/dev/null
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [[ "$output" == *"SFW SKIP=1"* ]]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npx" cowsay
+  [[ "$output" == *"SFW SKIP=1"* ]]
+  [[ "$output" == *"STUB:npx"* ]]
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build"
+  [[ "$output" == *"SFW SKIP=1"* ]]
+  [[ "$output" == *"--locked"* ]]
+}
+
+@test "sfw: the hardening-time user check runs sfw the way the wrappers will" {
+  # An sfw that fails exactly as the real one does an hour after hardening:
+  # for a non-root caller that has not set SFW_SKIP_UPDATE_CHECK. The user
+  # check has to pass the variable, or it judges sfw by a call the wrappers
+  # never make.
+  [ "$(id -u)" != 0 ] || skip "the user check is only distinct from the root warm for a non-root caller"
+  sfw_stubs
+  stub_bin sfw 'if [ "$(id -u)" != 0 ] && [ -z "${SFW_SKIP_UPDATE_CHECK:-}" ]; then
+  echo "[sfw] Failed to prepare firewall binary: EACCES: permission denied, open next-check" >&2; exit 1
+fi
+exec "$@"'
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"could not prepare its firewall binary"* ]]
+  assert_file_contains "$TEST_BIN/npm" "supply-chain-harden"
+  assert_file_contains "$OUT_FILE" "sfw_installed=true"
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+}
+
+@test "sfw: a cold sfw cache warns a non-root caller and passes through, for npm, npx and cargo" {
+  # With nothing cached, sfw downloads the binary even with
+  # SFW_SKIP_UPDATE_CHECK=1, and only root can create the cache (MEASURED:
+  # "EACCES ... mkdir .sfw-cache"). A root reinstall of sfw leaves it cold.
+  # The wrappers must say so in our name and run the tool unfiltered, as they
+  # do when sfw is absent, rather than fail every call in sfw's words.
+  [ "$(id -u)" != 0 ] || skip "root can fill the cache itself, so the guard does not apply"
+  sfw_stubs
+  stub_bin npx
+  cargo_sfw_stubs
+  # sfw laid out like a global npm install, so the wrappers can find its cache.
+  local pkg="$BATS_TEST_TMPDIR/prefix/lib/node_modules/sfw"
+  mkdir -p "$pkg/dist" "$pkg/.sfw-cache"
+  printf '{"name":"sfw","version":"0.0.0"}\n' > "$pkg/package.json"
+  printf '#!/bin/bash\necho SFW-STUB\nexec "$@"\n' > "$pkg/dist/sfw.mjs"
+  chmod +x "$pkg/dist/sfw.mjs"
+  stub_symlink sfw "$pkg/dist/sfw.mjs"
+  ln -s "$pkg/dist/sfw.mjs" "$pkg/.sfw-cache/latest"
+  harden ECOSYSTEMS=npm,cargo INSTALL_SFW=true -- --emit=plain >/dev/null
+  assert_file_contains "$TEST_BIN/npm" "supply-chain-harden"
+  # Warm: routed through sfw.
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [[ "$output" == *"SFW-STUB"* ]]
+  # Cold, in a cache this account cannot write (root's, on a real host).
+  rm -f "$pkg/.sfw-cache/latest"
+  chmod a-w "$pkg/.sfw-cache"
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" != *"SFW-STUB"* ]]
+  [[ "$output" == *"STUB:npm ARGS=[install foo]"* ]]
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npx" cowsay
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" == *"STUB:npx"* ]]
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" != *"SFW-STUB"* ]]
+  [[ "$output" == *"ARGS=[build --locked]"* ]]
+  # Cold, but in a cache this account CAN write (its own sfw, or a run that
+  # could not escalate): sfw downloads the binary itself, so it is used.
+  chmod u+w "$pkg/.sfw-cache"
+  run env PATH="$TEST_BIN:$PATH" "$TEST_BIN/npm" install foo
+  [[ "$output" == *"SFW-STUB"* ]]
+  [[ "$output" != *"sfw has no firewall binary cached"* ]]
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' build 2>&1"
+  [[ "$output" == *"SFW-STUB"* ]]
 }
 
 # --- absence ---------------------------------------------------------------

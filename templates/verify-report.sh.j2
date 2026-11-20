@@ -13,6 +13,7 @@
 : "${SCV_APPLIED_AT:=unknown}"
 : "${SCV_MIN_AGE_HOURS:=}"
 : "${NA_DESIGN:=0}"
+: "${WEAK_PRESENT:=0}"
 : "${VERBOSE:=0}"
 : "${JSON:=0}"
 
@@ -83,15 +84,25 @@ elif [ "$QUIET" -eq 0 ]; then
   [ "$VERBOSE" -eq 0 ] && { echo "(one-line summaries — run with --verbose for the full rationale, or --json for machine output)"; echo; }
   echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
   echo "setting back · PRESENT = a file exists and nothing more (unverified)."
-  echo "N/A rows say '-' (the tool is not installed here) or BYDESIGN (this"
-  echo "host's role configuration never asked for it)."
+  echo "N/A rows say '-' (nothing here to check: no such tool, or no project config"
+  echo "of that kind here) or BYDESIGN (this host's role configuration never asked for it)."
   echo
   if [ "$GAPS" -gt 0 ]; then
     echo "RESULT: $GAPS gap(s) — protections NOT in effect $SCV_SCOPE_LABEL."
   else
     echo "RESULT: no gaps."
   fi
-  [ "$WEAKS" -gt 0 ] && echo "        $WEAKS row(s) verified only as PRESENT — not evidence of enforcement."
+  # WEAKS counts every WEAK row, PARSED and FUNCTIONAL ones included, so it
+  # cannot be called "verified only as PRESENT" (it was: a host with two
+  # PRESENT rows and six WEAK PARSED/FUNCTIONAL ones printed "8 row(s) verified
+  # only as PRESENT"). Say both numbers.
+  if [ "$WEAKS" -gt 0 ]; then
+    if [ "${WEAK_PRESENT:-0}" -eq "$WEAKS" ]; then
+      echo "        $WEAKS row(s) WEAK, all verified only as PRESENT — not evidence of enforcement."
+    else
+      echo "        $WEAKS row(s) WEAK — not counted as coverage: ${WEAK_PRESENT:-0} verified only as PRESENT, the rest parsed or observed with a caveat the row states."
+    fi
+  fi
   [ "$NA_DESIGN" -gt 0 ] && echo "        $NA_DESIGN row(s) N/A — not requested by this host's configuration."
   echo
 fi

@@ -35,10 +35,16 @@ common_setup() {
   TEST_TMP="${BATS_TEST_TMPDIR}/tmp"
   TEST_BIN="${BATS_TEST_TMPDIR}/bin"
   mkdir -p "$TEST_HOME" "$TEST_TMP" "$TEST_BIN"
+  # harden.sh's DEFAULT location with no RUNNER_TEMP: a per-user directory,
+  # deliberately not $TMPDIR (VM#3: a fixed name in /tmp let another local user
+  # plant the file the recipe sources). Every test uses the default, so the
+  # default is what gets exercised.
   # shellcheck disable=SC2034  # consumed by the .bats files that load this
-  ENV_FILE="${TEST_TMP}/supply-chain-hardening.env"
+  STATE_DIR="${TEST_HOME}/.cache/supply-chain-hardening"
   # shellcheck disable=SC2034
-  OUT_FILE="${TEST_TMP}/supply-chain-hardening.outputs"
+  ENV_FILE="${STATE_DIR}/supply-chain-hardening.env"
+  # shellcheck disable=SC2034
+  OUT_FILE="${STATE_DIR}/supply-chain-hardening.outputs"
 }
 
 # harden [VAR=value ...] [-- script args ...]
@@ -143,6 +149,38 @@ stub_symlink() {
   ln -s "$target" "${TEST_BIN}/${name}"
 }
 
+# stub_go_env [version]
+#
+# A go that implements just `version` and `go env` (read, -w, -u, GOENV)
+# against a GOENV file under $HOME, with go's precedence: the environment wins
+# over the file. Enough to observe what harden.sh persists with `go env -w`
+# and what verify.sh reads back with the environment stripped.
+#
+# version defaults to go1.27.4. Below go1.21 the stub has no GOTOOLCHAIN, as
+# MEASURED on go1.18.10, go1.19.13 and go1.20.14: `go env -w GOTOOLCHAIN=...`
+# fails with "unknown go command variable GOTOOLCHAIN", and `go env GOTOOLCHAIN`
+# prints an empty line even with GOTOOLCHAIN=local exported.
+stub_go_env() {
+  local ver="${1:-go1.27.4}" minor notc=0
+  minor=${ver#go1.}; minor=${minor%%.*}
+  [[ "$minor" -lt 21 ]] && notc=1
+  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; touch "$f"
+notc='"$notc"'
+case "${1:-}" in
+  version) echo "go version '"$ver"' linux/amd64" ;;
+  env) shift
+    case "${1:-}" in
+      -w) shift; for kv in "$@"; do k=${kv%%=*}
+            if [ "$notc" = 1 ] && [ "$k" = GOTOOLCHAIN ]; then echo "go: unknown go command variable GOTOOLCHAIN" >&2; exit 1; fi
+            grep -v "^$k=" "$f" > "$f.t" || true; mv "$f.t" "$f"; echo "$kv" >> "$f"; done ;;
+      -u) shift; for k in "$@"; do grep -v "^$k=" "$f" > "$f.t" || true; mv "$f.t" "$f"; done ;;
+      GOENV) echo "$f" ;;
+      *) if [ "$notc" = 1 ] && [ "$1" = GOTOOLCHAIN ]; then echo
+         elif v=$(printenv "$1"); then echo "$v"; else grep "^$1=" "$f" | cut -d= -f2-; fi ;;
+    esac ;;
+esac'
+}
+
 # The real binary harden.sh moved aside when it wrapped our stub.
 stub_real() { echo "${TEST_BIN}/${1}-real"; }
 
@@ -167,3 +205,16 @@ assert_file_lacks() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Rewrite a file in place, keeping its mode and owner: `filter_file FILE CMD...`
+# runs CMD with FILE on stdin and writes its stdout back over FILE. Use it
+# instead of `sed -i`: BSD sed on the macOS runners has no plain -i (it takes
+# the script as a backup suffix) and no \n in a replacement.
+filter_file() {
+  local f="$1" tmp
+  shift
+  tmp="$BATS_TEST_TMPDIR/filter_file.$$.$RANDOM"
+  "$@" < "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ -w "$f" ]; then cat "$tmp" > "$f"; else sudo cp "$tmp" "$f"; fi
+  rm -f "$tmp"
+}

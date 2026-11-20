@@ -1,58 +1,22 @@
 ---
-- name: Check if socket firewall is already installed
-  ansible.builtin.command: which sfw
-  register: sfw_check
-  changed_when: false
-  check_mode: false
-  failed_when: false
-
-- name: Check if npm is available for socket install
-  # Canonical-path-first detection across system + Node-manager install
-  # methods. See tasks/npm.yml for the same logic explained.
-  ansible.builtin.shell:
-    cmd: |
-      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm"; do
-        if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
-        fi
-      done
-      for p in "$HOME"/.nvm/versions/node/*/bin/npm; do
-        if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
-        fi
-      done
-      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
-        if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
-        fi
-      done
-      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
-    executable: /bin/bash
-  register: npm_for_socket
-  changed_when: false
-  check_mode: false
-  failed_when: false
-
-- name: Check Node.js version (sfw requires >= 20)
-  ansible.builtin.shell:
-    cmd: |
-      set -o pipefail
-      node --version | sed 's/v\([0-9]*\).*/\1/'
-    executable: /bin/bash
-  register: node_major_version
-  changed_when: false
-  check_mode: false
-  failed_when: false
-  when: npm_for_socket.rc == 0
+# sfw_check, npm_for_socket, node_major_version and sfw_cache_reset come from
+# tasks/sfw_cache_reset.yml, which tasks/main.yml includes before npm.yml: the
+# sfw cache has to be reset before the first root `npm install -g` in the
+# play, and npm.yml and npq.yml run theirs before this file. When that include
+# did not run (--skip-tags always), it runs here.
+- name: Find sfw and reset an sfw cache anyone but root could have written (not done earlier in this run)
+  ansible.builtin.include_tasks:
+    file: sfw_cache_reset.yml
+    apply:
+      tags: [socket, npm]
+  when: sfw_cache_reset is not defined
 
 - name: Check that root can run npm (a per-user Node is invisible to become)
   # The install below runs `npm install -g` as root, and root's PATH is sudo's
   # secure_path, not the user's shell. On a host whose only Node is per-user
-  # (fnm, nvm, volta, asdf) the detection above finds the user's npm but root
-  # cannot run it (MEASURED on fnm: not found under sudo), so the install failed
+  # (fnm, nvm, volta, asdf) the detection in sfw_cache_reset.yml finds the
+  # user's npm but root cannot run it (MEASURED on fnm: not found under sudo),
+  # so the install failed
   # and was recorded as "install failed", which sends the reader after the wrong
   # problem. Running the user's npm as root is not the fix: root would execute
   # files the user can edit. Skip the install and say why instead.
@@ -74,7 +38,7 @@
   check_mode: false
   failed_when: false
   when:
-    - sfw_check.rc != 0
+    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
 
@@ -91,9 +55,14 @@
   # not a postinstall — if it WERE a postinstall it would already be blocked on
   # every npm >=12 host by native allowScripts (which the role supports), so sfw
   # cannot depend on an install-time script. Universal CLI flag across npm versions.
+  #
+  # Also run over an sfw older than 2.0.6 (the reset says "old-shim"):
+  # the wrappers depend on SFW_SKIP_UPDATE_CHECK, which only 2.0.6 reads. npm
+  # replaces the package directory, so the cache goes with it and the warm
+  # below downloads the binary again (MEASURED from 2.0.4 to 2.0.6).
   ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
   when:
-    - sfw_check.rc != 0
+    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
     - npm_root_for_socket.rc | default(1) == 0
@@ -140,12 +109,39 @@
       # failed (each has its own record), or sfw exists only on the applying
       # user's PATH. Carrying on recorded "installed, but its runtime binary could
       # not be fetched from GitHub (exit 127)" for an sfw root never had.
-      command -v sfw >/dev/null 2>&1 || { echo absent; exit 0; }
-      if out=$(timeout 120 sfw /bin/true 2>&1); then
+      P=$(command -v sfw 2>/dev/null) || { echo absent; exit 0; }
+      # The path root ran, for the non-root check below. The LAST line stays
+      # ok/broken/old/absent for the recorders.
+      echo "path=$P"
+      # Still older than 2.0.6 after the install above (it failed, was
+      # skipped, or sfw_version pins an older release): it ignores the
+      # SFW_SKIP_UPDATE_CHECK the wrappers set, so every non-root call through
+      # it would fail an hour after each update check. Move it aside, as for a
+      # failed warm, and record why. Not in a --check run.
+      shim=$(readlink -f "$P"); pkg=${shim%/*}; pkg=${pkg%/*}
+      if [ -f "$pkg/package.json" ] && ! grep -q SFW_SKIP_UPDATE_CHECK "$shim"; then
+        echo "version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg/package.json" | head -n 1)"
+        {{ 'true' if ansible_check_mode else 'mv -f "$P" "$P.broken" 2>/dev/null' }}
+        echo old
+        exit 0
+      fi
+      # umask 022: sudo applies the union of the caller's umask and its own, so
+      # a caller with umask 077 would leave the downloaded binary in a 0700
+      # directory that no other account can reach.
+      umask 022
+      # Whichever `true` exists, as the action does (macOS has no /bin/true).
+      true_bin=/usr/bin/true; [ -x "$true_bin" ] || true_bin=/bin/true
+      # 600 s, as supply-chain-age-gate-refresh --sfw allows for the same
+      # download. The binary is 137 MB; MEASURED from one test host the
+      # download alone took 81.6 s (1.68 MB/s), and with other downloads
+      # running at the same time it ran out at 120 s four times and at 180 s
+      # once (rc=124). Each time a working sfw was moved aside until the next
+      # apply. Waiting longer costs only time when GitHub hangs.
+      if out=$(timeout 600 sfw "$true_bin" 2>&1); then
         echo ok
       else
         rc=$?
-        P=$(command -v sfw 2>/dev/null) && mv -f "$P" "$P.broken" 2>/dev/null || true
+        mv -f "$P" "$P.broken" 2>/dev/null || true
         printf 'sfw warm failed (rc=%s): %s\n' "$rc" "$(printf '%s' "$out" | head -1)" >&2
         echo broken
         exit "$rc"
@@ -162,6 +158,60 @@
   when:
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+    # Never run sfw as root over a cache the reset found untrusted and
+    # did not remove (a --check run, or the removal failed), or over an sfw
+    # root does not own.
+    - sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True)
+
+- name: Check that a non-root caller can run the warmed sfw
+  # Parity with the action (install_sfw_and_wrap in action/harden.sh): warm as
+  # root, then run sfw the way the wrappers run it for an ordinary account,
+  # with SFW_SKIP_UPDATE_CHECK=1 and no write access to the root-owned cache.
+  # That is the state every non-root npm and cargo call through sfw is in, so
+  # if it fails here it would fail in each of them, in sfw's words, not ours.
+  # Skipped when the role is applied as root: the warm already ran as root.
+  become: false
+  ansible.builtin.shell:
+    cmd: |
+      true_bin=/usr/bin/true; [ -x "$true_bin" ] || true_bin=/bin/true
+      if out=$(SFW_SKIP_UPDATE_CHECK=1 timeout 120 {{ sfw_warm.stdout_lines[0][5:] | quote }} "$true_bin" 2>&1); then
+        echo ok
+      else
+        rc=$?
+        printf 'sfw failed as %s (rc=%s): %s\n' "$(id -un)" "$rc" "$(printf '%s' "$out" | grep -v '^[[:space:]]*$' | tail -n 1)" >&2
+        echo broken
+        exit "$rc"
+      fi
+    executable: /bin/bash
+  register: sfw_user_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - sfw_warm is defined
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'ok'
+    - (sfw_warm.stdout_lines | first) is match('path=/')
+    - preflight_invoking_user.stdout | default('root') | trim != 'root'
+
+- name: Move sfw aside when a non-root caller cannot run it
+  # Same degradation as a failed warm: with sfw gone from PATH, the npm and
+  # cargo wrappers pass through with a warning instead of failing every call.
+  become: true
+  ansible.builtin.command:
+    argv: [mv, -f, "{{ sfw_warm.stdout_lines[0][5:] }}", "{{ sfw_warm.stdout_lines[0][5:] }}.broken"]
+  changed_when: true
+  failed_when: false
+  when:
+    - sfw_user_check is defined
+    - sfw_user_check.stdout | default('') | trim == 'broken'
+
+- name: Record skipped protection — Socket Firewall cannot run for a non-root caller
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — prepared as root, but ' ~ (preflight_invoking_user.stdout | trim) ~ ' cannot run it (exit ' ~ (sfw_user_check.rc | default("?") | string) ~ ': ' ~ (sfw_user_check.stderr | default('') | trim) ~ '). It was moved aside so npm and cargo keep working, unfiltered. Check the permissions on ' ~ (sfw_cache_reset.stdout | default('') | regex_search('/[^ :]*\.sfw-cache') | default('the sfw cache', true)) ~ ' and its parents, then re-apply.'] }}
+  when:
+    - sfw_user_check is defined
+    - sfw_user_check.stdout | default('') | trim == 'broken'
 
 - name: Record skipped protection — Socket Firewall binary could not be fetched
   ansible.builtin.set_fact:
@@ -169,7 +219,15 @@
       {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ '). sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
   when:
     - sfw_warm is defined
-    - sfw_warm.stdout | default('') | trim == 'broken'
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'broken'
+
+- name: Record skipped protection — Socket Firewall older than 2.0.6
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — sfw ' ~ (sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true)) ~ ' at ' ~ sfw_warm.stdout_lines[0][5:] ~ ' predates 2.0.6, so it ignores SFW_SKIP_UPDATE_CHECK, which the npm and cargo wrappers set so that a non-root caller never writes its root-owned cache. With it, every non-root npm and cargo call through sfw fails from an hour after each update check ("[sfw] Failed to prepare firewall binary: EACCES ... next-check"). ' ~ (('This --check run changed nothing: a real run replaces it with sfw@' ~ sfw_version ~ ', and moves it aside only if it is still older than 2.0.6.') if ansible_check_mode else ((('Replacing it with sfw@' ~ sfw_version ~ ((' failed (exit ' ~ (sfw_install.rc | string) ~ ').') if (sfw_install.rc | default(0)) != 0 else ' left it unchanged: sfw_version must be 2.0.6 or later.')) if (sfw_install is defined and sfw_install is not skipped) else 'It was not replaced (see the other Socket Firewall entries).') ~ ' It was moved aside so npm and cargo keep working, unfiltered. Install sfw 2.0.6 or later as root and re-apply.'))] }}
+  when:
+    - sfw_warm is defined
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'old'
 
 - name: Record skipped protection — Socket Firewall (install failed)
   ansible.builtin.set_fact:
@@ -253,30 +311,6 @@
   changed_when: false
   check_mode: false
   failed_when: false
-
-- name: Give the invoking user ownership of the sfw cache
-  # sfw runs as WHOEVER invokes npm/cargo, but the global install and the
-  # apply-time warm both run as root (become), so the cache is root-owned. The
-  # old task set mode 0755 on that root-owned dir — writable only by root — so a
-  # non-root `npm install` failed with `EACCES ... .sfw-cache/next-check`, and
-  # because sfw's binary-prep fails BEFORE it hands off, it took the install
-  # down with it (fail-closed; MEASURED on a non-root Ubuntu box). chmod 0777
-  # would fix the permission but let any local user swap the cached firewall
-  # binary — a real downgrade. Instead chown the shared, already-warmed cache
-  # tree to the unescalated invoking user (the account that actually runs it).
-  become: true
-  ansible.builtin.file:
-    path: /usr/local/lib/node_modules/sfw/.sfw-cache
-    state: directory
-    owner: "{{ preflight_invoking_user.stdout }}"
-    recurse: true
-  failed_when: false
-  when:
-    - npm_for_socket.rc == 0
-    - node_major_version.stdout | int >= 20
-    - preflight_invoking_user.stdout | default('') | length > 0
-    # Otherwise this creates an empty root-owned sfw tree on a host with no sfw.
-    - npm_root_for_socket.rc | default(0) == 0
 
 # --- npm PATH wrapper (opt-in via npm_path_wrapper) ---
 # Without this, sfw is installed but never invoked except by callers who

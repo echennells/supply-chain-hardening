@@ -117,7 +117,7 @@ setup() {
   # re-evaluation.
   skip_if_npm_ge_12 "npm >=12 blocks lifecycle scripts even with --ignore-scripts=false (allowScripts), so this documented bypass no longer reproduces on npm >=12 (ECH-194)"
   backup=$(mktemp)
-  cp "$HOME/.npmrc" "$backup"
+  cp -p "$HOME/.npmrc" "$backup"   # -p: keep the original mode, not mktemp's 0600
 
   # Attacker-controlled override at user level
   echo "ignore-scripts=false" > "$HOME/.npmrc"
@@ -127,8 +127,9 @@ setup() {
   npm init -y >/dev/null 2>&1
   # Run in a subshell with NPM_CONFIG_IGNORE_SCRIPTS unset so the
   # documented non-PAM scenario is exercised regardless of caller context.
-  # When bats is invoked via SSH/sudo/cron, pam_env loads /etc/environment
-  # and puts NPM_CONFIG_IGNORE_SCRIPTS=true into scope — that beats the
+  # When bats is invoked via SSH or cron (or sudo where /etc/pam.d/sudo
+  # lists pam_env: Ubuntu 24.04's does, Debian 13's does not), pam_env loads
+  # /etc/environment and puts NPM_CONFIG_IGNORE_SCRIPTS=true into scope — that beats the
   # user-level .npmrc per npm precedence (env > user > global) and blocks
   # the bypass this test is documenting. The unset reproduces the Docker
   # CMD / systemd-no-EnvironmentFile / agent-process environment the test

@@ -242,7 +242,7 @@ exec '"$realpy"' "$@"'
   [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
   # Counted as toolchain: no re-run teaches pip 24 the flag. It was counted as
   # config, so the summary told the reader re-running the hardening would fix it.
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
@@ -265,6 +265,95 @@ exec '"$realpy"' "$@"'
   cd "$BATS_TEST_TMPDIR/repo"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"[allow.global]"* ]]
+}
+
+@test "cargo threat-intel: a cold sfw cache says cargo runs unfiltered, not that every build fails" {
+  # With nothing cached, sfw cannot run for a non-root caller (it cannot
+  # create its root-owned cache), and the cargo wrapper then runs cargo
+  # WITHOUT sfw and warns. MEASURED in the role and the action: the crate
+  # downloaded, exit 0, while this row said "EVERY cargo build in this job is
+  # failing" and sent the operator after the wrong problem.
+  [ "$(id -u)" != 0 ] || skip "root can fill the cache itself, so the wrapper does not skip sfw"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.80.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$BATS_TEST_TMPDIR/proj"; touch "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  # sfw laid out like a global npm install. It fails the way the real one
+  # does when it cannot create its cache.
+  local pkg="$BATS_TEST_TMPDIR/prefix/lib/node_modules/sfw"
+  mkdir -p "$pkg/dist" "$pkg/.sfw-cache"
+  printf '{"name":"sfw","version":"2.0.6"}\n' > "$pkg/package.json"
+  printf '#!/bin/bash\n[ -e "%s/.sfw-cache/latest" ] && exec "$@"\necho "[sfw] Failed to prepare firewall binary: EACCES: permission denied, mkdir" >&2; exit 1\n' "$pkg" > "$pkg/dist/sfw.mjs"
+  chmod +x "$pkg/dist/sfw.mjs"
+  stub_symlink sfw "$pkg/dist/sfw.mjs"
+  ln -s "$pkg/dist/sfw.mjs" "$pkg/.sfw-cache/latest"
+  harden ECOSYSTEMS=cargo CARGO_SOCKET_FIREWALL=true -- --emit=plain >/dev/null
+  rm -f "$pkg/.sfw-cache/latest"
+  chmod a-w "$pkg/.sfw-cache"
+
+  # Ground truth first: the build runs, unfiltered, with the warning.
+  run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fetch 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+
+  run verify_sourced --emit=plain
+  row=$(printf '%s\n' "$output" | grep 'cargo threat-intel filtering')
+  echo "$row"
+  [[ "$row" == "GAP    FUNCTIONAL  cargo threat-intel filtering"* ]]
+  [[ "$row" == *"runs cargo WITHOUT sfw"* ]]
+  [[ "$row" == *"sudo sfw true"* ]]
+  [[ "$row" != *"EVERY cargo build"* ]]
+
+  # An sfw that cannot execute with a binary cached is still the failing case.
+  chmod u+w "$pkg/.sfw-cache"
+  ln -s "$pkg/dist/sfw.mjs" "$pkg/.sfw-cache/latest"
+  printf '#!/bin/bash\nexit 1\n' > "$pkg/dist/sfw.mjs"
+  run verify_sourced --emit=plain
+  row=$(printf '%s\n' "$output" | grep 'cargo threat-intel filtering')
+  echo "$row"
+  [[ "$row" == *"CANNOT EXECUTE"* ]]
+}
+
+@test "cargo publish-age gate: a backend the wrapper refuses for this account is its own GAP" {
+  # The wrapper runs cargo-cooldown only when no other account can choose what
+  # runs there (VM#2). A refusal exits 126 before cargo is reached; the row
+  # must say so, not "no dispatch". The backend is given to ANOTHER account:
+  # a root-owned file in this user's own directory is this user's to run.
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to another account"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  sudo chown 65534 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run verify_sourced --emit=plain
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"REFUSES its gate backend"* ]]
+}
+
+@test "cargo publish-age gate: a wrapper that still prepends another account's directory is GAP" {
+  # Wrappers rendered before the backend had a fixed path PREPENDED a directory
+  # to PATH. MEASURED (VM#2): at /usr/bin/cargo that made root and a second
+  # account run the deploying user's cargo-cooldown and ~/.cargo/bin/cargo,
+  # while the dispatch probe still saw `cooldown build`. Owned by the caller,
+  # the same line is the caller's own business and not this GAP.
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to stage another account's directory"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  other="$BATS_TEST_TMPDIR/theirs"
+  mkdir -p "$other"; chmod 755 "$other"; sudo chown 65534 "$other"
+  filter_file "$TEST_BIN/cargo" awk -v l="COOLDOWN_BIN='$other'" '{ print } /^COOLDOWN_EXE=/ { print l }'
+  grep -q "^COOLDOWN_BIN='$other'\$" "$TEST_BIN/cargo"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"PREPENDS $other to PATH"* ]]
+  filter_file "$TEST_BIN/cargo" sed "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$TEST_HOME/.cargo/bin'|"
+  run verify_sourced --emit=plain
+  sudo rm -rf "$other"
+  [[ "$output" == *"cargo publish-age gate"* ]]
+  [[ "$output" != *"PREPENDS"* ]]
 }
 
 # uv_reporting <cutoff>: a uv that reports an absolute exclude-newer instant in
@@ -435,7 +524,7 @@ esac"
   [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
   [[ "$output" == *"does NOT implement config.policy.cooldown"* ]]
   # Counted as toolchain, or --fail-on=config fails a job for what it was handed.
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "composer: every version-limited gap is toolchain, so fail-on=config can pass on a stock LTS" {
@@ -446,7 +535,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      composer audit blocking"* ]]
   [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
-  [[ "$output" =~ [2-9]\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [2-9]\ no\ configuration\ can\ close ]]
 }
 
 @test "composer 2.11 with the gate in effect reads OK" {
@@ -481,13 +570,202 @@ esac"
   [[ "$output" == *"acme/*"* ]]
 }
 
+# MEASURED on 2.11.2 (VM run): ["*/*"] exempts every package (`composer require`
+# resolved a release inside the window) but read WEAK, because only a literal
+# "*" was recognised. Composer's only wildcard is *, so any pattern made of *
+# and the one slash matches every vendor/name.
+@test "composer: an ignore pattern that matches every vendor/name is a GAP, not just *" {
+  local pat
+  for pat in '*/*' '**' '*/**'; do
+    composer_age_stub 2.11.1 "[policy.cooldown.ignore] [acme/*, $pat] (./composer.json)"
+    harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+    run verify_sourced --emit=plain
+    [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]] || { echo "'$pat' was not a GAP" >&2; return 1; }
+    [[ "$output" == *"every package skips the gate"* ]]
+  done
+}
+
+@test "composer: a map-form ignore entry is read, and a constrained match-all is WEAK" {
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore.*.constraint] <1.0 (./composer.json)
+[policy.cooldown.ignore.*.reason] legacy (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"for the versions its constraint names"* ]]
+  composer_age_stub 2.11.1 '[policy.cooldown.ignore.*] legacy (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
+}
+
+# The writers put "allow-plugins": {} there, never false (false is a hard fatal
+# below 2.2.15). Composer lists no [allow-plugins] line for {} (MEASURED 2.2.6,
+# 2.7.1, 2.11.2), so the row was WEAK on every host, blaming a `false` nothing
+# writes.
+@test "composer: the empty allowlist the writers write reads OK, an allowed plugin a GAP" {
+  composer_age_stub 2.11.1 '[secure-http] true (/x/config.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer plugin execution blocked"* ]]
+  [[ "$output" == *"empty allowlist"* ]]
+  [[ "$output" != *"allow-plugins=false is NOT"* ]]
+  composer_age_stub 2.11.1 '[allow-plugins.evil/probe] true (/x/config.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer plugin execution blocked"* ]]
+  [[ "$output" == *"evil/probe"* ]]
+}
+
+# composer_override_stub <effective-only lines>: the --global dump is the
+# hardened one; the dump without --global (run inside the checkout) adds lines.
+composer_override_stub() {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *--global*--list*) echo '[secure-http] true (/x/config.json)'
+                     echo '[policy.cooldown.period] 172800 (/x/config.json)'
+                     echo '[policy.cooldown.block] true (/x/config.json)' ;;
+  *--list*) echo '[secure-http] true (/x/config.json)'
+            echo '[policy.cooldown.period] 172800 (/x/config.json)'
+            echo '[policy.cooldown.block] true (/x/config.json)'
+            echo '$1' ;;
+  *) echo STUB ;;
+esac"
+  CHECKOUT="$BATS_TEST_TMPDIR/checkout"; mkdir -p "$CHECKOUT"
+  echo '{"name":"t/t"}' > "$CHECKOUT/composer.json"
+}
+
+# MEASURED on 2.11.2 (VM run): a checkout's "policy": false with COMPOSER_POLICY=1
+# exported is listed as `[policy] true (./composer.json)`; the gate rows were
+# right (OK) but this row said GAP "policy: <unset> -> true ... composer uses
+# the repo's value", crediting the env's value to the repo.
+@test "composer: a repo key the exported env outranks is not reported as an override" {
+  composer_override_stub '[policy] true (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  echo 'export COMPOSER_POLICY=1' >> "$ENV_FILE"
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer repo config override"* ]]
+  [[ "$output" == *"outranked by the exported COMPOSER_POLICY=1"* ]]
+}
+
+# MEASURED on 2.11.2 (VM run): with {"*": "x"} the gate row was GAP while this
+# row said OK, "matches the global config on every key we harden".
+@test "composer: a map-form ignore entry in the checkout is an override" {
+  composer_override_stub '[policy.cooldown.ignore.*] x (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer repo config override"* ]]
+  [[ "$output" == *"policy.cooldown.ignore entries"* ]]
+}
+
+# composer_ignore_stub <ignore JSON, empty = not set> [--list line]: answers the
+# single-key read `composer config policy.cooldown.ignore` inside the checkout
+# with the JSON composer prints; the global config sets no ignore list.
+composer_ignore_stub() {
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *'--global policy.cooldown.ignore'*) exit 1 ;;
+  *'policy.cooldown.ignore'*) [ -n '$1' ] || exit 1; echo '$1' ;;
+  *--global*--list*) echo '[secure-http] true (/x/config.json)'
+                     echo '[policy.cooldown.period] 172800 (/x/config.json)'
+                     echo '[policy.cooldown.block] true (/x/config.json)' ;;
+  *--list*) echo '[secure-http] true (/x/config.json)'
+            echo '[policy.cooldown.period] 172800 (/x/config.json)'
+            echo '[policy.cooldown.block] true (/x/config.json)'
+            echo '${2:-}' ;;
+  *) echo STUB ;;
+esac"
+  CHECKOUT="$BATS_TEST_TMPDIR/checkout"; mkdir -p "$CHECKOUT"
+  echo '{"name":"t/t"}' > "$CHECKOUT/composer.json"
+}
+
+# MEASURED on 2.11.2 with the role applied: a checkout's {"*": {}}, {"*/*": {}}
+# or {"*": []} let `composer require aws/aws-sdk-php --dry-run` take a release the
+# baseline withholds as "still in the cooldown period", while `config --list`
+# printed no line for the rule and both rows read OK. Composer prints the
+# single-key read of all three as {"*":[]} / {"*/*":[]}.
+@test "composer: an ignore rule with no fields that matches every package is a GAP on both rows" {
+  have php || skip "php not installed (the verifier decodes the ignore list with php)"
+  local shape
+  for shape in '{"*":[]}' '{"*/*":[]}' '{"*":{}}' '{"*":null}' '{"*":[{"reason":"x"}]}'; do
+    composer_ignore_stub "$shape"
+    harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+    cd "$CHECKOUT"
+    run verify_sourced --emit=plain
+    cd - >/dev/null
+    [[ "$output" == *"GAP    PARSED      composer publish-age gate"* && "$output" == *"every package skips the gate"* ]] \
+      || { echo "gate row for $shape: $(printf '%s\n' "$output" | grep 'publish-age gate')" >&2; return 1; }
+    [[ "$output" == *"GAP    PARSED      composer repo config override"* && "$output" == *"policy.cooldown.ignore entries: <none> -> "* ]] \
+      || { echo "override row for $shape: $(printf '%s\n' "$output" | grep 'repo config override')" >&2; return 1; }
+  done
+  # The control: no ignore list reads OK on both rows.
+  composer_ignore_stub ''
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"OK     PARSED      composer repo config override"* ]]
+}
+
+# MEASURED on 2.11.2: {"*": {"on-block": false}} still withheld the release; the
+# rule only affects the audit report. It read GAP "every package skips the gate",
+# and the override row named its field as a pattern ("<none> -> *.on-block").
+@test "composer: a rule with on-block false exempts nothing from the gate" {
+  have php || skip "php not installed (the verifier decodes the ignore list with php)"
+  composer_ignore_stub '{"*":{"on-block":false}}' '[policy.cooldown.ignore.*.on-block] false (./composer.json)'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  cd "$CHECKOUT"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer publish-age gate"* ]]
+  [[ "$output" == *"OK     PARSED      composer repo config override"* ]]
+  [[ "$output" != *"on-block"* ]]
+}
+
+# What every composer call in harden.sh and verify.sh hands composer, recorded by
+# an UNWRAPPED stub (the wrapper sets COMPOSER_ALLOW_SUPERUSER itself, which would
+# hide the probe's own environment). MEASURED before: run as root on a terminal,
+# a composer that is not the wrapper waits at a hidden "Continue as root/super
+# user [yes]?" prompt unless COMPOSER_ALLOW_SUPERUSER is set (with the wrapper
+# reverted on 2.2.6 the verifier never finished), and the version probes ran
+# with the checkout's composer.json as the project. Reading a version needs no
+# project, and a probe must never boot the checkout it runs in.
+@test "composer: every composer probe is non-interactive, root-safe, and reads a version with no project" {
+  local log="$BATS_TEST_TMPDIR/composer-calls" body
+  CHECKOUT="$BATS_TEST_TMPDIR/checkout"; mkdir -p "$CHECKOUT"
+  echo '{"name":"t/t","require":{}}' > "$CHECKOUT/composer.json"
+  body="printf '%s|%s|%s|%s\\n' \"\$PWD\" \"\${COMPOSER-<unset>}\" \"\${COMPOSER_ALLOW_SUPERUSER-<unset>}\${COMPOSER_NO_INTERACTION:+ NI}\" \"\$*\" >> '$log'
+case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *--list*) echo '[secure-http] true (/x/config.json)' ;;
+esac"
+  stub_bin composer "$body"
+  cd "$CHECKOUT"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  stub_bin composer "$body"
+  run verify_sourced --emit=plain
+  [ -s "$log" ]
+  local pwd comp su args nver=0
+  while IFS='|' read -r pwd comp su args; do
+    [[ "$su" == 1* ]] || { echo "no COMPOSER_ALLOW_SUPERUSER=1: composer $args (in $pwd)" >&2; return 1; }
+    [[ " $args " == *" --no-interaction "* || " $args " == *" -n "* || "$su" == *" NI" ]] \
+      || { echo "interactive: composer $args (in $pwd)" >&2; return 1; }
+    if [[ " $args " == *" --version "* ]]; then
+      nver=$((nver + 1))
+      [ "$comp" = /dev/null/composer.json ] || { echo "version probe with COMPOSER=$comp: composer $args (in $pwd)" >&2; return 1; }
+    fi
+  done < "$log"
+  # harden's probe, the verifier's version read and its run-probe(s)
+  [ "$nver" -ge 3 ] || { echo "only $nver version probes recorded" >&2; cat "$log" >&2; return 1; }
+}
+
 @test "bundler below 4.0.13 is a toolchain GAP even though it echoes the key" {
   bundler_age_stub 2.4.20 2
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
   [[ "$output" == *"does NOT implement cooldown"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "bundler 4.0.13 is the first version the row accepts" {
@@ -576,7 +854,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
   [[ "$output" == *"has no solver.min-release-age"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "poetry 2.4.0 is the first version the row accepts" {
@@ -600,6 +878,10 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"WEAK   PARSED      poetry publish-age gate"* ]]
   [[ "$output" == *"exempts"* ]]
+  # The detail must NAME what is exempt and where. These fields used to print
+  # blank: cq() was defined below the poetry rows, so bash had not seen it yet.
+  [[ "$output" == *'exempts ["six"] in '* ]]
+  [[ "$output" != *"cq: command not found"* ]]
   poetry_age_stub 2.5.1 1
   harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
@@ -904,4 +1186,365 @@ echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   run verify -- --emit=plain
   [ "$(table_rows "$output")" -eq "$base" ]
   [[ "$output" == *'ignore-scripts=x\c'* ]]
+}
+
+# ---- VM#3: a record or env file someone else can write is not believed ----
+
+forge_record() { # a COMPLETE-looking record scoped to npm only
+  mkdir -p "$STATE_DIR"
+  printf 'ecosystems_hardened=npm\nrelease_age_hours=48\njob_id=\nhardening_complete=true\n' > "$OUT_FILE"
+}
+
+@test "record: one writable by group or others is ignored, and the scope is not narrowed" {
+  # MEASURED on old main: a planted record made the verifier say "this job
+  # hardened: npm" and report 1 gap instead of 5.
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  forge_record; chmod 666 "$OUT_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  hardening run record"*"writable by group or others"*"NOT read"* ]]
+  [[ "$output" != *"this job hardened: npm"* ]]
+}
+
+@test "record: one owned by another user is ignored" {
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo"
+  local other=nobody; id -u "$other" >/dev/null 2>&1 || skip "no 'nobody' user"
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  forge_record; chmod 644 "$OUT_FILE"; sudo -n chown "$other" "$OUT_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"hardening run record"*"belongs to uid"*"NOT read"* ]]
+  [[ "$output" != *"this job hardened: npm"* ]]
+}
+
+@test "record: our own record still scopes the run (the check is not a blanket refusal)" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"this job hardened: npm"* ]]
+  [[ "$output" != *"hardening run record"* ]]
+}
+
+@test "env file: one writable by others is reported as a GAP, not read and not compared" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  chmod 666 "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PRESENT     env layer propagation"*"NOT read. Do not source it"* ]]
+  [ "$status" -eq 1 ]
+}
+
+# ---- VM#14: an N/A must not contradict itself, a launcher is not a wrapper ----
+
+@test "wrapper N/A: the reason is the wrapper record, not the ecosystem list" {
+  # Old main: "npm PATH wrapper  not deployed ... — not required here: this job
+  # hardened: npm". npm WAS hardened; the wrapper only comes with intel.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'npm PATH wrapper' <<<"$output")
+  [[ "$r" == *"N/A"*"BYDESIGN"* ]]
+  [[ "$r" == *"the PATH wrappers this job deployed are: none"*"only with INTEL=sfw"* ]]
+  [[ "$r" != *"this job hardened"* ]]
+  # GitHub names the input, not the variable.
+  run verify_sourced --emit=github
+  [[ "$(grep 'npm PATH wrapper' <<<"$output")" == *"only with intel: sfw"* ]]
+}
+
+@test "describe_binary: a script nobody recognised is not called a wrapper" {
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
+  run verify -- --emit=plain
+  # stub_bin writes a #!/bin/bash script, which describe_binary names by its
+  # interpreter.
+  [[ "$(grep 'bun PATH wrapper' <<<"$output")" == *"(a shell script that is not ours)"* ]]
+  [[ "$output" != *"another wrapper script"* ]]
+}
+
+# ---- VM#14: remediation names the delivery path that is actually in use ----
+
+@test "uv age gate: the freeze remedy on this surface is harden.sh, not the role's timer" {
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'uv age gate' <<<"$output")
+  [[ "$r" == *"Re-run action/harden.sh"* ]]
+  [[ "$r" != *"Re-apply the role"* ]]
+  [[ "$r" != *"systemctl status"* ]]
+}
+
+# ---- VM#10: yarn is probed, not grepped, and below 4.10 is a toolchain gap ----
+
+# yarn_stub <version> <config-get npmMinimalAgeGate stdout> <its exit code>
+yarn_stub() {
+  stub_bin yarn 'case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get npmMinimalAgeGate") printf "%s\n" "'"$2"'"; exit '"$3"' ;;
+  "config get enableScripts") echo false ;;
+  *) echo STUB ;;
+esac'
+}
+
+@test "yarn: below 4.10 the age gate is a toolchain GAP naming 4.10, not 'the NaN failure'" {
+  # MEASURED (apt yarnpkg 4.1.0): `yarn config get npmMinimalAgeGate` prints a
+  # usage error on stdout and exits 1. Old main: the CI row was a WEAK PRESENT
+  # grep of our own file, and the role read the usage text as a NaN value.
+  yarn_stub 4.1.0 'Usage Error: Couldn'"'"'t find a configuration settings named "npmMinimalAgeGate"' 1
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'yarn age gate' <<<"$output")
+  [[ "$r" == GAP*"yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0)"* ]]
+  [[ "$r" != *"NaN"* ]]
+  [[ "$output" == *"OK     PARSED      yarn lifecycle scripts blocked"* ]]
+  [[ "$output" != *"file contents only"*"yarnrc"* ]]
+  [ "$status" -eq 1 ]
+  # A gap no config can close: --fail-on=config does not fail on it.
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ]
+}
+
+@test "yarn: 4.10 reading \"2d\" as 2 minutes is WEAK, below the promised window" {
+  yarn_stub 4.10.3 2 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn age gate' <<<"$output")" == WEAK*"npmMinimalAgeGate=2 minutes, below the 48h"* ]]
+}
+
+@test "yarn: a working gate is OK, so GAP is not the default answer" {
+  yarn_stub 4.11.0 2880 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn age gate' <<<"$output")" == OK*"npmMinimalAgeGate=2880 minutes"* ]]
+}
+
+@test "yarn: classic is a GAP for the whole ecosystem" {
+  yarn_stub 1.22.22 undefined 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn hardening' <<<"$output")" == GAP*"classic and ignores .yarnrc.yml"* ]]
+}
+
+@test "yarn: a yarn that prints no version is not blamed on its version" {
+  # A corepack shim that cannot resolve a version prints nothing for --version.
+  # The row used to read "yarn <unknown> has no npmMinimalAgeGate (needs Yarn
+  # 4.10.0)", sending the reader to upgrade a yarn whose version nobody knew.
+  yarn_stub '' 'Internal Error: cannot resolve a yarn version' 1
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'yarn age gate' <<<"$output")
+  [[ "$r" == GAP*"yarn could not report its version"* ]]
+  [[ "$r" != *"needs Yarn 4.10.0"* ]]
+  [[ "$r" != *"<unknown>"* ]]
+}
+
+# ---- verifier cluster (VM#7, #8, #11, #14; CMP 4.8) --------------------------
+
+@test "pip: only-binary=:all: is WEAK, never OK - a path or URL sdist still runs setup.py" {
+  # MEASURED on pip 22.0.2 to 26.0.1: only-binary refuses an sdist pip resolves
+  # from an index or --find-links and builds one named by path. This row was OK.
+  stub_bin pip3 "case \"\$*\" in
+  --version) echo 'pip 24.0 from /x (python 3.12)' ;;
+  'config list') echo \"install.only-binary=':all:'\" ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip sdist execution blocked"* ]]
+  [[ "$output" == *"NOT one named by path or URL"* ]]
+  [[ "$output" != *"OK     PARSED      pip sdist execution blocked"* ]]
+}
+
+@test "report: the footer separates PRESENT-only WEAK rows from caveated ones" {
+  # The footer said "N row(s) verified only as PRESENT" with N counting every
+  # WEAK row, PARSED and FUNCTIONAL ones included.
+  stub_bin pip3 "case \"\$*\" in
+  --version) echo 'pip 24.0 from /x (python 3.12)' ;;
+  'config list') echo \"install.only-binary=':all:'\" ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  weak_all=$(grep -cE '^WEAK ' <<<"$output" || true)
+  weak_present=$(grep -cE '^WEAK +PRESENT ' <<<"$output" || true)
+  [ "$weak_all" -gt "$weak_present" ]
+  [[ "$output" == *"$weak_all row(s) WEAK — not counted as coverage: $weak_present verified only as PRESENT"* ]]
+  [[ "$output" != *"$weak_all row(s) verified only as PRESENT"* ]]
+}
+
+@test "cargo lockfile writers: a tool limit, not a config gap, and the detail says the wrapper warns" {
+  # cargo-cooldown has no verb for add/generate-lockfile/vendor/remove, so no
+  # re-run routes them. Counted as "fixable by re-running", it made
+  # --fail-on=config fail every job that installed cargo-cooldown.
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod +x "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo lockfile writers routed"* ]]
+  [[ "$output" == *"writes Cargo.lock and is NOT age-gated' warning"* ]]
+  [[ "$output" != *"this state is SILENT"* ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
+  # The wrapper really does warn on a writer, with the backend present.
+  run env -i PATH="${TEST_BIN}:${TEST_HOME}/.cargo/bin:${PATH}" HOME="$TEST_HOME" cargo add serde
+  [[ "$output" == *"'cargo add' writes Cargo.lock and is NOT age-gated"* ]]
+}
+
+@test "doc pointers are absolute URLs pinned to the ref GitHub reports, never repo-relative paths" {
+  bundler_age_stub 2.4.20 2
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"bundler publish-age gate"* ]]
+  [[ "$output" == *"See https://github.com/echennells/supply-chain-hardening/blob/main/docs/composer-bundler-cooldown-by-distro.md"* ]]
+  [[ "$output" != *"See docs/"* ]]
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" SCV_DOCS_REF=v2.1.0 \
+    bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"/blob/v2.1.0/docs/composer-bundler-cooldown-by-distro.md"* ]]
+  # A value that is not a git ref never reaches the URL.
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" SCV_DOCS_REF='x y;$(id)' \
+    bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"/blob/main/docs/composer-bundler-cooldown-by-distro.md"* ]]
+}
+
+@test "npm exclude: the matcher block is byte-identical on both surfaces" {
+  block() { sed -n '/^# >>> npm exclude scope$/,/^# <<< npm exclude scope$/p' "$1"; }
+  role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+}
+
+# Stage a project .npmrc whose exclude list is $1, and run the verifier there.
+npm_exclude_run() {
+  mkdir -p "$BATS_TEST_TMPDIR/np"
+  printf '{"name":"np","version":"1.0.0"}\n' > "$BATS_TEST_TMPDIR/np/package.json"
+  printf 'min-release-age-exclude[]=%s\n' "$1" > "$BATS_TEST_TMPDIR/np/.npmrc"
+  cd "$BATS_TEST_TMPDIR/np"
+  run verify_sourced --emit=plain
+}
+
+@test "npm exclude: patterns are judged by npm's own matcher, scoped and unscoped apart" {
+  # MEASURED on npm 11.19.1, 99999-day window: '*' exempted lodash but not
+  # @types/node; '**' exempted both; '@*/*' every scoped package. The row
+  # compared entries with a literal '*': '*' read "every package", the rest WEAK.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_exclude_run 'lodash'
+  [[ "$output" == *"does NOT implement min-release-age"* ]] && skip "this npm predates the gate"
+  [ "$(npm config get min-release-age-exclude 2>/dev/null)" = lodash ] || skip "this npm predates min-release-age-exclude (11.17)"
+  [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: lodash"* ]]
+  npm_exclude_run '**'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches EVERY package name, scoped or not"* ]]
+  npm_exclude_run '*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every UNSCOPED package name"* ]]
+  [[ "$output" != *"EVERY package name"* ]]
+  npm_exclude_run '@*/*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every SCOPED package name"* ]]
+  # MEASURED, same npm: '??*' and '[!z]*' each exempted lodash and express.
+  # They miss one sentinel each ('a', zz9-sch-sentinel), which is how they
+  # used to read WEAK; a match on ANY made-up name is broad.
+  npm_exclude_run '??*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches made-up package names"* ]]
+  npm_exclude_run '[!z]*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches made-up package names"* ]]
+  npm_exclude_run '@types/*'
+  [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: @types/*"* ]]
+}
+
+@test "go discovery: both preambles look where the shared body looks, before their go rows" {
+  # The shared body's `discover go` runs after the preambles. Without the same
+  # lookup in each preamble, a go at /usr/local/go/bin off this PATH printed
+  # "go not installed" from the preamble and OK go rows from the shared body.
+  block() { sed -n '/^# >>> go discovery$/,/^# <<< go discovery$/p' "$1"; }
+  role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  probes="${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+  shared=$(sed -n 's/^discover go[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*|| true$/\1/p' "$probes")
+  mine=$(block "$VERIFY_SH" | sed -n 's/^[[:space:]]*for scv__gd in \(.*\); do$/\1/p')
+  [ -n "$shared" ] && [ "$shared" = "$mine" ]
+  # And the block sits before each preamble's own go rows (the last match: the
+  # block's own `if ! have go` matches too).
+  for f in "$role" "$VERIFY_SH"; do
+    [ "$(grep -n '^# <<< go discovery$' "$f" | cut -d: -f1)" -lt "$(grep -nE '^if (! )?have go; then$' "$f" | tail -1 | cut -d: -f1)" ]
+  done
+}
+
+@test "go discovery: a go off PATH is found by the preamble too, so the table agrees with itself" {
+  # A stub go in a directory the shared list names cannot be planted from here
+  # (/usr/local/go/bin needs root, $HOME/go/bin is under the test HOME), so use
+  # the second: HOME is the test's.
+  mkdir -p "$TEST_HOME/go/bin"
+  cat > "$TEST_HOME/go/bin/go" <<'GO'
+#!/bin/sh
+case "$1 $2" in
+  "env GOSUMDB") echo sum.golang.org ;;
+  "env GOTOOLCHAIN") echo local ;;
+  "env GOVERSION") echo go1.24.2 ;;
+  "env GOFLAGS") echo -mod=readonly ;;
+  "version "*) echo "go version go1.24.2 linux/amd64" ;;
+  env*) echo "" ;;
+  *) exit 0 ;;
+esac
+GO
+  chmod +x "$TEST_HOME/go/bin/go"
+  run env -i PATH="/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
+  [[ "$output" == *"go checksum verification"* ]]
+  # Not a substring test: "cargo not installed" contains "go not installed".
+  ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output"
+  grep -qE '^[A-Z/]+ +[A-Z-]+ +go settings persisted' <<<"$output"
+}
+
+@test "go: 'settings persisted' is OK from go env -w alone, and a GAP when GOTOOLCHAIN=local did not persist" {
+  # The probe used to be GOFLAGS=-mod=readonly, which harden.sh no longer writes
+  # (it made go ignore vendor/). GOTOOLCHAIN=local is the persisted setting that
+  # differs from go's default, so it is what tells "persisted" from "not".
+  stub_go_env
+  harden ECOSYSTEMS=go -- --emit=plain >/dev/null
+  run verify -- --emit=plain
+  [[ "$output" == *"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
+
+  filter_file "$TEST_HOME/.config/go/env" sed '/^GOTOOLCHAIN=/d'
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP"*"go settings persisted"*"GOTOOLCHAIN='<unset>'"* ]]
+}
+
+@test "go: before go1.21 'settings persisted' is N/A, not a GAP, and verify passes --fail-on=config" {
+  # go1.18-go1.20 have no GOTOOLCHAIN (see stub_go_env), and every other value
+  # harden.sh persists equals go's default, so there is nothing to tell
+  # persisted from unset. Probing GOTOOLCHAIN anyway printed "GOTOOLCHAIN='<unset>',
+  # so a go.mod can make go download and run another toolchain", which go1.20
+  # cannot do, and failed the step under --fail-on=any and --fail-on=config.
+  # MEASURED in golang:1.18/1.19/1.20 images with the env file sourced.
+  stub_go_env go1.20.14
+  run harden ECOSYSTEMS=go -- --emit=plain
+  [ "$status" -eq 0 ]
+  # FIXTURE CONTROL: the stub refused GOTOOLCHAIN as go1.20 does, so nothing
+  # persisted it, while the keys go1.20 knows were persisted.
+  [ "$(grep -c '^GOTOOLCHAIN=' "$TEST_HOME/.config/go/env")" = 0 ]
+  grep -qx "GOSUMDB=sum.golang.org" "$TEST_HOME/.config/go/env"
+
+  for fo in config any; do
+    run verify_sourced --emit=plain "--fail-on=$fo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"N/A"*"go settings persisted"*"go1.20 predates GOTOOLCHAIN (go1.21)"* ]]
+    [ "$(grep -c '^GAP' <<<"$output")" = 0 ]
+  done
+
+  # The version gate is go's, not the stub's file: go1.21 knows GOTOOLCHAIN
+  # and is probed as before.
+  stub_go_env go1.21.13
+  harden ECOSYSTEMS=go -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"*"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
+}
+
+@test "the shipped scripts parse under bash 3.2, the /bin/bash macOS runs them with" {
+  # MEASURED: files/verify-probes.sh had a `case ... in /*)` inside `$( ... )`,
+  # which bash 3.2 cannot parse ("syntax error near unexpected token ;;"), so on
+  # a Mac whose bash is /bin/bash the verifier died at the NuGet section. It was
+  # there since v2.0.0; nothing parsed the scripts with the bash macOS ships.
+  # Only the macOS job has a bash 3 to check with.
+  /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]' 2>/dev/null \
+    || skip "/bin/bash is bash 4 or later here; this runs on the macOS job"
+  local f
+  for f in "$HARDEN_SH" "$VERIFY_SH" "${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"; do
+    run /bin/bash -n "$f"
+    [ "$status" -eq 0 ] || { echo "$f: $output"; return 1; }
+  done
 }

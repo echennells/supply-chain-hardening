@@ -89,7 +89,8 @@
          age-gated here; uv-routed installs still are. NOTE: no apt-shipped pip carries
          this flag (MEASURED: Ubuntu 22.04=22.0.2, 24.04=24.0, 26.04=25.1.1,
          Debian 12=23.0.1), so upgrading the distro will not close it. What does: route
-         installs through uv (the deployed /usr/local/bin/pip already does), or use a
+         installs through uv (the role deploys /usr/local/bin/pip and pip3 wrappers that
+         do this when uv is installed; a separate entry says so when it is not), or use a
          uv-managed interpreter or a python:3.13+ image, whose pip is 26.x and reads
          this same /etc/pip.conf.'] }}
   when:

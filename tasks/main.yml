@@ -32,6 +32,25 @@
       tags: always
   tags: always
 
+- name: Include the sfw cache reset (before the first root npm install)
+  # npm.yml, npq.yml and socket.yml each run `npm install -g` as root, and on a
+  # host an earlier version hardened that goes through its npm wrapper and so
+  # through sfw. A cache another account could write therefore has to be reset
+  # here, before npm.yml, and not in socket.yml, which runs after the other two.
+  # See the top of sfw_cache_reset.yml for the measurement.
+  #
+  # Tagged `always`, not [socket, npm, npq]: Ansible skips a task when ANY of
+  # its tags is skipped, so `--skip-tags npq` would drop the reset while npm.yml
+  # still installed as root. socket.yml includes the file itself if this did
+  # not run. Same `when` as the socket.yml include: with
+  # socket_firewall_install=false the role leaves sfw alone.
+  ansible.builtin.include_tasks:
+    file: sfw_cache_reset.yml
+    apply:
+      tags: always
+  when: socket_firewall_install | bool
+  tags: always
+
 - name: Include npm hardening
   ansible.builtin.include_tasks:
     file: npm.yml
@@ -213,15 +232,37 @@
 # Ecosystem tasks append to `skipped_protections`; this reports the total.
 # Generalizes the pattern already used by "Report active pnpm allowlist
 # exemptions".
+
+# Does a supply-chain-verify report follow in this run? verify.yml skips the
+# run under --check, and the include is skipped with --skip-tags verify or
+# always. Saying "the report that follows" when none does sends the operator
+# looking for output that is not there.
+- name: Work out whether the verifier runs after this summary
+  ansible.builtin.set_fact:
+    sch_verify_follows: >-
+      {{ (verify_protections | default(true) | bool)
+         and not ansible_check_mode
+         and 'verify' not in (ansible_skip_tags | default([]))
+         and 'always' not in (ansible_skip_tags | default([])) }}
+  tags: always
+
 - name: Report protections that were NOT applied
+  # The optional audit tools (zizmor, pinact, govulncheck, uv-secure,
+  # pip-audit, lockfile-lint) are not protections: nothing in the role runs
+  # them. Their entries say so, and the header counts them apart.
+  vars:
+    sch_tool_entries: "{{ skipped_protections | select('search', '[(]optional audit tools?;') | list | length }}"
   ansible.builtin.debug:
     msg: |-
-      ⚠ {{ skipped_protections | length }} protection(s) were NOT applied on this host:
+      ⚠ {{ skipped_protections | length - sch_tool_entries | int }} protection(s) were NOT applied on this host{% if sch_tool_entries | int > 0 %}, plus {{ sch_tool_entries }} optional audit tool entr{{ 'y' if sch_tool_entries | int == 1 else 'ies' }} (not protections: nothing in the role runs them){% endif %}:
       {% for item in skipped_protections %}
         {{ loop.index }}. {{ item }}
       {% endfor %}
-      Everything else in the role applied normally. Install the missing
-      prerequisite and re-run to close these gaps.
+      This list is only what the role knew it skipped while applying; it does
+      not show that everything else is in effect.
+      {% if sch_verify_follows | bool %}The supply-chain-verify report that follows asks each tool: read its GAP and WEAK rows.{% else %}Run supply-chain-verify, which asks each tool, and read its GAP and WEAK rows.{% endif %}
+
+      Install the missing prerequisite and re-run to close the gaps listed here.
   when: skipped_protections | default([]) | length > 0
   tags: always
 
@@ -239,8 +280,16 @@
   # That is the exact failure this summary was added to eliminate, in a worse
   # form: an operator or agent can cite an affirmative ✓ as evidence of
   # coverage. Only claim full coverage when the run was actually full.
+  # Worded as what the role recorded, not as coverage: "All applicable
+  # protections were applied" overclaimed the same way the old "Everything
+  # else in the role applied normally" did. Only the verifier asks the tools.
   ansible.builtin.debug:
-    msg: "✓ All applicable protections were applied — no prerequisites missing."
+    msg: >-
+      ✓ No protection was skipped and no prerequisite was missing, as far as
+      the role could tell while applying. That is not proof that every
+      protection is in effect: {{ 'the supply-chain-verify report that follows
+      asks each tool.' if sch_verify_follows | bool else 'run supply-chain-verify,
+      which asks each tool.' }}
   when:
     - skipped_protections | default([]) | length == 0
     - ansible_run_tags | default(['all']) == ['all']

@@ -10,3 +10,9 @@ Type=oneshot
 User={{ ansible_user_id }}
 ExecStart=+/usr/local/sbin/supply-chain-age-gate-refresh --system
 ExecStart=/usr/local/sbin/supply-chain-age-gate-refresh --user
+{% if socket_firewall_install | bool %}
+# Socket Firewall's update check, which the wrappers skip (they run sfw with
+# SFW_SKIP_UPDATE_CHECK=1 so a non-root caller never writes its root-owned
+# cache). Root, like --system.
+ExecStart=+/usr/local/sbin/supply-chain-age-gate-refresh --sfw
+{% endif %}

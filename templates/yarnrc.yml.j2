@@ -10,10 +10,12 @@
 # on unknown keys but don't error. The role omits it on detected <4.0
 # to keep logs clean; when Yarn isn't detectable at apply time we assume
 # modern and emit it (downside on 3.x is a single warning per install).
-# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES and must be unquoted — a
-# quoted/suffixed value ("2d") parses to NaN and silently disables the gate.
-# Emitted unconditionally for forward-compat: on Yarn <4.10 the key is unknown
-# (one warning per install) but becomes active as soon as Yarn is upgraded.
+# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES, unquoted. Yarn 4.10.x
+# reads a duration string as its leading integer ("2d" = 2 minutes); 4.11+
+# parses it. Integer minutes mean the same on both (MEASURED 2026-11-19).
+# Emitted unconditionally for forward-compat: in ~/.yarnrc.yml, Yarn < 4.10
+# ignores the key with no warning (MEASURED 4.1.0, 4.9.4), and it becomes
+# active as soon as Yarn is upgraded. tasks/yarn.yml records the inert case.
 npmMinimalAgeGate: {{ yarn_minimal_age_gate }}
 enableScripts: {{ yarn_enable_scripts | lower }}
 defaultSemverRangePrefix: ""

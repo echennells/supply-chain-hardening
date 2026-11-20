@@ -99,6 +99,75 @@
           ansible-playbook site.yml -e accept_root_home_targeting=true
     success_msg: "Privilege context OK — per-user config targets {{ ansible_env.HOME }}."
   when: not (accept_root_home_targeting | default(false) | bool)
+
+# --- sudo-rs vs ansible-core's become prompt ---------------------------------
+# MEASURED on Ubuntu 26.04 (sudo-rs 0.2.13, the default /usr/bin/sudo there),
+# with a user whose sudo needs a password and ansible run with -K (or
+# --become-password-file, the same code path): every become task stops with
+#   "Timed out waiting for become success or become password prompt"
+# and rc=4, after 10s and having changed nothing. sudo-rs wraps the prompt
+# ansible asks for (`-p "[sudo via ansible, key=...] password:"`) as
+# "[sudo: <that>] Password:", so ansible never sees the exact string it is
+# waiting for. Measured per ansible-core release, same container:
+#   FAIL: 2.19.9, 2.19.14, 2.19.15, 2.20.0, 2.20.1 (apt on 26.04), 2.20.2,
+#         2.20.5, 2.20.8, 2.20.10, 2.21.0, 2.21.1, 2.21.3, 2.21.5
+#   HANG: 2.16.14, 2.17.14, 2.18.12 (Python 3.12 venvs): no timeout message,
+#         still running when killed at 90s; 2.16.14 and 2.18.12 escalate
+#         with NOPASSWD sudo, so it is the prompt again
+#   OK:   2.20.11, 2.21.6, 2.22.0
+# NOPASSWD sudo has no prompt to answer: on 2.20.1 it worked both with and
+# without a become password supplied. So the refusal needs all three: sudo-rs,
+# a password prompt, and an affected ansible-core. It runs before the first `become: true` task below;
+# without it the operator gets ansible's timeout, which names neither sudo-rs
+# nor this role. `sudo -n true` never prompts and never attempts a password,
+# so the probe cannot count as a failed login.
+- name: Probe for sudo-rs with a password prompt (affected ansible-core cannot answer it)
+  become: false
+  ansible.builtin.shell:
+    cmd: |
+      v=$(sudo --version 2>/dev/null | head -1)
+      case "$v" in sudo-rs*) ;; *) exit 0 ;; esac
+      if sudo -n true >/dev/null 2>&1; then exit 0; fi
+      printf '%s\n' "$v"
+    executable: /bin/sh
+  register: preflight_sudo_rs
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - (ansible_become_method | default(lookup('ansible.builtin.config', 'DEFAULT_BECOME_METHOD'))) == 'sudo'
+    - >-
+      ansible_version.full is version('2.20.11', '<')
+      or (ansible_version.full is version('2.21.0', '>=')
+          and ansible_version.full is version('2.21.6', '<'))
+
+- name: Refuse sudo-rs password prompts on an ansible-core that cannot answer them
+  ansible.builtin.fail:
+    msg: |
+      [supply-chain-hardening] preflight: ansible-core {{ ansible_version.full }} cannot answer the sudo-rs password prompt.
+
+      This host's sudo is {{ preflight_sudo_rs.stdout | trim }} and `sudo -n true` fails for this user,
+      so it would ask for a password. Every task that needs root would either stop
+      with "Timed out waiting for become success or become password prompt"
+      (measured on 2.19.9 to 2.20.10 and 2.21.0 to 2.21.5) or hang (measured on
+      2.16 to 2.18), and change nothing.
+
+      Fix, either one:
+        - Run a fixed ansible-core (2.20.11+, 2.21.6+ or 2.22+) for your user,
+          leaving the system package alone (`sudo apt install pipx` first if needed):
+              pipx install 'ansible-core>=2.21.6'
+              ~/.local/bin/ansible-playbook site.yml --limit localhost -K
+        - Or give this user NOPASSWD sudo for the duration of the apply and
+          drop -K (with no prompt to answer, the become succeeds; measured on 2.20.1).
+
+      If this user has no sudo rights on this host at all, `sudo -n true` fails the
+      same way and neither fix helps: the role needs an account that can use sudo.
+
+      Measured on Ubuntu 26.04 (sudo-rs 0.2.13, apt ansible-core 2.20.1).
+  when:
+    - preflight_sudo_rs.stdout is defined
+    - preflight_sudo_rs.stdout | trim | length > 0
+
 - name: Probe GNU date on the controller for the rolling uv/pip cutoff
   # defaults/main.yml computes the rolling cutoff (sch_uv_cutoff, sch_pip_cutoff) via
   #   lookup('pipe', 'date -u -d @<epoch> +%Y-%m-%dT00:00:00Z')
@@ -200,6 +269,136 @@
     - etc_preflight.rc == 42
     - not (accept_etc_overwrite | default(false) | bool)
 
+- name: Detect per-user config files this run would replace that this project did not write
+  # The same refusal as the /etc check above, for the three per-user files the
+  # role REPLACES wholesale rather than editing: $CARGO_HOME/config.toml,
+  # ~/.m2/settings.xml and NuGet's user NuGet.Config. Each is where a private
+  # registry or mirror lives ([source.crates-io] replace-with, <mirrors>,
+  # <packageSources>), next to its credentials (credential-provider,
+  # <servers>, <packageSourceCredentials>). MEASURED (8281a6b): an apply
+  # replaced all three, left no copy, and reported nothing; the corporate
+  # mirror and the credentials were gone. With the mirror gone, an internal
+  # package name resolves against the public registry instead: dependency
+  # confusion, the case the /etc check exists for.
+  #
+  # A file counts as OURS, and is replaced as before, when it carries either
+  # project's marker or is a version of what this role wrote before it had
+  # one (the role's settings.xml, NuGet.Config and cargo config carried no
+  # marker until CMP 4.7). dotnet's own first-run NuGet.Config, which lists
+  # nuget.org and nothing else, is not a choice anyone made and is replaced
+  # too; it is kept as a backup like any other file we did not write.
+  # MEASURED (apt dotnet-sdk-8.0 8.0.134, Ubuntu 24.04): the first
+  # `dotnet nuget list source` in a fresh home writes it, 205 bytes, opening
+  # with a UTF-8 byte-order mark and with no trailing newline. Without
+  # recognising it every fresh dotnet host would stop here.
+  #
+  # Only the files THIS run would write are checked: each one's tag must be
+  # selected, and each one's tool gate (tasks/maven.yml, tasks/nuget.yml)
+  # must pass. Paths are resolved the way those task files resolve them.
+  # Keep both in step with them.
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      conflict=""
+      ours='Managed by (ansible-supply-chain-security|supply-chain-harden)'
+      classify() { # $1 kind, $2 path -> ours | stock | foreign
+        grep -qE "$ours" "$2" 2>/dev/null && { echo ours; return; }
+        case "$1" in
+          cargo)
+            head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
+              && { echo ours; return; } ;;
+          maven)
+            grep -q '<id>central-https</id>' "$2" \
+              && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
+              && { echo ours; return; } ;;
+          nuget)
+            grep -q 'key="signatureValidationMode" value="require"' "$2" \
+              && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
+              && { echo ours; return; }
+            # dotnet's first-run file (see above), compared with the BOM,
+            # comments and whitespace stripped.
+            if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+                 '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+              echo stock; return
+            fi ;;
+        esac
+        echo foreign
+      }
+      check() { # $1 kind, $2 path. Prints "<class> <path>" for a file not ours.
+        [ -e "$2" ] || return 0
+        c=$(classify "$1" "$2")
+        [ "$c" = ours ] && return 0
+        printf '%s %s\n' "$c" "$2"
+        [ "$c" = foreign ] && conflict=1
+        return 0
+      }
+      {% if sch_user_cfg_runs.cargo | bool %}
+      check cargo "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      {% endif %}
+      {% if sch_user_cfg_runs.maven | bool %}
+      # tasks/maven.yml's gate: mvn, or a JDK a ./mvnw build would run on
+      if command -v mvn >/dev/null 2>&1 || command -v java >/dev/null 2>&1 \
+         || { [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; }; then
+        check maven "$HOME/.m2/settings.xml"
+      fi
+      {% endif %}
+      {% if sch_user_cfg_runs.nuget | bool %}
+      # tasks/nuget.yml's gate and path (DOTNET_CLI_HOME, not HOME, when set)
+      if command -v dotnet >/dev/null 2>&1; then
+        check nuget "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+      fi
+      {% endif %}
+      [ -z "$conflict" ] || exit 42
+    executable: /bin/bash
+  vars:
+    # Would this run reach the task file that writes each one? `--tags npm`
+    # must not stop on a ~/.m2/settings.xml it will never touch.
+    sch_run_tags: "{{ ansible_run_tags | default(['all']) }}"
+    sch_skip_tags: "{{ ansible_skip_tags | default([]) }}"
+    sch_user_cfg_runs:
+      cargo: "{{ ('all' in sch_run_tags or (sch_run_tags | intersect(['cargo', 'rust']) | length > 0)) and (sch_skip_tags | intersect(['cargo', 'rust']) | length == 0) }}"
+      maven: "{{ ('all' in sch_run_tags or (sch_run_tags | intersect(['maven', 'java']) | length > 0)) and (sch_skip_tags | intersect(['maven', 'java']) | length == 0) }}"
+      nuget: "{{ ('all' in sch_run_tags or (sch_run_tags | intersect(['nuget', 'dotnet']) | length > 0)) and (sch_skip_tags | intersect(['nuget', 'dotnet']) | length == 0) }}"
+  register: user_cfg_preflight
+  changed_when: false
+  check_mode: false
+  # Fail closed: a check that could not run must not read as "no conflict".
+  failed_when: user_cfg_preflight.rc not in [0, 42]
+
+- name: Record which per-user files get a backup before they are replaced
+  # Every file this project did not write: an accepted foreign file, and
+  # dotnet's first-run NuGet.Config. The deploy tasks in cargo.yml, maven.yml
+  # and nuget.yml set `backup:` from this list.
+  ansible.builtin.set_fact:
+    sch_user_cfg_backup: "{{ user_cfg_preflight.stdout_lines | map('regex_replace', '^[a-z]+ ', '') | list }}"
+
+- name: Fail when per-user config files exist that this project did not write
+  ansible.builtin.fail:
+    msg: |
+      [supply-chain-hardening] Refusing to overwrite existing per-user config
+      files that this project did not write:
+
+      {% for l in user_cfg_preflight.stdout_lines if l is match('foreign ') %}
+        {{ l | regex_replace('^foreign ', '') }}
+      {% endfor %}
+
+      The role replaces each of these files whole; it does not merge into
+      them. They commonly hold a private registry or mirror and its
+      credentials. Replacing them drops both, and an internal package name
+      then resolves against the public registry (dependency confusion).
+      Nothing has been changed yet.
+
+      To proceed, either:
+        1. Move the files aside, then re-run; or
+        2. Set `accept_user_config_overwrite=true` to replace them anyway
+           (e.g. `ansible-playbook site.yml -e accept_user_config_overwrite=true`).
+           Each is backed up next to itself first, as
+           <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~; re-add anything you still
+           need by hand.
+  when:
+    - user_cfg_preflight.rc == 42
+    - not (accept_user_config_overwrite | default(false) | bool)
+
 - name: Assert the pip age-gate cutoff is an absolute Z-suffixed RFC 3339 instant
   # A MALFORMED value makes pip >= 26 exit 2 on every install / download / list
   # and even `pip install --help` -- host-wide and for every account, because
@@ -237,7 +436,7 @@
   #
   # Deliberately LOOSER than the pip check: uv accepts forms pip does not. It
   # accepts every form defaults/main.yml documents for uv_exclude_newer: an
-  # absolute RFC 3339 instant, a local date, and the span forms uv 0.10+ accepts
+  # absolute RFC 3339 instant, a local date, and the span forms uv 0.9.17+ accepts
   # (which supply-chain-verify grades WEAK). This catches empty, garbage and
   # malformed values; it does NOT prove the host's uv is new enough for a span.
   # `is defined` keeps it skipped when preflight.yml is imported on its own
@@ -252,7 +451,7 @@
         or sch_uv_cutoff is match('^P(T[0-9]+[HMS]|[0-9]+[DW])$')
     fail_msg: >-
       uv_exclude_newer must be `rolling`, an absolute RFC 3339 instant
-      (e.g. 2026-10-19T00:00:00Z), a date (2026-10-19), or a span uv 0.10+
+      (e.g. 2026-10-19T00:00:00Z), a date (2026-10-19), or a span uv 0.9.17+
       accepts (e.g. "2 days", P2D); it resolved to
       '{{ sch_uv_cutoff | default("<undefined>") }}'. A value uv cannot parse
       is written to /etc/uv/uv.toml and stops uv from starting for every user.

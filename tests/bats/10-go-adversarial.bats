@@ -1,13 +1,21 @@
 #!/usr/bin/env bats
 # Adversarial tests: verify Go env vars can't be poisoned.
 # Simulates BufferZoneCorp: malicious init() sets GOSUMDB=off, GOPROXY to attacker.
-# Our hardening sets these in /etc/environment so they survive subprocess spawning.
+# Our hardening sets GOSUMDB, GOPROXY and GOTOOLCHAIN in both /etc/environment
+# and /etc/profile.d/supply-chain-hardening.sh (GOFLAGS only when goflags_mod
+# is set; by default it is not written, see 02-env-vars.bats). The bypass
+# knobs (GOPRIVATE, GONOPROXY, GOINSECURE, GONOSUMDB) are exported empty by
+# profile.d only: tasks/shell_env.yml drops an empty value from
+# /etc/environment, and never writes GONOSUMDB there. Most tests below source
+# profile.d for that reason.
 #
 # Note: the bypass knobs we defend are the actual Go env vars documented at
-# https://go.dev/ref/mod (GOPRIVATE, GONOPROXY, GOINSECURE). An earlier version
-# of this role set GONOSUMCHECK and GONOSUMDB — neither is a real Go env var,
-# so those assertions were trivially-true no-ops that gave a false sense of
-# coverage. Tests below use the documented variables.
+# https://go.dev/ref/mod (GOPRIVATE, GONOPROXY, GOINSECURE, GONOSUMDB). An
+# earlier version of this role set GONOSUMCHECK, which is not a Go env var (0
+# matches in go1.27.4's GOROOT/src), so that assertion was a trivially-true
+# no-op. This comment used to say GONOSUMDB was not real either; it is, and
+# templates/supply-chain-env.sh.j2 clears it, but no test below asserts that
+# yet.
 
 load setup
 

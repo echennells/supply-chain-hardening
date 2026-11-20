@@ -104,6 +104,17 @@ first_wrapper() {
   deactivate
 }
 
+# `pip install --dry-run` arrived in pip 22.2. The venv pip on stock Ubuntu
+# 22.04 is 22.0.2, which answers "no such option: --dry-run" (MEASURED on the VM
+# matrix). The index test then FAILED on a pip that does refuse the sdist, and
+# the direct-path test PASSED without pip ever looking at the sdist, because its
+# assertion is the absence of a message. Skip by capability, from inside the
+# activated venv.
+require_pip_dry_run() {
+  pip install --help 2>/dev/null | grep -q -- '--dry-run' \
+    || skip "this venv's pip $(pip --version 2>/dev/null | awk '{print $2}') has no install --dry-run (added in pip 22.2)"
+}
+
 @test "caller: in a stock venv, only-binary still refuses an index-resolved sdist" {
   [ -f /etc/pip.conf ] || skip "/etc/pip.conf not deployed"
   grep -q 'only-binary' /etc/pip.conf || skip "pip_only_binary disabled on this host"
@@ -112,6 +123,7 @@ first_wrapper() {
 
   python3 -m venv "$BATS_TEST_TMPDIR/venv" >/dev/null 2>&1 || skip "venv creation failed"
   . "$BATS_TEST_TMPDIR/venv/bin/activate"
+  require_pip_dry_run
   sdist=$(make_sdist "$BATS_TEST_TMPDIR/sd")
 
   # The config layer survives the wrapper shadow — this is the half that holds.
@@ -134,12 +146,35 @@ first_wrapper() {
 
   python3 -m venv "$BATS_TEST_TMPDIR/venv" >/dev/null 2>&1 || skip "venv creation failed"
   . "$BATS_TEST_TMPDIR/venv/bin/activate"
+  require_pip_dry_run
   sdist=$(make_sdist "$BATS_TEST_TMPDIR/sd")
 
   run pip install --dry-run --no-deps "$sdist"
   # Not asserting success — a build backend may be absent. Asserting that pip
   # did not REFUSE it on only-binary grounds, which is the coverage claim.
   [[ "$output" != *"from versions: none"* ]]
+  deactivate
+}
+
+@test "caller: in a stock venv the verifier grades only-binary WEAK, naming the path/URL hole" {
+  # The row was OK PARSED from a grep of /etc/pip.conf while the test above shows
+  # pip does not refuse a direct-path sdist (MEASURED: pip 24.0 in a venv ran a
+  # path sdist's setup.py). WEAK, with the hole named, is what it can honestly say.
+  [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
+  [ -f /etc/pip.conf ] || skip "/etc/pip.conf not deployed"
+  grep -q 'only-binary' /etc/pip.conf || skip "pip_only_binary disabled on this host"
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  python3 -c 'import venv' 2>/dev/null || skip "python3 venv module not available"
+
+  python3 -m venv "$BATS_TEST_TMPDIR/venv" >/dev/null 2>&1 || skip "venv creation failed"
+  . "$BATS_TEST_TMPDIR/venv/bin/activate"
+  run "$VERIFY" --verbose
+  echo "$output" | grep "pip source-build blocking" | grep -q "^WEAK"
+  echo "$output" | grep "pip source-build blocking" | grep -q "NOT one named by path or URL"
+  # And the venv's pip is named for what it is: a python launcher, not "another
+  # wrapper script" (which sent readers looking for a second security tool).
+  echo "$output" | grep "pip PATH wrapper" | grep -q "an unwrapped python3 launcher"
+  ! echo "$output" | grep -q "another wrapper script"
   deactivate
 }
 

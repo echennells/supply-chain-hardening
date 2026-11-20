@@ -110,100 +110,101 @@
   check_mode: false
   failed_when: false
 
-- name: Deploy pip wrapper to /usr/local/bin (system-wide, delegates to uv)
+- name: Deploy pip and pip3 wrappers to /usr/local/bin (system-wide, delegate to uv)
+  # One template for both names (they differed only in the name they print).
+  # The wrapper re-resolves uv for each caller and runs only a uv that caller
+  # owns or that root owns with nothing above it writable by anyone else. The
+  # baked deploy-time path stays as one candidate, for the deploying user's own
+  # contexts with no ~/.local/bin on PATH (cron). See the template for the
+  # measurements behind it (ECH-191, VM#2).
   become: true
-  ansible.builtin.copy:
-    dest: /usr/local/bin/pip
+  ansible.builtin.template:
+    src: pip-wrapper.sh.j2
+    dest: "/usr/local/bin/{{ pip_wrapper_name }}"
     mode: "0755"
     owner: root
     group: root
-    content: |
-      #!/bin/sh
-      # Managed by ansible-supply-chain-security
-      # Belt-and-suspenders: resolve a reachable uv (see the loop below) and
-      # refuse to run if none is found, rather than recursing into ourselves
-      # and bricking pip.
-      UV='{{ uv_binary_path.stdout }}'
-      # RUN-PROBE. Record that this wrapper actually executed.
-      #
-      # Free on a real invocation (SCH_WRAPPER_PROBE is unset, so this is one test).
-      # supply-chain-verify sets it to a temp file, invokes the tool, and reads back
-      # which wrappers ran.
-      #
-      # It replaces inferring "did our wrapper run" from PATH position, which CANNOT
-      # tell a bypassed wrapper from one chained behind another wrap. MEASURED: with
-      # an Aikido safe-chain shim first on PATH the wrapper ran on every call while
-      # the verifier reported "shadowed and never runs". Every version manager
-      # (asdf, mise, volta, nodenv, pyenv) is shim-first and delegates the same way.
-      #
-      # The value is caller-controlled, so it is only ever a redirect target. Never
-      # interpolate it into a command.
-      if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
-        printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
-      fi
-      # ECH-191: this wrapper is SYSTEM-WIDE (/usr/local/bin, every account uses
-      # it) but $UV was resolved in the DEPLOYING user's context. If uv lives in
-      # that user's ~/.local/bin and their home is not traversable by others
-      # (0750/0700 is common on hardened hosts), every other non-root user hits
-      # the guard below and loses pip entirely. Resolve uv for THIS caller:
-      # prefer a root-owned system copy, then the deploy-time path, then the
-      # caller's PATH. Preferring the system copy also keeps a root `sudo pip`
-      # from execing an unprivileged user's uv. Resolving `uv` (never `pip`)
-      # cannot recurse into this wrapper.
-      for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
-        if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
-      done
-      if [ -z "$UV" ] || [ ! -x "$UV" ]; then
-        echo "[supply-chain-hardening] error: uv not found in /usr/local/bin, /usr/bin, the deploy-time path, or PATH; refusing to recurse" >&2
-        exit 127
-      fi
-      echo "[supply-chain-hardening] pip redirected through uv" >&2
-      exec "$UV" pip "$@"
+  loop: [pip, pip3]
+  loop_control:
+    loop_var: pip_wrapper_name
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
-- name: Deploy pip3 wrapper to /usr/local/bin (system-wide, delegates to uv)
-  become: true
-  ansible.builtin.copy:
-    dest: /usr/local/bin/pip3
-    mode: "0755"
-    owner: root
-    group: root
-    content: |
-      #!/bin/sh
-      # Managed by ansible-supply-chain-security
-      UV='{{ uv_binary_path.stdout }}'
-      # RUN-PROBE. Record that this wrapper actually executed.
-      #
-      # Free on a real invocation (SCH_WRAPPER_PROBE is unset, so this is one test).
-      # supply-chain-verify sets it to a temp file, invokes the tool, and reads back
-      # which wrappers ran.
-      #
-      # It replaces inferring "did our wrapper run" from PATH position, which CANNOT
-      # tell a bypassed wrapper from one chained behind another wrap. MEASURED: with
-      # an Aikido safe-chain shim first on PATH the wrapper ran on every call while
-      # the verifier reported "shadowed and never runs". Every version manager
-      # (asdf, mise, volta, nodenv, pyenv) is shim-first and delegates the same way.
-      #
-      # The value is caller-controlled, so it is only ever a redirect target. Never
-      # interpolate it into a command.
-      if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
-        printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
-      fi
-      # ECH-191: see the pip wrapper above. $UV was resolved in the DEPLOYING
-      # user's context but this is SYSTEM-WIDE; if it points into a home other
-      # users cannot traverse they lose pip3. Prefer a root-owned system copy,
-      # then the deploy-time path, then the caller's PATH. Resolving `uv` (never
-      # `pip3`) cannot recurse into this wrapper.
-      for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)"; do
-        if [ -n "$_c" ] && [ -x "$_c" ]; then UV="$_c"; break; fi
+- name: Look for pip wrappers an earlier apply left in place (no uv on this run)
+  # The uv lookup above is per-user (it includes $HOME/.local/bin), but the
+  # wrappers are system-wide. When another account, or this one before uv was
+  # removed, applied the role with uv present, /usr/local/bin/pip is still our
+  # wrapper, so "the wrappers were not deployed and pip runs the real pip"
+  # would be false (MEASURED: a second sudo user applying on a host root had
+  # hardened got that entry while /usr/local/bin/pip was the wrapper). Prints
+  # which wrapper it is, then the uv path that apply baked in. This version's
+  # wrapper (sch_trusted) runs only a uv the caller or root owns; an earlier
+  # version's runs any uv it can execute. The entry below describes the one
+  # that is there: it described only the earlier one, so after a second
+  # account with no uv applied, it said the wrapper runs the first account's
+  # uv while `pip` refused that uv with exit 126 (MEASURED, Ubuntu 26.04).
+  ansible.builtin.shell:
+    cmd: |
+      for f in /usr/local/bin/pip /usr/local/bin/pip3; do
+        grep -qx '# Managed by ansible-supply-chain-security' "$f" 2>/dev/null || continue
+        if grep -q '^sch_trusted()' "$f"; then echo owner-checked; else echo any-owner; fi
+        sed -nE "s/^UV='(.*)'$/\1/p" "$f" | head -1
+        exit 0
       done
-      if [ -z "$UV" ] || [ ! -x "$UV" ]; then
-        echo "[supply-chain-hardening] error: uv not found in /usr/local/bin, /usr/bin, the deploy-time path, or PATH; refusing to recurse" >&2
-        exit 127
-      fi
-      echo "[supply-chain-hardening] pip3 redirected through uv" >&2
-      exec "$UV" pip "$@"
+      exit 1
+    executable: /bin/bash
+  register: pip_wrapper_left
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
+
+- name: Record skipped protection — pip / pip3 wrapper (uv absent)
+  # The wrappers are deployed only when uv exists (they exec it; without it they
+  # would refuse every pip call). The summary used to say nothing when they were
+  # skipped, and pip.yml's age-gate entry even claimed "the deployed
+  # /usr/local/bin/pip already does" route installs through uv. MEASURED on the
+  # VM matrix: no stock image ships uv, so no wrapper on any of them.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — this run found no uv, so it did not deploy /usr/local/bin/pip or /usr/local/bin/pip3. ' ~ (('The wrappers an earlier apply left there are still in place and were not updated: ' ~ (('each runs the first uv that the caller owns, or that root owns where no other account can replace it, trying /usr/local/bin/uv, /usr/bin/uv, the ' ~ ((pip_wrapper_left.stdout_lines + ['', ''])[1] | trim | default('<none>', true)) ~ ' recorded at that apply, PATH, then ~/.local/bin/uv of the account running pip. It refuses every pip command, with exit 126 when each uv it finds belongs to another account or sits where one could replace it, and with exit 127 when it finds none. ') if (pip_wrapper_left.stdout_lines + [''])[0] == 'owner-checked' else ('they are from an earlier version of this role, and each runs the first uv it can execute (/usr/local/bin/uv, /usr/bin/uv, the ' ~ ((pip_wrapper_left.stdout_lines + ['', ''])[1] | trim | default('<none>', true)) ~ ' recorded at that apply, then PATH) whoever owns it, so root and other accounts can end up running a uv that another account can replace. It refuses every pip command (exit 127) when it finds none. '))) if pip_wrapper_left.rc | default(1) == 0 else ('`pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. ')) ~ 'Install uv and re-apply.'] }}
+  when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
+
+- name: Detect installed uv tools (uv-managed versions, or copies uv does not manage)
+  # `creates:` checked only that a binary existed, so bumping uv_secure_version
+  # or pip_audit_version never reinstalled anything unless refresh_tools was
+  # set. `uv tool list` prints "<name> v<version>" per tool (MEASURED uv
+  # 0.13.9), and `uv tool install name==<other>` replaces the version uv
+  # installed. It does NOT replace an executable it did not install (pipx,
+  # `pip install --user`): it fails with "Executable already exists", rc=2. The
+  # probe therefore also looks where the install writes (`uv tool dir --bin`)
+  # and reports such a copy as "foreign", which the install leaves alone, as
+  # `creates:` did. Same probe as zizmor in tasks/github.yml.
+  ansible.builtin.shell:
+    cmd: |
+      uv='{{ uv_binary_path.stdout }}'
+      bin=$("$uv" tool dir --bin 2>/dev/null) || bin="$HOME/.local/bin"
+      list=$("$uv" tool list 2>/dev/null)
+      for name in uv-secure pip-audit; do
+        ver=$(printf '%s\n' "$list" | awk -v n="$name" '$1 == n { sub(/^v/, "", $2); print $2; exit }')
+        if [ -n "$ver" ]; then
+          echo "$name uv $ver"
+        elif [ -e "$bin/$name" ] || [ -L "$bin/$name" ]; then
+          echo "$name foreign $bin/$name"
+        fi
+      done
+    executable: /bin/bash
+  register: uv_tools_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+
+- name: Note an existing uv-secure / pip-audit that uv does not manage (left in place)
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.split(' ', 2)[2] }} was not installed by `uv tool`, so the role
+      leaves it as it is and does not install its pinned version over it.
+  loop: "{{ uv_tools_installed.stdout_lines | default([]) | select('match', '[^ ]+ foreign ') | list }}"
 
 - name: Install uv-managed tools
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
@@ -223,21 +224,32 @@
     # Pinned: an unpinned `uv tool install` takes the newest release at apply
     # time, which is the same always-newest exposure the role's age gates exist
     # to close for users. PyPI provides integrity; the pin is the other half.
-    # Looped over name/version pairs so `creates:` still names the binary
-    # rather than the versioned requirement string.
+    # Looped over name/version pairs so the skip test can compare each pin with
+    # the version `uv tool list` reported above.
     cmd: "{{ uv_binary_path.stdout }} tool install {{ item.name }}=={{ item.version }}"
-    creates: "{{ omit if refresh_tools | bool else ansible_env.HOME + '/.local/bin/' + item.name }}"
   loop:
     - { name: uv-secure, version: "{{ uv_secure_version }}" }
     - { name: pip-audit, version: "{{ pip_audit_version }}" }
-  when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+  when:
+    - uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+    - uv_tools_installed.stdout_lines | default([]) | select('match', item.name ~ ' foreign ') | list | length == 0
+    - refresh_tools | bool or (item.name ~ ' uv ' ~ item.version) not in (uv_tools_installed.stdout_lines | default([]))
+  # A failed install changed nothing, so it must not report `changed`: with
+  # failed_when: false and no changed_when, a persistently failing install broke
+  # idempotency on every re-apply.
   register: uv_tools_install
+  changed_when: uv_tools_install.rc | default(1) == 0
   failed_when: false
 
 - name: Record skipped protection — uv-managed tools (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['uv-managed audit tools (uv-secure / pip-audit) — install failed. Python dependency scanning is not set up.'] }}
+      {{ (skipped_protections | default([])) + ['uv-secure / pip-audit (optional audit tools; nothing in the role runs them, so no install is blocked either way) — install failed, so the Python dependency scanners are not available to run by hand.'] }}
   when:
+    # A looped task registers `results`, one entry per item, and no top-level
+    # rc, so the old `uv_tools_install.rc | default(0) != 0` was always false
+    # and a failed install was never recorded.
     - uv_tools_install is defined
-    - uv_tools_install.rc | default(0) != 0
+    - >-
+      uv_tools_install.results | default([]) | selectattr('rc', 'defined')
+      | rejectattr('rc', 'equalto', 0) | list | length > 0

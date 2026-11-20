@@ -38,12 +38,19 @@ export UV_LINK_MODE=copy
 # not in a self-disarming env var.
 
 # === Go ===
-# Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are emptied so
-# no module is exempted from sumdb checks, proxy traffic, or HTTPS. GOTOOLCHAIN
+# Sumdb + proxy stay active. GOPRIVATE / GONOPROXY / GOINSECURE are exported
+# empty so no value inherited through the environment exempts a module from
+# sumdb checks, proxy traffic, or HTTPS (a `go env -w` value survives an empty
+# export: see GONOSUMDB below). GOTOOLCHAIN
 # locks to the installed toolchain to prevent auto-download of alternatives.
 export GOSUMDB='{{ go_sumdb }}'
 export GOPROXY='{{ go_proxy }}'
+{% if goflags_mod | length > 0 %}
 export GOFLAGS='-mod={{ goflags_mod }}'
+{% endif %}
+# GOFLAGS is not written by default (goflags_mod: ""). Go's own default already
+# refuses to edit go.mod/go.sum during a build, and an explicit -mod=readonly makes
+# Go ignore a project's vendor/ directory (MEASURED; see defaults/main.yml).
 export GOPRIVATE='{{ go_private }}'
 export GONOPROXY='{{ go_noproxy }}'
 export GOINSECURE='{{ go_insecure }}'
@@ -55,7 +62,17 @@ export GOINSECURE='{{ go_insecure }}'
 # GOINSECURE entry names GONOSUMDB as a way to disable sumdb validation.
 # It was omitted because 10-go-adversarial.bats asserted it was not a real
 # variable - a wrong test comment was the documented reason a recommended
-# sweep (SOURCES.md:16) got dropped. Clearing it, like the other three.
+# sweep (SOURCES.md:16) got dropped. Exported empty, like the other three.
+#
+# WHAT AN EMPTY EXPORT DOES NOT DO. It replaces a value inherited through the
+# environment. It does NOT clear one written with `go env -w` (the per-user
+# file `go env GOENV` names): Go treats an empty variable as unset and falls
+# back to that file. MEASURED on go1.24.2 and go1.27.4: after
+# `go env -w GONOSUMDB='*'`, with GONOSUMDB='' exported, `go env GONOSUMDB`
+# still printed '*' and a fetch skipped the checksum database. The same holds
+# for GOPRIVATE (both versions) and for GONOPROXY and GOINSECURE (go1.24.2).
+# supply-chain-verify reports a sumdb exemption as a GAP and names the file;
+# `go env -u <KEY>` removes it.
 export GONOSUMDB='{{ go_nosumdb | default('', true) }}'
 export GOTOOLCHAIN=local
 
@@ -76,14 +93,13 @@ export GOTOOLCHAIN=local
 # slips through. The /usr/local/bin/composer wrapper is the primary
 # protection; this env var is the backup for shells that bypass it.
 export COMPOSER_SKIP_SCRIPTS='pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create'
-# COMPOSER_ALLOW_SUPERUSER=1 is also exported inside the composer wrapper
-# (templates/composer-wrapper.sh.j2). Both locations are needed — not a
-# duplication: the wrapper covers callers in non-PAM contexts (cron,
-# systemd ExecStart, container CMD) where /etc/profile.d/ never loads;
-# this profile.d export covers `php composer.phar` callers that bypass
-# the wrapper but inherit the PAM-loaded environment. Removing either
-# leaves a coverage gap.
-export COMPOSER_ALLOW_SUPERUSER=1
+# COMPOSER_ALLOW_SUPERUSER is deliberately NOT exported here: only the composer
+# wrapper sets it, for its own invocation. Exported host-wide it switched off
+# composer's root guard for every caller that bypasses the wrapper (composer-real,
+# `php composer.phar`, a user-local composer). MEASURED (2.7.1, 2.11.2, outside a
+# container): a non-interactive root run without it disables plugins ("Composer
+# plugins have been disabled for safety") and runs `sudo -K`; with it, a plugin
+# the checkout's own allow-plugins enables ran as root.
 # Publish-age gate, composer >= 2.11.0 (ignored below that). The env form is here
 # because it outranks a checked-out composer.json: MEASURED on 2.11.1, a repo's
 # "period": null or "block": false turns off the config.json gate but not these.

@@ -33,16 +33,14 @@ make_probe() {
   PROBE_DIR="$(mktemp -d)"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*"\n' > "$PROBE_DIR/cargo-real"
   chmod +x "$PROBE_DIR/cargo-real"
-  # Neutralise the wrapper's COOLDOWN_BIN prepend so THIS fixture controls
-  # whether cargo-cooldown is reachable. The wrapper prepends its embedded
-  # COOLDOWN_BIN ($CARGO_HOME/bin) to PATH before dispatching — added so the
-  # gate resolves on apt-cargo hosts. On the rustup test image that dir holds a
-  # REAL cargo-cooldown, so without this the `without-cooldown` probes would
-  # still find it and route to `cooldown`, never exercising the --locked
-  # fallback. Point it at PROBE_DIR, where make_probe places a cargo-cooldown
-  # only for the with-cooldown case, so presence is fully under fixture control.
+  # Point the wrapper's embedded backend (COOLDOWN_EXE, an absolute path) at
+  # PROBE_DIR, so THIS fixture controls whether cargo-cooldown is reachable. On
+  # the rustup test image the rendered path holds a REAL cargo-cooldown, so
+  # without this the `without-cooldown` probes would still find it and route to
+  # `cooldown`, never exercising the --locked fallback. make_probe places a
+  # cargo-cooldown in PROBE_DIR only for the with-cooldown case.
   sed -e "s|^REAL_CARGO=.*|REAL_CARGO='$PROBE_DIR/cargo-real'|" \
-      -e "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$PROBE_DIR'|" \
+      -e "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/cargo-cooldown'|" \
       "$(cargo_path)" > "$PROBE_DIR/cargo"
   chmod +x "$PROBE_DIR/cargo"
   mkdir -p "$PROBE_DIR/proj"
@@ -284,23 +282,185 @@ teardown() { [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"; return 0; }
   [ "$status" -eq 127 ]
 }
 
-# ---- BUG 1 regression: cargo-cooldown must be reachable on apt-cargo hosts ----
+# ---- the gate backend: absolute path, never a PATH prepend, and whose it is ----
 #
-# On a rustup cargo, $CARGO_HOME/bin is on PATH, so `command -v cargo-cooldown`
-# and cargo's own `cargo cooldown` subcommand resolution both find the backend.
-# On a distro/apt cargo, ~/.cargo/bin is NOWHERE on PATH — so the backend builds
-# fine but the wrapper cannot find it, and the age gate silently resolves fresh
-# crates unchecked. Every test image used rustup, so this hid until a real
-# Ubuntu 26.04 apt-cargo box surfaced it. The wrapper prepends $CARGO_HOME/bin
-# to PATH; assert that it does.
+# BUG 1 (apt-cargo reachability) was first fixed by PREPENDING $CARGO_HOME/bin
+# to PATH, and an earlier test here asserted that prepend. On a SYSTEM-path
+# cargo (apt's /usr/bin/cargo) that put the deploying user's home in front of
+# root and every other account. MEASURED (VM#2, reproduced on Ubuntu 26.04 with
+# apt cargo 1.93.1 and cargo-cooldown 0.3.5): `sudo -H cargo build` and a second
+# account's build ran the deployer's cargo-cooldown and ~/.cargo/bin/cargo, and
+# a second account's apply re-rendered the wrapper so the first account's
+# builds went ungated. The wrapper now names the backend by absolute path,
+# never prepends, appends the backend's directory only when cargo would not
+# otherwise find it, and refuses a backend whose owner is neither the caller
+# nor root.
 
-@test "cargo: wrapper prepends the cooldown bin dir to PATH (apt-cargo reachability)" {
+# Stub cargo-real that also reports the PATH it was started with, plus a
+# pass-through sfw first on PATH: the wrapper prefixes network commands with
+# sfw when it is installed (it is, in the test image), and the real one may
+# change PATH itself, which is not what these tests are about.
+path_probe() {
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\nprintf "PATH=%%s\\n" "$PATH"\n' > "$PROBE_DIR/cargo-real"
+  printf '#!/bin/sh\nexec "$@"\n' > "$PROBE_DIR/sfw"
+  chmod +x "$PROBE_DIR/cargo-real" "$PROBE_DIR/sfw"
+}
+
+@test "cargo: the wrapper names its gate backend by absolute path" {
   command -v cargo >/dev/null || skip "cargo not installed"
-  # COOLDOWN_BIN must be set to a non-empty $CARGO_HOME/bin, and the wrapper
-  # must add it to PATH.
-  run grep -E "^COOLDOWN_BIN='.+/bin'" "$(cargo_path)"
+  run grep -E "^COOLDOWN_EXE='/.+/cargo-cooldown'" "$(cargo_path)"
   [ "$status" -eq 0 ]
-  grep -q 'PATH="$COOLDOWN_BIN:$PATH"' "$(cargo_path)"
+  # The prepend that ran the deployer's binaries for everyone must be gone.
+  ! grep -q 'PATH="$COOLDOWN' "$(cargo_path)"
+}
+
+@test "cargo: a gated build leaves the caller's PATH order alone" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe with-cooldown
+  path_probe
+  out=$(probe build)
+  [[ "$out" == *"cooldown build"* ]]
+  # probe() runs with PATH="$PROBE_DIR:/usr/bin:/bin"; the backend's directory
+  # is already on it, so nothing may be added in front or behind.
+  [[ "$out" == *"PATH=$PROBE_DIR:/usr/bin:/bin"* ]]
+}
+
+@test "cargo: a backend directory cargo would not search is appended, never prepended" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  path_probe
+  mkdir -p "$PROBE_DIR/backend"
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_DIR/backend/cargo-cooldown"
+  chmod +x "$PROBE_DIR/backend/cargo-cooldown"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/backend/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  out=$(probe build)
+  [[ "$out" == *"cooldown build"* ]]
+  [[ "$out" == *"PATH=$PROBE_DIR:/usr/bin:/bin:$PROBE_DIR/backend"* ]]
+}
+
+@test "cargo: a backend owned by another account is refused, attributably, and never run" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to give the backend to another account"
+  make_probe with-cooldown
+  printf '#!/bin/sh\ntouch "%s/backend-ran"\nexit 0\n' "$PROBE_DIR" > "$PROBE_DIR/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/cargo-cooldown"
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"[supply-chain-hardening] error: refusing to run the cargo publish-age gate backend"* ]]
+  [[ "$output" == *"not owned by root"* ]]
+  # Neither the backend nor cargo ran: not a quiet degrade to --locked.
+  [ ! -e "$PROBE_DIR/backend-ran" ]
+  [[ "$output" != *"--locked"* ]]
+  [[ "$output" != *"cooldown build"* ]]
+}
+
+@test "cargo: a root-owned backend in a directory another account can write is refused" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to stage another account's directory"
+  make_probe without-cooldown
+  mkdir -p "$PROBE_DIR/theirs"
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_DIR/theirs/cargo-cooldown"
+  chmod 755 "$PROBE_DIR/theirs/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/theirs"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/theirs/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"directory $PROBE_DIR/theirs is not owned by root"* ]]
+}
+
+@test "cargo: another account may run a root-owned backend" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to run as another account"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  make_probe with-cooldown
+  chmod 755 "$PROBE_DIR"
+  chown -R 65534 "$PROBE_DIR/proj"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && HOME=/nonexistent PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [[ "$output" == *"cooldown build"* ]]
+  [[ "$output" != *"refusing"* ]]
+}
+
+@test "cargo: a root-owned backend in the caller's own directory is the caller's to run" {
+  # Only the caller (and root) can change what is in a directory the caller
+  # owns, so refusing there was a false refusal. Root still refuses it: that
+  # directory's owner could swap the file.
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to stage another account's directory"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  make_probe without-cooldown
+  chmod 755 "$PROBE_DIR"
+  mkdir -p "$PROBE_DIR/own"
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_DIR/own/cargo-cooldown"
+  chmod 755 "$PROBE_DIR/own/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/own"
+  chown -R 65534 "$PROBE_DIR/proj"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/own/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && HOME=/nonexistent PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [[ "$output" == *"cooldown build"* ]]
+  [[ "$output" != *"refusing"* ]]
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"directory $PROBE_DIR/own is not owned by root"* ]]
+}
+
+@test "cargo: a backend another account owns is refused even in the caller's own directory" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to stage other accounts' files"
+  command -v setpriv >/dev/null || skip "setpriv not installed"
+  make_probe without-cooldown
+  chmod 755 "$PROBE_DIR"
+  mkdir -p "$PROBE_DIR/own"
+  printf '#!/bin/sh\ntouch "%s/backend-ran"\nexit 0\n' "$PROBE_DIR/own" > "$PROBE_DIR/own/cargo-cooldown"
+  chmod 755 "$PROBE_DIR/own/cargo-cooldown"
+  chown 1 "$PROBE_DIR/own/cargo-cooldown"
+  chown 65534 "$PROBE_DIR/own"
+  chown -R 65534 "$PROBE_DIR/proj"
+  sed -i "s|^COOLDOWN_EXE=.*|COOLDOWN_EXE='$PROBE_DIR/own/cargo-cooldown'|" "$PROBE_DIR/cargo"
+  run setpriv --reuid=65534 --regid=65534 --clear-groups bash -c \
+    "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && HOME=/nonexistent PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' build 2>&1"
+  [ "$status" -eq 126 ]
+  [[ "$output" == *"cargo-cooldown is not owned by root or by "* ]]
+  [ ! -e "$PROBE_DIR/own/backend-ran" ]
+}
+
+@test "cargo: a command that never runs the backend is not refused over it" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to give the backend to another account"
+  make_probe with-cooldown
+  chown 65534 "$PROBE_DIR/cargo-cooldown"
+  # `cargo add` only warns about the gate; `cargo fmt` never touches it.
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' add serde 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"add serde"* ]]
+  run bash -c "cd '$PROBE_DIR/proj' && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' fmt 2>&1"
+  [ "$status" -eq 0 ]
+}
+
+# ---- --locked is ours, so it is attributed when it bites ----
+#
+# After a Cargo.toml edit, cargo stops with "--locked was passed to prevent
+# this", naming a flag the caller never typed (VM test report, section 6).
+
+@test "cargo: a manifest newer than the lockfile gets a note naming the wrapper's --locked" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  touch -d '2020-01-01' "$PROBE_DIR/proj/Cargo.lock"
+  : > "$PROBE_DIR/proj/Cargo.toml"
+  err=$(probe_err build)
+  [[ "$err" == *"[supply-chain-hardening] note: this cargo wrapper adds --locked"* ]]
+  [[ "$err" == *"cargo update --workspace"* ]]
+  [[ "$(probe build)" == *"build --locked"* ]]
+}
+
+@test "cargo: no --locked note when the lockfile is newer than the manifest" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  make_probe without-cooldown
+  touch -d '2020-01-01' "$PROBE_DIR/proj/Cargo.toml"
+  touch "$PROBE_DIR/proj/Cargo.lock"
+  err=$(probe_err build)
+  [[ "$err" != *"adds --locked"* ]]
 }
 
 # ---- the gate config ----
@@ -317,4 +477,90 @@ cargo_home_dir() { echo "${CARGO_HOME:-$HOME/.cargo}"; }
 @test "cargo: cooldown violations deny rather than fall back" {
   [ -f "$(cargo_home_dir)/cooldown.toml" ] || skip "cooldown gate not enabled"
   grep -qE 'incompatible-publish-age[[:space:]]*=[[:space:]]*"deny"' "$(cargo_home_dir)/cooldown.toml"
+}
+
+# ---- sfw runs read-only ----
+#
+# sfw's cache is root-owned, and by default sfw rewrites .sfw-cache/next-check
+# there once the last update check is an hour old. A non-root caller cannot,
+# and sfw treats that as fatal: VM#1 measured every non-root cargo build
+# failing with "[sfw] Failed to prepare firewall binary: EACCES ... next-check"
+# one hour after each apply. The wrapper must run sfw with
+# SFW_SKIP_UPDATE_CHECK=1, and must not hand a non-root caller to an sfw whose
+# cache is cold (only root can fill it).
+
+# An sfw laid out like a global npm install (bin -> lib/node_modules/sfw/dist),
+# so the wrapper can find its cache. The stub reports the variable and runs
+# the command it was given.
+make_sfw_pkg() {
+  local pkg="$PROBE_DIR/lib/node_modules/sfw"
+  mkdir -p "$pkg/dist" "$pkg/.sfw-cache"
+  printf '{"name":"sfw","version":"0.0.0"}\n' > "$pkg/package.json"
+  printf '#!/bin/sh\necho "SFW-STUB SKIP=${SFW_SKIP_UPDATE_CHECK:-unset}"\nexec "$@"\n' > "$pkg/dist/sfw.mjs"
+  chmod +x "$pkg/dist/sfw.mjs"
+  ln -s "$pkg/dist/sfw.mjs" "$PROBE_DIR/sfw"
+  SFW_CACHE_DIR="$pkg/.sfw-cache"
+}
+
+@test "cargo+sfw: the wrapper runs sfw with SFW_SKIP_UPDATE_CHECK=1" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  grep -q 'pfx="sfw"' "$(cargo_path)" || skip "wrapper rendered without the sfw route (cargo_socket_firewall=false)"
+  make_probe without-cooldown
+  make_sfw_pkg
+  ln -s "$PROBE_DIR/cargo-real" "$SFW_CACHE_DIR/latest"
+  run probe fetch
+  echo "$output"
+  [[ "$output" == *"SFW-STUB SKIP=1"* ]]
+  [[ "$output" == *"fetch --locked"* ]]
+}
+
+@test "cargo+sfw: a cold sfw cache warns a non-root caller and runs cargo, instead of failing in sfw" {
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to run the probe as another account"
+  grep -q 'pfx="sfw"' "$(cargo_path)" || skip "wrapper rendered without the sfw route (cargo_socket_firewall=false)"
+  make_probe without-cooldown
+  make_sfw_pkg
+  chmod -R a+rX "$PROBE_DIR"
+  run su -s /bin/bash nobody -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' fetch 2>&1"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" != *"SFW-STUB"* ]]
+  [[ "$output" == *"fetch --locked"* ]]
+  # Warm: the same caller is routed through sfw.
+  ln -s "$PROBE_DIR/cargo-real" "$SFW_CACHE_DIR/latest"
+  run su -s /bin/bash nobody -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:/usr/bin:/bin' '$PROBE_DIR/cargo' fetch 2>&1"
+  echo "$output"
+  [[ "$output" == *"SFW-STUB SKIP=1"* ]]
+}
+
+@test "cargo+sfw: the real sfw runs a non-root caller's cargo once its update check is due" {
+  # The tests above use a stub sfw. This one runs the installed sfw, so it
+  # fails if sfw writes its root-owned cache for a non-root caller: backdate
+  # next-check past sfw's 1h window, as VM#1 measured, and run the deployed
+  # wrapper as nobody against a stub cargo. sfw's firewall runs its child
+  # behind a local proxy (MEASURED, sfw-free 1.16.0: CARGO_HTTP_PROXY is set,
+  # for any child command), so the stub reports it as proof sfw was in the chain.
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to backdate sfw's cache and run as another account"
+  grep -q 'pfx="sfw"' "$(cargo_path)" || skip "wrapper rendered without the sfw route (cargo_socket_firewall=false)"
+  sfw_bin=$(command -v sfw) || skip "sfw not installed"
+  s=$(readlink -f "$sfw_bin"); s=${s%/*}; c=${s%/*}/.sfw-cache
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  make_probe without-cooldown
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\necho "PROXY=${CARGO_HTTP_PROXY:-none}"\n' > "$PROBE_DIR/cargo-real"
+  chmod -R a+rX "$PROBE_DIR"
+  saved=$(cat "$c/next-check" 2>/dev/null)
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
+
+  run su -s /bin/bash nobody -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:${sfw_bin%/*}:/usr/bin:/bin' '$PROBE_DIR/cargo' fetch 2>&1"
+  after=$(cat "$c/next-check")
+  [ -n "$saved" ] && printf '%s' "$saved" > "$c/next-check"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Failed to prepare firewall binary"* ]]
+  [[ "$output" != *"sfw has no firewall binary cached"* ]]
+  [[ "$output" == *"fetch --locked"* ]]
+  [[ "$output" == *"PROXY=http://127.0.0.1:"* ]]
+  [ "$after" = "2026-01-01T00:00:00.000Z" ]
 }

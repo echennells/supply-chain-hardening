@@ -134,3 +134,33 @@ PY
     *) echo "FAIL: $f is not valid TOML" >&2; cat "$f" >&2; return 1 ;;
   esac
 }
+
+# real_binary <tool>: the binary a deployed PATH wrapper execs, read from the
+# wrapper itself (its REAL_<TOOL>='...' line). Fails when <tool> is not wrapped.
+#
+# The role wraps a tool IN PLACE, at the path it was found: /usr/bin/composer on
+# an apt host, /usr/local/bin/composer for the upstream installer, ~/.bun/bin/bun
+# for bun's own installer. A hard-coded /usr/local/bin/<tool>-real therefore made
+# every FIXTURE CONTROL that used it SKIP on apt hosts (MEASURED on the Nov 2026
+# VM run: tests 172, 173, 175 and 176), and a fallback to `command -v <tool>`
+# resolves to the wrapper itself, which would make a control "pass" through the
+# very wrapper it is meant to go around.
+real_binary() {
+  local tool="$1" w var r
+  w=$(command -v "$tool" 2>/dev/null) || return 1
+  grep -q 'supply-chain-harden' "$w" 2>/dev/null || return 1
+  var="REAL_$(printf '%s' "$tool" | tr '[:lower:]-' '[:upper:]_')"
+  r=$(sed -n "s/^${var}='\(.*\)'\$/\1/p" "$w" | head -1)
+  [ -n "$r" ] && [ -x "$r" ] || return 1
+  printf '%s\n' "$r"
+}
+
+# The container suite runs as root (tests/Dockerfile CMD), so some tests write
+# root-owned paths (/etc/npmrc, /etc/uv, /etc/profile.d), move a root-owned
+# binary aside, or add a user. Run as a normal user on a real host those fail
+# with "Permission denied" and read as role defects; MEASURED on 9 VMs, 12 tests
+# plus a setup_file per host. Skip them with the reason instead. Call it from a
+# @test body (or setup_file) so bats's exit-based `skip` takes effect.
+require_root() {
+  [ "$(id -u)" = 0 ] || skip "needs root: ${1:-writes root-owned files} (the container suite runs as root)"
+}
