@@ -113,8 +113,8 @@ assert_has_baseline() {
 # The role's "NOT applied" summary used to say nothing about yarn on a host
 # whose yarn cannot enforce the age gate (VM#10: apt yarnpkg 4.1.0 on Debian 13
 # and Ubuntu 26.04). This runs the REAL task from tasks/yarn.yml, lifted out by
-# name so nothing else in that file (the ~/.yarnrc.yml and /etc/yarnrc.yml
-# writes) touches this container, at fixed yarn_detected_version inputs.
+# name so nothing else in that file (the ~/.yarnrc.yml writes for this user and
+# root) touches this container, at fixed yarn_detected_version inputs.
 yarn_skip_entries() { # <yarn_detected_version> -> skipped_protections, one per line
   local dir task play out
   dir=$(mktemp -d)
@@ -164,4 +164,92 @@ PLAY
     [ "$status" -eq 0 ]
     [[ "$output" != *"Yarn"* ]] || { echo "unexpected entry for '$v': $output"; return 1; }
   done
+}
+
+# Root's ~/.yarnrc.yml is what `sudo yarn` reads (HOME=/root), so the role
+# writes it now that it no longer writes /etc/yarnrc.yml, which Yarn never
+# reads. Unlike that file, root's is in use, and may hold root's registry and
+# npmAuthToken. The REAL three tasks from tasks/yarn.yml, lifted by name, run
+# with root's home pointed at a temp dir and the deploying user's home
+# elsewhere (the container runs the role as root, where the two are one file
+# and these tasks stand aside). `become` is dropped: the suite runs as root.
+yarn_root_rc_play() { # <fake root home> <deploying user's HOME> -> summary entries
+  local dir task play out
+  dir=$(mktemp -d)
+  task="$dir/task.json"; play="$dir/play.yml"; out="$dir/out.txt"
+  python3 - "$ROLE_DIR/tasks/yarn.yml" "$task" "$ROLE_DIR/templates/yarnrc.yml.j2" <<'PY'
+import json, sys, yaml
+want = ["Check root's ~/.yarnrc.yml before writing it (sudo coverage)",
+        "Deploy hardened .yarnrc.yml to root's home (sudo coverage)",
+        "Add root's own ~/.yarnrc.yml to the not-applied summary (sudo coverage)"]
+tasks = {t.get("name"): t for t in yaml.safe_load(open(sys.argv[1]))}
+lifted = []
+for n in want:
+    assert n in tasks, "task not found in tasks/yarn.yml: " + n
+    t = dict(tasks[n]); t.pop("become", None)
+    if "ansible.builtin.template" in t:
+        t["ansible.builtin.template"] = dict(t["ansible.builtin.template"], src=sys.argv[3])
+    lifted.append(t)
+json.dump(lifted, open(sys.argv[2], "w"))
+PY
+  cat > "$play" <<PLAY
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    yarn_root_home: { stdout: "$1" }
+    ansible_env: { HOME: "$2" }
+    yarn_detected_version: "4.11.0"
+    yarn_minimal_age_gate: 2880
+    yarn_enable_scripts: false
+    yarn_enable_immutable_installs: true
+    yarn_enable_immutable_cache: false
+    yarn_checksum_behavior: "throw"
+    yarn_unsafe_http_whitelist: []
+    yarn_approved_git_repositories: []
+    yarn_enable_hardened_mode: true
+  tasks:
+    - ansible.builtin.include_tasks: $task
+    - ansible.builtin.copy:
+        content: "{{ (skipped_protections | default([])) | join('\n') }}\n"
+        dest: $out
+        mode: "0644"
+PLAY
+  ansible-playbook "$play" >"$dir/log" 2>&1 || { echo "playbook failed:" >&2; tail -20 "$dir/log" >&2; rm -rf "$dir"; return 1; }
+  cat "$out"; rm -rf "$dir"
+}
+
+@test "root's ~/.yarnrc.yml: one this project did not write is left alone and listed; absent or ours, it is written" {
+  require_root "renders a root-owned file"
+  local r="$BATS_TEST_TMPDIR/roothome" u="$BATS_TEST_TMPDIR/deployer"
+  mkdir -p "$r" "$u"
+  # Root's own file: a registry and its token.
+  printf 'npmRegistryServer: "https://npm.corp.invalid"\nnpmAuthToken: "tok"\n' > "$r/.yarnrc.yml"
+  cp "$r/.yarnrc.yml" "$BATS_TEST_TMPDIR/before"
+  run yarn_root_rc_play "$r" "$u"
+  [ "$status" -eq 0 ]
+  cmp "$r/.yarnrc.yml" "$BATS_TEST_TMPDIR/before"
+  [[ "$output" == *"Yarn sudo coverage — $r/.yarnrc.yml exists and this project did not write it"* ]]
+  # A file with this project's marker (an older rendering) is rewritten.
+  printf '# Managed by supply-chain-harden action\nenableScripts: true\n' > "$r/.yarnrc.yml"
+  run yarn_root_rc_play "$r" "$u"
+  [ "$status" -eq 0 ]
+  grep -qx 'enableScripts: false' "$r/.yarnrc.yml"
+  grep -qx 'npmMinimalAgeGate: 2880' "$r/.yarnrc.yml"
+  [[ "$output" != *"Yarn sudo coverage"* ]]
+  # None at all: written.
+  rm -f "$r/.yarnrc.yml"
+  run yarn_root_rc_play "$r" "$u"
+  [ "$status" -eq 0 ]
+  grep -qx 'enableScripts: false' "$r/.yarnrc.yml"
+  [[ "$output" != *"Yarn sudo coverage"* ]]
+  # The role run as root: root's home is the deploying user's, whose
+  # ~/.yarnrc.yml the role writes as it always has, so these tasks stand
+  # aside and report nothing.
+  printf 'npmRegistryServer: "https://npm.corp.invalid"\n' > "$r/.yarnrc.yml"
+  cp "$r/.yarnrc.yml" "$BATS_TEST_TMPDIR/before"
+  run yarn_root_rc_play "$r" "$r"
+  [ "$status" -eq 0 ]
+  cmp "$r/.yarnrc.yml" "$BATS_TEST_TMPDIR/before"
+  [[ "$output" != *"Yarn sudo coverage"* ]]
 }

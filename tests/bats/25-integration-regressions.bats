@@ -727,12 +727,13 @@ task_changed() { # task_changed <output> <task name substring>
 # when there was none; and closed with "Everything else in the role applied
 # normally". A stub yarn first on PATH stands in for each Yarn version.
 
-# The yarn tasks render ~/.yarnrc.yml and /etc/yarnrc.yml for the version they
-# detect, so a stub's rendering must not outlive its test: left rendered for a
-# stub 4.10.3, a real Yarn 1.x host keeps a 4.x file, and the other way round a
+# The yarn tasks render ~/.yarnrc.yml and root's ~/.yarnrc.yml for the version
+# they detect, so a stub's rendering must not outlive its test: left rendered for
+# a stub 4.10.3, a real Yarn 1.x host keeps a 4.x file, and the other way round a
 # Yarn 4 host loses enableHardenedMode. MEASURED in review: both files' hashes
-# changed across a run of these tests. Restored by teardown, whatever the outcome.
-YARNRC_FILES=("$HOME/.yarnrc.yml" /etc/yarnrc.yml)
+# changed across a run of these tests (the second was /etc/yarnrc.yml then).
+# Restored by teardown, whatever the outcome.
+YARNRC_FILES=("$HOME/.yarnrc.yml" ~root/.yarnrc.yml)
 YARNRC_BACKUP=""
 backup_yarnrc() {
   local f i=0
@@ -871,7 +872,7 @@ EOF
 
 @test "summary: Yarn 2.x-4.9 is listed without its age gate; Yarn 4.10+ is not listed" {
   [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
-  require_root "re-renders /etc/yarnrc.yml for a stub Yarn and restores it afterwards"
+  require_root "re-renders root's ~/.yarnrc.yml for a stub Yarn and restores it afterwards"
   backup_yarnrc
   cd "$ROLE_DIR"
   make_yarn_stub 4.1.0
