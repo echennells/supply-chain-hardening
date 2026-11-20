@@ -4,7 +4,8 @@
 # non-root apply. Each check maps to a bug this cell actually shipped:
 #   1  verify: no gaps        -> non-root apply left every protection in effect
 #   2  real install succeeds  -> sfw runs for dev against its root-owned cache,
-#                                also once its 1h update-check window has passed
+#                                also once its 1h update-check window has passed,
+#                                and no account but root can write that cache
 #   3  postinstall blocked    -> ignore-scripts is enforced for the ordinary user
 #   4  interactive no-loop     -> the npm->npq->npm re-entry guard terminates
 set -u
@@ -76,6 +77,29 @@ if [ -e "$sfw_pkg/.sfw-cache/latest" ]; then
   rm -rf "$d1"
 else
   echo "SKIP: no warm sfw cache (the apply-time fetch failed), nothing to backdate"
+fi
+
+# 2c) ...and only root can change what sfw runs. sfw runs .sfw-cache/latest
+#     without re-checking its digest, for root too (`sudo npm install` goes
+#     through the wrapper). Up to 8281a6b a non-root apply chowned the cache to
+#     the deploying user, so on Debian's npm (prefix /usr/local) dev could
+#     repoint latest at a script that `sudo npm view` then ran as uid 0 (VM#1).
+#     The root-applied suite cannot see this: that apply chowned it to root.
+#     MEASURED against an 8281a6b non-root apply on Debian 13's npm: this
+#     check FAILs (".sfw-cache (dev 755)"). On this image's NodeSource npm
+#     (prefix /usr) the old chown missed the real cache, so here it guards the
+#     invariant rather than replaying VM#1.
+say "sfw cache writable only by root"
+if [ -d "$sfw_pkg/.sfw-cache" ]; then
+  bad=$(find "$sfw_pkg/.sfw-cache" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -printf '%p (%u %m)\n' 2>/dev/null | head -5)
+  if [ -z "$bad" ]; then
+    ok "every entry under $sfw_pkg/.sfw-cache is root-owned and not group/other-writable"
+  else
+    no "sfw cache entries another account can write (that account picks the binary root runs):"
+    printf '  %s\n' "$bad"
+  fi
+else
+  echo "SKIP: no sfw cache at $sfw_pkg/.sfw-cache"
 fi
 
 # 3) ignore-scripts must block a postinstall for the non-root user.
