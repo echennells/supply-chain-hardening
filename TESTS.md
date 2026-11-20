@@ -118,7 +118,7 @@ make test-dev      # docker-compose with mounted tests for fast iteration
 
 **The suite expects to run as root**, as it does in the container (`make test`, and CI's `test.yml`). Run as a normal user on a real host, a test that has to write a root-owned path (`/etc/npmrc`, `/etc/uv`, `/etc/profile.d`), move a root-owned binary aside, or add a user skips with `needs root: <what it writes>` instead of failing with "Permission denied" (`require_root` in `tests/bats/setup.bash`). That includes the whole of `38-preflight-become-guard.bats`, whose `setup_file` adds a user: on the November 2026 VM runs, which were all non-root, it reported a single "setup_file failed" in place of its tests, so they never ran there. In the container suite they run. Tests that need a tool feature skip by capability, not by version guess (for example `pip install --dry-run`, which pip 22.0.2 on Ubuntu 22.04 lacks).
 
-Tests that re-run the full playbook (preflight tests in `25-integration-regressions.bats`, idempotency check) are slow. To skip the idempotency double-apply specifically: `SKIP_SLOW=1 make test` (the idempotency test honors that env var; others run regardless).
+Tests that re-run the full playbook (preflight tests in `25-integration-regressions.bats`, idempotency check) are slow. `SKIP_SLOW=1 make test` skips the idempotency double-apply and the other playbook-running tests in `25-integration-regressions.bats` (check-mode dry run, Go floor, tool pins, end-of-run summary); the preflight tests run regardless.
 
 ## Measurement hazards when writing tests
 

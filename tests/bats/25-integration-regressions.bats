@@ -286,6 +286,7 @@ restore_real_go() {
 teardown() {
   restore_real_go
   restore_uv
+  restore_yarnrc
 }
 
 UV_HIDDEN=""
@@ -485,6 +486,33 @@ task_changed() { # task_changed <output> <task name substring>
 # when there was none; and closed with "Everything else in the role applied
 # normally". A stub yarn first on PATH stands in for each Yarn version.
 
+# The yarn tasks render ~/.yarnrc.yml and /etc/yarnrc.yml for the version they
+# detect, so a stub's rendering must not outlive its test: left rendered for a
+# stub 4.10.3, a real Yarn 1.x host keeps a 4.x file, and the other way round a
+# Yarn 4 host loses enableHardenedMode. MEASURED in review: both files' hashes
+# changed across a run of these tests. Restored by teardown, whatever the outcome.
+YARNRC_FILES=("$HOME/.yarnrc.yml" /etc/yarnrc.yml)
+YARNRC_BACKUP=""
+backup_yarnrc() {
+  local f i=0
+  YARNRC_BACKUP=$(mktemp -d /tmp/sch-yarnrc.XXXXXX)
+  for f in "${YARNRC_FILES[@]}"; do
+    # cp -p keeps the 0644 mode and owner (see the /etc/npmrc tests above).
+    if [ -e "$f" ]; then cp -p "$f" "$YARNRC_BACKUP/$i"; fi
+    i=$((i + 1))
+  done
+}
+restore_yarnrc() {
+  [ -n "$YARNRC_BACKUP" ] && [ -d "$YARNRC_BACKUP" ] || return 0
+  local f i=0
+  for f in "${YARNRC_FILES[@]}"; do
+    if [ -e "$YARNRC_BACKUP/$i" ]; then cp -p "$YARNRC_BACKUP/$i" "$f"; else rm -f "$f"; fi
+    i=$((i + 1))
+  done
+  rm -rf "$YARNRC_BACKUP"
+  YARNRC_BACKUP=""
+}
+
 make_yarn_stub() { # make_yarn_stub <version>
   YARN_STUB=$(mktemp -d /tmp/sch-yarn-stub.XXXXXX)
   printf '#!/bin/sh\necho %s\n' "$1" > "$YARN_STUB/yarn"
@@ -499,6 +527,7 @@ summary_of() { # the summary task's msg, one line per entry
   [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
   require_root "moves the image's uv aside"
   hide_uv || skip "no uv this test can hide"
+  backup_yarnrc
   make_yarn_stub 1.22.22
   cd "$ROLE_DIR"
   run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
@@ -533,6 +562,8 @@ summary_of() { # the summary task's msg, one line per entry
 
 @test "summary: Yarn 2.x-4.9 is listed without its age gate; Yarn 4.10+ is not listed" {
   [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  require_root "re-renders /etc/yarnrc.yml for a stub Yarn and restores it afterwards"
+  backup_yarnrc
   cd "$ROLE_DIR"
   make_yarn_stub 4.1.0
   run env PATH="$YARN_STUB:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
