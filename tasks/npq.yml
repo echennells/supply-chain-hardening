@@ -135,7 +135,8 @@
   # (all versions): load-bearing on npm <12, redundant-but-harmless on >=12 where
   # native allowScripts already blocks. npq is a pure-JS CLI with no required
   # postinstall, so this is safe. See tasks/socket.yml for the sfw reasoning.
-  ansible.builtin.command: npm install -g --ignore-scripts npq@{{ npq_version }}
+  # umask 022: see "Install lockfile-lint globally" in tasks/npm.yml.
+  ansible.builtin.command: sh -c 'umask 022 && exec "$@"' sch-umask npm install -g --ignore-scripts npq@{{ npq_version }}
   changed_when: true
   when:
     - npm_for_npq.rc == 0

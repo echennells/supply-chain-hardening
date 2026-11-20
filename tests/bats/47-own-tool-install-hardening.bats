@@ -56,3 +56,95 @@ load setup
   done < <(grep -lE 'command:.*npm install -g' "$ROLE_DIR"/tasks/*.yml)
   [ -z "$offenders" ] || { echo "$offenders" >&2; false; }
 }
+
+# Ansible sets no umask, so a tool install inherits the caller's. MEASURED at
+# 6c77f4e, the role applied as root under `umask 0000` (the default of GitLab's
+# Docker executor): /usr/local/lib/node_modules and the lockfile-lint, npq and
+# sfw trees in it were 0777, any account could replace code root runs, and the
+# per-user uv tools, ~/.local/bin among them, were 0777 too. So each install
+# runs under `sh -c 'umask ... && exec "$@"'`.
+#
+# This takes each install command as the command module does (the YAML value,
+# shlex-split, $VARS expanded), runs its umask wrapper under umask 0000 with a
+# stub in place of the tool, and reads the umask the stub was started with.
+# A root install must be exactly 022, so every account can still read it; a
+# per-user one must at least clear group and other write.
+@test "own tools: every tool install runs under a umask that clears group and other write" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+  python3 -c 'import yaml' 2>/dev/null || skip "PyYAML not available"
+  run python3 - "$BATS_TEST_TMPDIR" "$ROLE_DIR"/tasks/*.yml <<'PY'
+import os, re, shlex, subprocess, sys, yaml
+tmp, files = sys.argv[1], sys.argv[2:]
+stub = os.path.join(tmp, "tool")
+with open(stub, "w") as fh:
+    fh.write('#!/bin/sh\nprintf "%s %s\\n" "$(umask)" "$#" > "$SCH_OUT"\n')
+os.chmod(stub, 0o755)
+install = re.compile(r"npm install -g |tool install |cargo install |\binstall (github\.com|golang\.org)/")
+seen, bad = 0, []
+def walk(tasks, f, become):
+    global seen
+    for t in tasks or []:
+        if not isinstance(t, dict):
+            continue
+        b = t.get("become", become)
+        for k in ("block", "rescue", "always"):
+            walk(t.get(k), f, b)
+        c = t.get("ansible.builtin.command")
+        cmd = c if isinstance(c, str) else (c or {}).get("cmd") if isinstance(c, dict) else None
+        if not cmd or not install.search(cmd):
+            continue
+        seen += 1
+        name = "%s: %s" % (os.path.basename(f), t.get("name"))
+        argv = [os.path.expanduser(os.path.expandvars(a)) for a in shlex.split(cmd)]
+        if argv[:2] != ["sh", "-c"] or len(argv) < 5:
+            bad.append("%s runs with the caller's umask: %s" % (name, cmd))
+            continue
+        out = os.path.join(tmp, "out")
+        old = os.umask(0)
+        try:
+            subprocess.run(argv[:4] + [stub, "a", "b"], env={"PATH": os.environ["PATH"], "SCH_OUT": out}, check=True)
+        finally:
+            os.umask(old)
+        mask, nargs = open(out).read().split()
+        m = int(mask, 8)
+        root = b is True or str(b).lower() == "true"
+        if nargs != "2":
+            bad.append("%s: the wrapper passed %s arguments on, not 2" % (name, nargs))
+        elif root and m != 0o022:
+            bad.append("%s (become): installed under umask %s, want 0022" % (name, mask))
+        elif not root and m & 0o022 != 0o022:
+            bad.append("%s: installed under umask %s, which lets group or others write" % (name, mask))
+        else:
+            print("ok  %s  umask %s" % (name, mask))
+for f in files:
+    walk(yaml.safe_load(open(f)), f, False)
+for line in bad:
+    print("BAD " + line)
+print("checked %d install commands" % seen)
+sys.exit(1 if bad or seen < 9 else 0)
+PY
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "own tools: under umask 0000 the role's root npm install leaves nothing group- or world-writable" {
+  # The same defect end to end, through the real play: remove lockfile-lint,
+  # re-apply the npm tag under umask 0000, and look at what the install wrote.
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root: re-runs the role's root npm install"
+  command -v npm >/dev/null 2>&1 || skip "npm not installed"
+  local g
+  g=$(npm root -g 2>/dev/null) && [ -d "$g" ] || skip "no npm global root"
+  rm -rf "$g/lockfile-lint"
+  cd "$ROLE_DIR"
+  run bash -c 'umask 0000; exec ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npm -e podman_enabled=false -e verify_protections=false'
+  printf '%s\n' "$output" | grep -A1 'TASK \[.*Install lockfile-lint globally' || true
+  [ "$status" -eq 0 ]
+  [ -f "$g/lockfile-lint/package.json" ] || skip "lockfile-lint did not install (offline?): nothing to inspect"
+  local bad
+  bad=$(find "$g/lockfile-lint" \( -perm -0002 -o -perm -0020 \) ! -type l)
+  [ -z "$bad" ] || { echo "writable by group or others:"; echo "$bad" | head -20 | while read -r p; do ls -ld "$p"; done; false; }
+  # Still readable by every account, which a caller's 077 would have broken.
+  [ "$(ls -ld "$g/lockfile-lint" | cut -c1-10)" = drwxr-xr-x ]
+}
