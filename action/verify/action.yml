@@ -61,7 +61,9 @@ outputs:
     description: 'Of those, how many a re-run of the hardening can close.'
     value: ${{ steps.verify.outputs.gaps_config }}
   gaps_toolchain:
-    description: 'Of those, how many need a newer toolchain and no config can fix.'
+    description: >-
+      Of those, how many no configuration can close: the tool is too old for
+      the setting, or has no such control at all.
     value: ${{ steps.verify.outputs.gaps_toolchain }}
   weak:
     description: 'Number of WEAK rows (not counted as coverage), PRESENT-only and caveated alike.'

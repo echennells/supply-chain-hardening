@@ -242,7 +242,7 @@ exec '"$realpy"' "$@"'
   [[ "$output" == *"GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement"* ]]
   # Counted as toolchain: no re-run teaches pip 24 the flag. It was counted as
   # config, so the summary told the reader re-running the hardening would fix it.
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
@@ -435,7 +435,7 @@ esac"
   [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
   [[ "$output" == *"does NOT implement config.policy.cooldown"* ]]
   # Counted as toolchain, or --fail-on=config fails a job for what it was handed.
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "composer: every version-limited gap is toolchain, so fail-on=config can pass on a stock LTS" {
@@ -446,7 +446,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      composer audit blocking"* ]]
   [[ "$output" == *"GAP    PARSED      composer publish-age gate"* ]]
-  [[ "$output" =~ [2-9]\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [2-9]\ no\ configuration\ can\ close ]]
 }
 
 @test "composer 2.11 with the gate in effect reads OK" {
@@ -487,7 +487,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      bundler publish-age gate"* ]]
   [[ "$output" == *"does NOT implement cooldown"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "bundler 4.0.13 is the first version the row accepts" {
@@ -576,7 +576,7 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      poetry publish-age gate"* ]]
   [[ "$output" == *"has no solver.min-release-age"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
 }
 
 @test "poetry 2.4.0 is the first version the row accepts" {
@@ -957,7 +957,7 @@ esac"
   [[ "$output" == *"GAP    FUNCTIONAL  cargo lockfile writers routed"* ]]
   [[ "$output" == *"writes Cargo.lock and is NOT age-gated' warning"* ]]
   [[ "$output" != *"this state is SILENT"* ]]
-  [[ "$output" =~ [1-9][0-9]*\ need\ a\ newer\ toolchain ]]
+  [[ "$output" =~ [1-9][0-9]*\ no\ configuration\ can\ close ]]
   # The wrapper really does warn on a writer, with the backend present.
   run env -i PATH="${TEST_BIN}:${TEST_HOME}/.cargo/bin:${PATH}" HOME="$TEST_HOME" cargo add serde
   [[ "$output" == *"'cargo add' writes Cargo.lock and is NOT age-gated"* ]]

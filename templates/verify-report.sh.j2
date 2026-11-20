@@ -84,8 +84,8 @@ elif [ "$QUIET" -eq 0 ]; then
   [ "$VERBOSE" -eq 0 ] && { echo "(one-line summaries — run with --verbose for the full rationale, or --json for machine output)"; echo; }
   echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
   echo "setting back · PRESENT = a file exists and nothing more (unverified)."
-  echo "N/A rows say '-' (the tool is not installed here) or BYDESIGN (this"
-  echo "host's role configuration never asked for it)."
+  echo "N/A rows say '-' (nothing here to check: no such tool, or no project config"
+  echo "of that kind here) or BYDESIGN (this host's role configuration never asked for it)."
   echo
   if [ "$GAPS" -gt 0 ]; then
     echo "RESULT: $GAPS gap(s) — protections NOT in effect $SCV_SCOPE_LABEL."

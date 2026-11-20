@@ -75,7 +75,9 @@ USAGE
   --emit=TARGET     auto|github|gitlab|circleci|azure|buildkite|plain
   --fail-on=POLICY  any     fail on any gap (default; today's contract)
                     config  fail only on gaps a re-run of harden.sh can close,
-                            not on ones that need a newer toolchain
+                            not on ones no configuration can close (a
+                            toolchain too old for the setting, or a tool
+                            with no such control)
                     never   always exit 0; report only
 
 WHY THIS EXISTS
@@ -119,7 +121,8 @@ STATUS
   WEAK  not counted as coverage: verified only as PRESENT, or parsed or
         observed in effect with a caveat the row names
   N/A   nothing to check here. The EVIDENCE column says which kind:
-        ABSENT    the tool is not installed
+        ABSENT    nothing here to check: the tool is not installed, or what
+                  the row looks for (a project config, an SDK) is not here
         BYDESIGN  this job never asked for it
 
 Exit 0 when there are no GAP rows, 1 otherwise. WEAK does not fail on its own
@@ -1186,11 +1189,15 @@ if [ "$QUIET" -eq 0 ]; then
   echo
   echo "EVIDENCE: FUNCTIONAL = observed behavior · PARSED = the tool reported the"
   echo "setting back · PRESENT = a file exists and nothing more (unverified)."
-  echo "N/A rows say ABSENT (the tool is not installed) or BYDESIGN (not requested here)."
+  echo "N/A rows say ABSENT (nothing here to check: no such tool, or no project config of"
+  echo "that kind here) or BYDESIGN (not requested here)."
   echo
   if [ "$GAPS" -gt 0 ]; then
     echo "RESULT: $GAPS gap(s) — protections NOT in effect $SCV_SCOPE_LABEL."
-    echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN need a newer toolchain."
+    # The toolchain class holds every gap no configuration closes: a tool too
+    # old for the setting (npm 10 and min-release-age), and a tool with no such
+    # control at all (cargo-cooldown has no verb for cargo add / generate-lockfile).
+    echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN no configuration can close (the tool is too old, or has no such control)."
   else
     echo "RESULT: no gaps."
   fi
@@ -1204,7 +1211,7 @@ if [ "$QUIET" -eq 0 ]; then
     fi
   fi
   [ $((NA_ABSENT + NA_DESIGN)) -gt 0 ] && \
-    echo "        $((NA_ABSENT + NA_DESIGN)) row(s) N/A ($NA_ABSENT tool not installed, $NA_DESIGN not requested here)."
+    echo "        $((NA_ABSENT + NA_DESIGN)) row(s) N/A ($NA_ABSENT with nothing here to check, $NA_DESIGN not requested here)."
   echo
 fi
 
