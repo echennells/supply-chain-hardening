@@ -175,7 +175,10 @@ FAKE
   run /usr/local/bin/pip download six
   [ "$status" -eq 2 ]
   [[ "$output" == *"[supply-chain-hardening] error: 'pip download' is not available here"* ]]
-  # A package that happens to be called "download" is not the subcommand.
+  # A package that happens to be called "download" is not the subcommand. The
+  # fixture is a root-owned fake uv; as a normal user (the November 2026 VM
+  # runs) chown failed here, after the refusal above had passed.
+  require_root "gives the fake uv to root"
   fake_uv_wrapper 0
   run "$FAKE_DIR/pip" install download
   [ "$status" -eq 0 ]
