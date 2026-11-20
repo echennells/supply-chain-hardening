@@ -2207,8 +2207,25 @@ SCVSTUB
     done
     [ -f /Cargo.lock ] && { rm -rf "$tmp"; return 1; }
   fi
-  ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo "$@" 2>/dev/null )
+  # SCV_DISPATCH_STDERR=1 returns the wrapper's stderr instead of the argv, for
+  # cargo_wrapper_refusal. Unset, the output is exactly the argv, as before.
+  if [ -n "${SCV_DISPATCH_STDERR:-}" ]; then
+    ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo "$@" 2>&1 >/dev/null )
+  else
+    ( cd "$tmp" && unset SUPPLY_CHAIN_CARGO_WRAPPED && PATH="$tmp:$PATH" ./cargo "$@" 2>/dev/null )
+  fi
   rm -rf "$tmp"
+}
+
+# DOES THE WRAPPER REFUSE ITS OWN GATE BACKEND FOR THIS ACCOUNT? The wrapper runs
+# cargo-cooldown only when the caller owns it or root owns it with nothing
+# above it writable by anyone else (VM#2: a system-wide wrapper used to run the
+# deploying user's binaries as root). A refusal exits 126 before any argv
+# reaches cargo, so cargo_wrapper_dispatch sees nothing; this reads the
+# wrapper's own error line instead of reporting "no dispatch".
+cargo_wrapper_refusal() {
+  SCV_DISPATCH_STDERR=1 cargo_wrapper_dispatch lock build 2>/dev/null \
+    | grep -m1 'refusing to run the cargo publish-age gate backend'
 }
 
 # WHAT DOES THE BACKEND ACTUALLY RECEIVE WHEN THE CALLER TRIES TO TURN IT OFF?
@@ -2309,9 +2326,15 @@ cargo_wrapper_uses_sfw() {
   printf '%s\n' "$out_install" | grep -q 'SFW-INVOKED'
 }
 
-# Read a single-quoted assignment the wrapper embeds (REAL_CARGO, COOLDOWN_BIN).
+# Read a single-quoted assignment the wrapper embeds (REAL_CARGO, COOLDOWN_EXE,
+# or the COOLDOWN_BIN of a wrapper rendered before the backend had a fixed path).
 cargo_embedded() { # <VAR> <wrapper>
   grep -oE "^$1='[^']*'" "$2" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//"
+}
+
+# Is directory $1 this caller's own, or root's? find(1), not stat(1): portable.
+cargo_dir_callers_or_roots() {
+  [ -O "$1" ] || [ -n "$(find "$1" -maxdepth 0 -user 0 2>/dev/null)" ]
 }
 
 cargo_positive_int() {
@@ -2546,6 +2569,20 @@ else
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper's delegate '$creal' does not execute at all (${cerr}) - \`cargo build\` is broken, not gated"
     fi
+  elif [ -n "$cw" ] && cprep=$(cargo_embedded COOLDOWN_BIN "$cw") && [ -n "$cprep" ] && [ -d "$cprep" ] \
+       && ! cargo_dir_callers_or_roots "$cprep"; then
+    # A WRAPPER FROM BEFORE THE BACKEND HAD A FIXED PATH, reached by an account
+    # that does not own the directory it prepends. MEASURED (VM#2, reproduced
+    # on Ubuntu 26.04 with apt cargo 1.93.1): such a /usr/bin/cargo made
+    # `sudo -H cargo build` and a second account's build run the deploying
+    # user's cargo-cooldown and ~/.cargo/bin/cargo. The dispatch probe below
+    # would still see `cooldown build` and credit the gate. The role re-renders
+    # these on apply; this row is for a host where that has not happened.
+    row GAP FUNCTIONAL "cargo publish-age gate" \
+      "the wrapper at $cw was rendered before the gate backend had a fixed path: it PREPENDS $cprep to PATH, a directory owned by $(ls -ld "$cprep" 2>/dev/null | awk '{print $3}'), not by $( [ "$(id -u)" = 0 ] && echo root || echo "$(id -un 2>/dev/null) or root"), so this account's \`cargo build\` runs that account's cargo-cooldown, and any cargo or rustc there, ahead of its own. Re-apply the role (or re-run harden.sh) to re-render it with a root-owned backend"
+  elif [ -z "$cdisp" ] && crefuse=$(cargo_wrapper_refusal) && [ -n "$crefuse" ]; then
+    row GAP FUNCTIONAL "cargo publish-age gate" \
+      "the wrapper at $cw REFUSES its gate backend for this account ($(id -un 2>/dev/null)), so \`cargo build\` fails here rather than run a binary another account could replace. Its message: ${crefuse#*error: }"
   elif [ -z "$cdisp" ]; then
     row GAP FUNCTIONAL "cargo publish-age gate" \
       "the wrapper at $cw produced no dispatch for \`cargo build\` - either it never reaches the real cargo, or it is not a shape this probe can safely substitute into. Nothing here is verified, so nothing here is credited"
@@ -2553,23 +2590,27 @@ else
     row GAP FUNCTIONAL "cargo publish-age gate" \
       "the wrapper treats \`cargo build\` and \`cargo -q build\` DIFFERENTLY - a global flag before the subcommand bypasses the controls. Ordinary Makefile and CI invocations are ungated"
   elif printf '%s\n' "$cdisp" | grep -qx 'cooldown'; then
+    cexe=$(cargo_embedded COOLDOWN_EXE "$cw")
     cbin=$(cargo_embedded COOLDOWN_BIN "$cw")
     cool=""
     # Resolve cargo-cooldown EXACTLY the way the deployed wrapper does at runtime:
-    # its embedded COOLDOWN_BIN (prepended to PATH), else the ambient PATH. A prior
-    # version also tried "$ch/bin/cargo-cooldown", but that let the verifier find a
-    # backend the WRAPPER cannot - #376: when COOLDOWN_BIN renders EMPTY the
-    # wrapper's PATH prepend is a no-op, yet $ch/bin still resolved, so the row
-    # reported OK while the gate was inert on the host. Match the wrapper or lie.
-    for cand in "$cbin/cargo-cooldown" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    # its embedded COOLDOWN_EXE (an absolute path), else the ambient PATH. A
+    # wrapper rendered before that had COOLDOWN_BIN, a directory it PREPENDED to
+    # PATH; it is still read here so such a wrapper is judged by what it does. A
+    # prior version also tried "$ch/bin/cargo-cooldown", but that let the
+    # verifier find a backend the WRAPPER cannot - #376: when COOLDOWN_BIN
+    # rendered EMPTY the prepend was a no-op, yet $ch/bin still resolved, so the
+    # row reported OK while the gate was inert on the host. Match the wrapper or
+    # lie.
+    for cand in "$cexe" "${cbin:+$cbin/cargo-cooldown}" "$(command -v cargo-cooldown 2>/dev/null)"; do
       [ -n "$cand" ] && [ -x "$cand" ] && { cool="$cand"; break; }
     done
-    if [ -z "$cool" ] && [ -z "$cbin" ]; then
+    if [ -z "$cool" ] && [ -z "$cexe" ] && [ -z "$cbin" ] && grep -q "^COOLDOWN_BIN=''" "$cw" 2>/dev/null; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "the wrapper's COOLDOWN_BIN is EMPTY (#376), so its \$CARGO_HOME/bin PATH prepend is a no-op and cargo-cooldown - which lives in ~/.cargo/bin, off PATH on apt-cargo hosts - is never reached at runtime. The route dead-ends; \`cargo build\` is BROKEN, not gated. Re-apply with cargo_home resolved."
     elif [ -z "$cool" ]; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
-        "the wrapper routes builds through \`cargo cooldown\` but cargo-cooldown is not installed where the wrapper looks (${cbin:-\$CARGO_HOME/bin}). The route dead-ends, so \`cargo build\` is BROKEN, not gated"
+        "the wrapper routes builds through \`cargo cooldown\` but cargo-cooldown is not installed where the wrapper looks (${cexe:-${cbin:-PATH}}). The route dead-ends, so \`cargo build\` is BROKEN, not gated"
     elif ! cargo_run_ok "$cool" --version; then
       row GAP FUNCTIONAL "cargo publish-age gate" \
         "cargo-cooldown is installed ($cool) but CANNOT EXECUTE - usually a prebuilt binary needing newer glibc than this image ships. The wrapper routes builds into it, so \`cargo build\` is BROKEN, not gated"

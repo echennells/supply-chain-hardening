@@ -256,6 +256,46 @@ fallback.
 The pip-redirect wrapper is the gold-standard example — `/usr/local/bin/pip`
 catches every caller regardless of UID.
 
+**A system-wide wrapper must not run a per-user backend.** The pip wrapper and
+the apt-cargo wrapper both resolved their backend (uv, cargo-cooldown) in the
+DEPLOYING user's context and baked that user's home into a file every account
+runs. MEASURED (VM#2, reproduced on Ubuntu 26.04): `sudo pip` exec'd the
+deployer's `~/.local/bin/uv`; `sudo cargo build` and a second account's build
+ran the deployer's `cargo-cooldown` and, through a PATH prepend, their
+`~/.cargo/bin/cargo`; a second account's apply re-rendered `/usr/bin/cargo`
+with its own home and the first account's builds went ungated. The deploying
+user can rewrite every one of those files, so root was running code that
+user controls. That is a privilege boundary the wrapper itself crossed, not a
+threat this role excludes. Name the backend by absolute path, keep a
+system-wide wrapper's backend root-owned (the role copies cargo-cooldown to
+`/usr/local/libexec/supply-chain-hardening/`), never prepend to PATH (append
+if anything), and at run time refuse a backend the caller does not own unless
+root owns it and nothing above it is writable by anyone else. The refusal must
+name the control, like any other.
+
+**Naming a backend is not running it when another program does the lookup.**
+The cargo wrapper vouches for that root-owned copy, but cargo starts
+cargo-cooldown itself (`cargo cooldown build`), searching the caller's
+`$CARGO_HOME/bin` and then `PATH`, and the copy's directory is only appended.
+So the vouched copy runs only when neither holds another `cargo-cooldown`.
+MEASURED in `rust:1.100.0-slim-trixie` (`CARGO_HOME=/usr/local/cargo`, on
+`PATH`, mode 0777): root's build ran `/usr/local/cargo/bin/cargo-cooldown`,
+and after a second account replaced it root ran the replacement and nothing
+refused it. Do not claim a property for what the wrapper checks
+when a different file is what executes; say which file runs, and when.
+
+**Converge what an earlier version left, wherever this version no longer
+looks.** Re-rendering only the cargo the current apply discovers first left
+an old-format `/usr/bin/cargo`, the one that still ran the deployer's binaries
+for root, in place on exactly the hosts where the bug was measured, once the
+deployer had a `~/.cargo/bin/cargo` (rustup, which the role's own "rustc too
+old" record recommends). A shared artifact also needs a shared rule for
+removing it. Delete the root-owned backend only when this apply's own wrapper
+is the system-path one being switched off and no wrapper still names it.
+MEASURED otherwise: a second deployer's opt-out deleted it from under the
+first deployer's wrapper, whose builds then ran with `--locked` only and no
+warning.
+
 ### Apply-time vs runtime
 
 uv's `exclude-newer` is computed at template render time and frozen in

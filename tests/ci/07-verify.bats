@@ -312,6 +312,50 @@ exec '"$realpy"' "$@"'
   [[ "$row" == *"CANNOT EXECUTE"* ]]
 }
 
+@test "cargo publish-age gate: a backend the wrapper refuses for this account is its own GAP" {
+  # The wrapper runs cargo-cooldown only when no other account can choose what
+  # runs there (VM#2). A refusal exits 126 before cargo is reached; the row
+  # must say so, not "no dispatch". The backend is given to ANOTHER account:
+  # a root-owned file in this user's own directory is this user's to run.
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to hand the backend to another account"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  sudo chown 65534 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  run verify_sourced --emit=plain
+  sudo rm -f "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"REFUSES its gate backend"* ]]
+}
+
+@test "cargo publish-age gate: a wrapper that still prepends another account's directory is GAP" {
+  # Wrappers rendered before the backend had a fixed path PREPENDED a directory
+  # to PATH. MEASURED (VM#2): at /usr/bin/cargo that made root and a second
+  # account run the deploying user's cargo-cooldown and ~/.cargo/bin/cargo,
+  # while the dispatch probe still saw `cooldown build`. Owned by the caller,
+  # the same line is the caller's own business and not this GAP.
+  [ "$(id -u)" != 0 ] || skip "the fixture needs a non-root caller"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to stage another account's directory"
+  stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  mkdir -p "$TEST_HOME/.cargo/bin"
+  printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  chmod 755 "$TEST_HOME/.cargo/bin/cargo-cooldown"
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  other="$BATS_TEST_TMPDIR/theirs"
+  mkdir -p "$other"; chmod 755 "$other"; sudo chown 65534 "$other"
+  sed -i "s|^COOLDOWN_EXE=.*|&\nCOOLDOWN_BIN='$other'|" "$TEST_BIN/cargo"
+  grep -q "^COOLDOWN_BIN='$other'\$" "$TEST_BIN/cargo"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"PREPENDS $other to PATH"* ]]
+  sed -i "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$TEST_HOME/.cargo/bin'|" "$TEST_BIN/cargo"
+  run verify_sourced --emit=plain
+  sudo rm -rf "$other"
+  [[ "$output" == *"cargo publish-age gate"* ]]
+  [[ "$output" != *"PREPENDS"* ]]
+}
+
 # uv_reporting <cutoff>: a uv that reports an absolute exclude-newer instant in
 # the Debug shape `uv pip list --show-settings` prints, so the age-gate row
 # can be driven without a real uv or a frozen clock.

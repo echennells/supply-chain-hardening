@@ -1857,6 +1857,41 @@ EOF
     log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
+  # ---- which backend the wrapper runs (absolute path) ----
+  #
+  # A wrapper the invoking user does not own (apt's /usr/bin/cargo, a root
+  # job's /usr/local/cargo/bin) runs for root and for every other account, so
+  # its backend must not be a file in this user's $CARGO_HOME/bin, which this
+  # user can rewrite. MEASURED (VM#2, role and plain path alike): the old
+  # wrapper prepended that directory to PATH, and root and a second account
+  # then ran this user's cargo-cooldown and ~/.cargo/bin/cargo. A shared
+  # wrapper therefore gets a ROOT-OWNED copy under /usr/local/libexec; if that
+  # cannot be made, the wrapper still works for this user and refuses, with a
+  # message, for everyone else. Numeric 0 for owner and group: macOS has no
+  # group named root.
+  local cooldown_exe=""
+  if [[ -n "$cooldown_bin" ]]; then
+    cooldown_exe="$cooldown_bin/cargo-cooldown"
+    if [[ "$(id -u)" -eq 0 || ! -O "$(dirname "$wrapper_target")" ]]; then
+      local sys_cooldown=/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown
+      if [[ "${CAN_ESCALATE:-0}" -eq 1 ]] \
+         && $SUDO install -d -o 0 -g 0 -m 0755 "$(dirname "$sys_cooldown")" \
+         && $SUDO install -o 0 -g 0 -m 0755 "$cooldown_exe" "$sys_cooldown"; then
+        cooldown_exe="$sys_cooldown"
+        log "cargo: $wrapper_target is shared, so its wrapper names a root-owned copy of the gate backend, $sys_cooldown"
+        # cargo, not the wrapper, starts the backend, and it looks in
+        # $CARGO_HOME/bin before the directory the wrapper appends to PATH.
+        # MEASURED (rust:1.100.0-slim-trixie): root's builds there ran
+        # /usr/local/cargo/bin/cargo-cooldown, not the copy above.
+        if [[ -x "$cooldown_bin/cargo-cooldown" ]]; then
+          log "cargo: note: cargo starts the first cargo-cooldown in \$CARGO_HOME/bin, then PATH, so $(id -un)'s builds run $cooldown_bin/cargo-cooldown (or one earlier on PATH), not that copy; see docs/limitations.md"
+        fi
+      else
+        warn "cargo: $wrapper_target is shared, but no root-owned copy of cargo-cooldown could be installed; the wrapper gates builds for $(id -un) and refuses the backend for root and other accounts"
+      fi
+    fi
+  fi
+
   # Written via placeholders + sed rather than an interpolating heredoc: the
   # wrapper is dense with $ and the escaping is where this kind of code goes
   # wrong silently.
@@ -1915,15 +1950,16 @@ if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
 fi
 
 
-# cargo-cooldown lives in $CARGO_HOME/bin, which is on PATH for a rustup
-# cargo but NOT for a distro/apt cargo. Without this prepend, both
-# `command -v cargo-cooldown` and cargo's own cargo-<name> subcommand
-# resolution fail on apt-cargo hosts, so the gate silently does nothing even
-# though the backend installed fine.
-COOLDOWN_BIN='__COOLDOWN_BIN__'
-if [ -n "$COOLDOWN_BIN" ] && [ -d "$COOLDOWN_BIN" ]; then
-  case ":$PATH:" in *":$COOLDOWN_BIN:"*) ;; *) PATH="$COOLDOWN_BIN:$PATH"; export PATH ;; esac
-fi
+# THE GATE BACKEND, BY ABSOLUTE PATH, AND WHOSE IT IS. Parity with the role's
+# templates/cargo-wrapper.sh.j2, which carries the measurement record (VM#2):
+# this wrapper used to PREPEND $CARGO_HOME/bin to PATH, and at a system path
+# (/usr/bin/cargo) that made root and every other account run the hardening
+# user's cargo-cooldown and ~/.cargo/bin/cargo, files that user can replace.
+# harden.sh now renders the backend's absolute path: the one in $CARGO_HOME/bin
+# when the wrapped cargo is the invoking user's own, a ROOT-OWNED copy under
+# /usr/local/libexec/supply-chain-hardening/ otherwise. Nothing is prepended,
+# and use_cooldown refuses a backend whose owner is neither the caller nor root.
+COOLDOWN_EXE='__COOLDOWN_EXE__'
 
 if [ -z "$REAL_CARGO" ] || [ ! -x "$REAL_CARGO" ] || [ "$REAL_CARGO" = "$0" ]; then
   echo "[supply-chain-harden] error: real cargo not found at '$REAL_CARGO'; refusing to recurse" >&2
@@ -1989,6 +2025,74 @@ run_real() {
   exec -a cargo "$REAL_CARGO" "$@"
 }
 
+# May THIS caller run "$1" as the gate backend? Only when no other account can
+# choose what runs there. Walking up from the file: one the caller owns (not
+# root) ends the walk, yes (your own file, or a root-owned file in your own
+# directory); a root-owned one must be writable by neither group nor others, or
+# for a directory be sticky (/tmp), and the walk goes on; anything else is no.
+# Parity with the role's templates/cargo-wrapper.sh.j2. find(1), not stat(1):
+# `stat -c` is GNU-only and this runs on macOS runners.
+backend_trusted() {
+  _bt_why=""
+  _bt_me=""
+  [ "$(id -u)" != 0 ] && _bt_me=$(id -un 2>/dev/null || id -u)
+  _bt_p=$(readlink -f "$1" 2>/dev/null) || _bt_p="$1"
+  case "$_bt_p" in /*) ;; *) _bt_why="$1 is not an absolute path"; return 1 ;; esac
+  if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
+  if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+    _bt_why="$_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
+    return 1
+  fi
+  while [ "$_bt_p" != "/" ]; do
+    _bt_p=$(dirname "$_bt_p")
+    if [ -n "$_bt_me" ] && [ -O "$_bt_p" ]; then return 0; fi
+    if [ -z "$(find "$_bt_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ]; then
+      _bt_why="directory $_bt_p is not owned by root${_bt_me:+ or by $_bt_me}, or is writable by its group or others"
+      return 1
+    fi
+  done
+  return 0
+}
+
+cooldown_installed() {
+  local c
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && return 0
+  done
+  return 1
+}
+
+# Pick the backend for a gated command or REFUSE (exit 126); a quiet degrade
+# would leave the command ungated exactly when it runs as someone else. cargo
+# still starts the backend (`cargo-real cooldown build`), because cargo is what
+# consumes a leading +toolchain / -C / --config, so the backend's directory is
+# APPENDED to PATH when neither $CARGO_HOME/bin nor PATH covers it: appending
+# cannot change what any name already on PATH resolves to. What is vouched for
+# here is not always what runs: cargo looks in $CARGO_HOME/bin first (unless it
+# is on PATH, where PATH order decides), then along PATH, and starts any other
+# cargo-cooldown it finds there unchecked. MEASURED in rust:1.100.0-slim-trixie:
+# root's build ran /usr/local/cargo/bin/cargo-cooldown (a 0777 directory), not
+# the root-owned libexec copy this wrapper named. See the role template and
+# docs/limitations.md.
+use_cooldown() {
+  local c d refused=""
+  COOLDOWN=""
+  for c in "$COOLDOWN_EXE" "$(command -v cargo-cooldown 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if backend_trusted "$c"; then COOLDOWN="$c"; break; fi
+    refused="$_bt_why"
+  done
+  if [ -z "$COOLDOWN" ]; then
+    echo "[supply-chain-harden] error: refusing to run the cargo publish-age gate backend as $(id -un): $refused, so another account could choose what runs here. Re-run harden.sh with sudo available to give a shared cargo a root-owned backend, or run cargo as the account that owns this one. (cargo wrapper: $0)" >&2
+    exit 126
+  fi
+  d=$(dirname "$COOLDOWN")
+  case ":$PATH:" in
+    *":$d:"*) ;;
+    *) [ "$d" = "${CARGO_HOME:-$HOME/.cargo}/bin" ] || { PATH="$PATH:$d"; export PATH; } ;;
+  esac
+}
+
 subcmd=""
 skip_value=0
 for arg in "$@"; do
@@ -2013,14 +2117,32 @@ has_resolution_flag() {
 
 # Walk up for a lockfile: cargo is routinely run from a workspace
 # subdirectory, so checking only ./Cargo.lock would skip --locked for most
-# real invocations.
+# real invocations. Records the directory in LOCK_DIR.
 has_lockfile() {
   local d="$PWD"
+  LOCK_DIR=""
   while [ -n "$d" ] && [ "$d" != "/" ]; do
-    [ -f "$d/Cargo.lock" ] && return 0
+    [ -f "$d/Cargo.lock" ] && { LOCK_DIR="$d"; return 0; }
     d="$(dirname "$d")"
   done
-  [ -f "/Cargo.lock" ]
+  [ -f "/Cargo.lock" ] && { LOCK_DIR="/"; return 0; }
+  return 1
+}
+
+# --locked is OURS, so say so when it is about to bite: after a Cargo.toml edit
+# cargo stops with "cannot update the lock file ... because --locked was passed
+# to prevent this" (MEASURED, cargo 1.93.1, on this plain path), naming a flag
+# the caller never typed. Parity with the role wrapper, which records the
+# measurement; fires only when a manifest is newer than the lockfile.
+locked_note() {
+  local m
+  for m in "$PWD/Cargo.toml" "${LOCK_DIR%/}/Cargo.toml"; do
+    if [ -f "$m" ] && [ "$m" -nt "${LOCK_DIR%/}/Cargo.lock" ]; then
+      echo "[supply-chain-harden] note: this cargo wrapper adds --locked because a Cargo.lock exists, and $m is newer than it. If cargo stops with \"--locked was passed\", that flag is ours: record the change with 'cargo update --workspace', then build again." >&2
+      return 0
+    fi
+  done
+  return 0
 }
 
 # Insert EXTRA immediately after the subcommand, never appended:
@@ -2116,9 +2238,11 @@ sanitize_cooldown_env() {
     echo "[supply-chain-harden] note: overriding caller publish-age setting(s):$_sc_had - this run's __RELEASE_AGE_HOURS__h/__VIOLATION_ACTION__ policy applies instead." >&2
   fi
   export COOLDOWN_MINUTES=__MIN_AGE_MIN__
-  # The crates.io window, which a repo cooldown.toml's `[registry]
-  # min-publish-age` otherwise sets. Cargo also reads this name (its unstable
-  # registry.min-publish-age) and warns that it is ignoring it; harmless.
+  # The crates.io window, read by CARGO-COOLDOWN (a repo cooldown.toml's
+  # `[registry] min-publish-age` otherwise sets it). Cargo itself ignores this
+  # name: MEASURED on cargo 1.100.0, set alone it neither gated nor warned.
+  # Cargo's own gate is CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE. See the role's
+  # templates/cargo-wrapper.sh.j2 for the measurement.
   export CARGO_REGISTRY_MIN_PUBLISH_AGE="__RELEASE_AGE_HOURS__ hours"
   export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=__VIOLATION_ACTION__
   export COOLDOWN_LOCKFILE_BASELINE=floor
@@ -2186,9 +2310,10 @@ case "$KIND" in
     # These exist to change the lockfile, so --locked is contradictory.
     # `cargo update` is also the one resolution path --locked can never
     # cover, which is why the age gate matters most here.
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         update)
+          use_cooldown
           sanitize_cooldown_env
           export SUPPLY_CHAIN_CARGO_WRAPPED=1
           SCH_NET=1 exec_sub cooldown update "$@" ;;
@@ -2206,7 +2331,7 @@ case "$KIND" in
     ;;
 
   RESOLVING)
-    if command -v cargo-cooldown >/dev/null 2>&1; then
+    if cooldown_installed; then
       case "$subcmd" in
         build|b) SUB=build ;;
         check|c) SUB=check ;;
@@ -2222,6 +2347,7 @@ case "$KIND" in
         # commands cargo-cooldown never sees: MEASURED, generate-lockfile, tree
         # and fetch then resolved a version real cargo refused, and add wrote
         # it, while the note claimed this policy "applies instead".
+        use_cooldown
         sanitize_cooldown_env
         export SUPPLY_CHAIN_CARGO_WRAPPED=1
         SCH_NET=1 exec_sub cooldown "$SUB" "$@"
@@ -2234,6 +2360,7 @@ case "$KIND" in
       SCH_NET=1 run_real "$@"
     fi
     if has_lockfile; then
+      locked_note
       SCH_NET=1 exec_with "--locked" "$@"
     fi
     echo "[supply-chain-harden] warning: no Cargo.lock found and this wrapper applies no publish-age gate to 'cargo $subcmd' — it will resolve the newest matching versions, checked only by cargo's own gate if you configured one" >&2
@@ -2242,7 +2369,7 @@ case "$KIND" in
 esac
 WRAPPER
 
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_BIN__|$(sed_repl "$cooldown_bin")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
+  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_EXE__|$(sed_repl "$cooldown_exe")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
   $SUDO cp "$tmp_wrapper" "$wrapper_target"
   $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo

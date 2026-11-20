@@ -1,0 +1,128 @@
+#!/bin/sh
+# {{ pip_wrapper_name }} — supply-chain-hardening wrapper: {{ pip_wrapper_name }} is redirected to `uv pip`
+# Managed by ansible-supply-chain-security
+# Belt-and-suspenders: resolve a uv this caller may run (see below) and refuse
+# to run if none is found, rather than recursing into ourselves and bricking pip.
+UV='{{ uv_binary_path.stdout }}'
+# RUN-PROBE. Record that this wrapper actually executed.
+#
+# Free on a real invocation (SCH_WRAPPER_PROBE is unset, so this is one test).
+# supply-chain-verify sets it to a temp file, invokes the tool, and reads back
+# which wrappers ran.
+#
+# It replaces inferring "did our wrapper run" from PATH position, which CANNOT
+# tell a bypassed wrapper from one chained behind another wrap. MEASURED: with
+# an Aikido safe-chain shim first on PATH the wrapper ran on every call while
+# the verifier reported "shadowed and never runs". Every version manager
+# (asdf, mise, volta, nodenv, pyenv) is shim-first and delegates the same way.
+#
+# The value is caller-controlled, so it is only ever a redirect target. Never
+# interpolate it into a command.
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
+fi
+
+# WHICH uv, AND WHOSE.
+#
+# This wrapper is SYSTEM-WIDE (every account, and root, runs it) but $UV above
+# was resolved in the DEPLOYING user's context, usually their ~/.local/bin.
+#   - ECH-191: other users who cannot traverse that home lost pip entirely, so
+#     uv is resolved again here, per caller.
+#   - VM#2, MEASURED (reproduced on Ubuntu 26.04, uv 0.9.9 from the official
+#     installer): `sudo pip --version` and a second account's `pip` exec'd the
+#     deployer's uv, a file that user can replace, run as root and as them; and
+#     after a second account applied the role, the baked path pointed into
+#     THEIR home and the first account's cron-style `pip` (no ~/.local/bin on
+#     PATH) found no uv at all.
+# So every candidate must pass sch_trusted: no other account may be able to
+# choose what runs. Walking up from the file, one the caller owns (not root)
+# ends the walk, yes: your own uv, or a root-owned uv in your own directory. A
+# root-owned one must be writable by neither group nor others (a directory may
+# instead be sticky, like /tmp, where only an entry's owner can rename or
+# remove it), and the walk goes on. Anything else is no. The caller's own
+# default install location is a candidate, so a second deployer's apply no
+# longer takes pip away from the first. find(1), not stat(1): portable. Same
+# predicate as the cargo wrapper's backend_trusted.
+sch_trusted() {
+  [ -x "$1" ] || return 1
+  _me=""; [ "$(id -u)" != 0 ] && _me=1
+  _p=$(readlink -f "$1" 2>/dev/null) || _p=$1
+  case "$_p" in /*) ;; *) return 1 ;; esac
+  if [ -n "$_me" ] && [ -O "$_p" ]; then return 0; fi
+  [ -n "$(find "$_p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ] || return 1
+  while [ "$_p" != "/" ]; do
+    _p=$(dirname "$_p")
+    if [ -n "$_me" ] && [ -O "$_p" ]; then return 0; fi
+    [ -n "$(find "$_p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ] || return 1
+  done
+  return 0
+}
+_sch_uv=""; _sch_refused=""
+for _c in /usr/local/bin/uv /usr/bin/uv "$UV" "$(command -v uv 2>/dev/null)" "${XDG_BIN_HOME:-$HOME/.local/bin}/uv"; do
+  [ -n "$_c" ] && [ -x "$_c" ] || continue
+  if sch_trusted "$_c"; then _sch_uv=$_c; break; fi
+  case " $_sch_refused " in *" $_c "*) ;; *) _sch_refused="$_sch_refused $_c" ;; esac
+done
+if [ -z "$_sch_uv" ]; then
+  if [ -n "$_sch_refused" ]; then
+    echo "[supply-chain-hardening] error: {{ pip_wrapper_name }} on this host is redirected to uv (the pip-to-uv wrapper), but the only uv found ($_sch_refused ) belongs to another account or sits where another account can replace it, and running it as $(id -un) would let that account choose what runs here. Install uv for this account (the official installer puts it in ~/.local/bin), or a root-owned uv at /usr/local/bin/uv for root and every account." >&2
+    exit 126
+  fi
+  # Same shape as the 126 message above: name the redirect and the fix. A uv in
+  # a home this account cannot enter is invisible here, so that case lands in
+  # this branch too (VM#2 review: bob, with alice's home at 0750).
+  echo "[supply-chain-hardening] error: {{ pip_wrapper_name }} on this host is redirected to uv (the pip-to-uv wrapper), but no uv that $(id -un) can run was found in /usr/local/bin, /usr/bin, the path recorded when the role was applied, PATH or ~/.local/bin, so the wrapper stops here (refusing to recurse into itself). Install uv for this account (the official installer puts it in ~/.local/bin), or a root-owned uv at /usr/local/bin/uv for root and every account." >&2
+  exit 127
+fi
+UV=$_sch_uv
+
+# THE pip SURFACE uv pip DOES NOT HAVE. MEASURED on uv 0.9.9: `uv pip --version`
+# and `-V` exit 2 ("unexpected argument"), `uv pip download` exits 2
+# ("unrecognized subcommand"), and `uv pip install --user` exits 2 with uv's
+# own text. None of those named this wrapper, so the person whose `pip` broke
+# could not tell it was this host's hardening. Answer --version here, and
+# refuse the other two with a message that names the control and the route.
+case "${1:-}" in
+  --version|-V)
+    echo "[supply-chain-hardening] {{ pip_wrapper_name }} redirected through uv" >&2
+    echo "uv-pip $("$UV" --version 2>/dev/null | awk '{print $2}') from $UV ({{ pip_wrapper_name }} on this host is redirected to \`uv pip\` by supply-chain-hardening)"
+    exit 0 ;;
+esac
+# The subcommand is the first argument that is neither an option nor the value
+# of one of pip's general options that take a value (pip 26.3's
+# cmdoptions.general_group, read from its optparse definitions), so
+# `pip --python X download six` is still `download`. optparse also accepts
+# unambiguous abbreviations (`--pyth X`); those are not enumerated, and such a
+# call reaches uv, whose error the note at the end attributes.
+_sch_sub=""; _sch_skip=""
+for _a in "$@"; do
+  [ "$_a" = "--" ] && break
+  if [ -n "$_sch_skip" ]; then _sch_skip=""; continue; fi
+  case "$_a" in
+    --user)
+      echo "[supply-chain-hardening] error: '{{ pip_wrapper_name }} --user' is not available here: {{ pip_wrapper_name }} is redirected to \`uv pip\` (the pip-to-uv wrapper, which keeps uv's no-build and publish-age settings on every install), and uv has no per-user site-packages. For a command-line tool use 'uv tool install <package>'; for a library use a virtualenv ('uv venv', then '{{ pip_wrapper_name }} install' inside it)." >&2
+      exit 2 ;;
+    --python|--log|--log-file|--local-log|--keyring-provider|--proxy|--retries|\
+--timeout|--default-timeout|--exists-action|--trusted-host|--cert|--client-cert|\
+--cache-dir|--use-feature|--use-deprecated|--resume-retries)
+      [ -z "$_sch_sub" ] && _sch_skip=1 ;;
+    -*) ;;
+    *) [ -z "$_sch_sub" ] && _sch_sub=$_a ;;
+  esac
+done
+if [ "$_sch_sub" = "download" ]; then
+  echo "[supply-chain-hardening] error: '{{ pip_wrapper_name }} download' is not available here: {{ pip_wrapper_name }} is redirected to \`uv pip\` (the pip-to-uv wrapper), which has no download command. 'python3 -m pip download' runs pip itself, under /etc/pip.conf (only-binary = :all:), without this wrapper's uv settings." >&2
+  exit 2
+fi
+
+echo "[supply-chain-hardening] {{ pip_wrapper_name }} redirected through uv" >&2
+# Run, not exec, so a refusal can be attributed AFTER uv explains it. uv's own
+# errors for this host's settings ("No virtual environment found", "Building
+# source distributions for X is disabled") name neither this role nor the
+# route a person has; the line below does, only when uv failed.
+"$UV" pip "$@"
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  echo "[supply-chain-hardening] note: uv pip exited $_rc. On this host {{ pip_wrapper_name }} is redirected to \`uv pip\`: it installs into a virtualenv ('uv venv') or with --system, it refuses source distributions (a person who trusts one specific source can build it with 'supply-chain-allow-build -- uv pip install <path>'), and it holds back releases newer than the publish-age cutoff. If uv's error above is one of these, that is this host's hardening, not a broken uv." >&2
+fi
+exit "$_rc"
