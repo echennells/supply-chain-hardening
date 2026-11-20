@@ -39,7 +39,7 @@ not set the derived values individually. The unit trap is spelled out in
 | `npm_path_wrapper` | `true` | `/usr/local/bin/npm` wrapper that routes registry-touching subcommands through Socket Firewall. Disable if you can't tolerate ~50–200 ms per call or a hard dependency on `sfw`. |
 | `deno_path_wrapper` | `true` | Wrap the discovered `deno` binary in place to inject `--minimum-dependency-age` on every dep-fetching call. |
 | `bun_path_wrapper` | `true` | Wrap `bun` so `bun run` cannot auto-install missing imports. The bunfig protections apply either way. |
-| `composer_path_wrapper` | `true` | Wrap `composer` to force `--no-scripts`. The only script-blocking layer on Composer < 2.8. |
+| `composer_path_wrapper` | `true` | Wrap `composer` to force `--no-plugins`, and `--no-scripts` on everything but a script you run by name (`composer test`). The only script-blocking layer on Composer < 2.8.6. |
 | `cargo_path_wrapper` | `true` | Wrap `cargo` to route resolution through `cargo cooldown` (rustc ≥ 1.91.1) or fall back to `--locked`. |
 | `cargo_socket_firewall` | `true` | Filter cargo downloads through Socket Firewall (needs Node ≥ 20). |
 | `socket_firewall_install` | `true` | Install `sfw` at all. |

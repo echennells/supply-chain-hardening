@@ -3,38 +3,47 @@
 #
 # The verifier reads the EFFECTIVE composer config of the current directory
 # (files/verify-probes.sh, the `composer config --list --source` probe) so it can
-# report a repo that weakens the global hardening. `composer config` ACTIVATES any
-# plugin the merged allow-plugins permits, and a plugin's activate() is arbitrary
-# PHP. Without --no-plugins, running the verifier inside a hostile checkout — the
-# exact "just check posture" use the tool invites — runs that checkout's code as
-# the invoking user. MEASURED on composer 2.11.1 before the fix: the plugin ran.
+# report a repo that weakens the global hardening. A composer command run inside a
+# checkout boots that checkout: it ACTIVATES any plugin the merged allow-plugins
+# permits (a plugin's activate() is arbitrary PHP) and dispatches pre-command-run
+# to the root composer.json's scripts. Without --no-plugins, running the verifier
+# inside a hostile checkout — the exact "just check posture" use the tool invites —
+# runs that checkout's code as the invoking user.
 #
-# This test stages that checkout and asserts the plugin's activate() does NOT run,
-# AND that the composer rows are still produced (the flag must not blind the probe).
-# It drives the REAL composer, not the role wrapper — the wrapper injects
-# --no-plugins itself, so testing through it would prove nothing about the probe.
+# MEASURED on composer 2.11.2 at 8281a6b, with an unwrapped composer first on
+# PATH: composer_implements() (`composer config --global <key>`, once per key)
+# activated the plugin AND ran the root pre-command-run script, and the run-probe
+# (`composer --version`) activated the plugin, in both the role's verifier and
+# action/verify.sh. This test stages that checkout and asserts neither runs, and
+# that the composer rows are still produced (the flags must not blind the probe).
+#
+# It drives the REAL composer, not the role wrapper: the wrapper injects
+# --no-plugins and --no-scripts itself, so testing through it would prove nothing
+# about the probes. The real binary is read from the wrapper (real_binary), not
+# assumed at /usr/local/bin: on an apt host that path does not exist and the old
+# fallback resolved to the wrapper, which passes falsely.
 
 load setup
 
 VERIFY=/usr/local/bin/supply-chain-verify
 MARKER=/tmp/sch-verifier-plugin-activated
+SCRIPT_MARKER=/tmp/sch-verifier-checkout-script-ran
 
 setup() {
   command -v php >/dev/null 2>&1 || skip "php not installed"
   [ -x "$VERIFY" ] || skip "supply-chain-verify not deployed"
-  # The probe's exposure is against the UNWRAPPED composer; the role moves the
-  # real binary aside as composer-real when it wraps. No -real => not wrapped,
-  # and plain `composer` is already the real binary.
-  REAL_COMPOSER=/usr/local/bin/composer-real
-  [ -x "$REAL_COMPOSER" ] || REAL_COMPOSER=$(command -v composer 2>/dev/null)
+  REAL_COMPOSER=$(real_binary composer) || REAL_COMPOSER=$(command -v composer 2>/dev/null)
   [ -n "$REAL_COMPOSER" ] || skip "composer not installed"
-  rm -f "$MARKER"
+  if grep -q 'supply-chain-harden' "$REAL_COMPOSER" 2>/dev/null; then
+    skip "composer resolves to a wrapper whose real binary could not be read"
+  fi
+  rm -f "$MARKER" "$SCRIPT_MARKER"
 }
 
-teardown() { rm -f "$MARKER"; }
+teardown() { rm -f "$MARKER" "$SCRIPT_MARKER"; }
 
-@test "verify: composer effective-config probe does not activate a checkout plugin" {
-  local root="$BATS_TEST_TMPDIR/vcheck"
+stage_hostile_checkout() {
+  root="$BATS_TEST_TMPDIR/vcheck"
   mkdir -p "$root/plugin/src" "$root/app"
 
   cat > "$root/plugin/composer.json" <<'J'
@@ -54,30 +63,92 @@ class Plugin implements PluginInterface {
   public function uninstall(Composer \$c, IOInterface \$io) {}
 }
 P
-  # The hostile checkout: pulls the plugin from a path repo and allows it, and its
-  # config object overrides the global hardening (allow-plugins:false) per composer's
-  # merge rules — the scenario the probe exists to detect.
-  cat > "$root/app/composer.json" <<'J'
+  # The hostile checkout: pulls the plugin from a path repo and allows it (its
+  # config object overrides the global allow-plugins {} per composer's merge
+  # rules — the scenario the probe exists to detect), and hooks pre-command-run.
+  cat > "$root/app/composer.json" <<J
 { "name": "victim/app", "version": "0.0.0",
-  "repositories": [ { "type": "path", "url": "../plugin" } ],
+  "repositories": [ { "type": "path", "url": "../plugin", "options": { "symlink": false } } ],
   "require": { "evil/probe": "*" },
+  "scripts": { "pre-command-run": "echo ran > $SCRIPT_MARKER" },
   "config": { "allow-plugins": { "evil/probe": true } } }
 J
 
   # Populate vendor/ with the real composer so a committed-plugin checkout exists.
-  # (This install legitimately activates the plugin; we clear the marker after.)
-  ( cd "$root/app" && COMPOSER_HOME="$root/ch" HOME="$root" \
-      "$REAL_COMPOSER" install --no-interaction --no-audit ) >/dev/null 2>&1 || true
-  [ -f "$root/app/vendor/composer/installed.json" ] || skip "could not stage vendor/ (offline?)"
-  rm -f "$MARKER"
-
-  # Run the verifier in the hostile checkout with composer = the REAL binary.
-  local shim="$BATS_TEST_TMPDIR/shim"; mkdir -p "$shim"
+  # (This install legitimately activates the plugin; the markers are cleared after.)
+  ( cd "$root/app" && env -u COMPOSER_SKIP_SCRIPTS COMPOSER_HOME="$root/ch" HOME="$root" \
+      COMPOSER_ALLOW_SUPERUSER=1 "$REAL_COMPOSER" install --no-interaction ) >/dev/null 2>&1 || true
+  [ -f "$root/app/vendor/composer/installed.json" ] || skip "could not stage vendor/ from the path repository"
+  rm -f "$MARKER" "$SCRIPT_MARKER"
+  # The shim makes the bare `composer` the REAL binary for the verifier.
+  shim="$BATS_TEST_TMPDIR/shim"; mkdir -p "$shim"
   ln -sf "$REAL_COMPOSER" "$shim/composer"
-  run env PATH="$shim:$PATH" bash -c "cd '$root/app' && '$VERIFY'"
+}
 
-  # The load-bearing assertion: the checkout's plugin code never ran.
-  [ ! -f "$MARKER" ]
-  # And the fix did not blind the probe: a composer row is still emitted.
-  [[ "$output" == *"composer"* ]]
+@test "FIXTURE CONTROL: the probe's command without the protections runs the checkout's plugin" {
+  stage_hostile_checkout
+  # What composer_implements() ran before the fix: no --no-plugins, checkout as cwd.
+  # COMPOSER_ALLOW_SUPERUSER=1 so a root run outside a container cannot mask it
+  # (composer 2.7+ disables plugins for a non-interactive root run without it).
+  ( cd "$root/app" && env -u COMPOSER_SKIP_SCRIPTS COMPOSER_ALLOW_SUPERUSER=1 \
+      "$shim/composer" config --global --no-ansi secure-http ) >/dev/null 2>&1 || true
+  if [ ! -f "$MARKER" ]; then
+    # MEASURED: 2.2.6, 2.5.5, 2.7.1, 2.8.8, 2.9.5 and 2.11.2 all activate it.
+    # A composer that stops doing so leaves the test below nothing to prove.
+    skip "this composer ($("$REAL_COMPOSER" --version --no-ansi 2>/dev/null | head -1)) does not activate a checkout plugin on 'config --global'; nothing for the test below to prove"
+  fi
+}
+
+@test "verify: composer probes do not run a checkout's plugin or scripts" {
+  stage_hostile_checkout
+  # COMPOSER_SKIP_SCRIPTS is unset: on composer >= 2.8.6 it lists pre-command-run
+  # and would block the root script whatever the probes do, which made the
+  # script assertion below vacuous wherever the env layer was loaded.
+  run env -u COMPOSER_SKIP_SCRIPTS PATH="$shim:$PATH" COMPOSER_ALLOW_SUPERUSER=1 bash -c "cd '$root/app' && '$VERIFY' --verbose"
+
+  # The load-bearing assertions: neither the plugin nor the root script ran.
+  [ ! -f "$MARKER" ] || { echo "the checkout's plugin ran during verify" >&2; return 1; }
+  [ ! -f "$SCRIPT_MARKER" ] || { echo "the checkout's pre-command-run script ran during verify" >&2; return 1; }
+  # And the fix did not blind the probes: the plugin and override rows still
+  # see the checkout's allow-plugins.
+  [[ "$output" == *"composer plugin execution blocked"* ]]
+  [[ "$output" == *"evil/probe"* ]]
+}
+
+# What every composer probe hands composer, recorded by a shim that then execs the
+# real binary. Two properties, each MEASURED broken before:
+#   * root on a terminal: a composer that is not our wrapper stops at its hidden
+#     "Continue as root/super user [yes]?" prompt unless COMPOSER_ALLOW_SUPERUSER
+#     is set, and only answers it with -n by also running `sudo -K`. With the
+#     wrapper reverted on 2.2.6, `sudo supply-chain-verify` never finished.
+#   * the version probes (the version read and the run-probe) ran with the
+#     checkout's composer.json as the project. Reading a version needs no project,
+#     and a posture probe must never boot the checkout it is standing in, so they
+#     must name one that cannot exist.
+@test "verify: every composer probe is non-interactive, root-safe, and reads a version with no project" {
+  stage_hostile_checkout
+  local log="$BATS_TEST_TMPDIR/composer-calls" rec="$BATS_TEST_TMPDIR/rec"
+  mkdir -p "$rec"
+  cat > "$rec/composer" <<S
+#!/bin/bash
+printf '%s|%s|%s|%s\n' "\$PWD" "\${COMPOSER-<unset>}" "\${COMPOSER_ALLOW_SUPERUSER-<unset>}\${COMPOSER_NO_INTERACTION:+ NI}" "\$*" >> '$log'
+exec '$REAL_COMPOSER' "\$@"
+S
+  chmod 0755 "$rec/composer"
+  run env -u COMPOSER_ALLOW_SUPERUSER -u COMPOSER_NO_INTERACTION PATH="$rec:$PATH" bash -c "cd '$root/app' && '$VERIFY' --verbose"
+  [ -s "$log" ] || { echo "the verifier never ran composer through the shim" >&2; return 1; }
+  local pwd comp su args nver=0
+  while IFS='|' read -r pwd comp su args; do
+    [[ "$su" == 1* ]] || { echo "no COMPOSER_ALLOW_SUPERUSER=1: composer $args (in $pwd)" >&2; return 1; }
+    [[ " $args " == *" --no-interaction "* || " $args " == *" -n "* || "$su" == *" NI" ]] \
+      || { echo "interactive: composer $args (in $pwd)" >&2; return 1; }
+    if [[ " $args " == *" --version "* ]]; then
+      nver=$((nver + 1))
+      [ "$comp" = /dev/null/composer.json ] || { echo "version probe with COMPOSER=$comp: composer $args (in $pwd)" >&2; return 1; }
+    fi
+  done < "$log"
+  [ "$nver" -ge 1 ] || { echo "no version probe went through the shim" >&2; cat "$log" >&2; return 1; }
+  # The probes still read what they need.
+  [[ "$output" != *"could not parse a version out of 'composer --version'"* ]]
+  [[ "$output" == *"evil/probe"* ]]
 }

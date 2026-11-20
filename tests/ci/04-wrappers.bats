@@ -528,10 +528,91 @@ path_stubs() {
 
 # --- composer --------------------------------------------------------------
 
-@test "composer: --no-scripts is injected on every invocation" {
+@test "composer: --no-scripts is injected on lifecycle invocations" {
   stub_bin composer
   harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
   run "$TEST_BIN/composer" install
+  [[ "$output" == *"--no-scripts"* ]]
+}
+
+# MEASURED before this routing (composer 2.2.6 -> 2.11.2, this action's wrapper
+# included): with --no-scripts injected, `composer test` exited 0 having run
+# nothing and `composer run-script test` said 'Script "test" is not defined'.
+composer_route_project() {
+  have php || skip "php not installed (the wrapper reads composer.json with php)"
+  PROJ="$BATS_TEST_TMPDIR/proj"
+  mkdir -p "$PROJ/sub"
+  cat > "$PROJ/composer.json" <<'J'
+{ "name": "t/t",
+  "scripts": { "test": "echo t", "install": "echo x", "post-install-cmd": "echo p" },
+  "scripts-aliases": { "test": ["t"] } }
+J
+  stub_bin composer
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+}
+
+@test "composer: a root script run by name gets no --no-scripts" {
+  composer_route_project
+  local args
+  for args in "test" "t" "run-script test" "run test" "-n test"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$PROJ" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* ]] || { echo "'$args': $output"; return 1; }
+    [[ "$output" != *"--no-scripts"* ]] || { echo "'$args' got --no-scripts: $output"; return 1; }
+    [[ "$output" == *"--no-plugins"* ]] || { echo "'$args' lost --no-plugins: $output"; return 1; }
+  done
+  run bash -c 'cd / && "$1" -d "$2" test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  run bash -c 'cd "$2/sub" && "$1" test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+}
+
+@test "composer: a script named after a built-in, or an event, does not lift --no-scripts" {
+  composer_route_project
+  local args
+  for args in "install" "post-install-cmd" "show" "nosuchscript" ""; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$PROJ" "$TEST_BIN/composer" $args
+    [[ "$output" == *"--no-scripts"* ]] || { echo "'$args' did not get --no-scripts: $output"; return 1; }
+  done
+}
+
+# MEASURED on 2.7.1 and 2.11.2 (this action's wrapper included): a checkout
+# defining scripts named after unique prefixes of built-ins (req, du, dump, up,
+# upd, ins, rem) had them run, scripts enabled, on `composer req psr/log` and the
+# rest, because composer resolves an exact command name before an abbreviation.
+# A "scripts-aliases" alias spelled like a built-in ("i") ran in its place.
+@test "composer: a script or alias that also names a built-in is refused, not run" {
+  composer_route_project
+  local hij="$BATS_TEST_TMPDIR/hijack" args
+  mkdir -p "$hij"
+  cat > "$hij/composer.json" <<'J'
+{ "name": "t/h",
+  "scripts": { "req": "echo h", "du": "echo h", "upd": "echo h", "check": "echo h", "foo": "echo h" },
+  "scripts-aliases": { "foo": ["i", "upgrade"] } }
+J
+  for args in "req psr/log" "du" "upd" "check" "i" "upgrade"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$hij" "$TEST_BIN/composer" $args
+    [ "$status" -eq 2 ] || { echo "'$args' exited $status: $output"; return 1; }
+    [[ "$output" != *"STUB:composer"* ]] || { echo "'$args' reached composer: $output"; return 1; }
+    [[ "$output" == *"[supply-chain-harden] refusing 'composer "* && "$output" == *"composer run-script "* ]] \
+      || { echo "'$args' refusal does not name the control and the way out: $output"; return 1; }
+  done
+  run bash -c 'cd "$1" && "$2" run-script req' _ "$hij" "$TEST_BIN/composer"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  # With no such script, the abbreviation is the built-in and keeps --no-scripts.
+  run bash -c 'cd "$1" && "$2" req psr/log' _ "$PROJ" "$TEST_BIN/composer"
+  [[ "$output" == *"STUB:composer"* && "$output" == *"--no-scripts"* ]]
+}
+
+@test "composer: in -nd DIR the DIR is a value, and composer does not change to it" {
+  composer_route_project
+  # MEASURED on 2.5.5, 2.7.1 and 2.11.2: `composer -nd DIR test` runs the test
+  # script of the current directory; the wrapper took DIR for the subcommand.
+  run bash -c 'cd "$2" && "$1" -nd /tmp test' _ "$TEST_BIN/composer" "$PROJ"
+  [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
+  run bash -c 'cd / && "$1" -nd "$2" test' _ "$TEST_BIN/composer" "$PROJ"
   [[ "$output" == *"--no-scripts"* ]]
 }
 

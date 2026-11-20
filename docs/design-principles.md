@@ -207,9 +207,11 @@ the deploying user, and never assume per-user covers anyone else.
 
 `composer-real`, `deno-real`, and the cargo upgrade target all coexist
 with the role-deployed wrapper. The wrapper is the protected path; the
--real binary is the documented bypass. `composer self-update` overwrites
-the wrapper with a fresh composer.phar, defeating the protection until
-re-apply.
+-real binary is the documented bypass. Re-running the composer installer
+or reinstalling the distro package overwrites the wrapper with a fresh
+composer, defeating the protection until re-apply. (`composer self-update`
+replaces `composer-real` instead and the wrapper survives, MEASURED 2.8.8 ->
+2.9.5.)
 
 **Principle**: a wrapper deploys two paths into mutually exclusive
 behavior. Document which one is "the binary," which is the bypass,

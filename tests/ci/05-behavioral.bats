@@ -180,3 +180,71 @@ TOML
   [ "$status" -ne 2 ] || skip "local bundler predates cooldown (< 4.0.13); gate is INERT here, premise not testable"
   [ "$status" -eq 0 ]
 }
+
+# --- composer: harden.sh must not run a checkout's code -----------------------
+# The action runs in the GitHub workspace, i.e. inside the checkout, before any
+# wrapper exists. MEASURED on composer 2.11.2 at 8281a6b: harden.sh's
+# `composer --version` activated the plugin the checkout's allow-plugins enables
+# (committed to vendor/), and `composer config --global home` activated it again
+# and ran the checkout's root pre-command-run script.
+
+composer_hostile_checkout() {
+  have composer || skip "composer not installed"
+  have php || skip "php not installed"
+  REAL_COMPOSER=$(command -v composer)
+  # Earlier files in this suite run `harden ECOSYSTEMS=composer` with no stub,
+  # which wraps the system composer when sudo is passwordless (a CI runner).
+  # Go around that wrapper to the binary it execs.
+  if grep -q 'supply-chain-harden' "$REAL_COMPOSER" 2>/dev/null; then
+    REAL_COMPOSER=$(sed -n "s/^REAL_COMPOSER='\(.*\)'\$/\1/p" "$REAL_COMPOSER" | head -1)
+    [ -n "$REAL_COMPOSER" ] && [ -x "$REAL_COMPOSER" ] || skip "composer on PATH is a hardening wrapper whose real binary could not be read"
+  fi
+  CH="$BATS_TEST_TMPDIR/checkout"
+  PLUGIN_MARK="$BATS_TEST_TMPDIR/plugin-ran"; SCRIPT_MARK="$BATS_TEST_TMPDIR/script-ran"
+  mkdir -p "$CH/plugin/src" "$CH/app"
+  cat > "$CH/plugin/composer.json" <<'J'
+{ "name": "evil/probe", "type": "composer-plugin", "version": "1.0.0",
+  "require": { "composer-plugin-api": "^2.0" },
+  "autoload": { "psr-4": { "Evil\\": "src/" } },
+  "extra": { "class": "Evil\\Plugin" } }
+J
+  cat > "$CH/plugin/src/Plugin.php" <<P
+<?php
+namespace Evil;
+use Composer\\Composer; use Composer\\IO\\IOInterface; use Composer\\Plugin\\PluginInterface;
+class Plugin implements PluginInterface {
+  public function activate(Composer \$c, IOInterface \$io) { file_put_contents('$PLUGIN_MARK', implode(' ', \$_SERVER['argv']) . "\n", FILE_APPEND); }
+  public function deactivate(Composer \$c, IOInterface \$io) {}
+  public function uninstall(Composer \$c, IOInterface \$io) {}
+}
+P
+  cat > "$CH/app/composer.json" <<J
+{ "name": "victim/app", "version": "0.0.0",
+  "repositories": [ { "type": "path", "url": "../plugin", "options": { "symlink": false } } ],
+  "require": { "evil/probe": "*" },
+  "scripts": { "pre-command-run": "echo ran >> $SCRIPT_MARK" },
+  "config": { "allow-plugins": { "evil/probe": true } } }
+J
+  ( cd "$CH/app" && env -u COMPOSER_SKIP_SCRIPTS HOME="$CH" COMPOSER_HOME="$CH/ch" COMPOSER_ALLOW_SUPERUSER=1 \
+      "$REAL_COMPOSER" install --no-interaction ) >/dev/null 2>&1 || true
+  [ -f "$CH/app/vendor/composer/installed.json" ] || skip "could not stage vendor/ from the path repository"
+  rm -f "$PLUGIN_MARK" "$SCRIPT_MARK"
+  # A stub that execs the real composer, so harden.sh wraps the stub in TEST_BIN
+  # and never touches the system composer.
+  stub_bin composer "exec '$REAL_COMPOSER' \"\$@\""
+}
+
+@test "composer: the hostile checkout fires without the protections (the test can detect it)" {
+  composer_hostile_checkout
+  ( cd "$CH/app" && env -i PATH="$TEST_BIN:$PATH" HOME="$TEST_HOME" COMPOSER_ALLOW_SUPERUSER=1 \
+      composer config --global home --no-ansi ) >/dev/null 2>&1 || true
+  [ -f "$PLUGIN_MARK" ] || skip "this composer ($("$REAL_COMPOSER" --version --no-ansi 2>/dev/null | head -1)) does not activate a checkout plugin on 'config --global' (MEASURED: 2.2.6 through 2.11.2 all do)"
+}
+
+@test "composer: harden.sh run inside a checkout runs none of its plugins or scripts" {
+  composer_hostile_checkout
+  cd "$CH/app"
+  run harden ECOSYSTEMS=composer -- --emit=plain
+  [ ! -f "$PLUGIN_MARK" ] || { echo "plugin ran: $(cat "$PLUGIN_MARK")" >&2; return 1; }
+  [ ! -f "$SCRIPT_MARK" ] || { echo "the checkout's pre-command-run script ran" >&2; return 1; }
+}

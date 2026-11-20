@@ -291,7 +291,7 @@ suggest_for_repo() {
     fi
     if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
       found_any=1
-      notes+=("composer.json defines scripts — the wrapper injects \`--no-scripts\` unconditionally and there is no input to disable it. Run any required script as its own explicit step.")
+      notes+=("composer.json defines scripts. Lifecycle scripts (post-install-cmd, post-update-cmd, post-autoload-dump, ...) are skipped: the wrapper injects \`--no-scripts\`, COMPOSER_SKIP_SCRIPTS lists them as well, and there is no input to disable either. A script run by name still runs (\`composer test\`, \`composer run-script lint\`); one whose name is also a prefix of a built-in command (\`check\`, \`req\`) is refused, so run it as \`composer run-script <name>\`. Run a lifecycle event you need as its own step: \`COMPOSER_SKIP_SCRIPTS= composer run-script post-install-cmd\`.")
     fi
   fi
 
@@ -1325,7 +1325,19 @@ harden_composer() {
   mkdir -p "$HOME/.config/composer"
 
   local composer_version
-  composer_version=$(detect_version composer "composer --version --no-ansi")
+  # --no-plugins, and the home lookup below runs from an empty directory:
+  # MEASURED on composer 2.11.2, run with a checkout as the working directory
+  # (the GitHub workspace), `composer --version` activated the plugin that
+  # checkout's allow-plugins enables, and `composer config --global home` also
+  # ran its root "pre-command-run" script, before any wrapper existed.
+  # The version probe also gives composer no project (COMPOSER names a file that
+  # cannot exist; reading a version needs none, and a step that only looks must
+  # not boot the checkout it runs in), and both probes run with
+  # COMPOSER_ALLOW_SUPERUSER=1 and -n, so a root run on a terminal does not stop
+  # at composer's hidden "Continue as root/super user?" prompt. See the composer
+  # version probe in files/verify-probes.sh.
+  composer_version=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 \
+    detect_version composer "composer --version --no-ansi --no-plugins --no-interaction")
   # Tier-render:
   #   composer >= 2.9 : audit.block-insecure + block-abandoned + abandoned=fail
   #   composer 2.7-2.8: audit.abandoned=fail only
@@ -1401,9 +1413,10 @@ harden_composer() {
   # ~/.config/composer is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
   # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
-  local composer_home=""
-  if command -v composer >/dev/null 2>&1; then
-    composer_home=$(composer config --global home --no-ansi 2>/dev/null | tail -1)
+  local composer_home="" composer_cwd
+  if command -v composer >/dev/null 2>&1 && composer_cwd=$(mktemp -d 2>/dev/null); then
+    composer_home=$(cd "$composer_cwd" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
+    rmdir "$composer_cwd" 2>/dev/null || true
   fi
   case "$composer_home" in
     /*)
@@ -1426,7 +1439,11 @@ harden_composer() {
   # log that reads as coverage.
   write_env COMPOSER_SKIP_SCRIPTS \
     "pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,pre-command-run"
-  write_env COMPOSER_ALLOW_SUPERUSER 1
+  # No COMPOSER_ALLOW_SUPERUSER here: the wrapper sets it for its own run only.
+  # In the job's environment it switched off composer's root guard for every
+  # caller that bypasses the wrapper (MEASURED 2.7.1/2.11.2: without it a
+  # non-interactive root run disables plugins; with it a checkout-allowed plugin
+  # ran). See templates/supply-chain-env.sh.j2.
   # The env form outranks a checked-out composer.json (MEASURED on 2.11.1: a
   # repo's "period": null or "block": false turns off the config.json gate and
   # not these). A repo's "ignore" list still wins; verify.sh reports that.
@@ -1471,10 +1488,8 @@ harden_composer() {
     real_composer="${real_composer}-real"
   fi
 
-  local plugins_flag_line="FLAGS+=(--no-plugins)"
-  if [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]]; then
-    plugins_flag_line="# composer_allow_plugins=true — --no-plugins deliberately not injected"
-  fi
+  local inject_no_plugins=true
+  [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] && inject_no_plugins=false
 
   # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
   # MEASURED (2.0.14 -> 2.10.3): on 2.0/2.1 only install, update, require,
@@ -1491,7 +1506,12 @@ harden_composer() {
     no_scripts_is_global=true
   fi
 
-  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
+  # Two heredocs: the first is UNQUOTED and carries only the values decided
+  # here; the second is QUOTED, so the wrapper's own $variables, $(...) and
+  # backticks reach the file as written (tests/ci/heredoc-scan.py). The body
+  # is the same logic as templates/composer-wrapper.sh.j2.
+  {
+    cat <<EOF
 #!/bin/bash
 # Managed by supply-chain-harden action
 #
@@ -1503,6 +1523,35 @@ harden_composer() {
 # injecting it elsewhere there fails with
 #     The "--no-scripts" option does not exist.
 REAL_COMPOSER='$real_composer'
+WRAPPER_PATH='$wrapper_target'
+NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+# false when the composer_allow_plugins input is true.
+INJECT_NO_PLUGINS=$inject_no_plugins
+COOLDOWN_SECONDS=$COMPOSER_COOLDOWN_SECONDS
+EOF
+    cat <<'EOF'
+#
+# LIFECYCLE SCRIPTS ARE BLOCKED; A SCRIPT YOU ASK FOR BY NAME RUNS.
+# Composer only ever runs scripts from the ROOT composer.json, never a
+# dependency's; dependency code reaches composer through plugins, which
+# --no-plugins and allow-plugins block separately. Lifecycle events
+# (post-install-cmd, post-update-cmd, post-autoload-dump, pre-command-run, ...)
+# fire as a side effect of install, update, require and the rest, and get
+# --no-scripts. `composer run-script <name>`, `composer run <name>` and
+# `composer <name>` for a name under "scripts" are explicit runs, like
+# `npm test`, and get none: --no-scripts does not refuse them, it empties them.
+# MEASURED on composer 2.2.6 -> 2.11.2: `composer test` exited 0 having run
+# nothing, and `composer run-script test` said 'Script "test" is not defined'.
+# A name counts as a script only when it is a "scripts" key (or one of its
+# "scripts-aliases") in the composer.json composer will read AND is not a
+# built-in command or a script event name; composer never lets a script shadow
+# a built-in, so a checkout with a script called "install" still gets
+# `composer install --no-scripts`. A name that is a script AND a prefix of a
+# built-in (`req`, `upd`, `check`), or a "scripts-aliases" alias spelled like a
+# built-in (`i`, `upgrade`), is refused: composer runs the script there
+# (MEASURED on 2.7.1 and 2.11.2) although the caller typed a built-in.
+# Full reasoning: templates/composer-wrapper.sh.j2.
+
 # RUN-PROBE. Record that this wrapper actually executed.
 #
 # Costs nothing on a real invocation: SCH_WRAPPER_PROBE is unset, so this is
@@ -1518,52 +1567,165 @@ REAL_COMPOSER='$real_composer'
 #
 # The value is caller-controlled, so it is only ever a redirect target. Never
 # interpolate it into a command.
-if [ -n "\${SCH_WRAPPER_PROBE:-}" ]; then
-  printf '%s\n' "\$0" >> "\$SCH_WRAPPER_PROBE" 2>/dev/null || true
+if [ -n "${SCH_WRAPPER_PROBE:-}" ]; then
+  printf '%s\n' "$0" >> "$SCH_WRAPPER_PROBE" 2>/dev/null || true
 fi
 
-if [ -z "\$REAL_COMPOSER" ] || [ ! -x "\$REAL_COMPOSER" ] || [ "\$REAL_COMPOSER" = "$wrapper_target" ]; then
-  echo "[supply-chain-harden] error: real composer not found at '\$REAL_COMPOSER'; refusing to recurse" >&2
+if [ -z "$REAL_COMPOSER" ] || [ ! -x "$REAL_COMPOSER" ] || [ "$REAL_COMPOSER" = "$WRAPPER_PATH" ]; then
+  echo "[supply-chain-harden] error: real composer not found at '$REAL_COMPOSER'; refusing to recurse" >&2
   exit 127
 fi
+# Only here, not in the job's environment: wrapped runs carry --no-plugins, and
+# composer's own root guard (a non-interactive root run disables plugins) stays
+# on for anything that bypasses this wrapper.
 export COMPOSER_ALLOW_SUPERUSER=1
 # Publish-age gate (composer >= 2.11.0). Set unconditionally so a step's own env
-# cannot shorten the window; \`composer --no-cooldown\` still gets through, on
+# cannot shorten the window; `composer --no-cooldown` still gets through, on
 # purpose, as composer's escape hatch for an urgent fix.
-export COMPOSER_POLICY_COOLDOWN_PERIOD=$COMPOSER_COOLDOWN_SECONDS
+export COMPOSER_POLICY_COOLDOWN_PERIOD="$COOLDOWN_SECONDS"
 export COMPOSER_POLICY_COOLDOWN_BLOCK=1
 
-NO_SCRIPTS_IS_GLOBAL=$no_scripts_is_global
+# The subcommand is the first non-option token. -d/--working-dir is composer's
+# only value-taking global option, so its value is not the subcommand; it is
+# kept because it moves the composer.json composer reads. In a cluster of short
+# options that ends in d (`-nd DIR`), d still takes the next token, but composer
+# does not change directory for it (MEASURED on 2.5.5, 2.7.1 and 2.11.2:
+# `composer -nd DIR test` ran the test script of the current directory), so
+# that value is skipped and not kept.
+SUBCOMMAND=""; WORKDIR=""; skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; WORKDIR="$arg"; continue; fi
+  if [ "$skip_next" = 2 ]; then skip_next=0; continue; fi
+  case "$arg" in
+    -d|--working-dir) skip_next=1; continue ;;
+    --working-dir=*) WORKDIR="${arg#--working-dir=}"; continue ;;
+    -d?*) WORKDIR="${arg#-d}"; continue ;;
+    --*) continue ;;
+    -?*d) case "${arg%d}" in *d*) ;; *) skip_next=2 ;; esac; continue ;;
+    -*) continue ;;
+  esac
+  SUBCOMMAND="$arg"; break
+done
+
+# Every built-in command and alias of composer 2.1.14, 2.2.6, 2.5.5, 2.7.1,
+# 2.8.8, 2.9.5 and 2.11.2 (MEASURED: `composer list --format=json --no-plugins`
+# in an empty directory). A script cannot shadow one of these names.
+# This is a fixed list, not an answer from the composer on this host. A built-in
+# added after 2.11.2 is missing from it, so a project script of that name would
+# not get --no-scripts while composer runs the built-in; and on a composer older
+# than a name here (audit and bump on 2.2), a script of that name gets
+# --no-scripts and runs nothing. Add new built-ins here when composer ships them.
+BUILTIN_COMMANDS=' _complete about archive audit browse bump cc check-platform-reqs clear-cache clearcache completion config create-project depends diagnose dump-autoload dumpautoload exec fund global help home i info init install licenses list outdated policy prohibits r reinstall remove repo repository require rm run run-script search self-update selfupdate show status suggests u uninstall update upgrade validate why why-not '
+# The twelve script event names (Composer\Script\ScriptEvents, identical in
+# 2.1.14, 2.2.6 and 2.11.2). Composer never registers them as commands.
+SCRIPT_EVENTS=' pre-install-cmd post-install-cmd pre-update-cmd post-update-cmd pre-status-cmd post-status-cmd pre-autoload-dump post-autoload-dump post-root-package-install post-create-project-cmd pre-archive-cmd post-archive-cmd '
+
+# The built-ins whose name starts with $1, ignoring case: what composer's console
+# resolves a name to when no command has exactly that name (a unique prefix,
+# case-sensitive first, then case-insensitive).
+builtins_starting_with() {
+  local want b out=""
+  want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  for b in $BUILTIN_COMMANDS; do
+    case "$b" in "$want"*) out="${out:+$out, }$b" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# How the composer.json composer will read defines the name $1: prints "key"
+# for a "scripts" key, "alias<TAB><key>" for a "scripts-aliases" alias of a
+# key, and nothing otherwise. It finds the file the way composer does:
+# $COMPOSER (default composer.json) in the -d directory or the current one, else
+# the nearest parent below $HOME that has one (composer's use-parent-dir walk).
+# It decodes it with json_decode, as composer does when it registers script
+# commands, so the two read the same file the same way. php is whatever runs
+# composer itself. Nothing is executed from the project.
+root_script_def() {
+  local f="${COMPOSER:-composer.json}" dir home
+  case "$f" in
+    /*) ;;
+    *)
+      if [ -n "$WORKDIR" ]; then
+        f="$WORKDIR/$f"
+      elif [ ! -e "$f" ]; then
+        home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P)
+        dir=$(dirname "$(pwd -P)")
+        while [ "$dir" != "/" ] && [ "$dir" != "$home" ]; do
+          if [ -e "$dir/$f" ]; then f="$dir/$f"; break; fi
+          dir=$(dirname "$dir")
+        done
+      fi ;;
+  esac
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  php -r '
+    $j = json_decode((string) file_get_contents($argv[1]), true);
+    $n = $argv[2];
+    if (!is_array($j) || !isset($j["scripts"]) || !is_array($j["scripts"])) exit(0);
+    if (array_key_exists($n, $j["scripts"])) { echo "key\n"; exit(0); }
+    if (!isset($j["scripts-aliases"]) || !is_array($j["scripts-aliases"])) exit(0);
+    foreach ($j["scripts-aliases"] as $script => $aliases) {
+      if (isset($j["scripts"][$script]) && in_array($n, (array) $aliases, true)) {
+        echo "alias\t", preg_replace("/[[:cntrl:]]/", "?", (string) $script), "\n"; exit(0);
+      }
+    }' "$f" "$1" 2>/dev/null
+}
+
+# A name composer may run as a project script while the caller typed a built-in
+# (see the header): refuse it, and say how to ask for each one unambiguously.
+refuse_script_name() { # $1 = what the project defines it as, $2 = the built-in(s), $3 = the script
+  echo "[supply-chain-harden] refusing 'composer $SUBCOMMAND': '$SUBCOMMAND' is $1 in this project's composer.json and also names composer's built-in '$2'. Composer would run the project's script, with scripts enabled, instead of the built-in. Run the script with 'composer run-script $3', or the built-in by its full name." >&2
+  exit 2
+}
+
+EXPLICIT_SCRIPT=false
+case "$SUBCOMMAND" in
+  run-script|run) EXPLICIT_SCRIPT=true ;;
+  '') ;;
+  *)
+    case "$SCRIPT_EVENTS" in *" $SUBCOMMAND "*) ;; *)
+      SCRIPT_DEF=$(root_script_def "$SUBCOMMAND")
+      case "$BUILTIN_COMMANDS" in
+        *" $SUBCOMMAND "*)
+          # composer skips a scripts KEY named after a built-in, not an alias
+          case "$SCRIPT_DEF" in
+            alias*) refuse_script_name "a scripts-aliases alias" "$SUBCOMMAND" "${SCRIPT_DEF#alias?}" ;;
+          esac ;;
+        *)
+          case "$SCRIPT_DEF" in
+            key|alias*)
+              also=$(builtins_starting_with "$SUBCOMMAND")
+              script="$SUBCOMMAND"; kind="a script"
+              case "$SCRIPT_DEF" in alias*) script="${SCRIPT_DEF#alias?}"; kind="a scripts-aliases alias" ;; esac
+              [ -z "$also" ] || refuse_script_name "$kind" "$also" "$script"
+              EXPLICIT_SCRIPT=true ;;
+          esac ;;
+      esac ;;
+    esac ;;
+esac
 
 FLAGS=()
-if [ "\$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
+if [ "$EXPLICIT_SCRIPT" = "true" ]; then
+  :  # the caller named a root script: run it
+elif [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
   FLAGS+=(--no-scripts)
 else
-  # First non-option token is the subcommand. -d/--working-dir takes a value,
-  # so its argument must not be mistaken for the subcommand.
-  skip_next=0
-  for arg in "\$@"; do
-    if [ "\$skip_next" = 1 ]; then skip_next=0; continue; fi
-    case "\$arg" in
-      -d|--working-dir) skip_next=1; continue ;;
-      -*) continue ;;
-    esac
-    case "\$arg" in
-      install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
-        FLAGS+=(--no-scripts) ;;
-    esac
-    break
-  done
+  case "$SUBCOMMAND" in
+    install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+      FLAGS+=(--no-scripts) ;;
+  esac
 fi
-$plugins_flag_line
+if [ "$INJECT_NO_PLUGINS" = "true" ]; then
+  FLAGS+=(--no-plugins)
+fi
 
-exec "\$REAL_COMPOSER" \${FLAGS[@]+"\${FLAGS[@]}"} "\$@"
+exec "$REAL_COMPOSER" ${FLAGS[@]+"${FLAGS[@]}"} "$@"
 EOF
+  } | $SUDO tee "$wrapper_target" >/dev/null
   $SUDO chmod 755 "$wrapper_target"
-  local wrap_desc="--no-scripts on every invocation"
+  local wrap_desc="--no-scripts on every invocation except a script run by name"
   if [[ "$no_scripts_is_global" != "true" ]]; then
     wrap_desc="--no-scripts on install/update/require/remove/dump-autoload only"
-    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project, run-script and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
+    notice "composer ${composer_version:-undetected} does not accept --no-scripts as a global option (MEASURED: it became one in 2.2.0). The wrapper injects it only for install/update/require/remove/dump-autoload; create-project and exec run WITHOUT it on this runner. Upgrade composer to >= 2.2 and re-run to close the gap."
   fi
   [[ "$COMPOSER_ALLOW_PLUGINS" == "true" ]] || wrap_desc="$wrap_desc, --no-plugins"
   log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"

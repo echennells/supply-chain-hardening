@@ -76,14 +76,13 @@ export GOTOOLCHAIN=local
 # slips through. The /usr/local/bin/composer wrapper is the primary
 # protection; this env var is the backup for shells that bypass it.
 export COMPOSER_SKIP_SCRIPTS='pre-install-cmd,post-install-cmd,pre-update-cmd,post-update-cmd,pre-status-cmd,post-status-cmd,pre-autoload-dump,post-autoload-dump,post-root-package-install,post-create-project-cmd,pre-archive-cmd,post-archive-cmd,pre-package-install,post-package-install,pre-package-update,post-package-update,pre-package-uninstall,post-package-uninstall,init,command,pre-file-download,post-file-download,pre-command-run,pre-pool-create'
-# COMPOSER_ALLOW_SUPERUSER=1 is also exported inside the composer wrapper
-# (templates/composer-wrapper.sh.j2). Both locations are needed — not a
-# duplication: the wrapper covers callers in non-PAM contexts (cron,
-# systemd ExecStart, container CMD) where /etc/profile.d/ never loads;
-# this profile.d export covers `php composer.phar` callers that bypass
-# the wrapper but inherit the PAM-loaded environment. Removing either
-# leaves a coverage gap.
-export COMPOSER_ALLOW_SUPERUSER=1
+# COMPOSER_ALLOW_SUPERUSER is deliberately NOT exported here: only the composer
+# wrapper sets it, for its own invocation. Exported host-wide it switched off
+# composer's root guard for every caller that bypasses the wrapper (composer-real,
+# `php composer.phar`, a user-local composer). MEASURED (2.7.1, 2.11.2, outside a
+# container): a non-interactive root run without it disables plugins ("Composer
+# plugins have been disabled for safety") and runs `sudo -K`; with it, a plugin
+# the checkout's own allow-plugins enables ran as root.
 # Publish-age gate, composer >= 2.11.0 (ignored below that). The env form is here
 # because it outranks a checked-out composer.json: MEASURED on 2.11.1, a repo's
 # "period": null or "block": false turns off the config.json gate but not these.

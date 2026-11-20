@@ -84,7 +84,7 @@ EOF
   #      environment artifact (no node_modules in CWD, network
   #      unavailable, etc.)
   # If this test fails, the BEHAVIORAL test above may be a tautology.
-  [ -x /usr/local/bin/bun-real ] || skip "bun-real not present (bun_path_wrapper may be false)"
+  BUN_REAL=$(real_binary bun) || skip "bun is not wrapped (bun_path_wrapper may be false)"
 
   # Bun dropped default `bun run` auto-install at 1.4.0: a missing import now
   # errors "package not found" instead of silently installing. On >= 1.4.0 this
@@ -92,7 +92,7 @@ EOF
   # wrapper's --no-install is belt-and-suspenders, not the load-bearing control it
   # is on older bun. Skip rather than assert a behavior the toolchain removed
   # (MEASURED: field report, bun 1.4.0 says "package not found").
-  bun_ver=$(/usr/local/bin/bun-real --version 2>/dev/null | tr -d '[:space:]')
+  bun_ver=$("$BUN_REAL" --version 2>/dev/null | tr -d '[:space:]')
   bun_major=${bun_ver%%.*}; bun_rest=${bun_ver#*.}; bun_minor=${bun_rest%%.*}
   if [ "${bun_major:-0}" -gt 1 ] 2>/dev/null || \
      { [ "${bun_major:-0}" -eq 1 ] && [ "${bun_minor:-0}" -ge 4 ]; } 2>/dev/null; then
@@ -113,7 +113,7 @@ EOF
   # doesn't affect `bun run` per bun's docs, so this is belt-and-
   # suspenders for test isolation.
   result=$(env -i HOME=/tmp/bun-control-test PATH=/usr/local/bin:/usr/bin:/bin \
-    /usr/local/bin/bun-real run script.ts 2>&1 || true)
+    "$BUN_REAL" run script.ts 2>&1 || true)
   has_node_modules=$([ -d node_modules ] && echo "yes" || echo "no")
   rm -rf /tmp/bun-control-test
 

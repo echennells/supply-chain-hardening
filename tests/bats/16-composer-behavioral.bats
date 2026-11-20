@@ -10,10 +10,10 @@
 # fires when nothing blocks it; the FIXTURE CONTROL test below verifies that
 # property.
 #
-# The blocking assertion is skipped until the /usr/local/bin/composer
+# The blocking assertion is skipped until the composer PATH
 # wrapper is implemented (composer has no config-file or env-var way to
 # block scripts host-wide — the only real primitives are --no-scripts CLI
-# flag and COMPOSER_SKIP_SCRIPTS=<event,list> env var on composer 2.9+,
+# flag and COMPOSER_SKIP_SCRIPTS=<event,list> env var on composer 2.8.6+,
 # neither suitable as an always-on host-wide protection without a wrapper).
 
 load setup
@@ -31,13 +31,13 @@ setup() {
   # `composer install` with no lock transparently routes through update
   # (firing the latter two, not the former). Run with env -i + a clean
   # HOME so neither role env vars nor the role's per-user config affects
-  # the result. /usr/local/bin/composer-real bypasses the wrapper too.
+  # the result. The real binary behind the wrapper bypasses the wrapper too.
   # The marker SHOULD appear.
-  [ -x /usr/local/bin/composer-real ] || skip "composer-real not present"
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
   cd /tmp && rm -rf composer-control-test && mkdir composer-control-test && cd composer-control-test
   cp /opt/test-fixtures/composer-postinstall/composer.json .
   env -i HOME=/tmp/composer-control-test PATH=/usr/local/bin:/usr/bin:/bin \
-    /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
+    "$REAL" install --no-interaction 2>/dev/null || true
   marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
   rm -rf /tmp/composer-control-test
   rm -f /tmp/marker-composer-script
@@ -45,7 +45,7 @@ setup() {
 }
 
 @test "ATTACK: composer post-install-cmd script is blocked" {
-  # The /usr/local/bin/composer wrapper injects --no-scripts on every
+  # The composer wrapper injects --no-scripts on every lifecycle
   # invocation. The fixture above (FIXTURE CONTROL) proves the script
   # would fire absent hardening; this test proves the wrapper actually
   # blocks it. If the wrapper is ever bypassed, removed, or fails to
@@ -61,7 +61,7 @@ setup() {
 
 @test "BYPASS VERIFICATION: composer-real + cleared COMPOSER_SKIP_SCRIPTS runs scripts (documented bypass works)" {
   # The role ships TWO layers of script blocking:
-  #   1. /usr/local/bin/composer wrapper injects --no-scripts --no-plugins
+  #   1. the composer wrapper injects --no-scripts --no-plugins
   #   2. COMPOSER_SKIP_SCRIPTS=<events> in /etc/environment (catches
   #      `php composer.phar` callers and composer-real callers in
   #      PAM-loaded shells)
@@ -69,11 +69,11 @@ setup() {
   # AND clear the env var. Just `composer-real install` alone is still
   # blocked by layer 2 — which is intentional belt-and-suspenders, not a
   # bug. This test verifies the documented bypass actually works.
-  [ -x /usr/local/bin/composer-real ] || skip "composer-real not present (composer_path_wrapper may be false)"
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
   cd /tmp && rm -rf composer-bypass-test && mkdir composer-bypass-test && cd composer-bypass-test
   cp /opt/test-fixtures/composer-postinstall/composer.json .
   env -i HOME=/tmp/composer-bypass-test PATH=/usr/local/bin:/usr/bin:/bin \
-    /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
+    "$REAL" install --no-interaction 2>/dev/null || true
   marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
   rm -rf /tmp/composer-bypass-test
   rm -f /tmp/marker-composer-script
@@ -87,14 +87,140 @@ setup() {
   # someone removed COMPOSER_SKIP_SCRIPTS from /etc/environment or
   # /etc/profile.d/, this test would flip from blocked→not-blocked and
   # catch the regression.
-  [ -x /usr/local/bin/composer-real ] || skip "composer-real not present"
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
+  # The env-var layer only exists from composer 2.8.6: MEASURED, 2.2.6, 2.7.1,
+  # 2.8.4 and 2.8.5 run every script with COMPOSER_SKIP_SCRIPTS set, and the
+  # role records that host as a skipped protection rather than claiming it.
+  local v; v=$("$REAL" --version --no-ansi 2>/dev/null | sed -nE 's/^Composer (version )?([0-9]+\.[0-9]+\.[0-9]+).*$/\2/p' | head -1)
+  [ -n "$v" ] || skip "could not read the composer version"
+  [ "$(printf '2.8.6\n%s\n' "$v" | sort -V | head -1)" = "2.8.6" ] \
+    || skip "composer $v ignores COMPOSER_SKIP_SCRIPTS (honoured from 2.8.6); there is no env-var layer to test"
   cd /tmp && rm -rf composer-real-test && mkdir composer-real-test && cd composer-real-test
   cp /opt/test-fixtures/composer-postinstall/composer.json .
-  /usr/local/bin/composer-real install --no-interaction 2>/dev/null || true
+  "$REAL" install --no-interaction 2>/dev/null || true
   marker_present=$([ -f /tmp/marker-composer-script ] && echo "yes" || echo "no")
   rm -rf /tmp/composer-real-test
   rm -f /tmp/marker-composer-script
   [ "$marker_present" = "no" ]
+}
+
+# --- a script asked for by name runs; lifecycle scripts do not ---------------
+# MEASURED before the wrapper learned the difference (composer 2.2.6 -> 2.11.2,
+# role and action): `composer test` exited 0 with no output while the script
+# says `exit 3`, and `composer run-script test` failed with 'Script "test" is
+# not defined in this package'. A CI test step went green having run nothing.
+
+explicit_fixture() {
+  EXP="$BATS_TEST_TMPDIR/explicit"
+  mkdir -p "$EXP"
+  cat > "$EXP/composer.json" <<'J'
+{ "name": "test/explicit-scripts",
+  "scripts": { "test": "echo SCH-RAN-TEST; exit 3", "lint": ["@test"] } }
+J
+}
+
+@test "EXPLICIT SCRIPT: composer <name> runs the root script and returns its exit code" {
+  explicit_fixture
+  run bash -c 'cd "$1" && composer test --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+  run bash -c 'cd "$1" && composer lint --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+}
+
+@test "EXPLICIT SCRIPT: composer run-script <name> and composer run <name> run it" {
+  explicit_fixture
+  run bash -c 'cd "$1" && composer run-script test --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+  run bash -c 'cd "$1" && composer run test --no-interaction' _ "$EXP"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"SCH-RAN-TEST"* ]]
+}
+
+# A checkout cannot turn `composer install` into an "explicit run" by naming a
+# script "install": composer skips such a script ("would override a Composer
+# command") and runs the built-in, which must still get --no-scripts.
+hostile_install_fixture() {
+  HOST="$BATS_TEST_TMPDIR/hostile"
+  mkdir -p "$HOST"
+  php -r '
+    $j = json_decode(file_get_contents($argv[1]), true);
+    $j["scripts"]["install"] = "echo named-install";
+    file_put_contents($argv[2], json_encode($j, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  ' /opt/test-fixtures/composer-postinstall/composer.json "$HOST/composer.json"
+}
+
+@test "FIXTURE CONTROL: the hostile-install fixture fires its lifecycle script without the wrapper" {
+  command -v php >/dev/null 2>&1 || skip "php not installed"
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
+  hostile_install_fixture
+  run bash -c 'cd "$1" && env -u COMPOSER_SKIP_SCRIPTS "$2" install --no-interaction' _ "$HOST" "$REAL"
+  [ -f /tmp/marker-composer-script ]
+  rm -f /tmp/marker-composer-script
+}
+
+@test "ATTACK: a script named install does not lift --no-scripts from composer install" {
+  command -v php >/dev/null 2>&1 || skip "php not installed"
+  hostile_install_fixture
+  # COMPOSER_SKIP_SCRIPTS is unset so the wrapper is the only thing that can
+  # block the script. setup() loads the env layer, which on composer >= 2.8.6
+  # blocks post-install-cmd by itself: MEASURED on 2.11.2, this test still
+  # passed with "install" removed from the wrapper's built-in list.
+  run bash -c 'cd "$1" && env -u COMPOSER_SKIP_SCRIPTS composer install --no-interaction' _ "$HOST"
+  [ "$status" -eq 0 ]
+  [ -f "$HOST/vendor/autoload.php" ]
+  [ ! -f /tmp/marker-composer-script ]
+}
+
+# A checkout cannot take over a command the caller typed as package management
+# by naming a script after an abbreviation of a built-in: composer resolves an
+# exact command name before an abbreviation, and a script is a command. MEASURED
+# on 2.7.1 and 2.11.2 before the wrapper refused it: `composer req psr/log` ran
+# the checkout's "req" script with scripts enabled, and so did du, dump, up, upd,
+# ins and rem. A "scripts-aliases" alias spelled like a built-in ("i") did too.
+abbrev_fixture() {
+  ABB="$BATS_TEST_TMPDIR/abbrev"
+  mkdir -p "$ABB"
+  cat > "$ABB/composer.json" <<J
+{ "name": "test/abbrev-hijack",
+  "scripts": { "req": "echo req >> $ABB/HIJACK", "upd": "echo upd >> $ABB/HIJACK",
+               "check": "echo check >> $ABB/HIJACK", "foo": "echo foo >> $ABB/HIJACK" },
+  "scripts-aliases": { "foo": ["i"] } }
+J
+}
+
+@test "FIXTURE CONTROL: without the wrapper, composer runs an abbreviation-named script" {
+  REAL=$(real_binary composer) || skip "composer is not wrapped (composer_path_wrapper may be false)"
+  abbrev_fixture
+  run bash -c 'cd "$1" && env -u COMPOSER_SKIP_SCRIPTS "$2" req psr/log --no-interaction' _ "$ABB" "$REAL"
+  # composer appends the arguments to the script's command, hence "req psr/log"
+  grep -q '^req' "$ABB/HIJACK" 2>/dev/null || { echo "composer-real req did not run the req script: $output"; return 1; }
+}
+
+@test "ATTACK: a script named after an abbreviation of a built-in is refused, not run" {
+  command -v php >/dev/null 2>&1 || skip "php not installed (the wrapper reads composer.json with php)"
+  abbrev_fixture
+  local args
+  for args in "req psr/log" "upd" "check" "i"; do
+    rm -f "$ABB/HIJACK"
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && env -u COMPOSER_SKIP_SCRIPTS composer "$@" --no-interaction' _ "$ABB" $args
+    [ ! -f "$ABB/HIJACK" ] || { echo "'composer $args' ran the checkout's script: $(cat "$ABB/HIJACK")"; return 1; }
+    [ "$status" -eq 2 ] || { echo "'composer $args' exited $status: $output"; return 1; }
+    [[ "$output" == *"[supply-chain-hardening] refusing"* && "$output" == *"composer run-script"* ]] \
+      || { echo "'composer $args' was not refused by name: $output"; return 1; }
+  done
+  # The unambiguous spelling still runs the script.
+  rm -f "$ABB/HIJACK"
+  run bash -c 'cd "$1" && composer run-script check --no-interaction' _ "$ABB"
+  [ "$status" -eq 0 ]
+  grep -q '^check' "$ABB/HIJACK"
+  # And in a project with no such script, an abbreviation is still the built-in.
+  explicit_fixture
+  run bash -c 'cd "$1" && composer req --help --no-interaction' _ "$EXP"
+  [[ "$output" == *"require [options]"* ]] || { echo "req --help: $output"; return 1; }
 }
 
 # --- publish-age gate ---------------------------------------------------------
