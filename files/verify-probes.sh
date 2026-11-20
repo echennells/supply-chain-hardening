@@ -1846,7 +1846,27 @@ fi
 # the lookup is still skipped. Go treats an empty variable as unset and falls
 # back to its env file, so the env layer's blanks cannot clear a `go env -w`
 # value. Each detail says where a value came from for exactly that reason.
-scv_go_env() { (cd / && go env "$1") 2>/dev/null | head -1 | tr -d '\r'; }
+#
+# GOTOOLCHAIN=local for every read but GOTOOLCHAIN's own. Under an exported
+# toolchain NAME go switches before it runs any subcommand, `go env` included:
+# MEASURED on go1.24.2 with GOPROXY=off, GOTOOLCHAIN=go1.23.0 made
+# `go env GOTOOLCHAIN GOVERSION` print "go: downloading go1.23.0" and fail, so
+# with a network the verifier would have fetched and run that toolchain, and
+# read its version back as "the installed" one. Forced local, go answers for
+# the installed toolchain and switches to nothing. GOTOOLCHAIN itself is the
+# exported value when there is one (the environment wins); otherwise go reads
+# it from its env file or go.env, and then `go env` did not switch (MEASURED:
+# after `go env -w GOTOOLCHAIN=go1.23.0` it printed go1.23.0, no download).
+scv_go_env() {
+  if [ "$1" = GOTOOLCHAIN ] && [ -n "${GOTOOLCHAIN:-}" ]; then
+    printf '%s\n' "$GOTOOLCHAIN"; return 0
+  fi
+  if [ "$1" = GOTOOLCHAIN ]; then
+    (cd / && go env "$1") 2>/dev/null | head -1 | tr -d '\r'
+  else
+    (cd / && GOTOOLCHAIN=local go env "$1") 2>/dev/null | head -1 | tr -d '\r'
+  fi
+}
 scv_go_src() { # KEY -> where Go got its value, in words; empty when unknown
   local k="$1" gf gr
   if [ -n "${!k:-}" ]; then
@@ -1913,13 +1933,31 @@ else
   # MEASURED): go then downloads and runs whatever toolchain a go.mod or go.work
   # names. `local` refuses instead. `path` and `+path` switch only to a toolchain
   # already on PATH and never download.
+  #
+  # A plain toolchain NAME (go1.24.2, no +auto/+path) never follows go.mod
+  # either. MEASURED on go1.24.2 with GOPROXY=off, in a module whose go.mod
+  # says go 1.99.0: GOTOOLCHAIN=go1.24.2 printed "go.mod requires go >= 1.99.0
+  # (running go 1.24.2; GOTOOLCHAIN=go1.24.2)", exactly as local does, while
+  # go1.24.2+auto and auto printed "downloading go1.99.0". A name other than
+  # the installed version is still a toolchain fetched at build time
+  # (GOTOOLCHAIN=go1.23.0: "downloading go1.23.0" for any command), so only a
+  # name equal to the installed version is OK. It used to fall through to the
+  # GAP below, which said go downloads what a go.mod names.
   gotc=$(scv_go_env GOTOOLCHAIN)
   gov=$(scv_go_env GOVERSION)
   [ -n "$gov" ] || gov=$( (cd / && go version) 2>/dev/null | awk '{print $3}')
   gonum=${gov#go}
+  gotcname=""
+  case "$gotc" in go[0-9]*) case "$gotc" in *+*) ;; *) gotcname=$gotc ;; esac ;; esac
   if [ -n "$gonum" ] && [ "$(printf '1.21\n%s\n' "$gonum" | sort -V | head -1)" != "1.21" ]; then
     row OK PARSED "go toolchain switching" \
       "$gov predates toolchain switching (GOTOOLCHAIN, added in go1.21), so it never downloads a toolchain a go.mod asks for"
+  elif [ -n "$gotcname" ] && [ "$gotcname" = "$gov" ]; then
+    row OK PARSED "go toolchain switching" \
+      "go reports GOTOOLCHAIN=$gotc $(scv_go_src GOTOOLCHAIN), the installed version - a plain toolchain name never follows a go.mod or go.work (only name+auto does), so one that asks for a newer toolchain is refused, not downloaded and run"
+  elif [ -n "$gotcname" ]; then
+    row WEAK PARSED "go toolchain switching" \
+      "go reports GOTOOLCHAIN=$gotc $(scv_go_src GOTOOLCHAIN), not the installed $gov - go runs $gotc for every command, downloading it through GOPROXY when this host does not have it. A go.mod or go.work cannot choose a different toolchain (a plain name never follows them; only name+auto does), but this one is fetched at build time rather than installed"
   else
     case "$gotc" in
       local)

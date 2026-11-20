@@ -549,6 +549,25 @@ bundler_project() { # dir
   verify_from /tmp GOTOOLCHAIN=auto
   echo "$output" | grep "go toolchain switching" | grep -q "^GAP"
   echo "$output" | grep "go toolchain switching" | grep -q "downloads and runs"
+  # A plain name never follows go.mod. Ground truth first: pinned to the
+  # installed version, a module that asks for a newer go is refused, not
+  # switched (+auto would try to download it).
+  gv=$(cd / && GOTOOLCHAIN=local go env GOVERSION)
+  m="$BATS_TEST_TMPDIR/gomod"; mkdir -p "$m"
+  printf 'module example.com/m\n\ngo 1.99.0\n' > "$m/go.mod"
+  run bash -c "cd '$m' && GOTOOLCHAIN='$gv' GOPROXY=off go list 2>&1"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "requires go >= 1.99.0"
+  ! echo "$output" | grep -qi "downloading go1.99.0"
+  verify_from /tmp GOTOOLCHAIN="$gv"
+  echo "$output" | grep "go toolchain switching" | grep -q "^OK"
+  # GOPROXY=off: the verifier forces GOTOOLCHAIN=local for its own reads, but
+  # nothing here should be able to download go1.20.0 if something else runs go.
+  verify_from /tmp GOTOOLCHAIN=go1.20.0 GOPROXY=off
+  echo "$output" | grep "go toolchain switching" | grep -q "^WEAK"
+  echo "$output" | grep "go toolchain switching" | grep -q "not the installed $gv"
+  verify_from /tmp GOTOOLCHAIN="$gv+auto"
+  echo "$output" | grep "go toolchain switching" | grep -q "^GAP"
 }
 
 # Stage a project .npmrc with one exclude pattern and run the verifier there.
