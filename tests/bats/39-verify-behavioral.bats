@@ -634,7 +634,9 @@ bundler_project() { # dir
   run env -i HOME="$HOME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$VERIFY" --verbose
   echo "$output" | grep -q "go checksum verification"
   ! echo "$output" | grep -qE '^N/A +- +go +go not installed'
-  echo "$output" | grep -qE '^[A-Z/]+ +[A-Z-]+ +go module integrity'
+  # The preamble's own go row (fix/rh-go-pnpm-uv renamed it from "go module
+  # integrity" to "go module mode").
+  echo "$output" | grep -qE '^[A-Z/]+ +[A-Z-]+ +go module mode'
 }
 
 @test "verify: GOTOOLCHAIN is reported - local is OK, an exported auto is a GAP" {
