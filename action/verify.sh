@@ -880,11 +880,17 @@ npm_implements() {
 # "every package skips the gate" overstated it; '**' exempted both, and '@*/*'
 # and '*/*' every scoped package, while the row graded all three WEAK.
 #
-# So ask the minimatch npm itself loads, about two sentinel names of each kind:
-# a list that matches both members of a kind matches that whole kind. Prints
-# "unscoped", "scoped", "unscoped scoped" or nothing. When npm's matcher cannot
-# be found (a version-manager shim, an npm laid out differently) only '*' and
-# '**', whose meaning is fixed, are judged, and anything else prints "unknown".
+# So ask the minimatch npm itself loads, about sentinel names of each kind. A
+# list that matches every sentinel of a kind ("a" and the made-up ones) matches
+# that whole kind. A list that matches ANY made-up sentinel is broad even when
+# it misses some: no list that names real packages names zz9-sch-sentinel, and
+# MEASURED on npm 11.19.1 with a 99999-day window, '??*' and '[!z]*' each
+# exempted lodash AND express, while 'lodash' alone left express refused
+# (ENOVERSIONS), yet requiring every sentinel to match graded both WEAK as narrow.
+# Prints "unscoped", "scoped", "broad", any two or three of them, or nothing.
+# When npm's matcher cannot be found (a version-manager shim, an npm laid out
+# differently) only '*' and '**', whose meaning is fixed, are judged, and
+# anything else prints "unknown".
 scv_npm_exclude_scope() { # <the list as `npm config get` prints it: comma-separated>
   local npmjs npmdir out
   npmjs=$(command -v npm 2>/dev/null)
@@ -906,8 +912,12 @@ const opts = { nonegate: true, nocomment: true, noext: true };
 const pats = process.argv[2].split(",").map(s => s.trim()).filter(Boolean);
 const hit = n => pats.some(p => n === p || mm(n, p, opts));
 const kinds = [];
-if (["a", "zz9-sch-sentinel"].every(hit)) kinds.push("unscoped");
-if (["@a/b", "@zz9-sch/sentinel"].every(hit)) kinds.push("scoped");
+const made = ["zz9-sch-sentinel", "q7x-sch-sentinel", "m3k-sch-sentinel", "e5w-sch-sentinel"];
+const madeS = made.map(n => "@" + n + "/sentinel");
+const unsc = ["a"].concat(made).every(hit), scop = ["@a/b"].concat(madeS).every(hit);
+if (unsc) kinds.push("unscoped");
+if (scop) kinds.push("scoped");
+if ((!unsc && made.some(hit)) || (!scop && madeS.some(hit))) kinds.push("broad");
 process.stdout.write(kinds.join(" "));
 ' "$npmdir" "$1" 2>/dev/null) || out=unknown
   fi
@@ -922,14 +932,20 @@ process.stdout.write(kinds.join(" "));
 
 # The age-gate row's verdict on an exclude list, as "STATUS<TAB>detail".
 scv_npm_exclude_verdict() { # <npm version> <window days> <list>
-  local where; where=$(pwd)
-  case "$(scv_npm_exclude_scope "$3")" in
+  local where sc; where=$(pwd); sc=$(scv_npm_exclude_scope "$3")
+  case "$sc" in
     "unscoped scoped")
       printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches EVERY package name, scoped or not (asked of the matcher npm uses) - the gate is off for every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
     unscoped)
       printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name (asked of the matcher npm uses) - the gate is off for every package except scoped @org/name ones, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
     scoped)
       printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name (asked of the matcher npm uses) - the gate is off for every @org/name package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    "unscoped broad")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every UNSCOPED package name, and made-up scoped names too (asked of the matcher npm uses) - the gate is off for nearly every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    "scoped broad")
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches every SCOPED package name, and made-up unscoped names too (asked of the matcher npm uses) - the gate is off for nearly every package, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
+    broad)
+      printf 'GAP\tnpm %s reports min-release-age=%s but min-release-age-exclude=%s in %s matches made-up package names no exclude list would name (zz9-sch-sentinel and the like, asked of the matcher npm uses) - a wildcard that broad exempts arbitrary packages, not a named few, and no exported setting overrides a repo'"'"'s exclude list' "$1" "$2" "$3" "$where" ;;
     unknown)
       printf 'WEAK\tnpm %s enforces %s day(s) but %s exempts: %s (min-release-age-exclude). The matcher npm uses could not be loaded, so whether these patterns match every package was not tested' "$1" "$2" "$where" "$3" ;;
     *)

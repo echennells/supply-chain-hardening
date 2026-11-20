@@ -1012,4 +1012,13 @@ npm_exclude_run() {
   [[ "$output" != *"EVERY package name"* ]]
   npm_exclude_run '@*/*'
   [[ "$output" == *"GAP    PARSED      npm age gate"*"matches every SCOPED package name"* ]]
+  # MEASURED, same npm: '??*' and '[!z]*' each exempted lodash and express.
+  # They miss one sentinel each ('a', zz9-sch-sentinel), which is how they
+  # used to read WEAK; a match on ANY made-up name is broad.
+  npm_exclude_run '??*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches made-up package names"* ]]
+  npm_exclude_run '[!z]*'
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"matches made-up package names"* ]]
+  npm_exclude_run '@types/*'
+  [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: @types/*"* ]]
 }

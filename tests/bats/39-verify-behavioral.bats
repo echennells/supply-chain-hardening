@@ -566,6 +566,14 @@ npm_exclude_from() { # pattern
   npm_exclude_from '@*/*'
   echo "$output" | grep "npm age gate" | grep -q "^GAP"
   echo "$output" | grep "npm age gate" | grep -q "every SCOPED package name"
+  # Patterns that miss one sentinel but match made-up names are broad, not narrow.
+  npm_exclude_from '??*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  echo "$output" | grep "npm age gate" | grep -q "matches made-up package names"
+  npm_exclude_from '[!z]*'
+  echo "$output" | grep "npm age gate" | grep -q "^GAP"
+  npm_exclude_from '@types/*'
+  echo "$output" | grep "npm age gate" | grep -q "^WEAK"
 }
 
 @test "verify: the footer counts PRESENT-only WEAK rows apart from caveated ones" {
