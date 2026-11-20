@@ -369,6 +369,14 @@ restore_uv() {
   # that misreads its tool would reinstall on every apply.
   [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
   cd "$ROLE_DIR"
+  # A first apply brings the tools to their pins; only the second is measured.
+  # In the image root's tools already are, but a user who has not applied the
+  # role (a normal user on a real host) gets a legitimate first install of the
+  # per-user ones (pinact and govulncheck in its own GOPATH), which is not what
+  # this test is about.
+  ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
+    -e socket_firewall_install=false >/tmp/tool-pins-apply1.log 2>&1 || true
   run ansible-playbook site.yml --connection=local --limit localhost \
     --tags github,go,uv,npm -e podman_enabled=false -e verify_protections=false \
     -e socket_firewall_install=false
