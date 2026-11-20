@@ -94,8 +94,10 @@ runs:
         HARDENING_ENV_FILE: ${{ inputs.env-file }}
         HARDENING_OUTPUT_FILE: ${{ inputs.output-file }}
         # The ref this action ran at, so the doc URLs in the table match the
-        # code that printed them. GitHub only exposes it through the env context
-        # of a composite action's step.
+        # code that printed them. UNVERIFIED: that github.action_ref holds this
+        # action's ref inside a composite step was not measured, and it has been
+        # reported empty there. Empty or unsafe falls back to main in verify.sh,
+        # so the cost of it being empty is URLs that point at main.
         SCV_DOCS_REF: ${{ github.action_ref }}
       run: |
         args=()

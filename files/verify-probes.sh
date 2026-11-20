@@ -4050,7 +4050,11 @@ fi
 #    (bb5446d) both writers hooked only project.repositories, and only maven
 #    repos, so this probe measured the other three, and ivy, as ADDED on gradle
 #    8.14.3. Both writers now hook all four, maven and ivy alike (ECH-171,
-#    verified per scope on 8.14.3). The probe still baits all four, because
+#    verified per scope on 8.14.3), with one difference: the role's settings
+#    hook sits behind respondsTo('beforeSettings') (tasks/gradle.yml), so on a
+#    gradle without beforeSettings (older than 6) the role covers project and
+#    buildscript repositories only; the action's Kotlin init script calls
+#    beforeSettings unguarded. The probe still baits all four, because
 #    "HTTPS-only repos" is what the row is NAMED, and a plugin jar fetched over
 #    http from buildscript{} executes at configuration time.
 #
