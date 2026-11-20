@@ -481,12 +481,45 @@ restore_real_go() {
   if [ -e "$PINACT_BIN.bats-hidden" ]; then mv -f "$PINACT_BIN.bats-hidden" "$PINACT_BIN"; fi
 }
 
+# The age-gate refresher (and, on a systemd host, its service unit) is one
+# root-owned file that applies in this file re-render, several of them with
+# -e socket_firewall_install=false so they need no network, which drops its
+# --sfw step. 49-age-gate-refresh.bats reads the deployed copy later in the
+# same container, and its --sfw tests then skipped as though the image had been
+# built without sfw. setup() keeps the content of each before every test, and
+# teardown() writes back any that a test changed, through the existing file so
+# it stays root-owned (cat, or sudo tee for a normal user on a real host).
+REFRESH_FILES=(/usr/local/sbin/supply-chain-age-gate-refresh /etc/systemd/system/supply-chain-age-gate-refresh.service)
+setup() {
+  local i=0 f
+  for f in "${REFRESH_FILES[@]}"; do
+    if [ -f "$f" ]; then cat "$f" > "$BATS_TEST_TMPDIR/refresh-snap.$i" 2>/dev/null || rm -f "$BATS_TEST_TMPDIR/refresh-snap.$i"; fi
+    i=$((i + 1))
+  done
+}
+restore_refresher() {
+  local i=0 f snap changed=""
+  for f in "${REFRESH_FILES[@]}"; do
+    snap="$BATS_TEST_TMPDIR/refresh-snap.$i"; i=$((i + 1))
+    [ -f "$snap" ] && [ -f "$f" ] || continue
+    cmp -s "$snap" "$f" && continue
+    { cat "$snap" > "$f"; } 2>/dev/null || sudo -n tee "$f" < "$snap" >/dev/null 2>&1 || continue
+    case "$f" in *.service) changed=1 ;; esac
+  done
+  if [ -n "$changed" ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || sudo -n systemctl daemon-reload 2>/dev/null || true
+  fi
+  return 0
+}
+
 # Runs after every test in this file. A no-op unless a test left the real Go
-# or uv hidden, which must never outlive the test that hid it.
+# or uv hidden, which must never outlive the test that hid it, or changed the
+# refresher (above).
 teardown() {
   restore_real_go
   restore_uv
   restore_yarnrc
+  restore_refresher
 }
 
 UV_HIDDEN=""
