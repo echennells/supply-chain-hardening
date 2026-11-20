@@ -67,16 +67,30 @@ Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/
 ## Apply without Ansible
 
 ```bash
-./action/harden.sh --emit=plain
-source "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env"
-./action/verify.sh --emit=plain
+./action/harden.sh --emit=plain &&
+  source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}" &&
+  ./action/verify.sh --emit=plain
 ```
+
+Keep the `&&`. If `harden.sh` fails, nothing after it should run, least of all
+the `source`. Outside a CI runner the env file goes in
+`~/.cache/supply-chain-hardening/` (created with mode 0700), never a shared
+directory. `HARDENING_ENV_FILE` moves it, and the `source` line follows. `harden.sh`
+refuses a file that is not yours or that group or others can write, and a path
+through a world-writable directory without the sticky bit, or through a sticky
+one another user owns. It accepts group-writable directories. Run `verify.sh` as
+the same user: it will not read a record another user owns, and fails instead.
 
 This path was built for CI, so it is narrower than the role:
 
 - The env file only reaches shells that source it.
 - It wraps binaries and writes `/etc` with `sudo` where it can.
-- CI only exercises the GitHub path, so treat `plain` as less tested.
+- **Nothing refreshes the uv and pip cutoffs.** They are a fixed date, set when
+  `harden.sh` runs. On a host you keep, re-run the three lines above to move
+  them, and re-source the env file in any shell that sourced the old one. The
+  role installs a timer for this.
+- CI only exercises the GitHub path, so treat `plain` as less tested. GitLab and
+  Buildkite shell runners are not tested at all.
 
 ## If you copy settings anyway
 
@@ -92,7 +106,7 @@ This is the weakest option. Use it only when neither path above is possible, and
 |---|---|---|---|---|
 | npm | `min-release-age` | `2` | npm 11.10.0 | Integer days. `48h` fails installs, and `2880` means about 8 years. |
 | pnpm | `minimumReleaseAge` | `2880` | | Minutes. pnpm 11 no longer reads `~/.npmrc` or `/etc/npmrc`. |
-| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. `"2d"` parses to NaN and disables the gate. |
+| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. Yarn 4.10 reads `"2d"` as 2 minutes; 4.11+ parses it. Below 4.10 the key is ignored in `~/.yarnrc.yml` and rejected in a project's. |
 | Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds. One bad value makes Bun reject the whole file. |
 | uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. |
 | pip | `uploaded-prior-to` | a date | pip 26.0 | Same, with a literal `Z`. |

@@ -994,3 +994,145 @@ echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   [ "$(table_rows "$output")" -eq "$base" ]
   [[ "$output" == *'ignore-scripts=x\c'* ]]
 }
+
+# ---- VM#3: a record or env file someone else can write is not believed ----
+
+forge_record() { # a COMPLETE-looking record scoped to npm only
+  mkdir -p "$STATE_DIR"
+  printf 'ecosystems_hardened=npm\nrelease_age_hours=48\njob_id=\nhardening_complete=true\n' > "$OUT_FILE"
+}
+
+@test "record: one writable by group or others is ignored, and the scope is not narrowed" {
+  # MEASURED on old main: a planted record made the verifier say "this job
+  # hardened: npm" and report 1 gap instead of 5.
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  forge_record; chmod 666 "$OUT_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  hardening run record"*"writable by group or others"*"NOT read"* ]]
+  [[ "$output" != *"this job hardened: npm"* ]]
+}
+
+@test "record: one owned by another user is ignored" {
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo"
+  local other=nobody; id -u "$other" >/dev/null 2>&1 || skip "no 'nobody' user"
+  harden ECOSYSTEMS=npm,pip -- --emit=plain >/dev/null
+  forge_record; chmod 644 "$OUT_FILE"; sudo -n chown "$other" "$OUT_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"hardening run record"*"belongs to uid"*"NOT read"* ]]
+  [[ "$output" != *"this job hardened: npm"* ]]
+}
+
+@test "record: our own record still scopes the run (the check is not a blanket refusal)" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"this job hardened: npm"* ]]
+  [[ "$output" != *"hardening run record"* ]]
+}
+
+@test "env file: one writable by others is reported as a GAP, not read and not compared" {
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  chmod 666 "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PRESENT     env layer propagation"*"NOT read. Do not source it"* ]]
+  [ "$status" -eq 1 ]
+}
+
+# ---- VM#14: an N/A must not contradict itself, a launcher is not a wrapper ----
+
+@test "wrapper N/A: the reason is the wrapper record, not the ecosystem list" {
+  # Old main: "npm PATH wrapper  not deployed ... — not required here: this job
+  # hardened: npm". npm WAS hardened; the wrapper only comes with intel.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'npm PATH wrapper' <<<"$output")
+  [[ "$r" == *"N/A"*"BYDESIGN"* ]]
+  [[ "$r" == *"the PATH wrappers this job deployed are: none"*"only with INTEL=sfw"* ]]
+  [[ "$r" != *"this job hardened"* ]]
+  # GitHub names the input, not the variable.
+  run verify_sourced --emit=github
+  [[ "$(grep 'npm PATH wrapper' <<<"$output")" == *"only with intel: sfw"* ]]
+}
+
+@test "describe_binary: a script nobody recognised is not called a wrapper" {
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
+  run verify -- --emit=plain
+  [[ "$(grep 'bun PATH wrapper' <<<"$output")" == *"(a script that is not ours)"* ]]
+  [[ "$output" != *"another wrapper script"* ]]
+}
+
+# ---- VM#14: remediation names the delivery path that is actually in use ----
+
+@test "uv age gate: the freeze remedy on this surface is harden.sh, not the role's timer" {
+  uv_reporting 2026-01-01T00:00:00Z
+  harden ECOSYSTEMS=uv -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'uv age gate' <<<"$output")
+  [[ "$r" == *"Re-run action/harden.sh"* ]]
+  [[ "$r" != *"Re-apply the role"* ]]
+  [[ "$r" != *"systemctl status"* ]]
+}
+
+# ---- VM#10: yarn is probed, not grepped, and below 4.10 is a toolchain gap ----
+
+# yarn_stub <version> <config-get npmMinimalAgeGate stdout> <its exit code>
+yarn_stub() {
+  stub_bin yarn 'case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get npmMinimalAgeGate") printf "%s\n" "'"$2"'"; exit '"$3"' ;;
+  "config get enableScripts") echo false ;;
+  *) echo STUB ;;
+esac'
+}
+
+@test "yarn: below 4.10 the age gate is a toolchain GAP naming 4.10, not 'the NaN failure'" {
+  # MEASURED (apt yarnpkg 4.1.0): `yarn config get npmMinimalAgeGate` prints a
+  # usage error on stdout and exits 1. Old main: the CI row was a WEAK PRESENT
+  # grep of our own file, and the role read the usage text as a NaN value.
+  yarn_stub 4.1.0 'Usage Error: Couldn'"'"'t find a configuration settings named "npmMinimalAgeGate"' 1
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'yarn age gate' <<<"$output")
+  [[ "$r" == GAP*"yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0)"* ]]
+  [[ "$r" != *"NaN"* ]]
+  [[ "$output" == *"OK     PARSED      yarn lifecycle scripts blocked"* ]]
+  [[ "$output" != *"file contents only"*"yarnrc"* ]]
+  [ "$status" -eq 1 ]
+  # A gap no config can close: --fail-on=config does not fail on it.
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ]
+}
+
+@test "yarn: 4.10 reading \"2d\" as 2 minutes is WEAK, below the promised window" {
+  yarn_stub 4.10.3 2 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn age gate' <<<"$output")" == WEAK*"npmMinimalAgeGate=2 minutes, below the 48h"* ]]
+}
+
+@test "yarn: a working gate is OK, so GAP is not the default answer" {
+  yarn_stub 4.11.0 2880 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn age gate' <<<"$output")" == OK*"npmMinimalAgeGate=2880 minutes"* ]]
+}
+
+@test "yarn: classic is a GAP for the whole ecosystem" {
+  yarn_stub 1.22.22 undefined 0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(grep 'yarn hardening' <<<"$output")" == GAP*"classic and ignores .yarnrc.yml"* ]]
+}
+
+@test "yarn: a yarn that prints no version is not blamed on its version" {
+  # A corepack shim that cannot resolve a version prints nothing for --version.
+  # The row used to read "yarn <unknown> has no npmMinimalAgeGate (needs Yarn
+  # 4.10.0)", sending the reader to upgrade a yarn whose version nobody knew.
+  yarn_stub '' 'Internal Error: cannot resolve a yarn version' 1
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'yarn age gate' <<<"$output")
+  [[ "$r" == GAP*"yarn could not report its version"* ]]
+  [[ "$r" != *"needs Yarn 4.10.0"* ]]
+  [[ "$r" != *"<unknown>"* ]]
+}

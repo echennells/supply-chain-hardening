@@ -118,13 +118,16 @@ sch_pip_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | i
 # (SFW_SKIP_UPDATE_CHECK=1) so that a non-root caller never writes sfw's
 # root-owned cache. Where the timer is absent, sfw's binary updates at re-apply.
 age_gate_refresh: true
-# Yarn's npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES. A duration-suffix
-# string ("2d", "7d") hits a parser bug that yields NaN and silently disables
-# the gate entirely — and yarn has no second age-gate layer to fall back on.
-# Verified against yarn 4.10.3 (2026-08): "36500d" let a fresh package install;
-# 52560000 (minutes) correctly blocked it. Must also render UNQUOTED so it
-# lands as a YAML number rather than a string. Deriving in minutes also avoids
-# the /24 truncation that turned any release_age_hours < 24 into "0d" (gate off).
+# Yarn's npmMinimalAgeGate (Yarn 4.10+) is in MINUTES, and integer minutes are
+# the one form every yarn with the key reads the same way. MEASURED 2026-11-19:
+# yarn 4.10.3 reads a duration string as its leading integer, so "2d" (quoted
+# or not) is a 2-MINUTE gate and "36500d" is 36500 minutes; yarn 4.11.0 parses
+# durations ("2d" = 2880). Yarn has no second age-gate layer to fall back on.
+# (An earlier note here said "2d" parsed to NaN; re-measured, it does not.)
+# Below 4.10 the key is ignored silently in ~/.yarnrc.yml (MEASURED 4.1.0,
+# 4.9.4), which tasks/yarn.yml records and the verifier reports. Rendered
+# unquoted, as a YAML number. Deriving in minutes also avoids the /24
+# truncation that turned any release_age_hours < 24 into "0d" (gate off).
 yarn_minimal_age_gate: "{{ (release_age_hours | int * 60) | int }}"            # 2880 min
 # deno's --minimum-dependency-age takes an ISO 8601 duration. The /24 here has
 # the same truncation hazard the yarn gate above was fixed for: any

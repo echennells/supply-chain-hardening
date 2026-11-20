@@ -6,11 +6,11 @@
 #
 #   00-context.sh   templates/verify.sh.j2         (this file)
 #                   the CONTEXT PREAMBLE, the row/expectation API, and the
-#                   probes that are still host-only (npm, yarn, pnpm, npq,
+#                   probes that are still host-only (npm, pnpm, npq,
 #                   sfw, PATH wrappers, go, pip)
 #   50-probes.sh    files/verify-probes.sh         (SHARED, byte-identical
-#                   with the CI surface: bun, deno, uv, composer, cargo,
-#                   bundler, maven, gradle, nuget)
+#                   with the CI surface: yarn, bun, deno, uv, composer,
+#                   cargo, bundler, maven, gradle, nuget)
 #   90-report.sh    templates/verify-report.sh.j2  (renderer + exit code)
 #
 # The shared body is plain bash with no Jinja in it, which is what lets it be
@@ -22,7 +22,7 @@
 #
 # Every protection in this role has failed at least once in the same way: the
 # config file was written correctly, the tool ignored it, and nothing said so.
-#   yarn npmMinimalAgeGate: "2d"     -> parsed to NaN, gate silently absent
+#   yarn npmMinimalAgeGate: "2d"     -> 2 MINUTES on yarn 4.10.x, gate effectively absent
 #   npm  MINIMUM_RELEASE_AGE         -> key npm does not read, gate absent
 #   pnpm 11                          -> stopped reading rc/npmrc entirely
 #   pnpm 10 block-exotic-subdeps     -> accepted the key, ignored it
@@ -72,6 +72,11 @@ set -u
 # This is executed bash, not rendered text: $(hostname) below runs when the
 # verifier runs. Only the literal string is frozen at apply time.
 
+# Which delivery path deployed this host. The shared probe body reads it to
+# word a remediation for THIS path ("re-apply the role" here, "re-run
+# action/harden.sh" in CI); action/verify.sh declares SCV_SURFACE=ci.
+# shellcheck disable=SC2034  # read by the shared probe body
+SCV_SURFACE=role
 SCV_SCOPE_LABEL="on $(hostname)"
 
 # When this host's intent was recorded. A stale preamble is the one failure
@@ -697,42 +702,8 @@ else
 fi
 
 # ---------------------------------------------------------------- yarn -------
-if have yarn; then
-  yv=$(yarn --version 2>/dev/null)
-  case "$yv" in
-    1.*)
-      # Yarn classic never reads .yarnrc.yml, so none of our yarn hardening
-      # applies. Silent today; reported here.
-      row GAP FUNCTIONAL "yarn hardening" "yarn $yv is classic and ignores .yarnrc.yml entirely" ;;
-    *)
-      # The "2d" bug: yarn accepted the file, parsed the value to NaN, and
-      # applied no gate. Asking yarn for the value is what exposes that.
-      v=$(yarn config get npmMinimalAgeGate 2>/dev/null | tr -d '\r' | tr -d ' ')
-      case "$v" in
-        ''|undefined|null)
-          row GAP PARSED "yarn age gate" "yarn does not report npmMinimalAgeGate (needs yarn >= 4.10; found $yv)" ;;
-        *[!0-9]*)
-          row GAP PARSED "yarn age gate" "yarn reports non-integer npmMinimalAgeGate='$v' (this is the NaN failure)" ;;
-        0)
-          row GAP PARSED "yarn age gate" "npmMinimalAgeGate=0 disables the gate" ;;
-        *)
-          if [ -n "$SCV_MIN_AGE_HOURS" ] && [ "$v" -lt "$((SCV_MIN_AGE_HOURS * 60))" ] 2>/dev/null; then
-            row WEAK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes, below the ${SCV_MIN_AGE_HOURS}h this host declared"
-          else
-            row OK PARSED "yarn age gate" "yarn reports npmMinimalAgeGate=$v minutes"
-          fi ;;
-      esac
-      v=$(yarn config get enableScripts 2>/dev/null | tr -d '\r' | tr -d ' ')
-      if [ "$v" = "false" ]; then
-        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
-      else
-        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}"
-      fi
-      ;;
-  esac
-else
-  row "N/A" - "yarn" "yarn not installed"
-fi
+# The yarn probe is in the shared body (files/verify-probes.sh), so the CI
+# surface asks yarn the same question instead of grepping our own file.
 
 # ---------------------------------------------------------------- pnpm -------
 if have pnpm; then
@@ -907,7 +878,9 @@ describe_binary() {
     */.volta/*)                           echo "a volta shim" ;;
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     *)
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      # A script, but nothing above recognised it: often the package's own
+      # launcher (Debian's /usr/bin/npm, a composer.phar), not a wrapper.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "a script that is not ours"
       else echo "an unwrapped binary"; fi ;;
   esac
 }

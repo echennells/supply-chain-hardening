@@ -75,8 +75,8 @@ setup() { common_setup; }
   run harden ECOSYSTEMS=yarn -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableScripts: false"
-  # BARE INTEGER MINUTES, UNQUOTED. "2d" parses to NaN and silently disables
-  # the gate (measured, yarn 4.10.3). This assertion used to demand "2d" - it
+  # BARE INTEGER MINUTES, UNQUOTED. yarn 4.10.3 reads "2d" as 2 minutes, a gate
+  # in name only (MEASURED 2026-11-19). This assertion used to demand "2d" - it
   # asserted the bug, and stayed green, while tests/bats/06-js-ecosystem.bats
   # asserted the fix. Two suites, opposite claims, both passing.
   assert_file_contains "$TEST_HOME/.yarnrc.yml" "npmMinimalAgeGate: 2880"

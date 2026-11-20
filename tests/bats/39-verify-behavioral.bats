@@ -36,10 +36,9 @@ setup() {
   echo "$output" | grep -qi "evidence strength"
 }
 
-@test "verify: BEHAVIORAL — catches yarn's npmMinimalAgeGate parsing to NaN" {
-  # The c9a250f bug. The config file said exactly what we intended; yarn
-  # parsed "2d" to NaN and applied no gate at all, with no warning. Grepping
-  # our own file could never catch this. Asking yarn could.
+@test "verify: BEHAVIORAL — a yarn age gate that is not a whole number is a GAP" {
+  # Asking yarn what it believes, rather than grepping the file we wrote, is
+  # what catches a value yarn mangled. A non-numeric answer cannot be confirmed.
   cat > "$FAKEBIN/yarn" <<'EOF'
 #!/bin/bash
 [ "$1" = "--version" ] && { echo "4.10.3"; exit 0; }
@@ -55,6 +54,50 @@ EOF
   echo "$output" | grep -q "yarn age gate"
   echo "$output" | grep "yarn age gate" | grep -q "GAP"
   [ "$status" -eq 1 ]
+}
+
+@test "verify: BEHAVIORAL — yarn below 4.10 is a GAP that names 4.10, not 'the NaN failure'" {
+  # MEASURED (VM#10, apt yarnpkg 4.1.0): `yarn config get npmMinimalAgeGate`
+  # prints a usage error on STDOUT and exits 1. Old main read that text as the
+  # value and reported "non-integer npmMinimalAgeGate='UsageError:...' (this is
+  # the NaN failure)": the wrong cause, for a gap only an upgrade closes.
+  cat > "$FAKEBIN/yarn" <<'EOF'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "4.1.0"; exit 0; }
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+  case "$3" in
+    npmMinimalAgeGate) echo 'Usage Error: Couldn'"'"'t find a configuration settings named "npmMinimalAgeGate"'; exit 1 ;;
+    enableScripts)     echo "false" ;;
+  esac
+fi
+EOF
+  chmod +x "$FAKEBIN/yarn"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
+  row=$(echo "$output" | grep "yarn age gate")
+  echo "$row" | grep -q "GAP"
+  echo "$row" | grep -q "4.10.0"
+  ! echo "$row" | grep -q "NaN"
+  echo "$output" | grep "yarn lifecycle scripts blocked" | grep -q "OK"
+  [ "$status" -eq 1 ]
+}
+
+@test "verify: BEHAVIORAL — yarn 4.10 reading \"2d\" as 2 minutes is below the window" {
+  # MEASURED 2026-11-19: yarn 4.10.3 reads "2d" as its leading integer, so a
+  # gate written as a duration is 2 minutes, and `yarn config get` says 2.
+  cat > "$FAKEBIN/yarn" <<'EOF'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "4.10.3"; exit 0; }
+if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+  case "$3" in
+    npmMinimalAgeGate) echo "2" ;;
+    enableScripts)     echo "false" ;;
+  esac
+fi
+EOF
+  chmod +x "$FAKEBIN/yarn"
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
+  echo "$output" | grep "yarn age gate" | grep -q "WEAK"
+  echo "$output" | grep "yarn age gate" | grep -q "below the"
 }
 
 @test "verify: BEHAVIORAL — catches an npq that is installed but suppressed" {

@@ -96,11 +96,193 @@ setup() { common_setup; }
   assert_file_contains "$OUT_FILE" "ecosystems_hardened=npm,pip"
 }
 
-@test "a TMPDIR that does not exist yet is created, not fatal" {
-  run env -i PATH="$PATH" HOME="$TEST_HOME" TMPDIR="$TEST_TMP/deep/nested" \
-    WRITE_ETC=false ECOSYSTEMS=npm bash "$HARDEN_SH" --emit=plain
+@test "an env file directory that does not exist yet is created, not fatal" {
+  run harden HARDENING_ENV_FILE="$TEST_TMP/deep/nested/h.env" ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
-  [ -f "$TEST_TMP/deep/nested/supply-chain-hardening.env" ]
+  [ -f "$TEST_TMP/deep/nested/h.env" ]
+}
+
+# ---- VM#3: the env file and the run record are not attacker-placeable ----
+#
+# MEASURED on old main (Ubuntu 26.04, --emit=plain): another local user
+# pre-created /tmp/supply-chain-hardening.env with a payload; harden.sh exited 2,
+# the AGENTS.md recipe's next line sourced it anyway, and the payload ran as the
+# person hardening. A planted .outputs beside it scoped verify.sh down to
+# "this job hardened: npm".
+
+@test "env file: with no RUNNER_TEMP the default is per-user and 0700, never TMPDIR" {
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$ENV_FILE" ] && [ -f "$OUT_FILE" ]
+  [ ! -e "$TEST_TMP/supply-chain-hardening.env" ]
+  [ ! -e "$TEST_TMP/supply-chain-hardening.outputs" ]
+  # `ls -ld`, not GNU stat: this suite also runs on macOS.
+  [ "$(ls -ld "$STATE_DIR" | cut -c1-10)" = drwx------ ]
+  # 0644, not mktemp's 0600: a profile.d line for every user may source it.
+  [ "$(ls -ld "$ENV_FILE" | cut -c1-10)" = -rw-r--r-- ]
+  assert_file_contains "$OUT_FILE" "env_file=$ENV_FILE"
+}
+
+@test "env file: RUNNER_TEMP, when set, is still where it goes" {
+  mkdir -p "$TEST_TMP/runner"
+  run harden RUNNER_TEMP="$TEST_TMP/runner" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/runner/supply-chain-hardening.env" ]
+  [ -f "$TEST_TMP/runner/supply-chain-hardening.outputs" ]
+}
+
+@test "env file: an existing file writable by others is refused, and a chained source never runs" {
+  mkdir -p "$STATE_DIR"
+  printf 'touch %s/planted-ran\n' "$TEST_TMP" > "$ENV_FILE"
+  chmod 666 "$ENV_FILE"
+  # The recipe as AGENTS.md now writes it.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" WRITE_ETC=false ECOSYSTEMS=npm \
+    bash -c "bash '$HARDEN_SH' --emit=plain && source '$ENV_FILE'"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to write the env file"* ]]
+  [[ "$output" == *"$ENV_FILE"* ]]
+  [[ "$output" == *"writable by group or others"* ]]
+  [ ! -e "$TEST_TMP/planted-ran" ]
+}
+
+@test "env file: one owned by another user is refused before anything is written" {
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo to create a file owned by someone else"
+  local other=nobody
+  id -u "$other" >/dev/null 2>&1 || skip "no 'nobody' user"
+  mkdir -p "$TEST_TMP/shared"
+  echo "touch $TEST_TMP/planted-ran" > "$TEST_TMP/shared/h.env"
+  chmod 644 "$TEST_TMP/shared/h.env"
+  sudo -n chown "$other" "$TEST_TMP/shared/h.env"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/shared/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"belongs to another user"* ]]
+  [ ! -f "$TEST_HOME/.npmrc" ]          # refused at admission: nothing hardened, nothing half-written
+  [ "$(ls -ld "$TEST_TMP/shared/h.env" | awk '{print $3}')" = "$other" ]   # and not replaced either
+}
+
+@test "env file: a world-writable directory without the sticky bit is refused" {
+  mkdir -p "$TEST_TMP/open" && chmod 777 "$TEST_TMP/open"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/open/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no sticky bit"* ]]
+}
+
+# The directory checks walk every directory above the file, not only the one it
+# is in. MEASURED on the first VM#3 fix: a world-writable ~/.cache (created by
+# harden.sh itself under umask 0000) and another user's sticky directory were
+# both let through, and in the second case that user replaced the file.
+
+@test "env file: a world-writable directory ABOVE the file's directory is refused" {
+  mkdir -p "$TEST_TMP/open/mine" && chmod 777 "$TEST_TMP/open" && chmod 755 "$TEST_TMP/open/mine"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/open/mine/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"is below $TEST_TMP/open, which every user can write to"* ]]
+  [ ! -e "$TEST_TMP/open/mine/h.env" ]
+  [ ! -f "$TEST_HOME/.npmrc" ]
+}
+
+@test "env file: a symlinked directory is judged by where it points" {
+  # A symlink's own mode is lrwxrwxrwx on Linux. Judged by that, every
+  # symlinked path would be refused; judged by nothing, an open target passes.
+  mkdir -p "$TEST_TMP/safe" "$TEST_TMP/open"
+  chmod 755 "$TEST_TMP/safe"; chmod 777 "$TEST_TMP/open"
+  ln -s "$TEST_TMP/safe" "$TEST_TMP/to-safe"
+  ln -s "$TEST_TMP/open" "$TEST_TMP/to-open"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/to-safe/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/safe/h.env" ]
+  run harden HARDENING_ENV_FILE="$TEST_TMP/to-open/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no sticky bit"* ]]
+}
+
+@test "env file: a sticky directory another user owns is refused" {
+  # The sticky bit stops everyone EXCEPT the directory's owner, who can delete
+  # the file and put their own in its place.
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo to create a directory owned by someone else"
+  id -u nobody >/dev/null 2>&1 || skip "no 'nobody' user"
+  sudo -n mkdir -m 1777 "$TEST_TMP/theirs"
+  sudo -n chown nobody "$TEST_TMP/theirs"
+  run harden HARDENING_ENV_FILE="$TEST_TMP/theirs/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"a sticky directory that another user (nobody) owns"* ]]
+  [ ! -e "$TEST_TMP/theirs/h.env" ]
+  [ ! -f "$TEST_HOME/.npmrc" ]
+}
+
+@test "env file: a sticky directory we own is accepted, with a warning that does not call it safe" {
+  mkdir -m 1777 "$TEST_TMP/ours"
+  chmod 1777 "$TEST_TMP/ours"      # mkdir -m is still filtered by some umasks
+  run harden HARDENING_ENV_FILE="$TEST_TMP/ours/h.env" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/ours/h.env" ]
+  [[ "$output" == *"which every user can write to"*"once a reboot or a cleanup removes it"* ]]
+  [[ "$output" != *"safe as written"* ]]
+}
+
+@test "env file: under umask 0000 every directory harden.sh creates is 0700, ~/.cache included" {
+  # GitLab's Docker and Kubernetes executors run jobs under umask 0000. A plain
+  # `mkdir -p` made ~/.cache drwxrwxrwx there, the parent of the 0700 leaf.
+  [ ! -e "$TEST_HOME/.cache" ]
+  run env -i PATH="$PATH" HOME="$TEST_HOME" GRADLE_USER_HOME="$TEST_HOME/.gradle" \
+    TMPDIR="$TEST_TMP" WRITE_ETC=false ECOSYSTEMS=npm \
+    bash -c "umask 0000; bash '$HARDEN_SH' --emit=plain"
+  [ "$status" -eq 0 ]
+  [ "$(ls -ld "$TEST_HOME/.cache" | cut -c1-10)" = drwx------ ]
+  [ "$(ls -ld "$STATE_DIR" | cut -c1-10)" = drwx------ ]
+  [ -f "$ENV_FILE" ]
+}
+
+@test "env file: under umask 0000 a directory created for an override is not world-writable" {
+  # It would otherwise be created 0777 and then refused by the same run.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" GRADLE_USER_HOME="$TEST_HOME/.gradle" \
+    TMPDIR="$TEST_TMP" WRITE_ETC=false ECOSYSTEMS=npm \
+    HARDENING_ENV_FILE="$TEST_TMP/new/deeper/h.env" \
+    bash -c "umask 0000; bash '$HARDEN_SH' --emit=plain"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_TMP/new/deeper/h.env" ]
+  [ "$(ls -ld "$TEST_TMP/new" | cut -c9)" = - ]
+  [ "$(ls -ld "$TEST_TMP/new/deeper" | cut -c9)" = - ]
+}
+
+@test "env file: /dev/null is refused, not replaced" {
+  run harden HARDENING_ENV_FILE=/dev/null ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"'/dev/null' exists and is not a regular file"* ]]
+  [ -c /dev/null ]
+}
+
+@test "env file: an existing file is replaced, never written through" {
+  # `: >` kept the inode, so whoever held it (a hard link, an open descriptor)
+  # saw every line harden.sh wrote, and the other user appended to it after.
+  mkdir -p "$STATE_DIR"
+  echo OLD > "$ENV_FILE"
+  chmod 644 "$ENV_FILE"     # under umask 002 it would be 0664, which is refused
+  ln "$ENV_FILE" "$TEST_TMP/held-link"
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TMP/held-link")" = OLD ]
+  assert_file_contains "$ENV_FILE" "NPM_CONFIG_IGNORE_SCRIPTS"
+}
+
+@test "the run record gets the same protection as the env file" {
+  mkdir -p "$STATE_DIR"
+  : > "$OUT_FILE"; chmod 666 "$OUT_FILE"
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing to write the run record"* ]]
+  [[ "$output" == *"HARDENING_OUTPUT_FILE"* ]]
+}
+
+@test "plain mode says once that nothing refreshes the uv/pip cutoff" {
+  run harden ECOSYSTEMS=npm,pip -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"age-gate cutoff is fixed at"*"re-run harden.sh"* ]]
+  # A CI job re-hardens every run: the reminder is noise there.
+  run harden GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT="$TEST_TMP/ghout" \
+             GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum" ECOSYSTEMS=npm,pip
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"age-gate cutoff is fixed at"* ]]
 }
 
 @test "an unwritable env file path fails loudly with the path named" {
@@ -145,6 +327,46 @@ setup() { common_setup; }
   run harden ECOSYSTEMS=cargo -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$OUT_FILE" "ecosystems_degraded=cargo"
+}
+
+@test "reporting: yarn below 4.10 is degraded, not 'Fully applied' (VM#10)" {
+  # MEASURED on old main with apt yarnpkg 4.1.0: "Fully applied | yarn" while a
+  # release 13 hours old installed. npmMinimalAgeGate arrived in Yarn 4.10.0.
+  stub_bin yarn 'case "${1:-}" in --version) echo "4.1.0" ;; *) echo STUB ;; esac'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yarn 4.1.0 does NOT implement npmMinimalAgeGate"* ]]
+  [[ "$output" != *"Fully applied | \`yarn\`"* ]]
+  assert_file_contains "$OUT_FILE" "ecosystems_degraded=yarn"
+  # Script blocking is still written: this is INERT, not a refusal.
+  assert_file_contains "$TEST_HOME/.yarnrc.yml" "enableScripts: false"
+}
+
+@test "reporting: yarn classic is NOT applied, and yarn 4.10+ is" {
+  stub_bin yarn 'case "${1:-}" in --version) echo "1.22.22" ;; *) echo STUB ;; esac'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"never reads .yarnrc.yml"* ]]
+  assert_file_contains "$OUT_FILE" "ecosystems_ineffective=yarn"
+  stub_bin yarn 'case "${1:-}" in --version) echo "4.10.3" ;; *) echo STUB ;; esac'
+  run harden ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$OUT_FILE" "ecosystems_effective=yarn"
+  [[ "$output" != *"does NOT implement npmMinimalAgeGate"* ]]
+}
+
+@test "reporting: the cargo-cooldown hint names the switch this caller has (VM#14)" {
+  # Old main told a plain-mode caller to set the ACTION INPUT
+  # install_cargo_cooldown, which only action.yml reads.
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || skip "needs passwordless sudo to wrap cargo"
+  stub_bin cargo
+  run harden ECOSYSTEMS=cargo -- --emit=plain
+  [[ "$output" == *"INSTALL_CARGO_COOLDOWN=true"* ]]
+  [[ "$output" != *"install_cargo_cooldown: true"* ]]
+  sudo -n rm -f "$(stub_real cargo)"; stub_bin cargo
+  run harden GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT="$TEST_TMP/ghout" \
+             GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum" ECOSYSTEMS=cargo
+  [[ "$output" == *"install_cargo_cooldown: true"* ]]
 }
 
 @test "reporting: npm that cannot enforce the age gate is flagged at hardening time" {

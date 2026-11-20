@@ -10,6 +10,9 @@ set -euo pipefail
 
 "${BUILDKITE_BUILD_CHECKOUT_PATH}/action/harden.sh" --emit=buildkite
 
-# harden.sh runs as a subprocess, so pick up the env layer it wrote.
+# harden.sh runs as a subprocess, so pick up the env layer it wrote. Buildkite
+# sets no RUNNER_TEMP, so it is in the agent user's per-user directory unless
+# HARDENING_ENV_FILE says otherwise. set -e above means a failed harden.sh never
+# reaches this line. Not tested on a real Buildkite agent.
 # shellcheck disable=SC1090
-source "${TMPDIR:-/tmp}/supply-chain-hardening.env"
+source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}"

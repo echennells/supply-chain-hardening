@@ -55,7 +55,7 @@ SCV_SCOPE_LABEL="in this job"
 
 # The shared probe body. Overridable so a checkout laid out differently, or a
 # test, can point at another copy — but NEVER optional. A verifier that
-# silently skips nine ecosystems' probes and then prints "no gaps" is the
+# silently skips ten ecosystems' probes and then prints "no gaps" is the
 # exact fail-open shape this whole script exists to catch, so a missing body
 # is a hard error, not a degraded run.
 SCV_PROBES="${SCV_PROBES:-$(CDPATH="" cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/files/verify-probes.sh}"
@@ -85,7 +85,7 @@ same shape: the file was exactly what we meant to write, the tool ignored it,
 and nothing said so.
 
   npm  MINIMUM_RELEASE_AGE   a key npm does not read — gate absent
-  yarn npmMinimalAgeGate     parsed to NaN — gate absent
+  yarn npmMinimalAgeGate     "2d" read as 2 minutes on yarn 4.10 — a 2-minute gate
   bun  ignoreScripts         bunfig not loaded for `bun run`
   sfw  npm wrapper           written to a path PATH never resolves
   bunx wrapper               overwrote the bun wrapper through a symlink
@@ -181,11 +181,17 @@ emit_summary() {
 }
 
 # ---- machine outputs sink ----
-# Written unconditionally so action.yml can read a real COUNT out of a run it
-# was allowed to fail, instead of inferring one from the exit code.
-SCV_OUTPUT_FILE="${VERIFY_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-verify.outputs}"
-mkdir -p "$(dirname "$SCV_OUTPUT_FILE")" 2>/dev/null || true
-: > "$SCV_OUTPUT_FILE" 2>/dev/null || SCV_OUTPUT_FILE=""
+# Written so action.yml can read a real COUNT out of a run it was allowed to
+# fail, instead of inferring one from the exit code. action.yml sets
+# VERIFY_OUTPUT_FILE; RUNNER_TEMP is the per-job directory. Without either
+# nothing reads this file, and its old fallback was a fixed name in /tmp,
+# opened with `: >` (VM#3: that keeps another user's file and writes into it),
+# so outside a runner it is simply not written.
+SCV_OUTPUT_FILE="${VERIFY_OUTPUT_FILE:-${RUNNER_TEMP:+$RUNNER_TEMP/supply-chain-verify.outputs}}"
+if [ -n "$SCV_OUTPUT_FILE" ]; then
+  mkdir -p "$(dirname "$SCV_OUTPUT_FILE")" 2>/dev/null || true
+  : > "$SCV_OUTPUT_FILE" 2>/dev/null || SCV_OUTPUT_FILE=""
+fi
 emit_output() {
   [ -n "$SCV_OUTPUT_FILE" ] || return 0
   printf '%s=%s\n' "$1" "$2" >> "$SCV_OUTPUT_FILE"
@@ -218,7 +224,11 @@ SEEN=" "
 # every path that cannot PROVE the run was narrow widens back to verifying
 # everything, because "not requested" and "silently skipped" are
 # indistinguishable from here and only one of them is safe to assume.
-OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
+# Where harden.sh put its record: the same default it resolves (see "The env
+# file and the run record" in action/harden.sh). RUNNER_TEMP on a runner,
+# otherwise a per-user directory, never a shared one.
+SCH_STATE_DIR="${RUNNER_TEMP:-${HOME:+$HOME/.cache/supply-chain-hardening}}"
+OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${SCH_STATE_DIR:+$SCH_STATE_DIR/supply-chain-hardening.outputs}}"
 HARDENED_LIST=""
 SCV_EXPECT_KNOWN=0
 SCV_EXPECT=""
@@ -241,9 +251,35 @@ _this_job_id() {
   fi
 }
 
-ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
+ENV_FILE="${HARDENING_ENV_FILE:-${SCH_STATE_DIR:+$SCH_STATE_DIR/supply-chain-hardening.env}}"
 
-if [ -r "$OUTPUT_FILE" ]; then
+# WHOSE FILE IS IT? A record only means something if this user, or root, wrote
+# it. MEASURED (VM#3): a .outputs file another local user had planted in /tmp
+# made this verifier report "this job hardened: npm" and 1 gap instead of 5,
+# and the env file beside it ran their code in the shell that sourced it. So a
+# file owned by anyone else, or writable by group or others, is not read. Its
+# reason is printed; the outputs file then counts as no record at all (verify
+# everything), and the env file is reported, not compared against.
+_scv_untrusted() { # <file> -> prints why it must not be believed; silent when it may
+  local o m
+  o=$(ls -ldnL -- "$1" 2>/dev/null | awk '{print $3}')
+  [ -n "$o" ] || return 0
+  if [ "$o" != "$(id -u)" ] && [ "$o" != 0 ]; then echo "belongs to uid $o, not to you or root"; return 0; fi
+  m=$(ls -ldL -- "$1" 2>/dev/null | cut -c1-10)
+  case "$m" in ?????w*|????????w*) echo "is writable by group or others ($m)"; return 0 ;; esac
+  return 0
+}
+_env_file_why=""
+[ -n "$ENV_FILE" ] && [ -e "$ENV_FILE" ] && _env_file_why=$(_scv_untrusted "$ENV_FILE")
+_record_why=""
+[ -n "$OUTPUT_FILE" ] && [ -e "$OUTPUT_FILE" ] && _record_why=$(_scv_untrusted "$OUTPUT_FILE")
+
+if [ -n "$_record_why" ]; then
+  _record_note_status=gap
+  _record_note_detail="the hardening outputs file at $OUTPUT_FILE $_record_why. Anyone who can write it decides what this run checks, so it was NOT read: every installed tool is being checked. Delete it and re-run harden.sh"
+  # scv_want_hours (files/verify-probes.sh) reads the age window from this file too.
+  OUTPUT_FILE=""
+elif [ -n "$OUTPUT_FILE" ] && [ -r "$OUTPUT_FILE" ]; then
   HARDENED_LIST=$(_rec ecosystems_hardened)
   _complete=$(_rec hardening_complete)
   _recjob=$(_rec job_id)
@@ -277,9 +313,15 @@ if [ -r "$OUTPUT_FILE" ]; then
     done
     IFS="$_oldifs"
     [ "$(_rec sfw_installed)" = "true" ] && _exp="$_exp tool.sfw"
-    [ -f "$ENV_FILE" ] && _exp="$_exp env.propagation"
+    [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ -z "$_env_file_why" ] && _exp="$_exp env.propagation"
     SCV_EXPECT="$_exp"
     SCV_EXPECT_WHY="this job hardened: ${HARDENED_LIST:-<nothing>}"
+    # A wrapper's N/A is about the WRAPPER record, not the ecosystem list.
+    # "npm PATH wrapper not deployed — not required here: this job hardened:
+    # npm" contradicted itself (VM#14): npm WAS hardened, by config; harden.sh
+    # deploys the npm and npx wrappers only when it installs sfw.
+    _wl=$(_rec wrappers_deployed)
+    SCV_WRAPPERS_WHY="the PATH wrappers this job deployed are: ${_wl:-none}"
   fi
 fi
 
@@ -366,7 +408,14 @@ _neg() { # class, id, evidence, protection, detail
     if [ "$1" = config ]; then GAPS_CONFIG=$((GAPS_CONFIG + 1)); else GAPS_TOOLCHAIN=$((GAPS_TOOLCHAIN + 1)); fi
     row GAP "$3" "$4" "$5"
   else
-    row "N/A" BYDESIGN "$4" "$5 — not required here: ${SCV_EXPECT_WHY:-no declared expectations for this surface}"
+    local why="${SCV_EXPECT_WHY:-no declared expectations for this surface}" sfw_in
+    case "$2" in
+      wrapper.npm|wrapper.npx)
+        case "$PLATFORM" in github) sfw_in="intel: sfw" ;; *) sfw_in="INTEL=sfw" ;; esac
+        why="${SCV_WRAPPERS_WHY:-$why}. harden.sh deploys the npm and npx wrappers only with $sfw_in" ;;
+      wrapper.*) why="${SCV_WRAPPERS_WHY:-$why}" ;;
+    esac
+    row "N/A" BYDESIGN "$4" "$5 — not required here: $why"
   fi
 }
 gap()     { _neg config    "$@"; }   # id evidence protection detail
@@ -607,7 +656,14 @@ fi
 # A mismatch is not cosmetic. On the targets with no native mechanism
 # (gitlab, buildkite, plain) the caller is expected to source the file, and
 # forgetting to is exactly the silent half-application this catches.
-if [ -f "$ENV_FILE" ]; then
+if [ -n "$_env_file_why" ]; then
+  # Not compared: its owner chooses the variables this row would check. GAP and
+  # not WEAK, because the documented next step after harden.sh is to source it.
+  # Plain row(), not gap(): with env.propagation left out of the expectations
+  # above, gap() would turn this into an N/A.
+  row GAP PRESENT "env layer propagation" \
+    "the env file at $ENV_FILE $_env_file_why, so it was NOT read. Do not source it: sourcing runs whatever its owner wrote, as you. Delete it and re-run harden.sh"
+elif [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   intended=0; propagated=0; missing=""
   while IFS= read -r line; do
     case "$line" in export\ *) ;; *) continue ;; esac
@@ -692,7 +748,9 @@ describe_binary() {
     */.nodenv/shims/*|*/.pyenv/shims/*)   echo "a version-manager shim" ;;
     */hostedtoolcache/*)                  echo "a toolcache binary — a setup-* step ran AFTER hardening" ;;
     *)
-      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "another wrapper script"
+      # A script, but nothing above recognised it: often the package's own
+      # launcher (Debian's /usr/bin/npm, a composer.phar), not a wrapper.
+      if head -c 2 "$f" 2>/dev/null | grep -q '#!'; then echo "a script that is not ours"
       else echo "an unwrapped binary"; fi ;;
   esac
 }
@@ -968,31 +1026,31 @@ fi
 # PRESENT-level only, and reported as such. These exist so a missing file is
 # visible; they are not evidence that anything enforces.
 #
-# bun and bundler used to be in this loop and are NOT any more: the shared
-# probe body runs real `bun install` / `bundle config` probes for both, and a
-# second value-blind grep row for the same protection would double-count it in
-# the table and in every count derived from it. pnpm and yarn keep their
-# grep-level rows until real `config get` probes exist for them.
-for pair in "pnpm:$HOME/.config/pnpm/config.yaml:ignoreScripts" \
-            "yarn:$HOME/.yarnrc.yml:enableScripts"; do
-  tool="${pair%%:*}"; rest="${pair#*:}"; file="${rest%%:*}"; key="${rest##*:}"
-  have "$tool" || { na_absent "$tool config" "$tool not installed"; continue; }
-  requested "$tool" || { row "N/A" BYDESIGN "$tool config" "$tool installed but not in the requested ecosystems"; continue; }
-  if [ -f "$file" ] && grep -q "$key" "$file" 2>/dev/null; then
-    row WEAK PRESENT "$tool config" "$key present in $file — file contents only, not proof of enforcement"
-  else
-    gap "$tool.config" PRESENT "$tool config" "$key not found in $file"
-  fi
-done
+# bun, bundler and yarn used to be grep rows here and are NOT any more: the
+# shared probe body runs real `bun install` / `bundle config` / `yarn config
+# get` probes for them, and a second value-blind grep row for the same
+# protection would double-count it in the table and in every count derived
+# from it. pnpm keeps its grep-level row until a real `config get` probe exists
+# for it.
+pcfg="$HOME/.config/pnpm/config.yaml"
+if ! have pnpm; then
+  na_absent "pnpm config" "pnpm not installed"
+elif ! requested pnpm; then
+  row "N/A" BYDESIGN "pnpm config" "pnpm installed but not in the requested ecosystems"
+elif [ -f "$pcfg" ] && grep -q ignoreScripts "$pcfg" 2>/dev/null; then
+  row WEAK PRESENT "pnpm config" "ignoreScripts present in $pcfg — file contents only, not proof of enforcement"
+else
+  gap pnpm.config PRESENT "pnpm config" "ignoreScripts not found in $pcfg"
+fi
 
 # ============================================================ shared probes ==
 #
-# bun, deno, uv, composer, cargo, bundler, maven, gradle, nuget — the same
+# yarn, bun, deno, uv, composer, cargo, bundler, maven, gradle, nuget — the same
 # bytes the Ansible role installs at /usr/local/bin/supply-chain-verify. The
 # body needs row(), have() and requested(), all defined above. It never exits.
 if [ ! -r "$SCV_PROBES" ]; then
   echo "[supply-chain-verify] error: shared probe body not found at $SCV_PROBES" >&2
-  echo "  nine ecosystems would go unprobed and this run would print a short green table," >&2
+  echo "  ten ecosystems would go unprobed and this run would print a short green table," >&2
   echo "  which is the exact failure this verifier exists to catch. Set SCV_PROBES to its path." >&2
   exit 2
 fi

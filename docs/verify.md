@@ -6,7 +6,8 @@ exactly what we intended, the tool ignored it, and the run reported success:
 
 | | |
 |---|---|
-| yarn `npmMinimalAgeGate: "2d"` | parsed to NaN; no gate, no warning |
+| yarn `npmMinimalAgeGate: "2d"` | read as 2 minutes on yarn 4.10; no warning |
+| yarn `npmMinimalAgeGate` below yarn 4.10 | key does not exist; ignored in `~/.yarnrc.yml` without a word |
 | npm `MINIMUM_RELEASE_AGE` | a key npm does not read |
 | pnpm 11 | stopped reading `rc` / `npmrc` entirely |
 | pnpm 10 `block-exotic-subdeps` | accepted the key, ignored it |
@@ -29,7 +30,7 @@ supply-chain-verify --json    # machine-readable; exit is non-zero on any GAP, s
 ```
 STATUS EVIDENCE    PROTECTION                       DETAIL
 OK     PARSED      npm lifecycle scripts blocked    npm reports ignore-scripts=true
-GAP    PARSED      yarn age gate                    yarn reports non-integer npmMinimalAgeGate='NaN'
+GAP    PARSED      yarn age gate                    yarn 4.1.0 has no npmMinimalAgeGate (needs Yarn 4.10.0), so the...
 GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on Node v18.19.1
 WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
 ```
@@ -72,6 +73,20 @@ install generate. Matching a line says nothing about the module it imports, so r
 that list too. To find an interpreter's directories it asks the interpreter with
 `-I -S`, which skips `site` and so runs no hook. None of this shows the host is clean,
 and the checks after it still start Python.
+
+## In a checkout, it runs that project's yarn
+
+The verifier asks each tool from the directory it runs in, because a project's own
+config can override the host's. The action's verify step runs in the job's working
+directory, normally the checkout. For yarn, that means the project's yarn. MEASURED
+(apt yarnpkg 4.1.0): in a directory whose `.yarnrc.yml` sets `yarnPath`, both
+`yarn --version` and `yarn config get` ran the file it names, and a `plugins:` entry
+was loaded by both. That is the same code the project's own `yarn install` runs, so in a
+CI job that installs anyway, verifying runs nothing new. On a checkout you have not
+reviewed, though, the check runs that repo's code. The verifier does not skip
+`yarnPath`: it would then grade a different yarn from the one the install uses.
+Composer is read with `--no-plugins` instead. To check the host alone, run the
+verifier from a directory outside any checkout.
 
 ## Related
 

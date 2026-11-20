@@ -35,10 +35,16 @@ common_setup() {
   TEST_TMP="${BATS_TEST_TMPDIR}/tmp"
   TEST_BIN="${BATS_TEST_TMPDIR}/bin"
   mkdir -p "$TEST_HOME" "$TEST_TMP" "$TEST_BIN"
+  # harden.sh's DEFAULT location with no RUNNER_TEMP: a per-user directory,
+  # deliberately not $TMPDIR (VM#3: a fixed name in /tmp let another local user
+  # plant the file the recipe sources). Every test uses the default, so the
+  # default is what gets exercised.
   # shellcheck disable=SC2034  # consumed by the .bats files that load this
-  ENV_FILE="${TEST_TMP}/supply-chain-hardening.env"
+  STATE_DIR="${TEST_HOME}/.cache/supply-chain-hardening"
   # shellcheck disable=SC2034
-  OUT_FILE="${TEST_TMP}/supply-chain-hardening.outputs"
+  ENV_FILE="${STATE_DIR}/supply-chain-hardening.env"
+  # shellcheck disable=SC2034
+  OUT_FILE="${STATE_DIR}/supply-chain-hardening.outputs"
 }
 
 # harden [VAR=value ...] [-- script args ...]

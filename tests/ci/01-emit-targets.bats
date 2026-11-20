@@ -151,3 +151,71 @@ setup() { common_setup; }
   run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; echo \"\$GOFLAGS\""
   [ "$output" = "-mod=readonly" ]
 }
+
+# ---- The shipped GitLab example, run as written ----
+#
+# GitLab's Docker and Kubernetes executors run jobs under `umask 0000` unless
+# FF_DISABLE_UMASK_FOR_DOCKER_EXECUTOR / ..._KUBERNETES_EXECUTOR is on (runner
+# feature-flag docs), so the checkout is drwxrwxrwx. The example used to pin
+# HARDENING_ENV_FILE into $CI_PROJECT_DIR. MEASURED in a container (review of
+# the VM#3 fix): harden.sh refused that directory, rc=2, and the anchor's
+# source line then failed with "No such file or directory". These tests read
+# the example file itself, so editing the example is what they test.
+
+# gitlab_job <file> <job>: the example's top-level `variables:` as exports,
+# then that job's lines (`.harden` = the anchor), comments stripped.
+gitlab_job() {
+  awk -v job="$2" '
+    /^variables:/ { v = 1; next }
+    v && /^  [A-Za-z_][A-Za-z0-9_]*:/ { k = $1; sub(/:$/, "", k); $1 = ""; sub(/^ /, ""); print "export " k "=" $0; next }
+    v && /^[^ #]/ { v = 0 }
+    job == ".harden" && /^\.harden: &harden/ { h = 1; next }
+    h && /^  - / { l = $0; sub(/^  - /, "", l); print l; next }
+    h { h = 0 }
+    job != ".harden" && $0 == job ":" { j = 1; next }
+    j && /^[^ ]/ { j = 0 }
+    j && /^  script:/ { s = 1; next }
+    j && s && /^    - / { l = $0; sub(/^    - /, "", l); sub(/ +#.*$/, "", l); print l; next }
+    j && s && /^  [^ ]/ { s = 0 }
+  ' "$1"
+}
+
+# run_gitlab_job <job>: in a 0777 checkout, as GitLab runs a script.
+run_gitlab_job() {
+  local ex="${BATS_TEST_DIRNAME}/../../action/examples/gitlab-ci.yml"
+  PROJ="$TEST_TMP/builds/grp/proj"
+  (umask 0000 && mkdir -p "$PROJ" && cp -R "${BATS_TEST_DIRNAME}/../../action" "$PROJ/action")
+  [ "$(ls -ld "$PROJ" | cut -c1-10)" = drwxrwxrwx ]
+  JOB_LINES=$(gitlab_job "$ex" "$1")
+  [[ "$JOB_LINES" == *"./action/harden.sh --emit=gitlab"* ]]
+  # Each failing line stops the job, as GitLab does ("further commands do not execute").
+  { echo 'set -eo pipefail'; echo 'umask 0000'; echo 'cd "$CI_PROJECT_DIR"'
+    printf '%s\n' "$JOB_LINES"
+    echo 'echo "JOB-END NPM_CONFIG_IGNORE_SCRIPTS=${NPM_CONFIG_IGNORE_SCRIPTS:-<unset>}"'
+  } > "$TEST_TMP/job.sh"
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" \
+    GRADLE_USER_HOME="${TEST_HOME}/.gradle" TMPDIR="$TEST_TMP" WRITE_ETC=false \
+    ECOSYSTEMS=npm GITLAB_CI=true CI_PROJECT_DIR="$PROJ" CI_JOB_ID=4242 \
+    bash "$TEST_TMP/job.sh"
+}
+
+@test "gitlab example: the .harden anchor works in a world-writable checkout under umask 0000" {
+  [ ! -e "$TEST_HOME/.cache" ]
+  run_gitlab_job .harden
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"refusing to write"* ]]
+  [[ "$output" == *"JOB-END NPM_CONFIG_IGNORE_SCRIPTS=true"* ]]
+  [ -f "$ENV_FILE" ]
+  # The umask did not leak into the directories harden.sh made.
+  [ "$(ls -ld "$TEST_HOME/.cache" | cut -c1-10)" = drwx------ ]
+  [ "$(ls -ld "$STATE_DIR" | cut -c1-10)" = drwx------ ]
+}
+
+@test "gitlab example: the dotenv job copies the env file it just wrote" {
+  sed --version >/dev/null 2>&1 || skip "the example's sed -i is GNU sed"
+  run_gitlab_job build-with-dotenv
+  [ "$status" -eq 0 ]
+  assert_file_contains "$PROJ/hardening.env" "NPM_CONFIG_IGNORE_SCRIPTS=true"
+  # Not `! grep`: bats does not fail a test on a negated command.
+  [ -z "$(grep '^export ' "$PROJ/hardening.env")" ]
+}

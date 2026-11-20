@@ -81,13 +81,42 @@ sources the env file — `harden.sh` runs as a subprocess and its own exports
 do not reach the calling shell. The config-file and wrapper layers need no
 such step on any target; they are already on disk.
 
-Every target writes that canonical sourceable env file
-(`$HARDENING_ENV_FILE`, default `$RUNNER_TEMP/supply-chain-hardening.env`):
+Every target writes that canonical sourceable env file. Its path is
+`$HARDENING_ENV_FILE` if you set it, otherwise
+`$RUNNER_TEMP/supply-chain-hardening.env` on a runner that sets `RUNNER_TEMP`
+(GitHub's per-job directory), otherwise
+`~/.cache/supply-chain-hardening/supply-chain-hardening.env`:
 
 ```bash
-./action/harden.sh --emit=plain
-source "${TMPDIR:-/tmp}/supply-chain-hardening.env"
+./action/harden.sh --emit=plain &&
+  source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}"
 ```
+
+Keep the `&&`: a failed `harden.sh` must not be followed by a `source`. The run
+record (`supply-chain-hardening.outputs`) sits beside the env file. Neither ever
+defaults to a shared directory such as `/tmp`, where another local user could
+plant a file for you to source. `harden.sh` creates the per-user directory, and
+any parent it has to create, with mode 0700 whatever the umask. It writes each
+file through `mktemp` and a rename. It refuses, before writing anything:
+
+- an existing file that is not a regular file (`/dev/null` included), that is
+  not yours, or that group or others can write;
+- a path through a world-writable directory without the sticky bit, at any
+  level, where anyone could rename the file or a directory above it away;
+- a path through a sticky directory that another user owns. The sticky bit
+  restricts everyone except the directory's owner.
+
+It accepts group-writable directories, and directories another user owns that
+are not world-writable: both are trust somebody granted. `verify.sh` ignores a
+record or env file owned by anyone but you or root, and says so. Run it as the
+user who ran `harden.sh`: as root under `sudo -E`, it finds that user's record,
+does not read it, and fails with a GAP.
+
+Upgrading from an earlier release: outside a runner both files used to default
+to `${TMPDIR:-/tmp}`. A pipeline that sources that path itself gets "No such file"
+now; use the expansion above. On GitLab, don't point `HARDENING_ENV_FILE` into
+the checkout, which the Docker executor makes world-writable (see
+[`examples/gitlab-ci.yml`](examples/gitlab-ci.yml)).
 
 Worked examples for each platform live in [`examples/`](examples/).
 
@@ -102,7 +131,20 @@ a Dockerfile.
 > on those platforms runs against this yet — treat them as working code with
 > untested integration, not as supported targets, until `action-smoke.yml`
 > has siblings. Layers 1 and 2 are platform-independent by construction, so
-> what is unverified is env propagation, not the hardening itself.
+> what is unverified is env propagation, not the hardening itself. That
+> includes where the env file lands: GitLab and Buildkite set no
+> `RUNNER_TEMP`, so it goes to the job user's `~/.cache/supply-chain-hardening/`
+> unless `HARDENING_ENV_FILE` says otherwise. Not tested on either.
+
+**The uv and pip cutoffs do not refresh.** Both gates are an absolute date that
+`harden.sh` computes when it runs (`release_age_hours` before now). A CI job
+re-hardens every run, so it never notices. A long-lived host hardened with
+`--emit=plain` keeps that date until `harden.sh` runs again, and the verifier
+starts calling it a freeze after 7 days. Re-run the two lines above (cron is
+fine), and re-source the env file in any shell that sourced the old one: it
+carries `PIP_UPLOADED_PRIOR_TO`, which outranks `pip.conf`. A plain run ends
+with a one-line reminder. The Ansible role installs
+`supply-chain-age-gate-refresh.timer` for this; the action has none.
 
 For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
@@ -266,7 +308,7 @@ git clone https://github.com/echennells/supply-chain-hardening
 ./supply-chain-hardening/action/harden.sh --suggest=/path/to/your/repo
 ```
 
-It reads your manifests and prints the block you need:
+It reads your manifests and prints the block you need. For a pnpm repo:
 
 ```
 Add this to your workflow:
@@ -277,14 +319,25 @@ Add this to your workflow:
 
 Why, and what else to know:
 
-  - These packages run code at install time. `ignore-scripts` blocks that by
-    default, which for native modules means the install 'succeeds' and the
-    binding is missing. Allowlisting them restores their build scripts and
-    nothing else.
+  - These packages run code at install time: esbuild,sharp. `ignore-scripts`
+    blocks that by default, which for native modules means the install
+    'succeeds' and the binding is missing.
+  - pnpm: allowlisting them restores their build scripts and nothing else. [...]
   - Your own package.json defines: prepare — `npm ci` will NOT run these while
     ignore-scripts is on. If one of them is load-bearing (husky,
     patch-package), run it explicitly as its own step.
 ```
+
+An npm repo (`package-lock.json`) gets no input, because `pnpm_built_dependencies`
+only changes pnpm's config and npm has no per-package allowlist that survives
+`ignore-scripts`. It gets a step instead: `npm rebuild <pkgs> --ignore-scripts=false`
+after the install, and on npm 12 an `npm approve-scripts <pkgs>` first, because
+npm 12 also skips unapproved install scripts. MEASURED under the hardening with a
+dependency whose install script writes a marker: plain `npm rebuild <pkg>` built
+nothing on npm 9.2.0, 11.19.1 or 12.2.3; adding `--ignore-scripts=false` built it on
+9.2.0 and 11.19.1; npm 12.2.3 built it only after `npm approve-scripts`, and
+`ignore-scripts` stayed `true` for the next install on all three. A `yarn.lock` or
+bun lockfile is told that the action has no per-package allowlist for them.
 
 It reports and changes nothing — no config is written, no tool is installed.
 
@@ -408,11 +461,16 @@ degrades the env-propagation row to `WEAK`; without `output-file` it has no
 record of what the job hardened and falls back to checking every installed
 tool.
 
+The verify step runs in the job's working directory, normally the checkout,
+so it asks the project's own yarn: a committed `.yarnrc.yml` `yarnPath` or
+`plugins:` entry runs during the check, as it does during `yarn install`
+([docs/verify.md](../docs/verify.md#in-a-checkout-it-runs-that-projects-yarn)).
+
 The probes themselves live in `files/verify-probes.sh` — the same bytes the
 Ansible role installs as `/usr/local/bin/supply-chain-verify`, so the two
 surfaces cannot drift. `action/verify.sh` is the CI half: what this job
 promised, the runner-only probes, and the report. It **exits 2** if the probe
-body is missing rather than quietly skipping nine ecosystems and printing a
+body is missing rather than quietly skipping ten ecosystems and printing a
 short green table.
 
 ## Inputs
@@ -454,7 +512,8 @@ Use sparingly. The whole point of the action is to harden subsequent steps; opti
 | `tool-versions` | `{"npm":"10.5.0","bun":"1.2.0","composer":"2.9.8",...}` | JSON map of detected tool versions per ecosystem. Empty string means the tool wasn't installed in this runner. Useful for conditional downstream steps. |
 
 Alongside these, the harden step writes a private record next to the env file
-(`…/supply-chain-hardening.outputs`) that only the verify step reads:
+(`…/supply-chain-hardening.outputs`, overridable with `HARDENING_OUTPUT_FILE`)
+that only the verify step reads:
 `wrappers_deployed` (which PATH wrappers actually landed), `job_id` (so a
 leftover record on a self-hosted runner is ignored rather than silently
 scoping the next job), and `hardening_complete`, written last. That marker is

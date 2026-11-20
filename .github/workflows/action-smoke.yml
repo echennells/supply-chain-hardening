@@ -1173,7 +1173,12 @@ jobs:
         run: |
           grep -q "^min-release-age=2$" /tmp/plainhome/.npmrc
           grep -q "emit=plain" /tmp/plain.log
-          envfile=$(ls /tmp/plain/supply-chain-hardening.env 2>/dev/null || ls /tmp/supply-chain-hardening.env)
+          # Outside a runner (no RUNNER_TEMP) the default is per-user, never
+          # TMPDIR or /tmp: another local user could plant a file there (VM#3).
+          envfile=/tmp/plainhome/.cache/supply-chain-hardening/supply-chain-hardening.env
+          test ! -e /tmp/plain/supply-chain-hardening.env || { echo "::error::env file landed in TMPDIR"; exit 1; }
+          test "$(stat -c %a /tmp/plainhome/.cache/supply-chain-hardening)" = 700 \
+            || { echo "::error::per-user env dir is not 0700"; exit 1; }
           echo "env file: $envfile"; cat "$envfile"
           # Source it in a pristine shell and confirm values survive quoting.
           out=$(env -i bash -c "source '$envfile'; echo \"\$GOPROXY|\$NPM_CONFIG_MIN_RELEASE_AGE\"")

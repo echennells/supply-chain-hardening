@@ -5,7 +5,7 @@
 #
 # Every protection failure this project has shipped had the same shape: the
 # config file was exactly what we intended, the tool ignored it, and the run
-# reported success. yarn's "2d" parsing to NaN, npm's MINIMUM_RELEASE_AGE key,
+# reported success. yarn 4.10 reading "2d" as 2 minutes, npm's MINIMUM_RELEASE_AGE key,
 # pnpm 11 dropping the ini files, pnpm 10 accepting block-exotic-subdeps and
 # ignoring it, bun not loading bunfig for `bun run`, npq passing through to npm
 # and exiting 0 on old Node. Six instances, six one-off fixes.

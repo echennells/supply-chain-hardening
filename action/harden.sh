@@ -224,13 +224,37 @@ suggest_for_repo() {
   # --- npm/pnpm/yarn/bun: packages whose install runs code ---
   local scripted
   scripted=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//') || true
+  # THE FIX DEPENDS ON THE PACKAGE MANAGER. pnpm_built_dependencies writes
+  # pnpm's config and nothing else. MEASURED (VM#9): a package-lock.json repo
+  # with sqlite3 was told to set it, did, and the binding was still missing,
+  # because only ~/.config/pnpm changed. npm has no per-package allowlist that
+  # survives ignore-scripts=true; what works is an explicit rebuild step.
+  # MEASURED 2026-11-19 with a dependency whose install script writes a
+  # marker, under ~/.npmrc + NPM_CONFIG_IGNORE_SCRIPTS=true:
+  #   npm rebuild <pkg>                         did nothing    9.2.0, 11.19.1, 12.2.3
+  #   npm rebuild <pkg> --ignore-scripts=false  ran it         9.2.0, 11.19.1
+  #                                             did nothing    12.2.3 (allowScripts gate)
+  #   npm approve-scripts <pkg>, then the same  ran it         12.2.3
+  # and npm config get ignore-scripts still answered true afterwards.
+  local scripted_sp="${scripted//,/ }"
+  local npm_fix="\`- run: npm rebuild ${scripted_sp} --ignore-scripts=false\` as its own step after the install. On npm 12, run \`npm approve-scripts ${scripted_sp}\` once and commit the allowScripts entry it adds to package.json, or that rebuild skips them too"
   if [ -n "$scripted" ]; then
     found_any=1
-    with_lines+=("          pnpm_built_dependencies: '$scripted'")
-    notes+=("These packages run code at install time. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing. Allowlisting them restores their build scripts and nothing else.")
-    notes+=("On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
+    notes+=("These packages run code at install time: ${scripted}. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing.")
+    if [ -f "$dir/pnpm-lock.yaml" ]; then
+      with_lines+=("          pnpm_built_dependencies: '$scripted'")
+      notes+=("pnpm: allowlisting them restores their build scripts and nothing else. On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
+    fi
+    if [ -f "$dir/package-lock.json" ]; then
+      notes+=("npm (package-lock.json): there is no per-package build allowlist for npm here; \`pnpm_built_dependencies\` changes pnpm's config only. To build the ones you trust, add ${npm_fix}.")
+    fi
     if [ ! -f "$dir/package-lock.json" ] && [ ! -f "$dir/pnpm-lock.yaml" ]; then
       notes+=("This list came from a known-names scan, not a lockfile — treat it as a floor, not the full set. Commit a package-lock.json or pnpm-lock.yaml and re-run for the exact answer.")
+      if [ -f "$dir/yarn.lock" ] || [ -f "$dir/bun.lock" ] || [ -f "$dir/bun.lockb" ]; then
+        notes+=("yarn and bun: this action has no per-package build allowlist for either, so these builds stay blocked under it. \`pnpm_built_dependencies\` changes pnpm's config only.")
+      else
+        notes+=("With no lockfile it is not known which package manager installs these. pnpm: set \`pnpm_built_dependencies: '$scripted'\` (and \`allowBuilds\` on pnpm 11+). npm: add ${npm_fix}.")
+      fi
     fi
   fi
 
@@ -303,7 +327,7 @@ suggest_for_repo() {
     printf '%s\n' "${with_lines[@]}"
     echo ""
   else
-    echo "No inputs need changing — the defaults fit this repo."
+    echo "No action inputs need changing. Read the notes below before your first build."
     echo ""
   fi
 
@@ -351,15 +375,6 @@ case "$PLATFORM" in
     ;;
 esac
 
-# The canonical, platform-neutral artifact. Written on EVERY platform, so
-# there is always one sourceable file containing the full env layer even
-# when the platform has no native step-to-step mechanism:
-#
-#   source /tmp/supply-chain-hardening.env
-#
-# On Drone/Woodpecker and other per-step-container runners this file is
-# the only way the env layer survives a step boundary (config files and
-# wrappers still work via the shared workspace volume).
 # ---- privilege: resolve ONCE, never assume ----
 #
 # MEASURED DEFECT. This script called `sudo` unconditionally in 24 places with
@@ -397,19 +412,6 @@ else
   SUDO=""
   CAN_ESCALATE=0
 fi
-
-HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.env}"
-HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/supply-chain-hardening.outputs}"
-# The chosen temp dir is not guaranteed to exist — a caller can point TMPDIR
-# at a path it has not created yet, and the bare redirect below would then
-# fail with an opaque "no such file or directory" before any hardening ran.
-mkdir -p "$(dirname "$HARDENING_ENV_FILE")" "$(dirname "$HARDENING_OUTPUT_FILE")" 2>/dev/null || true
-if ! : > "$HARDENING_ENV_FILE" 2>/dev/null; then
-  echo "[supply-chain-harden] error: cannot write the env file at '$HARDENING_ENV_FILE'" >&2
-  echo "  set HARDENING_ENV_FILE to a writable path" >&2
-  exit 2
-fi
-: > "$HARDENING_OUTPUT_FILE"
 
 # ---- Log annotations (platform-specific markup, identical semantics) ----
 log()  { echo "[supply-chain-harden] $*"; }
@@ -475,6 +477,173 @@ end_section() {
   CURRENT_SECTION=""
 }
 
+if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
+  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
+  exit 2
+fi
+
+# ---- The env file and the run record: where they go, and who else can touch them ----
+#
+# The env file is the canonical, platform-neutral artifact. It is written on
+# EVERY platform, so there is always one sourceable file holding the whole env
+# layer even where the platform has no step-to-step mechanism. On
+# Drone/Woodpecker and other per-step-container runners it is the only way the
+# env layer survives a step boundary. The run record (.outputs) beside it is
+# what verify.sh reads to learn what this job promised.
+#
+# MEASURED DEFECT (VM#3, Ubuntu 26.04, --emit=plain). Both used a FIXED NAME
+# under ${RUNNER_TEMP:-${TMPDIR:-/tmp}}, which outside a CI runner is /tmp, a
+# directory every local user can write. Another user pre-created
+# /tmp/supply-chain-hardening.env holding a payload. harden.sh refused to
+# overwrite it (rc=2), the documented recipe's next line sourced it anyway, and
+# the payload ran as the person hardening. A forged .outputs beside it scoped
+# the verifier down to "this job hardened: npm". Where fs.protected_regular=0, a
+# 0666 file the other user owned was even written INTO, because `: >` keeps an
+# existing file's owner, and they appended to it afterwards.
+#
+# Three changes:
+#   1. With no RUNNER_TEMP the default directory is per-user,
+#      $HOME/.cache/supply-chain-hardening, created 0700. Not $TMPDIR, which is
+#      often /tmp itself. Not $XDG_RUNTIME_DIR, which cron, `su` and most
+#      containers do not set, so a later verify.sh could look somewhere else.
+#      RUNNER_TEMP is GitHub's per-job directory, owned by the runner user, so
+#      that path is unchanged. action/verify.sh resolves the same default.
+#   2. A file that already exists must be a regular file we own that group and
+#      others cannot write. The directory it is in, and every directory above
+#      that, must not let another user swap what is below it: world-writable
+#      only with the sticky bit, and then only when we or root own it.
+#      Anything else is refused before a byte is written, with the reason.
+#   3. Each file is created by mktemp in its own directory and renamed over the
+#      target. An existing inode, and any descriptor someone holds on it, is
+#      never written through.
+SCH_STATE_DIR="${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}"
+HARDENING_ENV_FILE="${HARDENING_ENV_FILE:-$SCH_STATE_DIR/supply-chain-hardening.env}"
+HARDENING_OUTPUT_FILE="${HARDENING_OUTPUT_FILE:-$SCH_STATE_DIR/supply-chain-hardening.outputs}"
+
+# The 10-character mode string, as `ls -ld` prints it on GNU and BSD alike.
+# -L: a symlink's own mode is lrwxrwxrwx on Linux whatever it points to.
+_sch_mode() { ls -ldL -- "$1" 2>/dev/null | cut -c1-10; }
+
+# _sch_unsafe_target <file>: prints why <file> must not be (re)created; silent when it may.
+_sch_unsafe_target() {
+  local f="$1" d m
+  d=$(dirname -- "$f")
+  if [ -L "$f" ]; then echo "is a symbolic link"; return 0; fi
+  if [ -e "$f" ]; then
+    [ -f "$f" ] || { echo "exists and is not a regular file"; return 0; }
+    [ -O "$f" ] || { echo "already exists and belongs to another user ($(ls -ld -- "$f" | awk '{print $3}'))"; return 0; }
+    m=$(_sch_mode "$f")
+    case "$m" in ?????w*|????????w*) echo "already exists and is writable by group or others ($m)"; return 0 ;; esac
+  fi
+  _sch_dir_walk "$d"
+}
+
+# _sch_dir_walk <dir>: prints why another user could swap the file in <dir>,
+# or <dir> itself, or any directory above it; silent when no one can.
+#
+# Every directory from <dir> up to /, as written and as resolved (a symlinked
+# component is judged by where it points). Each one decides who can rename the
+# entry below it, so one open directory anywhere above lets that user move ours
+# aside and put their own in its place. For each directory:
+#   world-writable, no sticky bit -> anyone can.
+#   world-writable, sticky        -> its owner still can: the sticky bit
+#                                    restricts everyone EXCEPT the directory's
+#                                    owner. Accepted only when that is us or root.
+# MEASURED (review of the VM#3 fix): HARDENING_ENV_FILE in another user's 1777
+# directory was accepted with a warning, and that user deleted and replaced
+# the file; a later `source` ran their code. Under `umask 0000` (GitLab's
+# Docker and Kubernetes executors) `mkdir -p` made ~/.cache drwxrwxrwx, the
+# parent of the 0700 leaf, and the old check looked at the leaf only.
+#
+# Group-writable is not refused: with per-user groups and umask 002 (the Ubuntu
+# default) every project directory is 0775, and the group is a trust grant
+# somebody made on purpose. Nor is a directory merely OWNED by another user, if
+# it is not world-writable. A GitHub `container:` job is the case in mind: it
+# runs as root by default, and its RUNNER_TEMP is a host directory bind-mounted
+# in, owned by the runner's uid (no smoke job runs in a container, so this is
+# not exercised by CI).
+_sch_dir_walk() {
+  local d="$1" phys p m o me
+  me=$(id -u)
+  case "$d" in /*) ;; *) d="$PWD/$d" ;; esac
+  phys=$(cd -P -- "$d" 2>/dev/null && pwd -P) || phys=""
+  [ "$phys" = "$d" ] && phys=""
+  for p in "$d" ${phys:+"$phys"}; do
+    while :; do
+      m=$(_sch_mode "$p")
+      case "$m" in
+        ????????w[tT])
+          o=$(ls -ldnL -- "$p" 2>/dev/null | awk '{print $3}')
+          if [ "$o" != "$me" ] && [ "$o" != 0 ]; then
+            if [ "$p" = "$d" ] || [ "$p" = "$phys" ]; then
+              echo "is in $p, a sticky directory that another user ($(ls -ldL -- "$p" | awk '{print $3}')) owns. The sticky bit stops everyone except the directory's owner, who can delete the file and put their own in its place"
+            else
+              echo "is below $p, a sticky directory that another user ($(ls -ldL -- "$p" | awk '{print $3}')) owns, who can rename the directory under it and put their own in its place"
+            fi
+            return 0
+          fi ;;
+        ????????w*)
+          if [ "$p" = "$d" ] || [ "$p" = "$phys" ]; then
+            echo "is in $p, which every user can write to and which has no sticky bit ($m), so anyone could replace the file after it is written"
+          else
+            echo "is below $p, which every user can write to and which has no sticky bit ($m), so anyone could rename the directory under it and put their own in its place"
+          fi
+          return 0 ;;
+      esac
+      [ "$p" = / ] && break
+      p=$(dirname -- "$p")
+    done
+  done
+  return 0
+}
+
+# _sch_create <file> <what> <override var>: <file> now exists, empty, 0644, ours. Exits 2 otherwise.
+_sch_create() {
+  local f="$1" what="$2" var="$3" d why tmp=""
+  d=$(dirname -- "$f")
+  # The directory is not guaranteed to exist: a caller can point the override
+  # at a path it has not created yet. Whatever we create is never
+  # world-writable, whatever the caller's umask: under GitLab's `umask 0000`
+  # a plain `mkdir -p` made every new directory 0777, which the walk above
+  # then refuses.
+  if [ "$d" = "$HOME/.cache/supply-chain-hardening" ]; then
+    # 077 for every directory this creates, ~/.cache included, not the leaf alone.
+    [ -d "$d" ] || ( umask 077 && mkdir -p -- "$d" ) 2>/dev/null || true
+  else
+    # The caller's umask plus o-w: a group-shared directory stays group-shared.
+    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$(umask) | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
+  fi
+  why=$(_sch_unsafe_target "$f")
+  if [ -n "$why" ]; then
+    err "refusing to write the $what: '$f' $why. Another user may control what a later step sources or trusts. Remove it, or set $var to a path in a directory only you can write."
+    exit 2
+  fi
+  # 0644, not mktemp's 0600: the file holds no secret, and a profile.d line
+  # that sources it for every user (action/examples/Dockerfile) must be able to
+  # read it. What matters is who can WRITE it.
+  if ! tmp=$(mktemp "$d/.supply-chain-hardening.XXXXXX" 2>/dev/null) \
+     || ! chmod 644 "$tmp" 2>/dev/null \
+     || ! mv -f -- "$tmp" "$f" 2>/dev/null; then
+    [ -n "$tmp" ] && rm -f -- "$tmp" 2>/dev/null
+    err "cannot write the $what at '$f'"
+    echo "  set $var to a writable path" >&2
+    exit 2
+  fi
+  # What the refusals leave: the file directly in a sticky world-writable
+  # directory that we or root own, such as /tmp. No other user can replace it
+  # while it exists. Once a reboot or a cleanup removes it, anyone can put a
+  # file at the same path, and a `source` of that path runs it.
+  if [ "$what" = "env file" ]; then
+    case "$(_sch_mode "$d")" in
+      ????????w*)
+        warn "the $what is in $d, which every user can write to. While the file exists no other user can replace it, but once a reboot or a cleanup removes it anyone can put a file at that path, and a later \`source\` of it, in a shell where this harden.sh run did not just succeed, runs their file. Prefer a per-user directory." ;;
+    esac
+  fi
+  return 0
+}
+_sch_create "$HARDENING_ENV_FILE"    "env file"    HARDENING_ENV_FILE
+_sch_create "$HARDENING_OUTPUT_FILE" "run record"  HARDENING_OUTPUT_FILE
+
 # ---- Validation ----
 if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
   err "release_age_hours must be a non-negative integer (got: '$RELEASE_AGE_HOURS')"
@@ -487,10 +656,6 @@ fi
 RELEASE_AGE_HOURS=$((10#$RELEASE_AGE_HOURS))
 if [[ "$RELEASE_AGE_HOURS" -lt 1 ]]; then
   err "release_age_hours must be >= 1 (got: $RELEASE_AGE_HOURS). Setting to 0 silently disables the age gate across every ecosystem."
-  exit 2
-fi
-if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
-  err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
   exit 2
 fi
 
@@ -512,8 +677,11 @@ write_env() {
     # calling job shell does not inherit it. On these targets the env file is
     # the mechanism and the caller must source it:
     #
-    #   ./harden.sh --emit=gitlab
-    #   source "${RUNNER_TEMP:-/tmp}/supply-chain-hardening.env"
+    #   ./harden.sh --emit=gitlab &&
+    #     source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}"
+    #
+    # (that expansion is the default path: see "The env file and the run
+    # record" above)
     #
     # The config-file and wrapper layers need no such step; they are already
     # on disk. Buildkite conventionally does the source in a pre-command hook.
@@ -590,14 +758,13 @@ COMPOSER_COOLDOWN_SECONDS=$(( RELEASE_AGE_HOURS * 3600 ))
 POETRY_AGE_DAYS=$NPM_AGE_DAYS                     # integer days, floored at 1 like npm
 DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 [[ "$DENO_AGE_ISO" == "P0D" ]] && DENO_AGE_ISO="P1D"
-# INTEGER MINUTES, and rendered UNQUOTED. A duration-suffix string ("2d")
-# hits a yarn parser bug that yields NaN and silently disables the gate
-# entirely, and yarn has no second age-gate layer to fall back on.
-# MEASURED against yarn 4.10.3 (2026-08), recorded in defaults/main.yml:53:
-# "36500d" let a fresh package install; 52560000 (minutes) blocked it.
-# Quoting it lands a YAML string where yarn wants a number, which fails
-# the same way. The role has derived this in minutes since c9a250f; the
-# action was still shipping the exact bug the role documented.
+# INTEGER MINUTES, rendered unquoted. Yarn 4.10.x reads a duration string as
+# its leading integer, in minutes: "2d" is a 2-minute gate, quoted or not
+# (MEASURED 2026-11-19, yarn 4.10.3; "36500d" read as 36500). Yarn 4.11.0
+# parses durations ("2d" = 2880). Integer minutes mean the same on every yarn
+# that has the key, and yarn has no second age-gate layer to fall back on. The
+# role has derived this in minutes since c9a250f; the action once shipped "2d".
+# (An older note here said "2d" parsed to NaN. Re-measured, it does not.)
 YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
 # uv requires an absolute RFC 3339 datetime — "48 hours" or similar
 # relative-duration strings fail uv's TOML parser with
@@ -1024,7 +1191,24 @@ harden_yarn() {
 
   HARDENED+=("yarn")
   set_tool_version "yarn" "$yarn_version"
-  log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  # SAY IT HERE, NOT ONLY IN THE VERIFIER — the npm rule above, for yarn.
+  #
+  # npmMinimalAgeGate arrived in Yarn 4.10.0. Older Berry ignores the key in
+  # ~/.yarnrc.yml without a word (MEASURED: 4.1.0, the apt yarnpkg on Debian 13
+  # and Ubuntu 26.04, and 4.9.4: exit 0, no warning), and Yarn 1.x (classic)
+  # never reads .yarnrc.yml at all. This used to report yarn as "Fully
+  # applied" on 4.1.0 while a release 13 hours old installed (VM#10).
+  if [[ -n "$yarn_version" ]] && ! version_ge "$yarn_version" "2.0.0"; then
+    warn "yarn $yarn_version is Yarn 1.x (classic), which never reads .yarnrc.yml — none of the yarn settings are in force: no age gate and no enableScripts. Yarn 4.10 or later is needed."
+    set_eco_status yarn NONE "yarn $yarn_version is classic and never reads .yarnrc.yml; nothing written for yarn is in force"
+    log "yarn: .yarnrc.yml written but NOT read by yarn $yarn_version (classic)"
+  elif [[ -n "$yarn_version" ]] && ! version_ge "$yarn_version" "4.10.0"; then
+    warn "yarn $yarn_version does NOT implement npmMinimalAgeGate (added in Yarn 4.10.0) — the age gate is written and NOT enforced. enableScripts=false still applies. Install Yarn 4.10 or later before this step to make it effective."
+    set_eco_status yarn INERT "age gate written but yarn $yarn_version does not implement npmMinimalAgeGate (Yarn 4.10.0); enableScripts=false still applies"
+    log "yarn: enableScripts=false (age gate written but INERT on yarn $yarn_version)$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  else
+    log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  fi
   end_section
 }
 
@@ -2378,7 +2562,12 @@ WRAPPER
   if [[ -n "$cooldown_bin" ]]; then
     log "cargo: wrapper at $wrapper_target (--locked injection + ${RELEASE_AGE_HOURS}h publish-age gate via cargo-cooldown)"
   else
-    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. Set install_cargo_cooldown: true, or install cargo-cooldown in an earlier step."
+    # Name the switch the way THIS caller sets it: the action input on GitHub,
+    # the env var everywhere else (VM#14: plain mode was told to set an input
+    # it does not have).
+    local _cc_how="set INSTALL_CARGO_COOLDOWN=true in harden.sh's environment"
+    [[ "$PLATFORM" == "github" ]] && _cc_how="set the action input install_cargo_cooldown: true"
+    warn "cargo: the publish-age gate is written but NOT enforced — cargo-cooldown is not installed. --locked injection still applies. To enforce it, ${_cc_how}, or install cargo-cooldown in an earlier step."
     set_eco_status cargo PARTIAL "--locked injection active; publish-age gate written but no cargo-cooldown backend to enforce it"
     log "cargo: wrapper at $wrapper_target (--locked injection; age gate written but inert without cargo-cooldown)"
   fi
@@ -3368,4 +3557,12 @@ if [ -n "$part_list$none_list" ]; then
   log "done (emit=$PLATFORM). applied: ${eff_list:-none}${part_list:+ | degraded: $part_list}${none_list:+ | NOT applied: $none_list}"
 else
   log "done (emit=$PLATFORM). applied: ${eff_list:-none}"
+fi
+
+# The uv and pip gates are an ABSOLUTE cutoff computed above, so on a host that
+# keeps this hardening they freeze at this run (VM#16: the plain path has no
+# refresh, by design). A CI job re-hardens every run and never notices; a
+# long-lived host does, so plain mode says so once, at the end.
+if [[ "$PLATFORM" == "plain" ]] && [[ " ${HARDENED[*]:-} " == *" uv "* || " ${HARDENED[*]:-} " == *" pip "* ]]; then
+  notice "the uv/pip age-gate cutoff is fixed at $UV_EXCLUDE_NEWER and nothing advances it. On a long-lived host, re-run harden.sh (and re-source $HARDENING_ENV_FILE) to move it, or apply the Ansible role, which installs a refresh timer."
 fi

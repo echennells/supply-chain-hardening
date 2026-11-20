@@ -19,6 +19,24 @@ scv_toolchain_gap() { # id evidence protection detail
   if type unavail >/dev/null 2>&1; then unavail "$@"; else shift; row GAP "$@"; fi
 }
 
+# How THIS surface puts a deployed setting back. The body is shared, so a
+# remediation that names one delivery path is wrong on the other. MEASURED
+# (VM#14, a host hardened with action/harden.sh --emit=plain): the frozen-cutoff
+# rows told the user to re-apply a role they never ran and to check a systemd
+# timer that path never installs. SCV_SURFACE is declared by both preambles.
+scv_reapply() { # -> an imperative phrase, lower case
+  case "${SCV_SURFACE:-role}" in
+    ci) printf 're-run action/harden.sh' ;;
+    *)  printf 're-apply the role' ;;
+  esac
+}
+scv_cutoff_fix() { # -> the remedy for a frozen absolute uv/pip cutoff
+  case "${SCV_SURFACE:-role}" in
+    ci) printf '%s' "Re-run action/harden.sh to advance it, and re-source its env file in any shell that sourced the old one. harden.sh ships no refresh timer: a CI job re-hardens on every run, but a long-lived host hardened this way keeps the cutoff of its last harden.sh run until something runs it again (the Ansible role installs supply-chain-age-gate-refresh.timer for this)" ;;
+    *)  printf '%s' "Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal" ;;
+  esac
+}
+
 # The window this surface promised, in hours; empty when nothing recorded one.
 # The role renders it into its preamble, the action records it in OUTPUT_FILE.
 scv_want_hours() {
@@ -111,6 +129,89 @@ discover go       /usr/local/go/bin "$HOME/go/bin"                              
 discover pnpm     "$HOME/.local/share/pnpm"                                      || true
 discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bin" || true
 discover poetry  "$HOME/.local/bin" "${POETRY_HOME:-$HOME/.local/share/pypoetry}/venv/bin" || true
+
+# ======================================================================
+# yarn
+# ======================================================================
+
+# --- yarn age gate, yarn lifecycle scripts  [PARSED] ---
+# ---------------------------------------------------------------- yarn -------
+# One probe for both surfaces. It lived in the role's preamble only; the CI
+# surface grepped ~/.yarnrc.yml for the key and graded that WEAK PRESENT, which
+# cannot tell a yarn that implements npmMinimalAgeGate from one that does not.
+# MEASURED (VM#10, apt yarnpkg 4.1.0 on Ubuntu 26.04 and Debian 13): harden.sh
+# said "Fully applied", a release 13 hours old installed, and that row stayed
+# WEAK PRESENT.
+#
+# BRANCH ON THE EXIT CODE, NOT ON THE TEXT. Below Yarn 4.10.0 the key does not
+# exist: `yarn config get npmMinimalAgeGate` prints a usage error ("Couldn't
+# find a configuration settings named ...") on STDOUT and exits 1 (MEASURED,
+# 4.1.0 and 4.9.4). Read as a value, that became "non-integer
+# npmMinimalAgeGate='UsageError:...' (this is the NaN failure)": the wrong
+# diagnosis, for a gap only an upgrade closes. In the HOME ~/.yarnrc.yml those
+# versions ignore the key without a word and run the install (MEASURED).
+#
+# DURATION STRINGS. `yarn config get` prints the number yarn will use, so a
+# value is judged by that number. MEASURED 2026-11-19: yarn 4.10.3 reads "2d"
+# (quoted or not) as its leading integer, 2 MINUTES, and "36500d" as 36500;
+# yarn 4.11.0 parses durations ("2d" = 2880). So on 4.10.x a duration string is
+# a gate of a few minutes, which the window comparison below reports. Integer
+# minutes mean the same on every version that has the key, which is what both
+# writers emit.
+#
+# Yarn 1.x (classic) never reads .yarnrc.yml: `yarn config get` answers
+# "undefined" for both keys with exit 0 (MEASURED, 1.22.22), so it is
+# recognised by its version first.
+if ! have yarn; then
+  row "N/A" - "yarn" "yarn not installed"
+elif command -v requested >/dev/null 2>&1 && ! requested yarn; then
+  row "N/A" - "yarn" "yarn installed but not in the requested ecosystems"
+else
+  yv=$(yarn --version 2>/dev/null | head -1 | tr -d '\r')
+  # A yarn that cannot name its version (a corepack shim that cannot resolve
+  # one, a broken yarnPath) must not be reported as one too old for the gate.
+  case "$yv" in [0-9]*) ;; *) yv="" ;; esac
+  case "$yv" in
+    1.*)
+      scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
+        "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them" ;;
+    *)
+      yout=$(yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
+      v=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | tr -d ' ')
+      ywant=$(scv_want_hours)
+      ysaid=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | cut -c1-90)
+      if [ "$yrc" -ne 0 ] && [ -z "$yv" ]; then
+        scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
+          "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` in this directory to see why it printed none"
+      elif [ "$yrc" -ne 0 ]; then
+        scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
+          "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this"
+      else
+        yv="${yv:-(version unknown)}"
+        case "$v" in
+          ''|undefined|null)
+            row GAP PARSED "yarn age gate" "yarn $yv reports no npmMinimalAgeGate value, so no age gate is in effect" ;;
+          *[!0-9]*)
+            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate='$v', which is not a whole number of minutes, so the gate cannot be confirmed" ;;
+          0)
+            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=0, which disables the gate" ;;
+          *)
+            if [ -n "$ywant" ] && [ "$v" -lt "$((ywant * 60))" ] 2>/dev/null; then
+              row WEAK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes, below the ${ywant}h promised here. Yarn 4.10.x reads a duration string such as \"2d\" as 2 minutes; write integer minutes"
+            else
+              row OK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes"
+            fi ;;
+        esac
+      fi
+      v=$(yarn config get enableScripts 2>/dev/null | head -1 | tr -d '\r' | tr -d ' ')
+      if [ "$v" = "false" ]; then
+        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
+      else
+        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}"
+      fi
+      ;;
+  esac
+fi
 
 # ======================================================================
 # bun
@@ -820,7 +921,7 @@ deno_npm_fallback() { # prints the min-release-age value deno would read, or fai
 deno_unwrapped_row() { # <why it is not wrapped>
   if _dnr=$(deno_npm_fallback); then
     row WEAK PARSED "deno publish-age gate" \
-      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. Re-apply the role to restore the wrapper"
+      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. To restore the wrapper, $(scv_reapply)"
   else
     row GAP PRESENT "deno publish-age gate" \
       "$1, so no invocation is age-gated${dver:+ (deno $dver reads no npm min-release-age here)}"
@@ -910,7 +1011,7 @@ else
         "wrapper is at $dshadow but deno resolves to $dp — the wrapper is shadowed and never runs, so no invocation is age-gated"
     elif [ -x "${dp}-real" ]; then
       row GAP PRESENT "deno publish-age gate" \
-        "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper; re-apply the role"
+        "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper; $(scv_reapply)"
     elif [ -f /etc/profile.d/deno-cooldown.sh ] && grep -q 'minimum-dependency-age' /etc/profile.d/deno-cooldown.sh 2>/dev/null; then
       deno_unwrapped_row "no wrapper at $dp; only the /etc/profile.d/deno-cooldown.sh alias, which fires in interactive login shells ONLY — scripts, agents, CI and cron are not wrapped"
     else
@@ -1307,7 +1408,7 @@ if have uv; then
             "uv reports exclude-newer cutoff $uvcut, but this host's date cannot parse it, so its age is unknown - the instant is fixed at apply time, and a months-old freeze cannot be told from a fresh 48h gate here"
         elif [ "$_scd" -gt 7 ]; then
           row WEAK PARSED "uv age gate" \
-            "uv reports exclude-newer cutoff $uvcut, which is $_scd days old - that is a FREEZE, not a rolling cooldown: the instant is fixed at apply time, so every release since then is refused and a security fix cannot be installed without an override. Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal"
+            "uv reports exclude-newer cutoff $uvcut, which is $_scd days old - that is a FREEZE, not a rolling cooldown: the instant is fixed at apply time, so every release since then is refused and a security fix cannot be installed without an override. $(scv_cutoff_fix)"
         else
           row OK PARSED "uv age gate" \
             "uv reports exclude-newer cutoff $uvcut ($_scd day(s) old) - anything published after it is refused"
@@ -1473,7 +1574,7 @@ elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
             "pip $pipver reports uploaded-prior-to=$pipcut, but this host's date cannot parse it, so its age is unknown - the instant is fixed at apply time, and a months-old freeze cannot be told from a fresh 48h gate here"
         elif [ "$_spd" -gt 7 ]; then
           row WEAK PARSED "pip native age gate" \
-            "pip $pipver reports uploaded-prior-to=$pipcut, which is $_spd days old - a FREEZE, not a rolling cooldown, so a security fix published since then cannot be installed without --uploaded-prior-to on the command line. Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal"
+            "pip $pipver reports uploaded-prior-to=$pipcut, which is $_spd days old - a FREEZE, not a rolling cooldown, so a security fix published since then cannot be installed without --uploaded-prior-to on the command line. $(scv_cutoff_fix)"
         else
           row OK PARSED "pip native age gate" \
             "pip $pipver reports uploaded-prior-to=$pipcut ($_spd day(s) old) - anything published after it is refused, pinned or not (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)"
