@@ -7,7 +7,7 @@
 
 **Safe defaults for 14 package managers, so a careless `npm install` or `pip install` of a registry package gets age-gated and script-blocked without the caller knowing about it.**
 
-Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use.
+Built for hosts and CI runners where AI agents install packages. You can't control which package manager an agent reaches for, what shell it uses, or when it decides to install something. This role sets policy one level below the agent — in the package managers themselves — through system-wide env vars, config files and PATH wrappers that apply to every caller, including the non-interactive shells agents actually use. (A PATH wrapper only reaches a caller whose `PATH` includes it: Debian and Ubuntu cron run jobs with `PATH=/usr/bin:/bin`, which skips the `/usr/local/bin` wrappers, so a cron job gets the config files and `/etc/environment` but not the `/usr/local/bin` wrappers. A wrapper the role installs in place of a binary in `/usr/bin`, such as an apt-installed `composer` or `cargo`, still runs. See [docs/how-it-works.md](docs/how-it-works.md).)
 
 Then it **proves the policy is in effect.** Writing a config file is not the same as a protection being on: every real failure this project has shipped was a file that was exactly right and a tool that quietly ignored it. So the role asks the tools what they ended up believing, on the real host, against the real installed versions:
 
@@ -31,17 +31,19 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
 | **Socket Firewall** | x | | | | | † | x | | | | | | |
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
-| **Hash/integrity verification** | x | | | | | x | | x | | | x | | x |
+| **Hash/integrity verification** | x | | | | | § | | x | | | x | | x |
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
 | **Lockfile enforcement** | | | | | | | x | x | | x | | | |
 
-`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md).
+`*` = via the third-party `cargo-cooldown` crate, enforced by the cargo PATH wrapper; see the Cargo coverage map in [docs/limitations.md](docs/limitations.md). Cargo 1.100.0 and later also have a native gate (`registry.global-min-publish-age`), which the role does not write yet.
 
 `‡` = **needs Composer ≥ 2.11.0 or Bundler ≥ 4.0.13, which no stock distro package ships.** The role writes both settings everywhere and the verifier reports a GAP until you upgrade; see [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md). Bundler's gate covers `gem install` only from RubyGems 4.1.0, which reads the same `BUNDLE_COOLDOWN`; below that, `gem install` has no age gate.
 
 `†` = **not implemented for Python.** Socket Firewall is wired only into the npm and cargo PATH wrappers, and in the GitHub Action also an npx wrapper. The role deploys no npx wrapper, so a bare `npx <pkg>` on a role-hardened host is not threat-intel filtered; `npm exec <pkg>` goes through the npm wrapper and is. No Python caller is threat-intel filtered — not `pip install` (which this role redirects to `uv pip`), not `python3 -m pip`, not a venv's own `bin/pip`, not `pipx`, and not a direct `uv pip install` / `uv add` / `uv run --with` / `uv tool install`. Python is covered by the uv **config** layer instead (`exclude-newer`, `no-build`, `index-strategy`, `verify-hashes`); see [docs/limitations.md](docs/limitations.md).
 
 `§` = uv's `no-build` refuses every sdist. Where pip runs without the redirect to uv (no uv on the host, `python3 -m pip`, a venv's own `pip`), pip's `only-binary = :all:` refuses an sdist it resolves from an index or `--find-links`, but **not one named by path or URL**: `pip install ./x.tar.gz` still runs its `setup.py`. `supply-chain-verify` grades that row WEAK.
+
+`§` = **uv's default, restated.** uv has verified any hashes a requirements file supplies since 0.5.3, and the role's `[pip] verify-hashes = true` only writes that default down. It does not require hashes, so an install that names none, which is most ad-hoc installs, is not hash-checked.
 
 Each protection is delivered in up to three overlapping layers — system-wide env vars, on-disk config files, `/usr/local/bin` PATH wrappers — so one covers another's gaps. What each layer reaches, and what it doesn't, is in [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -127,6 +129,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
 | [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
+| [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
 | [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
 | [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |

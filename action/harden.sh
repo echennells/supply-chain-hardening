@@ -766,15 +766,15 @@ DENO_AGE_ISO="P$(( RELEASE_AGE_HOURS / 24 ))D"
 # role has derived this in minutes since c9a250f; the action once shipped "2d".
 # (An older note here said "2d" parsed to NaN. Re-measured, it does not.)
 YARN_AGE=$(( RELEASE_AGE_HOURS * 60 ))
-# uv requires an absolute RFC 3339 datetime — "48 hours" or similar
-# relative-duration strings fail uv's TOML parser with
-# "failed to parse year in date '48 hours'", breaking every uv
-# invocation. Same bug the Ansible role had in defaults/main.yml
-# (fixed in b96bb7e); the action re-introduced it independently
-# at the bash layer.
-# (uv 0.11.4+ added relative-duration support for pylock.toml
-# lockfiles, NOT for the config-file exclude-newer setting; config
-# requires absolute datetimes on all uv versions.)
+# uv's exclude-newer is written as an absolute RFC 3339 datetime. A
+# relative span such as "48 hours" is accepted only from uv 0.9.17 (its
+# changelog: "Add support for relative durations in exclude-newer",
+# #16814). MEASURED: 0.9.16 fails the whole config with "failed to parse
+# year in date", breaking every uv invocation; 0.9.17 resolves the span to
+# now minus 48h. The runner's uv version is not known here, so the absolute
+# form is the one every uv reads. Same bug the Ansible role had in
+# defaults/main.yml (fixed in b96bb7e); the action re-introduced it
+# independently at the bash layer.
 #
 # BSD date (macOS runners) takes -v-Nh where GNU takes -d "N hours ago".
 # Try GNU first, fall back to BSD — CI runners are usually Linux but
@@ -1776,16 +1776,20 @@ harden_bun() {
 
   # FAIL-WHOLE HAZARD, not fail-silent. bun rejects the ENTIRE bunfig on ONE
   # bad value — "Invalid Bunfig: failed to load bunfig", exit 1 — MEASURED
-  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d"). One malformed
-  # key disarms every other key in the file AND breaks bun itself, so a bad
-  # value here is strictly worse than writing nothing. BUN_AGE_SECONDS is
+  # with a QUOTED minimumReleaseAge (minimumReleaseAge = "2d") on bun 1.3.0
+  # through 1.4.3, which want a number of seconds there. bun 1.4.4 accepts a
+  # duration string (MEASURED), but the runner's bun version is not known
+  # here, and a bare integer of seconds works on every bun from 1.3.0. On
+  # the versions that reject it, one malformed key disarms every other key
+  # in the file AND breaks bun itself, so a bad value here is strictly worse
+  # than writing nothing. BUN_AGE_SECONDS is
   # $(( RELEASE_AGE_HOURS * 3600 )), i.e. always a bare integer and never
   # quoted — but RELEASE_AGE_HOURS is caller-supplied, so a negative or
   # otherwise non-integer value drops the key rather than risking the file.
   # Never interpolate a duration string ("2d") or a quoted number here.
   if [[ "$has_min_release_age" == "true" ]] && ! [[ "$BUN_AGE_SECONDS" =~ ^[0-9]+$ ]]; then
     has_min_release_age=false
-    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted: bun rejects the WHOLE bunfig on one bad value, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
+    warn "bun: RELEASE_AGE_HOURS=$RELEASE_AGE_HOURS yields minimumReleaseAge='$BUN_AGE_SECONDS', which is not a bare non-negative integer of seconds. The key is omitted rather than risk the file: bun 1.3.0 through 1.4.3 reject the WHOLE bunfig on a non-numeric minimumReleaseAge, which would disarm every other key and break bun on this runner. bun's install age gate is NOT enforced."
   fi
 
   # WHERE THE GLOBAL BUNFIG LIVES — resolved from bun's environment, never

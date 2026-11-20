@@ -66,7 +66,7 @@ Briefly implemented (commit `3194f99`), then removed. The audit recommended this
 - `exact = true` — exact version pinning. All bun.
 - `ignoreScripts = true` — script blocking (corrected 2026-05-28 from the made-up `lifecycleScripts = false` which bun silently ignored; see commit message). **bun 1.2.0+** (MEASURED: below 1.2.0 the key is inert in the GLOBAL bunfig *and* in a local one — only the CLI `--ignore-scripts` blocks lifecycle scripts there). Tiered since 2026-08-28.
 
-**Not a version question but the same blast radius:** bun rejects the ENTIRE bunfig on one bad value (`Invalid Bunfig: failed to load bunfig`, exit 1 — MEASURED with a quoted `minimumReleaseAge = "2d"`). Fail-whole, not fail-silent: a single malformed key disarms every other key AND breaks bun. Any new tiered key must render a value bun's parser accepts on every version that reads it.
+**Not a version question but the same blast radius:** bun rejects the ENTIRE bunfig on one bad value (`Invalid Bunfig: failed to load bunfig`, exit 1 — MEASURED with a quoted `minimumReleaseAge = "2d"` on bun 1.3.0 through 1.4.3; bun 1.4.4 accepts a duration string, and a bare integer of seconds works on every bun from 1.3.0). Fail-whole, not fail-silent: a single malformed key disarms every other key AND breaks bun. Any new tiered key must render a value bun's parser accepts on every version that reads it.
 
 **Findings:**
 

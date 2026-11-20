@@ -24,8 +24,9 @@ Deployed to `/etc/profile.d/supply-chain-hardening.sh` (sourced by login shells)
 
 | Caller | Sees these env vars? |
 |---|---|
-| Login shell (ssh, sudo -i, su -, getty) | ✓ (PAM loads /etc/environment + shell sources profile.d) |
-| Cron job, ssh session, any process inherited from a PAM-launched parent | ✓ (env propagation through fork/exec) |
+| Login shell (ssh, sudo -i, su -, getty) | ✓ (PAM loads /etc/environment, except under `sudo` on Debian 13, whose `/etc/pam.d/sudo` has no pam_env; the shell sources profile.d, which sets every variable /etc/environment does) |
+| ssh session, any process inherited from a PAM-launched parent | ✓ (env propagation through fork/exec) |
+| Cron job (Debian and Ubuntu cron) | `/etc/environment` only: cron opens its own PAM session, but no shell sources profile.d. Its `PATH=/usr/bin:/bin` also skips the `/usr/local/bin` wrappers (MEASURED on cron 3.0pl1, Debian 13 and Ubuntu 24.04) |
 | `bash -c "..."` from inside a PAM-launched shell | ✓ (inherited) |
 | Container `CMD ["python", "app.py"]` started by Docker | ✗ (no PAM, no shell sourcing) |
 | systemd service without `Environment=` directives | ✗ |
@@ -62,7 +63,7 @@ User-level configs override these **per-key**: a setting *present* in the user f
 
 ## pip-to-uv redirect
 
-Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement, hash verification) applies even when an agent or script calls `pip install` directly.
+Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement) applies even when an agent or script calls `pip install` directly.
 
 The wrappers are shared by every account, so each call picks a uv that this caller may run: one the caller owns, or a root-owned one in directories no other account can write (`/usr/local/bin/uv`, `/usr/bin/uv`, the uv found at apply time, the caller's `PATH`, then `~/.local/bin/uv`). A uv in another user's home is never run; with no other candidate the wrapper refuses with a `[supply-chain-hardening]` message. `pip --version` is answered by the wrapper; `--user` and `download`, which `uv pip` does not have, are refused by name. See [limitations.md](limitations.md).
 

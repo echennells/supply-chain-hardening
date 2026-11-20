@@ -83,9 +83,12 @@ No actual malware is used. All fixtures are local packages with scripts that wri
 |---|---|---|---|
 | GOSUMDB set to "off" | malicious init() disables checksum verification | BufferZoneCorp CI poisoning | `/etc/profile.d/` re-sets to `sum.golang.org` |
 | GOPROXY redirect | malicious init() redirects to attacker proxy | BufferZoneCorp CI poisoning | `/etc/profile.d/` re-sets to official proxy |
-| GONOSUMDB wildcard | malicious init() skips all module verification | BufferZoneCorp CI poisoning | `/etc/environment` sets empty |
-| GONOSUMCHECK wildcard | malicious init() skips all checksum checks | BufferZoneCorp CI poisoning | `/etc/environment` sets empty |
+| GOPRIVATE wildcard | `GOPRIVATE='*'` marks every module private, skipping sumdb checks | sumdb bypass | `/etc/profile.d/` exports it empty; `/etc/environment` never assigns a value |
+| GONOPROXY / GOINSECURE | module fetches skip the proxy, or allow plain HTTP | proxy and TLS bypass | same as GOPRIVATE |
 | GOTOOLCHAIN override | malicious code triggers toolchain auto-download | toolchain substitution | `/etc/profile.d/` enforces `local` |
+| go.mod `toolchain` directive | a repo's go.mod names a toolchain to fetch and run | toolchain substitution | `GOTOOLCHAIN=local` ignores it |
+
+`GONOSUMDB` is also a real sumdb bypass (BufferZoneCorp set `GONOSUMDB=*`). `/etc/profile.d/` exports it empty, but no test asserts that yet. An earlier version of this table listed a `GONOSUMCHECK` test; that is not a Go variable (0 matches in go1.27.4's `GOROOT/src`, and `go env -w GONOSUMCHECK=1` fails), so there is nothing to defend.
 
 ### System-level enforcement tests
 

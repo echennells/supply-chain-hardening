@@ -114,8 +114,8 @@ This is the weakest option. Use it only when neither path above is possible, and
 | npm | `min-release-age` | `2` | npm 11.10.0 | Integer days. `48h` fails installs, and `2880` means about 8 years. |
 | pnpm | `minimumReleaseAge` | `2880` | | Minutes. pnpm 11 no longer reads `~/.npmrc` or `/etc/npmrc`. |
 | Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. Yarn 4.10 reads `"2d"` as 2 minutes; 4.11+ parses it. Below 4.10 the key is ignored in `~/.yarnrc.yml` and rejected in a project's. |
-| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds. One bad value makes Bun reject the whole file. |
-| uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. |
+| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds, which every Bun from 1.3.0 reads. On 1.3.0 to 1.4.3 a quoted value such as `"2d"` makes Bun reject the whole file. |
+| uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. A span such as `"48 hours"` needs uv 0.9.17; older uv rejects the whole file. |
 | pip | `uploaded-prior-to` | a date | pip 26.0 | Same, with a literal `Z`. |
 | Deno | `--minimum-dependency-age` | `P2D` | | A flag, not a config key. Deno has no config file for it. |
 | Composer | `config.policy.cooldown.period` | `172800` | Composer 2.11.0 | Seconds. Also set `COMPOSER_POLICY_COOLDOWN_PERIOD`, which outranks a repo. |
@@ -190,6 +190,10 @@ If a fresh release is refused or an install script is blocked, the control is wo
 
 An agent fails closed. A person can vouch for a specific build they trust, and
 `supply-chain-allow-build` exists for that person. It is not for you to reach for.
+
+Several of these refusals don't name this project (npm `ETARGET`, a native module that
+fails when loaded, Yarn `YN0028`, Bundler frozen mode). [docs/day-one.md](docs/day-one.md)
+explains each one, so you can tell the user what was refused and what their options are.
 
 ## What this does not cover
 
