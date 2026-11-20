@@ -39,6 +39,44 @@ if [ -z "$REAL_NPM" ] || [ ! -x "$REAL_NPM" ] || [ "$REAL_NPM" = "$0" ]; then
   exit 127
 fi
 
+# SOCKET FIREWALL RUNS READ-ONLY. sfw keeps its firewall binary in a cache
+# inside its own package directory, which a root `npm install -g` makes
+# root-owned, and by default it rewrites a timestamp there
+# (.sfw-cache/next-check) once the last update check is more than an hour old.
+# A non-root caller cannot write that file, and sfw treats the failure as fatal.
+# MEASURED (sfw 2.0.6, NodeSource npm, role at 8281a6b): from one hour after
+# each apply, every non-root npm and cargo call through sfw failed with
+# "[sfw] Failed to prepare firewall binary: EACCES ... next-check".
+# SFW_SKIP_UPDATE_CHECK=1 makes sfw run the cached binary without touching the
+# cache (MEASURED as a non-root user: with next-check expired sfw exited 0 and
+# no file under the cache changed; with it missing, sfw also exited 0). The
+# update check runs as root instead: at apply time, and from
+# supply-chain-age-gate-refresh --sfw.
+SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+
+# sfw_ready: can sfw run for this caller? The variable does not cover a COLD
+# cache: with nothing cached sfw downloads the binary anyway, and a non-root
+# caller cannot create the cache (MEASURED: "EACCES: permission denied, mkdir
+# .../sfw/.sfw-cache"). A root reinstall of sfw leaves the cache cold, because
+# npm replaces the package directory (MEASURED). Rather than
+# fail every install in sfw's words, treat that like an absent sfw: warn, name
+# the fix, and pass through. Root can fill the cache itself, and so can a
+# caller who can write it (a per-user sfw). When the layout is not the one
+# recognised here, sfw is left to decide.
+sfw_why="sfw not found"
+sfw_ready() {
+  _s=$(command -v sfw 2>/dev/null) || return 1
+  [ "$(id -u)" = 0 ] && return 0
+  _s=$(readlink -f "$_s" 2>/dev/null) || return 0
+  _p=${_s%/*}; _p=${_p%/*}
+  [ -f "$_p/package.json" ] || return 0
+  [ -e "$_p/.sfw-cache/latest" ] && return 0
+  if [ -e "$_p/.sfw-cache" ]; then [ -w "$_p/.sfw-cache" ] && return 0
+  else [ -w "$_p" ] && return 0; fi
+  sfw_why="sfw has no firewall binary cached that this account can run ($_p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-apply the role"
+  return 1
+}
+
 # npq re-entry guard — the interactive block below hands the install to
 # npq-hero, and npq performs the APPROVED install by invoking the package
 # manager, which resolves back to this wrapper. Without this guard that is an
@@ -162,13 +200,19 @@ esac
 # the keyboard. Use npq's prompt-driven reputation review, wrapped by sfw
 # for threat-intel blocking. Otherwise (script/agent/CI), use sfw alone
 # (npq would hang waiting for input).
+sfw_ok=0
+sfw_ready && sfw_ok=1
+
 if [ -t 0 ] && [ -t 1 ] && command -v npq-hero >/dev/null 2>&1; then
   # Mark the hand-off so npq's own npm call (to perform the install it just
   # approved) hits the re-entry guard above and reaches the real npm instead
   # of looping back into npq.
   SUPPLY_CHAIN_NPM_WRAPPED=1; export SUPPLY_CHAIN_NPM_WRAPPED
-  if command -v sfw >/dev/null 2>&1; then
+  if [ "$sfw_ok" = 1 ]; then
     exec sfw npq-hero "$@"
+  fi
+  if command -v sfw >/dev/null 2>&1; then
+    echo "[supply-chain-hardening] warning: $sfw_why; npm call not filtered through threat intel" >&2
   fi
   exec npq-hero "$@"
 fi
@@ -183,21 +227,21 @@ _is_install=0
 case "$subcmd" in install|i|add|ci|update|up) _is_install=1 ;; esac
 
 if [ "${SCV_AGE_NOTICE:-}" = "1" ] && [ "$_is_install" = 1 ]; then
-  if command -v sfw >/dev/null 2>&1; then
+  if [ "$sfw_ok" = 1 ]; then
     sfw "$REAL_NPM" "$@"; _rc=$?
   else
-    echo "[supply-chain-hardening] warning: sfw not found; npm call not filtered through threat intel" >&2
+    echo "[supply-chain-hardening] warning: $sfw_why; npm call not filtered through threat intel" >&2
     "$REAL_NPM" "$@"; _rc=$?
   fi
   [ "$_rc" -eq 0 ] && scv_age_notice "$@"
   exit "$_rc"
 fi
 
-if command -v sfw >/dev/null 2>&1; then
+if [ "$sfw_ok" = 1 ]; then
   exec sfw "$REAL_NPM" "$@"
 fi
 
 # sfw unavailable — warn loudly and pass through. Don't break npm just
 # because the wrapper's helper isn't there.
-echo "[supply-chain-hardening] warning: sfw not found; npm call not filtered through threat intel" >&2
+echo "[supply-chain-hardening] warning: $sfw_why; npm call not filtered through threat intel" >&2
 exec "$REAL_NPM" "$@"

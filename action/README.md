@@ -205,8 +205,10 @@ caller, and cannot fail open. Intel is a different kind of control and the
 trade is yours to make, not ours:
 
 - **It is a network dependency** on a third-party service.
-- **It is fail-open.** If Socket is unreachable, sfw warns and the install
-  proceeds unfiltered. It raises the floor; it is not a boundary.
+- **It can fail your build.** If Socket's API is unreachable, the download
+  fails and so does the install (MEASURED with sfw-free 1.16.0: `npm install`
+  exit 1 after about 70 s of npm retries, `cargo fetch` exit 101). It raises
+  the floor; it is not a boundary.
 - **It downloads a ~137 MB firewall binary from GitHub during hardening** (measured 79 s) and needs **Node ≥ 20**. If the download fails (often the runner IP's unauthenticated GitHub API rate limit), npm is left unwrapped with a warning rather than broken.
 - **A warm cache defeats it.** Measured: a second install served from
   `~/.npm` produced *zero* policy checks. If your job restores a dependency

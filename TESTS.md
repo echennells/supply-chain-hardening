@@ -25,7 +25,7 @@
 | 17-bundler-behavioral.bats | 4 | Bundler frozen-mode end-to-end |
 | 18-cargo-behavioral.bats | 5 | Cargo config (git-fetch-with-cli, retry), build.rs gap + regression catchers for removed Windows-only / mislabeled keys |
 | 19-deno-behavioral.bats | 3 | Deno cooldown alias verification |
-| 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept |
+| 20-socket-behavioral.bats | 3 | Socket Firewall (sfw) install + npm intercept, and a NON-root caller: npm (with sfw's proxy and CA seen in the child's environment) and the verifier row after sfw's 1h update-check window (backdated next-check), a cold cache (named warning, pass-through), and no account but root able to change the cached binary, with the verifier's row turning GAP when another account can |
 | 21-podman.bats | 14 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign |
 | 22-pip-wrapper-safety.bats | 5 | Defensive guards in the pip→uv wrapper |
 | 23-npm-path-wrapper.bats | 16 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback) |
@@ -39,9 +39,9 @@
 | 37-pnpm-allowlist-hardening.bats | 13 | pnpm build-script allowlist + doubly-exempt guard |
 | 38-preflight-become-guard.bats | 7 | Refuses invocations where escalation would mis-target per-user config; escalation-method agnostic (sudo/su/doas), covers sudo -i |
 | 39-verify-behavioral.bats | 18 | supply-chain-verify itself: stages the real failure shapes (yarn NaN gate, suppressed npq, yarn 1.x, npm echoing an unimplemented key, wrapper outside /usr/local/bin, composer version tiers, an unvouched Python startup hook, a file name that tries to erase or forge report rows) and asserts each is caught |
-| 40-upgrade-convergence.bats | 5 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again |
+| 40-upgrade-convergence.bats | 5 | Hosts hardened by an EARLIER role version converge — stale npq alias file is removed when npq cannot function, the gap is reported, and it converges back when npq works again; an sfw cache left 0777 or user-owned is reset (and the stray /usr/local tree removed), while a clean one is left alone; an sfw older than 2.0.6 (which ignores SFW_SKIP_UPDATE_CHECK) is replaced, or moved aside and reported when it cannot be; an sfw root does not own is reported without failing the play |
 | 41-tty-interactive.bats | 6 | The npm wrapper's interactive branch under a real pty (script -qec): TTY routes through npq, non-TTY skips it, sfw-absent still reaches npq, read-only subcommands bypass both |
-| 42-cargo-path-wrapper.bats | 29 | The cargo PATH wrapper: subcommand parsing (global flags before the subcommand must not bypass the controls — the argv[1] regression), +toolchain ordering, --locked placement before `--`, unknown subcommands warned not gated, unprotected builds warned not silent, install/writer handling, re-entrancy and recursion guards, and `bash -n` on the deployed artifact |
+| 42-cargo-path-wrapper.bats | 29 | The cargo PATH wrapper: subcommand parsing (global flags before the subcommand must not bypass the controls — the argv[1] regression), +toolchain ordering, --locked placement before `--`, unknown subcommands warned not gated, unprotected builds warned not silent, install/writer handling, re-entrancy and recursion guards, `bash -n` on the deployed artifact, and sfw run read-only (`SFW_SKIP_UPDATE_CHECK=1`) with a cold cache passed through for a non-root caller, including the REAL sfw run as `nobody` after its update-check window |
 | 28-composer-tier-rendering.bats | 8 | Composer audit-tier authority (renders composer-config.json.j2 across 2.2 / 2.7 / 2.9 and asserts each tier's keys) |
 | 29-maven-behavioral.bats | 4 | Maven settings.xml — HTTPS-only mirror, checksum policy |
 | 30-gradle-behavioral.bats | 6 | Gradle init script — repository pinning, verification metadata |
@@ -134,7 +134,7 @@ These are scenarios the test suite does **not** cover. They're tracked here so a
 - **Clock-skew bypass.** `27-cache-and-time.bats` notes the gap but skips the actual exploit without `faketime` installed. Adding `faketime` to the Dockerfile and writing the test would lock in the documented behavior.
 - **`python3 -m pip --no-binary :all:` defense.** Tested as a documented bypass that succeeds (test #4 in `09-python-adversarial.bats`). No defense is in place; the test pins this so a future "fix" that breaks legitimate `pip -m` callers without closing the bypass is caught.
 - **Determined operator overrides.** Role-deployed files at user-home paths can be overwritten by the user (`echo > ~/.npmrc`). The role isn't a sandbox. Tested implicitly via the precedence tests, but no test asserts "user can clobber if they want to."
-- **The age-gate refresh timer.** The test image runs no systemd, so `49-age-gate-refresh.bats` drives `supply-chain-age-gate-refresh` directly and asserts the timer is absent. The service/timer units (the `User=` + `+ExecStart` split, `OnCalendar`, `Persistent=`) and the apply-time enable/disable tasks are only exercised on a real systemd host.
+- **The age-gate refresh timer.** The test image runs no systemd, so `49-age-gate-refresh.bats` drives `supply-chain-age-gate-refresh` directly and asserts the timer is absent. The service/timer units (the `User=` + `+ExecStart` split, `OnCalendar`, `Persistent=`) and the apply-time enable/disable tasks are only exercised on a real systemd host. Its `--sfw` step is driven against a stub sfw: a real sfw update (a new sfw-free release downloaded, verified and swapped in by root) is not exercised.
 - **Container CMD callers (no PAM).** `12-cross-ecosystem.bats` proves `/etc/environment` doesn't propagate; the config-file layer is the documented protection. Not separately re-tested for every ecosystem.
 
 ## Issues found by testing

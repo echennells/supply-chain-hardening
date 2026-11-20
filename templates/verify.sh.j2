@@ -786,10 +786,53 @@ fi
 
 # ------------------------------------------------- sfw (reputation layer) ----
 if have sfw; then
-  if sfw --version >/dev/null 2>&1; then
+  # The wrappers' sfw_ready test: a non-root caller, the npm shim, nothing
+  # cached, and a cache this caller cannot fill. The wrappers then run npm and
+  # cargo WITHOUT sfw and warn, which is not the same as an sfw that fails.
+  sfw_cold=""
+  if [ "$(id -u)" != 0 ]; then
+    _s=$(readlink -f "$(command -v sfw)" 2>/dev/null); _p=${_s%/*}; _p=${_p%/*}
+    if [ -n "$_s" ] && [ -f "$_p/package.json" ] && [ ! -e "$_p/.sfw-cache/latest" ]; then
+      if [ -e "$_p/.sfw-cache" ]; then [ -w "$_p/.sfw-cache" ] || sfw_cold="$_p/.sfw-cache"
+      else [ -w "$_p" ] || sfw_cold="$_p/.sfw-cache"; fi
+    fi
+  fi
+  # Who can change the binary sfw runs. sfw runs .sfw-cache/latest without
+  # checking its digest again, for every caller, root included (`sudo npm
+  # install` goes through the npm wrapper), so a cache another account can
+  # write lets that account choose what root runs. Earlier role versions left
+  # it that way (VM#1: mode 0777 and a user-owned `latest`). The apply resets
+  # such a cache, but only when it runs; between applies this row is the only
+  # place it shows. Same test as that reset in tasks/socket.yml, and only for
+  # a root-owned sfw: a per-user sfw's cache is its owner's to write.
+  sfw_foreign=""
+  _s=$(readlink -f "$(command -v sfw)" 2>/dev/null); _p=${_s%/*}; _p=${_p%/*}
+  if [ -n "$_s" ] && [ -f "$_p/package.json" ] && [ "$(stat -c %u "$_p" 2>/dev/null)" = 0 ] \
+     && { [ -e "$_p/.sfw-cache" ] || [ -L "$_p/.sfw-cache" ]; }; then
+    if [ -L "$_p/.sfw-cache" ] || [ ! -d "$_p/.sfw-cache" ]; then
+      sfw_foreign="$_p/.sfw-cache is not a directory"
+    else
+      _b=$(find "$_p/.sfw-cache" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)
+      if [ -n "$_b" ]; then
+        sfw_foreign="$_b is $(stat -c '%U %a' "$_b" 2>/dev/null)"
+      elif [ -L "$_p/.sfw-cache/latest" ]; then
+        _t=$(readlink -f "$_p/.sfw-cache/latest" 2>/dev/null)
+        case "$_t" in "$_p/.sfw-cache"/*) ;; *) sfw_foreign="$_p/.sfw-cache/latest points outside the cache, at $_t" ;; esac
+      fi
+    fi
+  fi
+  # SFW_SKIP_UPDATE_CHECK=1 because that is how the npm and cargo wrappers run
+  # it. Without it, sfw run by a non-root account fails from one hour after the
+  # apply (it tries to rewrite its root-owned .sfw-cache/next-check), and this
+  # row reported a GAP for wrappers that were working.
+  if [ -n "$sfw_foreign" ]; then
+    row GAP FUNCTIONAL "Socket Firewall" "sfw's cache is not root-only ($sfw_foreign). sfw runs the cached binary without checking it again, for root too, so whoever can write there chooses what the npm and cargo wrappers run, including under sudo. Re-apply the role: it removes the cache and downloads the binary again"
+  elif [ -n "$sfw_cold" ]; then
+    row GAP FUNCTIONAL "Socket Firewall" "sfw has no firewall binary cached that this account can run ($sfw_cold), and only root can fetch it, so the npm and cargo wrappers run without sfw and warn - installs work, unfiltered. Re-apply the role, or run 'sudo sfw true' once"
+  elif sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
     row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
   else
-    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully"
+    row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully: $(printf '%s' "$sfw_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
   fi
 elif expected tool.sfw; then
   row GAP PRESENT "Socket Firewall" "sfw not installed — npm installs are not threat-intel filtered"

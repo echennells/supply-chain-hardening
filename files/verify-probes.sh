@@ -2326,6 +2326,27 @@ cargo_run_ok() {
   else RUSTUP_AUTO_INSTALL=0 "$@" >/dev/null 2>&1; fi
 }
 
+# The cargo wrapper's sfw_ready test, run for the caller: prints sfw's cache
+# directory when the caller is not root, sfw is the npm shim, nothing is
+# cached and the caller cannot fill the cache. The wrapper then runs cargo
+# WITHOUT sfw and says so, so it is not the same state as an sfw that cannot
+# execute. MEASURED in the role and the action with the cache removed: a
+# non-root `cargo fetch` downloaded its crate, exit 0, with the wrapper's
+# "sfw has no firewall binary cached" warning, while this row said every
+# cargo build was failing.
+sfw_cold_cache_for_caller() {
+  local s p
+  [ "$(id -u)" = 0 ] && return 1
+  s=$(command -v sfw 2>/dev/null) || return 1
+  s=$(readlink -f "$s" 2>/dev/null) || return 1
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 1
+  [ -e "$p/.sfw-cache/latest" ] && return 1
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 1
+  else [ -w "$p" ] && return 1; fi
+  printf '%s/.sfw-cache\n' "$p"
+}
+
 # `exec -a` is a bash builtin, so it must run INSIDE bash -c for `timeout` to
 # bound it. This is the invocation that actually dispatches into rustup AS
 # cargo - i.e. the one that could trigger a toolchain download - so it is the
@@ -2737,14 +2758,27 @@ else
   elif ! have sfw; then
     row GAP PRESENT "cargo threat-intel filtering" \
       "the wrapper routes cargo through sfw but sfw is not on PATH - crate downloads are unfiltered"
-  elif ! cargo_run_ok sfw --version && ! cargo_run_ok sfw --help; then
+  elif grep -q 'sfw_ready' "$cw" 2>/dev/null && scold=$(sfw_cold_cache_for_caller); then
+    # Before the run test below, which fails here too (sfw cannot create its
+    # cache) and would blame sfw for builds that are running. A wrapper from
+    # before sfw_ready existed does run sfw, and does fail, so it falls through.
+    row GAP FUNCTIONAL "cargo threat-intel filtering" \
+      "sfw has no firewall binary cached that this account can run (${scold}), and only root can fetch it, so the wrapper runs cargo WITHOUT sfw and warns - builds work, crate downloads are unfiltered. Re-apply the role or re-run the hardening step, or run 'sudo sfw true' once"
+  elif ! cargo_run_ok env SFW_SKIP_UPDATE_CHECK=1 sfw --version \
+       && ! cargo_run_ok env SFW_SKIP_UPDATE_CHECK=1 sfw --help; then
+    # SFW_SKIP_UPDATE_CHECK=1: the wrappers run sfw that way, so a non-root
+    # caller never writes its root-owned cache. Probing without it reported
+    # this GAP from one hour after hardening for wrappers that were working.
     row GAP FUNCTIONAL "cargo threat-intel filtering" \
       "sfw is present but CANNOT EXECUTE, and the wrapper prefixes cargo with it - EVERY cargo build in this job is failing. sfw downloads its firewall binary from GitHub on first use; this state usually means that fetch never succeeded"
   else
-    # Deliberately WEAK, no OK branch. MEASURED in the role: with no network
-    # sfw prints "fetch failed", exits 0, and the build proceeds UNFILTERED.
+    # Deliberately WEAK, no OK branch: sfw checks only what is DOWNLOADED, so
+    # a crate already in the local cache builds unchecked. An earlier note here
+    # said sfw fails open when it cannot reach Socket. MEASURED with sfw-free
+    # 1.16.0 (2026-11-19), it does not: with Socket's API refused or
+    # blackholed, `cargo fetch` exited 101 and the download never happened.
     row WEAK FUNCTIONAL "cargo threat-intel filtering" \
-      "wrapper routes cargo through sfw; note sfw FAILS OPEN - if it cannot reach Socket it warns, exits 0 and the build proceeds unfiltered"
+      "wrapper routes cargo through sfw; it checks only crates that are downloaded, so one already in the local cache builds unchecked, and an unreachable Socket API fails the build rather than letting it through"
   fi
 fi
 

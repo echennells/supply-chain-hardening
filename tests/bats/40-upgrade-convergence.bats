@@ -181,3 +181,211 @@ EOF
   fi
   [ -z "$dupes" ]
 }
+
+# --- the sfw cache an earlier role version left writable ----------------------
+#
+# v2.0.0 through 8281a6b chowned sfw's cache (.sfw-cache) to the deploying
+# user, and a host hardened by an earlier version was found with it at mode
+# 0777 and a user-owned `latest`. sfw runs .sfw-cache/latest without re-checking its
+# digest, for every caller including root, so either state lets that account
+# pick the binary root runs (VM#1, verified on Debian 13). The old chown also
+# used a fixed /usr/local/lib/node_modules path, so on a NodeSource host (npm
+# prefix /usr) it created a stray user-owned tree there instead. A re-apply
+# must undo all of it, and must leave a clean cache alone.
+
+sfw_cache_dir() {
+  local s
+  s=$(readlink -f "$(command -v sfw 2>/dev/null)" 2>/dev/null) || return 1
+  s=${s%/*}; s=${s%/*}
+  [ -f "$s/package.json" ] || return 1
+  echo "$s/.sfw-cache"
+}
+
+# The sfw tests below change the suite's real sfw: they plant a writable cache
+# or install sfw@2.0.4. A test that fails partway would leave that for every
+# later file in the container (42-*, 49-*), which then fail for the wrong
+# reason: on a tree without the 2.0.4 replacement, 42-*'s real-sfw cargo test
+# failed with 2.0.4's "EACCES ... next-check". sfw_snapshot saves the clean
+# state; teardown puts it back only when a test left it otherwise.
+sfw_snapshot() {
+  SFW_SNAP_CACHE=$1
+  SFW_SNAP_BIN=$(command -v sfw)
+  SFW_SNAP_PIN=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  cp -a "$SFW_SNAP_CACHE" "$BATS_TEST_TMPDIR/sfw-cache-saved"
+}
+
+teardown() {
+  [ -n "${SFW_SNAP_CACHE:-}" ] || return 0
+  local c=$SFW_SNAP_CACHE shim t
+  hash -r
+  shim=$(readlink -f "$(command -v sfw 2>/dev/null)" 2>/dev/null)
+  if [ -z "$shim" ] || ! grep -q "\"version\": \"$SFW_SNAP_PIN\"" "${shim%/dist/*}/package.json" 2>/dev/null; then
+    echo "# teardown: restoring sfw@$SFW_SNAP_PIN" >&3
+    rm -f "$SFW_SNAP_BIN.broken"
+    npm install -g --ignore-scripts "sfw@$SFW_SNAP_PIN" >/dev/null 2>&1
+    hash -r
+  fi
+  t=$(readlink -f "$c/latest" 2>/dev/null)
+  if [ ! -d "$c" ] || [ -L "$c" ] || [[ "$t" != "$c"/* ]] \
+     || [ -n "$(find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null)" ]; then
+    echo "# teardown: restoring the clean sfw cache" >&3
+    rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
+  fi
+  rm -f /tmp/sfwprior-bin
+  return 0
+}
+
+@test "upgrade: a re-apply resets an sfw cache an earlier version left writable, and removes the stray tree" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to seed root-owned state"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+  sfw_snapshot "$c"
+
+  # Seed both prior states on the real cache: 0777, and a `latest` owned by a
+  # non-root account that points at a binary of its own.
+  printf '#!/bin/sh\necho NOT-THE-REAL-SFW\n' > /tmp/sfwprior-bin
+  chmod 755 /tmp/sfwprior-bin; chown sfwprior /tmp/sfwprior-bin
+  chmod 0777 "$c"
+  ln -sfn /tmp/sfwprior-bin "$c/latest"; chown -h sfwprior "$c/latest"
+  # And the stray tree, on a host whose real cache is elsewhere.
+  stray=""
+  if [ "${c%/sfw/.sfw-cache}" != /usr/local/lib/node_modules ] && [ ! -e /usr/local/lib/node_modules/sfw ]; then
+    stray=/usr/local/lib/node_modules/sfw/.sfw-cache
+    mkdir -p "$stray"; chown sfwprior "$stray" "${stray%/.sfw-cache}"
+  fi
+
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false
+  echo "$output" | tail -25
+  rm -f /tmp/sfwprior-bin
+  [ "$status" -eq 0 ]
+
+  # Root-owned, writable by nobody else, and `latest` is the downloaded binary.
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  echo "non-root or group/other-writable: $output"
+  [ -z "$output" ]
+  [ "$(stat -c '%a' "$c")" = 755 ]
+  t=$(readlink -f "$c/latest")
+  [[ "$t" == "$c"/* ]]
+  [ "$(stat -c %u "$t")" = 0 ]
+  run sfw --version
+  [[ "$output" != *NOT-THE-REAL-SFW* ]]
+  if [ -n "$stray" ]; then
+    [ ! -e "${stray%/.sfw-cache}" ]
+  fi
+}
+
+@test "upgrade: a re-apply leaves a clean sfw cache alone (no re-download)" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  # A fresh next-check, so the apply-time warm makes no update check either.
+  date -u -d '+30 min' +%Y-%m-%dT%H:%M:%S.000Z | tr -d '\n' > "$c/next-check"
+  before=$(stat -c %i "$(readlink -f "$c/latest")")
+
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false
+  st=$(printf '%s\n' "$output" | grep -A1 'TASK \[.*Reset an sfw cache' | tail -n 1)
+  echo "reset task: $st"
+  [ "$status" -eq 0 ]
+  [ "$(stat -c %i "$(readlink -f "$c/latest")")" = "$before" ]
+  # The reset task ran and found nothing to change.
+  [[ "$st" == ok:* ]]
+}
+
+@test "upgrade: an sfw that root does not own is reported and left alone, and the play completes" {
+  # The reset refuses to judge or warm an sfw whose files another account
+  # could have written (root would run them). Its record used a regex
+  # back-reference written '\\1', which Ansible's templating turns into a
+  # literal backslash: the set_fact raised "'NoneType' object has no
+  # attribute 'group'" and failed the play (MEASURED with ansible-core 2.16).
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to change the owner of sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  pkg=${c%/.sfw-cache}
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+  before=$(stat -c %i "$(readlink -f "$c/latest")")
+
+  chown sfwprior "$pkg"
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false
+  chown root "$pkg"
+  echo "$output" | tail -25
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Socket Firewall — root resolves sfw to $pkg/"*"which root does not own"* ]]
+  # Neither reset nor re-downloaded.
+  [ "$(stat -c %i "$(readlink -f "$c/latest")")" = "$before" ]
+}
+
+# --- an sfw older than 2.0.6 ---------------------------------------------------
+#
+# The npm and cargo wrappers run sfw with SFW_SKIP_UPDATE_CHECK=1 so that a
+# non-root caller never writes its root-owned cache, and only sfw 2.0.6 reads
+# that variable (2.0.4's shouldCheckForUpdate() has no such test; there is no
+# 2.0.5). Role releases before v2.0.0 installed a floating `sfw@2`, which was
+# 2.0.4 until 2026-05-22, and the install used to run only when sfw was absent,
+# so those hosts kept it. MEASURED on NodeSource with this branch before the
+# fix: every non-root npm and cargo call failed an hour after the apply with
+# "[sfw] Failed to prepare firewall binary: EACCES ... next-check". A re-apply
+# must replace it, and when it cannot, move it aside and say so.
+
+@test "upgrade: an sfw older than 2.0.6 is replaced, or moved aside and reported when it cannot be" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to install a global sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  want=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  true_bin=/usr/bin/true; [ -x "$true_bin" ] || true_bin=/bin/true
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+
+  # The prior state: 2.0.4, installed and warmed by root. Installing it
+  # replaces the package directory, so put the warm cache back afterwards;
+  # that keeps this test to one binary download.
+  sfw_snapshot "$c"
+  npm install -g --ignore-scripts sfw@2.0.4 >/dev/null 2>&1 || skip "could not install sfw@2.0.4 (offline?)"
+  rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
+  shim=$(readlink -f "$(command -v sfw)")
+  run grep -c SFW_SKIP_UPDATE_CHECK "$shim"
+  [ "$output" = 0 ]
+
+  # 1) The replacement leaves it old (sfw_version pins 2.0.4 here): moved
+  #    aside, so the wrappers pass through instead of failing, and recorded.
+  sfw_path=$(command -v sfw)
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false -e sfw_version=2.0.4
+  echo "$output" | tail -25
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Socket Firewall — sfw 2.0.4 at $sfw_path predates 2.0.6"* ]]
+  [[ "$output" == *"sfw_version must be 2.0.6 or later"* ]]
+  hash -r
+  [ -z "$(command -v sfw)" ]
+  [ -e "$sfw_path.broken" ]
+
+  # 2) The default pin: sfw is reinstalled at sfw_version, warmed by root, and
+  #    a non-root caller runs it read-only once the update check is due.
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false
+  echo "$output" | tail -25
+  rm -f "$sfw_path.broken"
+  [ "$status" -eq 0 ]
+  hash -r
+  shim=$(readlink -f "$(command -v sfw)")
+  grep -q SFW_SKIP_UPDATE_CHECK "$shim"
+  grep -q "\"version\": \"$want\"" "${shim%/dist/*}/package.json"
+  [ -e "$c/latest" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
+  run su -s /bin/sh sfwprior -c "SFW_SKIP_UPDATE_CHECK=1 '$(command -v sfw)' $true_bin"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$c/next-check")" = "2026-01-01T00:00:00.000Z" ]
+}

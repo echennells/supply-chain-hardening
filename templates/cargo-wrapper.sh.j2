@@ -111,6 +111,28 @@ if [ -n "${SUPPLY_CHAIN_CARGO_WRAPPED:-}" ]; then
   exec "$REAL_CARGO" "$@"
 fi
 
+{% if cargo_socket_firewall | bool %}
+# sfw runs read-only, as in the npm wrapper (templates/npm-wrapper.sh.j2 has
+# the measurements): SFW_SKIP_UPDATE_CHECK=1 stops a non-root caller trying to
+# rewrite sfw's root-owned .sfw-cache/next-check, which sfw treats as fatal, so
+# every cargo build failed one hour after each apply. A cold cache that this
+# caller cannot fill (only root can, unless sfw is the caller's own) warns and
+# runs cargo unfiltered instead of failing.
+SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK
+sfw_ready() {
+  local s p
+  [ "$(id -u)" = 0 ] && return 0
+  s=$(readlink -f "$(command -v sfw)" 2>/dev/null) || return 0
+  p=${s%/*}; p=${p%/*}
+  [ -f "$p/package.json" ] || return 0
+  [ -e "$p/.sfw-cache/latest" ] && return 0
+  if [ -e "$p/.sfw-cache" ]; then [ -w "$p/.sfw-cache" ] && return 0
+  else [ -w "$p" ] && return 0; fi
+  echo "[supply-chain-hardening] warning: sfw has no firewall binary cached that this account can run ($p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-apply the role. cargo call not filtered through threat intel" >&2
+  return 1
+}
+{% endif %}
+
 # ARGV[0] MUST BE "cargo". rustup's ~/.cargo/bin/cargo is a symlink to the
 # rustup binary, which dispatches on the name it was invoked as; a backup named
 # cargo-real is rejected with "unknown proxy name: 'cargo-real'". On a
@@ -118,7 +140,7 @@ fi
 run_real() {
   local pfx=""
 {% if cargo_socket_firewall | bool %}
-  if [ "${SCH_NET:-0}" = "1" ] && command -v sfw >/dev/null 2>&1; then
+  if [ "${SCH_NET:-0}" = "1" ] && command -v sfw >/dev/null 2>&1 && sfw_ready; then
     pfx="sfw"
   fi
 {% endif %}
