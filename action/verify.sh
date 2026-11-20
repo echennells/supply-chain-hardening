@@ -1059,6 +1059,22 @@ else
 fi
 
 # ============================================================ go =============
+# >>> go discovery
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them, and
+# checks the directories against `discover go` in files/verify-probes.sh).
+# The shared body's discovery (ECH-189) runs AFTER this preamble, so a go that
+# is installed at /usr/local/go/bin but not on this PATH (a non-login PATH,
+# another user's) read "go not installed" here, while the shared go rows below
+# found it and graded it OK in the same table (MEASURED). Look in the same
+# fixed directories, in the same order, before the go rows below.
+if ! have go; then
+  for scv__gd in /usr/local/go/bin "$HOME/go/bin"; do
+    if [ -x "$scv__gd/go" ]; then PATH="$scv__gd:$PATH"; export PATH; break; fi
+  done
+fi
+# <<< go discovery
+
 if ! have go; then
   na_absent "go" "go not installed"
 elif ! requested go; then

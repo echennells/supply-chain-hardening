@@ -532,6 +532,16 @@ bundler_project() { # dir
   echo "$output" | grep "go checksum verification" | grep -q "does not override it"
 }
 
+@test "verify: a go off this PATH is found by the preamble too, so the table agrees with itself" {
+  [ -x /usr/local/go/bin/go ] || skip "no go at /usr/local/go/bin"
+  # The verifier's own non-login PATH, without /usr/local/go/bin. The shared go
+  # rows discover go there; the preamble's row used to say "go not installed".
+  run env -i HOME="$HOME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$VERIFY" --verbose
+  echo "$output" | grep -q "go checksum verification"
+  ! echo "$output" | grep -qE '^N/A +- +go +go not installed'
+  echo "$output" | grep -qE '^[A-Z/]+ +[A-Z-]+ +go module integrity'
+}
+
 @test "verify: GOTOOLCHAIN is reported - local is OK, an exported auto is a GAP" {
   command -v go >/dev/null 2>&1 || skip "go not installed"
   verify_from /tmp GOTOOLCHAIN=local

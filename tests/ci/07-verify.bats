@@ -1022,3 +1022,47 @@ npm_exclude_run() {
   npm_exclude_run '@types/*'
   [[ "$output" == *"WEAK   PARSED      npm age gate"*"exempts: @types/*"* ]]
 }
+
+@test "go discovery: both preambles look where the shared body looks, before their go rows" {
+  # The shared body's `discover go` runs after the preambles. Without the same
+  # lookup in each preamble, a go at /usr/local/go/bin off this PATH printed
+  # "go not installed" from the preamble and OK go rows from the shared body.
+  block() { sed -n '/^# >>> go discovery$/,/^# <<< go discovery$/p' "$1"; }
+  role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  probes="${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$role") <(block "$VERIFY_SH")
+  shared=$(sed -n 's/^discover go[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*|| true$/\1/p' "$probes")
+  mine=$(block "$VERIFY_SH" | sed -n 's/^[[:space:]]*for scv__gd in \(.*\); do$/\1/p')
+  [ -n "$shared" ] && [ "$shared" = "$mine" ]
+  # And the block sits before each preamble's own go rows (the last match: the
+  # block's own `if ! have go` matches too).
+  for f in "$role" "$VERIFY_SH"; do
+    [ "$(grep -n '^# <<< go discovery$' "$f" | cut -d: -f1)" -lt "$(grep -nE '^if (! )?have go; then$' "$f" | tail -1 | cut -d: -f1)" ]
+  done
+}
+
+@test "go discovery: a go off PATH is found by the preamble too, so the table agrees with itself" {
+  # A stub go in a directory the shared list names cannot be planted from here
+  # (/usr/local/go/bin needs root, $HOME/go/bin is under the test HOME), so use
+  # the second: HOME is the test's.
+  mkdir -p "$TEST_HOME/go/bin"
+  cat > "$TEST_HOME/go/bin/go" <<'GO'
+#!/bin/sh
+case "$1 $2" in
+  "env GOSUMDB") echo sum.golang.org ;;
+  "env GOTOOLCHAIN") echo local ;;
+  "env GOVERSION") echo go1.24.2 ;;
+  "env GOFLAGS") echo -mod=readonly ;;
+  "version "*) echo "go version go1.24.2 linux/amd64" ;;
+  env*) echo "" ;;
+  *) exit 0 ;;
+esac
+GO
+  chmod +x "$TEST_HOME/go/bin/go"
+  run env -i PATH="/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
+  [[ "$output" == *"go checksum verification"* ]]
+  # Not a substring test: "cargo not installed" contains "go not installed".
+  ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output"
+  grep -qE '^[A-Z/]+ +[A-Z-]+ +go settings persisted' <<<"$output"
+}
