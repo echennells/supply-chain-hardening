@@ -264,6 +264,13 @@
 # composer-real, so the wrapper survives (MEASURED, 2.8.8 -> 2.9.5 through the
 # wrapper). Re-apply anyway, so the version-tiered settings follow.
 
+# The three read-only probes below run whether or not composer_path_wrapper is
+# on: composer_path_wrapper=false has to find the wrapper an earlier apply left
+# and put composer-real back (the restore task at the end). Gating them on the
+# switch left the restore reading registers of skipped tasks, which have no rc
+# or stdout. MEASURED on 6c77f4e: a re-apply with composer_path_wrapper=false
+# failed the play there with "'dict object' has no attribute 'rc'", and the
+# wrapper stayed in place.
 - name: Find current composer path for wrapping
   ansible.builtin.shell:
     cmd: |
@@ -279,7 +286,6 @@
   changed_when: false
   check_mode: false
   failed_when: false
-  when: composer_path_wrapper | bool
 
 - name: Determine whether current composer binary is our wrapper or the real binary
   ansible.builtin.shell:
@@ -294,20 +300,16 @@
   changed_when: false
   check_mode: false
   when:
-    - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
 
 - name: Check whether a composer-real backup exists (from prior wrapper run)
   ansible.builtin.stat:
     path: "{{ composer_binary_path.stdout }}-real"
   register: composer_real_backup
   when:
-    - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
 
 - name: Rename real composer to composer-real (refresh backup if a re-install overwrote wrapper)
   # No gate on `not composer_real_backup.stat.exists`: if a re-install
@@ -319,10 +321,9 @@
     cmd: "mv {{ composer_binary_path.stdout }} {{ composer_binary_path.stdout }}-real"
   when:
     - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
-    - composer_binary_kind.stdout == 'is_real'
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
+    - composer_binary_kind.stdout | default('') == 'is_real'
   changed_when: true
 
 - name: Deploy composer wrapper at the discovered composer path
@@ -337,9 +338,8 @@
     composer_real_path: "{{ composer_binary_path.stdout }}-real"
   when:
     - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
 
 - name: Record skipped protection — wrapper --no-scripts is subcommand-gated (Composer <= 2.1)
   # MEASURED (composer 2.0.14 → 2.10.3): --no-scripts became an
@@ -362,16 +362,16 @@
       or composer_detected_version is version('2.2.0', '<')
 
 - name: Restore original composer binary when wrapper is disabled
+  # composer_path_wrapper=false: the documented way back (defaults/main.yml).
+  # Puts composer-real back at the path the wrapper held. The env-var layer
+  # (COMPOSER_SKIP_SCRIPTS) is left as it is.
   become: true
   ansible.builtin.command:
-    cmd: "mv {{ composer_binary_path.stdout }}-real {{ composer_binary_path.stdout }}"
+    argv: [mv, -f, "{{ composer_binary_path.stdout }}-real", "{{ composer_binary_path.stdout }}"]
   when:
     - not (composer_path_wrapper | bool)
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
-    - composer_binary_kind is defined
-    - composer_binary_kind.stdout == 'is_wrapper'
-    - composer_real_backup is defined
-    - composer_real_backup.stat.exists
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
+    - composer_binary_kind.stdout | default('') == 'is_wrapper'
+    - composer_real_backup.stat.exists | default(false)
   changed_when: true

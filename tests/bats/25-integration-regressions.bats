@@ -279,6 +279,63 @@ jvm_only_apply() { # $1 = PATH to use
   rm -rf "$t"
 }
 
+# ---- composer_path_wrapper=false: the documented way back ----
+#
+# defaults/main.yml: "Set this var to false to restore the real binary at the
+# wrap location on next apply (env-var layer remains)". MEASURED on 6c77f4e
+# (composer 2.11.2): that apply failed the play at "Restore original composer
+# binary when wrapper is disabled" with "'dict object' has no attribute 'rc'",
+# because the probes it reads were skipped whenever the wrapper was off, and the
+# wrapper stayed where it was.
+
+COMPOSER_UNWRAPPED=""
+composer_apply() { # extra ansible args
+  cd "$ROLE_DIR"
+  ansible-playbook site.yml --connection=local --limit localhost \
+    --tags composer -e podman_enabled=false -e verify_protections=false "$@" 2>&1
+}
+restore_composer_wrapper() {
+  [ -n "$COMPOSER_UNWRAPPED" ] || return 0
+  grep -q 'supply-chain-hardening' "$COMPOSER_UNWRAPPED" 2>/dev/null && return 0
+  echo "# teardown: wrapping composer again" >&3
+  composer_apply >/dev/null || true
+}
+
+@test "composer_path_wrapper=false: a re-apply puts the real composer back at the wrapped path, and true wraps it again" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "moves the root-owned composer wrapper"
+  w=$(command -v composer) || skip "composer not installed"
+  grep -q 'supply-chain-hardening' "$w" || skip "composer is not wrapped here"
+  [ -x "$w-real" ] || skip "no $w-real next to the wrapper"
+  real_sum=$(sha256sum < "$w-real")
+  COMPOSER_UNWRAPPED=$w
+
+  run composer_apply -e composer_path_wrapper=false
+  echo "$output" | grep -E 'fatal|FAILED|Restore original composer|PLAY RECAP' -A2 | head -20
+  [ "$status" -eq 0 ]
+  # The binary composer-real held is back at the path, and no wrapper is left.
+  [ ! -e "$w-real" ]
+  if grep -q 'supply-chain-hardening' "$w"; then echo "$w is still the wrapper"; return 1; fi
+  [ "$(sha256sum < "$w")" = "$real_sum" ]
+  run "$w" --version --no-ansi --no-plugins
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Composer"* ]]
+  # The env-var layer stays, as documented.
+  grep -q '^COMPOSER_SKIP_SCRIPTS=' /etc/environment
+  grep -q 'COMPOSER_SKIP_SCRIPTS=' /etc/profile.d/supply-chain-hardening.sh
+
+  # Again with the wrapper off: nothing left to restore, and the play passes.
+  run composer_apply -e composer_path_wrapper=false
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -A1 'TASK \[.*Restore original composer binary' | tail -n 1 | grep -q '^skipping:'
+
+  # Back on: wrapped again, around the same binary.
+  run composer_apply
+  [ "$status" -eq 0 ]
+  grep -q 'supply-chain-hardening' "$w"
+  [ "$(sha256sum < "$w-real")" = "$real_sum" ]
+}
+
 # ---- Per-user config files the role replaces whole (CMP 4.7) ----
 #
 # $CARGO_HOME/config.toml, ~/.m2/settings.xml and NuGet.Config are replaced,
@@ -520,6 +577,7 @@ teardown() {
   restore_uv
   restore_yarnrc
   restore_refresher
+  restore_composer_wrapper
 }
 
 UV_HIDDEN=""
