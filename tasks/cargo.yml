@@ -30,10 +30,15 @@
     mode: "0755"
 
 - name: Deploy hardened cargo config.toml
+  # Replaces the file whole. A config.toml this project did not write (a
+  # registry mirror, private registries, credential providers) stops the play
+  # in preflight unless accept_user_config_overwrite=true, and is backed up
+  # here first (tasks/preflight.yml, CMP 4.7).
   ansible.builtin.template:
     src: cargo-config.toml.j2
     dest: "{{ cargo_home }}/config.toml"
     mode: "0644"
+    backup: "{{ (cargo_home ~ '/config.toml') in (sch_user_cfg_backup | default([])) }}"
 
 - name: Deploy publish-age gate config at $CARGO_HOME/cooldown.toml
   # THE load-bearing cargo protection. Cargo runs build.rs at compile time

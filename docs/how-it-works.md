@@ -61,6 +61,8 @@ User-level configs override these **per-key**: a setting *present* in the user f
 
 **Pre-flight check protects pre-existing `/etc/*` files.** Before any system file is deployed, the role looks at `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf`, and `/etc/uv/uv.toml`. If any of those exist *without* the role's `Managed by ansible-supply-chain-security` marker — meaning a sysadmin, corporate config management, or distribution package put them there — the playbook fails loudly with the list of conflicting paths. This catches the worst-case scenario: silently clobbering a corporate `/etc/npmrc` with `registry=https://npm.internal.corp/` and reverting npm to the public registry (a dependency-confusion exposure). To accept the overwrite explicitly: `-e accept_etc_overwrite=true`.
 
+**The same check covers three per-user files the role replaces whole:** `$CARGO_HOME/config.toml`, `~/.m2/settings.xml` and NuGet's `NuGet.Config`. Each is where a registry mirror or private feed lives, next to its credentials. A file that carries neither project's marker and is not an earlier version of the role's own stops the play before anything is changed. dotnet's first-run `NuGet.Config`, which lists only nuget.org, does not. To replace them anyway: `-e accept_user_config_overwrite=true`, which backs each one up next to itself first.
+
 ## pip-to-uv redirect
 
 Wrapper scripts at `/usr/local/bin/pip` and `/usr/local/bin/pip3` (owned by root) redirect all pip commands through uv. This means uv's hardening (48-hour age gate, wheels-only enforcement) applies even when an agent or script calls `pip install` directly.

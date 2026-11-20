@@ -826,6 +826,58 @@ can_write() {
   return 1
 }
 
+# keep_user_copy <kind> <path> — call before REPLACING a per-user config file
+# whole (cargo config.toml, ~/.m2/settings.xml, NuGet.Config). Those files are
+# where a private registry or mirror and its credentials live, and the writers
+# below do not merge into them. MEASURED (8281a6b): the role replaced all three
+# with no copy and no message; this script did the same. The role now refuses
+# unless accept_user_config_overwrite=true (tasks/preflight.yml, CMP 4.7). This
+# script runs in CI jobs and keeps replacing, but it no longer does so
+# silently: a file this project did not write is copied next to itself first,
+# as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~ (the name ansible's backup uses), and
+# the replacement is a warning that names it. Recognition matches the role's
+# preflight: either project's marker, or what the role wrote before it had a
+# marker, counts as ours; dotnet's own first-run NuGet.Config (nuget.org and
+# nothing else; MEASURED on SDK 8.0.134 it opens with a UTF-8 BOM) is copied
+# without a warning.
+user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
+  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
+  case "$1" in
+    cargo)
+      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
+        && { echo ours; return 0; } ;;
+    maven)
+      grep -q '<id>central-https</id>' "$2" \
+        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
+        && { echo ours; return 0; } ;;
+    nuget)
+      grep -q 'key="signatureValidationMode" value="require"' "$2" \
+        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
+        && { echo ours; return 0; }
+      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+        echo stock; return 0
+      fi ;;
+  esac
+  echo foreign
+}
+keep_user_copy() {
+  local kind="$1" path="$2" cls bak
+  [[ -e "$path" ]] || return 0
+  cls=$(user_cfg_class "$kind" "$path")
+  [[ "$cls" == ours ]] && return 0
+  bak="${path}.$$.$(date +%Y-%m-%d@%H:%M:%S)~"
+  if ! cp -p "$path" "$bak"; then
+    err "$kind: could not copy $path to $bak before replacing it; refusing to replace a file this project did not write without a copy"
+    exit 1
+  fi
+  if [[ "$cls" == foreign ]]; then
+    warn "$kind: replaced $path, which this project did not write. Any registry mirror, private source or credentials in it no longer apply; the previous file is at $bak"
+  else
+    log "$kind: replaced dotnet's first-run $path (nuget.org only); copy at $bak"
+  fi
+}
+
 # require_privilege <tool> <target> — gate for wrapper deployment.
 #
 # Wrappers are the ONLY mechanism for deno's age gate, bun's --no-install,
@@ -2055,6 +2107,7 @@ harden_cargo() {
   local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   mkdir -p "$cargo_home"
 
+  keep_user_copy cargo "$cargo_home/config.toml"
   cat > "$cargo_home/config.toml" <<'EOF'
 # Managed by supply-chain-harden
 # Note: build.rs / proc-macro execution CANNOT be blocked by cargo config —
@@ -3113,6 +3166,7 @@ DENOWRAP
 harden_maven() {
   section "maven"
   mkdir -p "$HOME/.m2"
+  keep_user_copy maven "$HOME/.m2/settings.xml"
   cat > "$HOME/.m2/settings.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by supply-chain-harden action -->
@@ -3132,7 +3186,16 @@ harden_maven() {
        checksum (Maven's default is 'warn', which installs anyway). This covers
        Central-sourced artifacts; the role additionally routes ALL repos through
        Central (mirrorOf=*), which the action does not, to avoid breaking a
-       project's own HTTPS repositories. -->
+       project's own HTTPS repositories.
+       Maven keeps TWO repository lists, and the super POM declares 'central'
+       in both: <repositories> for dependencies, <pluginRepositories> for
+       plugins. Redefining it only under <repositories> left plugin jars, code
+       that runs inside the build, on 'warn'. MEASURED (maven 3.9.11, a plugin
+       jar served with a wrong .sha1): two checksum WARNINGs and BUILD SUCCESS,
+       while a dependency jar with a wrong .sha1 failed the build.
+       Both entries restore the super POM's <snapshots><enabled>false</enabled>
+       too: without it the redefinition turned snapshot lookups on Central back
+       on (MEASURED). The plugin entry keeps the super POM's updatePolicy=never. -->
   <profiles>
     <profile>
       <id>strict-checksums</id>
@@ -3141,9 +3204,17 @@ harden_maven() {
           <id>central</id>
           <url>https://repo.maven.apache.org/maven2</url>
           <releases><checksumPolicy>fail</checksumPolicy></releases>
-          <snapshots><checksumPolicy>fail</checksumPolicy></snapshots>
+          <snapshots><enabled>false</enabled></snapshots>
         </repository>
       </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases><updatePolicy>never</updatePolicy><checksumPolicy>fail</checksumPolicy></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
     </profile>
   </profiles>
   <activeProfiles>
@@ -3153,7 +3224,7 @@ harden_maven() {
 EOF
   HARDENED+=("maven")
   set_tool_version "maven" "$(detect_version maven "mvn --version")"
-  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central"
+  log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central, for dependencies and plugins"
   end_section
 }
 
@@ -3234,20 +3305,30 @@ val rejectHttp: (org.gradle.api.artifacts.repositories.ArtifactRepository) -> Un
     throw GradleException("supply-chain-harden: refusing HTTP repo: $url (use HTTPS)")
   }
 }
+// Refuse dynamic / changing version selectors (1.+, latest.release, -SNAPSHOT)
+// in EVERY configuration gradle resolves code from (CMP 4.6). Plugins resolve
+// into a SCRIPT classpath - a project's buildscript.configurations for its
+// plugins{} / buildscript{}, the settings script's for the same blocks in
+// settings.gradle - which allprojects{configurations} does not reach. MEASURED
+// (gradle 8.14.3 and 9.1.0): with project configurations only, a 1.+ plugin in
+// any of those four places resolved and its code RAN.
+// When this fires gradle reports "Resolution strategy disallows usage of
+// dynamic versions" (or "... of changing versions"); that refusal comes from
+// this file.
+val refuseDynamic: (org.gradle.api.artifacts.Configuration) -> Unit = { conf ->
+  conf.resolutionStrategy.failOnDynamicVersions()
+  conf.resolutionStrategy.failOnChangingVersions()
+}
 beforeSettings {
   pluginManagement.repositories.all { rejectHttp(this) }
   dependencyResolutionManagement.repositories.all { rejectHttp(this) }
+  buildscript.configurations.all { refuseDynamic(this) }
 }
 allprojects {
   repositories.all { rejectHttp(this) }
   buildscript.repositories.all { rejectHttp(this) }
-  configurations.all {
-    resolutionStrategy {
-      // Refuse dynamic / changing version selectors (1.+, latest.release).
-      failOnDynamicVersions()
-      failOnChangingVersions()
-    }
-  }
+  configurations.all { refuseDynamic(this) }
+  buildscript.configurations.all { refuseDynamic(this) }
 }
 EOF
   # Layer 2 of the fix above. Written AFTER the file exists so the value we
@@ -3255,7 +3336,7 @@ EOF
   write_env GRADLE_USER_HOME "$gradle_home"
   HARDENED+=("gradle")
   set_tool_version "gradle" "$(detect_version gradle "gradle --version")"
-  log "gradle: HTTPS-only repos enforced, dynamic versions blocked (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
+  log "gradle: HTTPS-only repos enforced, dynamic versions blocked for dependencies and plugin classpaths (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
   end_section
 }
 
@@ -3275,6 +3356,7 @@ harden_nuget() {
   # b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5).
   local nuget_home="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet"
   mkdir -p "$nuget_home"
+  keep_user_copy nuget "$nuget_home/NuGet.Config"
   cat > "$nuget_home/NuGet.Config" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Managed by supply-chain-harden action -->
@@ -3289,15 +3371,22 @@ harden_nuget() {
   <!-- nuget.org ROTATES this certificate. All three fingerprints must be listed or
        packages signed under a rotation we do not trust fail with NU3034 and the
        install is refused — signatureValidationMode=require makes that fatal.
-       Source: https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/
-       Re-check on every cert rotation announcement; a stale list bricks dotnet restore. -->
+       SOURCE OF TRUTH: nuget.org's repository-signatures index,
+         https://api.nuget.org/v3-index/repository-signatures/5.0.0/index.json
+       These three SHA-256 fingerprints match the three it lists, exactly (checked
+       2026-11-19); the validity windows below are its notBefore / notAfter.
+       THE CURRENT CERTIFICATE EXPIRES 2027-05-18. nuget.org has to rotate before
+       then: add the new fingerprint as soon as that index lists it, or every
+       package repository-signed after the rotation is refused.
+       2024 rotation notice:
+         https://devblogs.microsoft.com/dotnet/the-nuget-org-repository-signing-certificate-will-be-updated-as-soon-as-april-8th-2024/ -->
   <trustedSigners>
     <repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">
-      <!-- current; deployed 2024-04-08 -->
+      <!-- current: valid 2024-02-23 to 2027-05-18 -->
       <certificate fingerprint="1F4B311D9ACC115C8DC8018B5A49E00FCE6DA8E2855F9F014CA6F34570BC482D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
-      <!-- previous; renewed 2021-03-15, expired 2024-05-15 -->
+      <!-- previous: valid 2021-02-16 to 2024-05-15 -->
       <certificate fingerprint="5A2901D6ADA3D18260B9C6DFE2133C95D74B9EEF6AE0E5DC334C8454D1477DF4" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
-      <!-- intermediate/original; still required for older packages -->
+      <!-- original (not an intermediate): valid 2018-04-10 to 2021-04-14; kept for packages whose repository signature was made with it -->
       <certificate fingerprint="0E5F38F57DC1BCC806D8494F4F90FBCEDD988B46760709CBEEC6F4219AA6157D" hashAlgorithm="SHA256" allowUntrustedRoot="false" />
     </repository>
   </trustedSigners>

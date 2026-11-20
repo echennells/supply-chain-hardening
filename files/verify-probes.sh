@@ -4306,7 +4306,7 @@ fi
 if have mvn && ! requested maven; then
   row "N/A" - "maven strict checksums" "maven installed but not in the requested ecosystems"
 elif have mvn; then
-  # ---- row 3: strict checksums (role surface; the action omits them) ------
+  # ---- row 3: strict checksums (both surfaces write them) -----------------
   # Requires the maven preamble from the "maven settings honored" probe.
   # Which profile ids actually carry <checksumPolicy>fail. A file-level grep
   # would green-light a policy sitting in a profile that never activates.
@@ -4322,6 +4322,23 @@ elif have mvn; then
             if (k > 0) { r = substr(m, k + 4); e = index(r, "</id>"); if (e > 0) print substr(r, 1, e - 1) }
           }
         } }'
+  }
+  # Does any <pluginRepository> in this text carry <checksumPolicy>fail? Maven
+  # keeps TWO repository lists and the super POM declares central in both, so a
+  # policy under <repositories> alone leaves plugin jars - code that runs inside
+  # the build - on the default warn. MEASURED (maven 3.9.11): a plugin jar
+  # served under a wrong .sha1 was installed with two WARNINGs while a
+  # dependency jar under the same settings failed the build. $1 = file, or - for stdin
+  mvn_plugin_fail() {
+    if [ "${1:-}" = - ]; then cat; else [ -f "${1:-}" ] && cat "$1"; fi 2>/dev/null \
+      | tr -d '\r\n\t ' | awk '
+      { s = $0
+        while ((i = index(s, "</pluginRepository>")) > 0) {
+          m = substr(s, 1, i - 1); s = substr(s, i + 19)
+          if ((j = index(m, "<pluginRepository>")) > 0) m = substr(m, j)
+          if (index(m, "<checksumPolicy>fail") > 0) found = 1
+        } }
+      END { exit(found ? 0 : 1) }'
   }
 
   if [ "${MVN_STARTED:-0}" -eq 0 ]; then
@@ -4368,18 +4385,24 @@ elif have mvn; then
         fi
       done
     fi
+    mvn_plug_note=""
+    mvn_plugin_fail "${MVN_SETTINGS}" \
+      || mvn_plug_note="; that file also sets no <checksumPolicy>fail on any <pluginRepository>, so plugin jars - code that runs inside the build - keep maven's default warn"
     if [ "$erc" -ne 0 ]; then
       row WEAK PRESENT "maven strict checksums" \
-        "<checksumPolicy>fail is in the file maven reads and maven parsed that file, but maven-help-plugin could not run offline (exit $erc), so nothing reports the EFFECTIVE policy, and no read-only probe can stage a checksum mismatch"
+        "<checksumPolicy>fail is in the file maven reads and maven parsed that file, but maven-help-plugin could not run offline (exit $erc), so nothing reports the EFFECTIVE policy, and no read-only probe can stage a checksum mismatch${mvn_plug_note}"
     elif [ "$mvn_eff_fail" -eq 0 ]; then
       row GAP FUNCTIONAL "maven strict checksums" \
         "maven's own merged settings model, read back with help:effective-settings, carries no <checksumPolicy>fail even though ${mvn_disp:-the file maven reads} declares one - the policy did not survive maven's settings merge"
     elif [ -z "$mvn_prof_fail" ]; then
       row WEAK PRESENT "maven strict checksums" \
         "maven reports checksumPolicy=fail out of its merged settings model, but this probe could not tell which profile carries it, so it could not confirm that profile is active"
+    elif [ -n "$mvn_prof_active" ] && ! printf '%s\n' "$eff" | mvn_plugin_fail -; then
+      row WEAK PARSED "maven strict checksums" \
+        "DEPENDENCIES ONLY: maven reports checksumPolicy=fail out of its merged settings model and help:active-profiles names '$(mvn_safe "$mvn_prof_active")' active, but no <pluginRepository> in that model carries it - plugin jars, code that runs inside the build, keep maven's default warn and are installed despite a checksum mismatch"
     elif [ -n "$mvn_prof_active" ]; then
       row OK PARSED "maven strict checksums" \
-        "maven reports checksumPolicy=fail out of its own merged settings model and help:active-profiles names '$(mvn_safe "$mvn_prof_active")' active - SCOPE: this binds only the repository ids that profile declares (central); a repository a project declares itself keeps maven's default warn even after being mirrored, and nothing here observes a checksum mismatch aborting a build"
+        "maven reports checksumPolicy=fail for repositories AND plugin repositories out of its own merged settings model, and help:active-profiles names '$(mvn_safe "$mvn_prof_active")' active - SCOPE: this binds only the repository ids that profile declares (central). A repository a project declares itself keeps maven's default warn, and under a catch-all mirror (mirrorOf=*) maven merges it with central and keeps the WEAKER policy, so one extra project repository puts central back on warn (MEASURED, maven 3.9.11). Nothing here observes a checksum mismatch aborting a build"
     else
       row WEAK PRESENT "maven strict checksums" \
         "maven reports a checksumPolicy=fail in its merged settings, but help:effective-settings prints INACTIVE profiles too and maven did not confirm profile(s) '$(mvn_safe "$mvn_prof_fail")' active (help:active-profiles exit $arc), so the policy may bind nothing"
@@ -4396,9 +4419,11 @@ fi
 # Gradle's hardening is an init SCRIPT, not a key/value file: the role writes
 # $GRADLE_USER_HOME/init.d/supply-chain-security.gradle (Groovy) and harden.sh
 # writes $GRADLE_USER_HOME/init.gradle.kts (Kotlin). Both refuse an http://
-# repository and both call failOnDynamicVersions()/failOnChangingVersions();
-# the role's script guards those two calls with respondsTo(), the action's
-# does not (tasks/gradle.yml, action/harden.sh harden_gradle).
+# repository in all four repository containers (ECH-171), and both call
+# failOnDynamicVersions()/failOnChangingVersions() on project configurations AND
+# on the buildscript / settings script classpaths that plugins resolve into
+# (CMP 4.6); the role's script guards those calls with respondsTo(), the
+# action's does not (tasks/gradle.yml, action/harden.sh harden_gradle).
 #
 # Three things follow, and they shape the whole probe.
 #
@@ -4551,6 +4576,14 @@ try { configurations.scDyn.resolve() } catch (Throwable t) { sc.dyn = 'REFUSED';
 // BEHAVIOURAL half, PLUGIN CLASSPATH: the same dynamic selector on
 // buildscript.configurations.classpath -- a dynamic plugin version is remote
 // code chosen at build time. Its own successful resolve is its fixture control.
+// Gradle 9 may not run this half. With an init script that configures
+// buildscript.configurations (both writers do, since CMP 4.6), 9.1.0 refuses
+// the mutation: "Cannot mutate the dependencies of configuration 'classpath'
+// after the configuration was resolved"; creating a fresh configuration in
+// the container is refused too. With the 8281a6b scripts, which leave the
+// script classpath alone, 9.1.0 allowed it and RESOLVED 1.+. MEASURED both.
+// That throw is NOT a refusal of the dynamic selector; the row tells the two
+// apart by the message and falls back to the flag readback.
 sc.bsdyn = 'RESOLVED'; sc.bsdynmsg = ''
 try {
     buildscript.repositories { maven { url = uri(new File(rootDir, 'repo').toURI().toString()) } }
@@ -4728,7 +4761,14 @@ fi
 # The SAME selector is also resolved on buildscript.configurations.classpath:
 # allprojects{configurations.all} does not reach the PLUGIN classpath, and a
 # dynamic plugin version is remote code chosen at build time. MEASURED with
-# harden.sh's script: project REFUSED, plugin classpath RESOLVED -> WEAK.
+# both writers' scripts at 8281a6b on gradle 8.14.3: project REFUSED, plugin
+# classpath RESOLVED -> WEAK (gradle 9.1.0 the same). With the current
+# scripts gradle 9.1.0 refuses that in-process resolve as a mutation of an
+# already-resolved classpath, so there the plugin half is the classpath's own
+# failingOnDynamicVersions readback - PARSED, and leaning on the project half
+# having just shown this gradle enforces the same flag. The real refusal on
+# gradle 9 (plugins{}, buildscript{}, settings) was measured outside the
+# verifier: "Resolution strategy disallows usage of dynamic versions".
 #
 # --- shared gradle probe machinery (this identical block appears in both -----
 # --- gradle sections; redefining the functions is harmless, and -------------
@@ -4810,8 +4850,13 @@ try { repositories { ivy { url = uri('http://127.0.0.1:9/sc-ivy-http') } } }
 catch (Throwable t) { sc.ivy = 'BLOCKED' }
 // Bait #5: buildscript.repositories -- the PLUGIN CLASSPATH container, where
 // gradle fetches jars it then EXECUTES at configuration time. A different
-// container from project.repositories; neither writer hooked it before ECH-171
-// (MEASURED ADDED); both now do.
+# Both writers call failOnDynamicVersions() and failOnChangingVersions() on
+# project configurations and on the buildscript / settings script classpaths:
+# action/harden.sh (harden_gradle) unconditionally, and tasks/gradle.yml behind
+# respondsTo(), so an older gradle skips them instead of failing every build.
+# (This comment used to call it CI-only: the role's script once deployed no
+# resolutionStrategy at all.) Gradle added both methods in 6.1 (@since 6.1 in
+# ResolutionStrategy.java; absent from the 6.0 source).
 sc.bs = 'ADDED'
 try { buildscript { repositories { maven { url = uri('http://127.0.0.1:9/sc-bs-http') } } } }
 catch (Throwable t) { sc.bs = 'BLOCKED' }
@@ -4845,6 +4890,14 @@ try { configurations.scDyn.resolve() } catch (Throwable t) { sc.dyn = 'REFUSED';
 // BEHAVIOURAL half, PLUGIN CLASSPATH: the same dynamic selector on
 // buildscript.configurations.classpath -- a dynamic plugin version is remote
 // code chosen at build time. Its own successful resolve is its fixture control.
+// Gradle 9 may not run this half. With an init script that configures
+// buildscript.configurations (both writers do, since CMP 4.6), 9.1.0 refuses
+// the mutation: "Cannot mutate the dependencies of configuration 'classpath'
+// after the configuration was resolved"; creating a fresh configuration in
+// the container is refused too. With the 8281a6b scripts, which leave the
+// script classpath alone, 9.1.0 allowed it and RESOLVED 1.+. MEASURED both.
+// That throw is NOT a refusal of the dynamic selector; the row tells the two
+// apart by the message and falls back to the flag readback.
 sc.bsdyn = 'RESOLVED'; sc.bsdynmsg = ''
 try {
     buildscript.repositories { maven { url = uri(new File(rootDir, 'repo').toURI().toString()) } }
@@ -4972,7 +5025,7 @@ elif have gradle; then
   gbsflag=$(gradle_field SCP_BSDYNFLAG)
   if [ -z "$gend" ]; then
     if printf '%s\n' "$GRADLE_OUT" | grep -q 'Initialization script'; then
-      row GAP FUNCTIONAL "gradle dynamic-version refusal" "an init script fails to evaluate on gradle $gver, so it enforces nothing and every gradle build here fails. failOnDynamicVersions()/failOnChangingVersions() need gradle >= 6.0 and NEITHER writer tiers on it: on older gradle the METHOD IS MISSING and the build dies, rather than the key lapsing quietly"
+      row GAP FUNCTIONAL "gradle dynamic-version refusal" "an init script fails to evaluate on gradle $gver, so it enforces nothing and every gradle build here fails. failOnDynamicVersions()/failOnChangingVersions() need gradle >= 6.1; the role guards each call with respondsTo() but harden.sh's Kotlin script calls them directly, so on older gradle the METHOD IS MISSING and the build dies, rather than the key lapsing quietly"
     elif printf '%s\n' "$GRADLE_OUT" | grep -qE 'JAVA_HOME|Could not determine java|Unsupported class file'; then
       row WEAK PRESENT "gradle dynamic-version refusal" "not observed - gradle $gver is on PATH but cannot start (no usable JVM): $(gradle_san "$gerr")"
     elif [ "$GRADLE_RC" = "124" ]; then
@@ -4991,6 +5044,14 @@ elif have gradle; then
       row WEAK FUNCTIONAL "gradle dynamic-version refusal" "dynamic versions ARE refused here, but no init script of ours was observed EXECUTING in this run (loaded: $(gradle_san "${ginit:-<none>}"); our http:// refusal message was not seen) - the refusal is not attributable to this project$ghome"
     elif [ "$gbsdyn" != "REFUSED" ]; then
       row WEAK FUNCTIONAL "gradle dynamic-version refusal" "PROJECT CONFIGURATIONS ONLY: gradle $gver refused com.example:probe:1.+ (failingOnDynamicVersions=$gdflag), but RESOLVED the same selector on buildscript.configurations.classpath (failingOnDynamicVersions=$gbsflag) - a dynamic PLUGIN version still resolves and executes$ghome"
+    elif ! printf '%s\n' "$(gradle_field SCP_BSDYNMSG)" | grep -qi 'dynamic version'; then
+      # The plugin-classpath resolve threw for another reason - gradle 9.1.0
+      # refuses to mutate a classpath our hook has configured. Not a refusal.
+      if [ "$gbsflag" = "true" ]; then
+        row OK PARSED "gradle dynamic-version refusal" "gradle $gver refused com.example:probe:1.+ on project configurations (a real resolve; its STATIC coordinate resolved in the same run), and reports failingOnDynamicVersions=true on buildscript.configurations.classpath. The plugin half is a READBACK: this gradle would not let the probe resolve the plugin classpath in-process ($(gradle_san "$(gradle_field SCP_BSDYNMSG)")); only our init scripts were loaded$ghome"
+      else
+        row WEAK PARSED "gradle dynamic-version refusal" "PROJECT CONFIGURATIONS ONLY: gradle $gver refused com.example:probe:1.+ on project configurations, but reports failingOnDynamicVersions=$gbsflag on buildscript.configurations.classpath - a dynamic PLUGIN version is not refused (readback; this gradle would not let the probe resolve the plugin classpath in-process)$ghome"
+      fi
     else
       row OK FUNCTIONAL "gradle dynamic-version refusal" "gradle $gver refused com.example:probe:1.+ from a local repo that HAS 1.0 (its STATIC coordinate resolved in the same run), on project configurations AND on the buildscript classpath; only our init scripts were loaded. failingOnChangingVersions=$(gradle_field SCP_CHGFLAG) is a READBACK only - changing versions were not exercised$ghome"
     fi
@@ -5392,9 +5453,11 @@ NGEOF
   # the merged trustedSigners section but NOT certificate fingerprints
   # (MEASURED: entries print as `\trepository name="..." serviceIndex="..."`,
   # the <certificate> children are not printed at all), so a present entry can
-  # only ever be WEAK.  (MEASURED: the fingerprint pinned by action/harden.sh,
-  # 0E5F38F5..., does not match what nuget.org counter-signs with today,
-  # 5A2901D6..., and restores fail NU3034 with it as the only pin.)
+  # only ever be WEAK.  (MEASURED back when action/harden.sh pinned only the
+  # 2018 certificate, 0E5F38F5...: packages repository-signed with a later one,
+  # 5A2901D6..., failed NU3034 with that as the only pin.  Both writers now pin
+  # all three certificates nuget.org's repository-signatures index lists; the
+  # current one expires 2027-05-18 — see tasks/nuget.yml.)
   if [ "$nsigstate" != "enforcing" ]; then
     row "N/A" - "nuget trusted signers" \
       "signature validation is not proven to be enforcing on this host; trusted signers cannot change that outcome"

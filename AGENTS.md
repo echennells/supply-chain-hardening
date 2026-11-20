@@ -61,6 +61,9 @@ supply-chain-verify
 - If the play stops on an existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or
   `/etc/uv/uv.toml`, don't override it yourself. It may be a corporate registry setting.
   Show it to the user, and pass `-e accept_etc_overwrite=true` only if they agree.
+- The same goes for a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or
+  `~/.nuget/NuGet/NuGet.Config` the role did not write: show it to the user, and pass
+  `-e accept_user_config_overwrite=true` only if they agree.
 - On agent hosts and CI images, add `-e verify_fail_on_gap=true` so a gap fails the play.
 - If Ansible stops with "could not initialize the preferred locale", run it with
   `LC_ALL=C.UTF-8`. Over SSH the client's locale is often forwarded and missing on the
