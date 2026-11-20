@@ -384,6 +384,97 @@ restore_uv() {
   done
 }
 
+# Did this task report `changed` on any of its result lines? (Same parse as above.)
+task_changed() { # task_changed <output> <task name substring>
+  echo "$1" | awk -v pat="$2" '
+    /^TASK \[/ { inblk = index($0, pat) > 0; next }
+    inblk && /^changed:/ { found = 1 }
+    END { exit !found }'
+}
+
+@test "tool pins: a zizmor / uv-secure / pip-audit that uv did not install is left alone, not reported as a failed install" {
+  # MEASURED (review of the version probes): with a zizmor from pipx or
+  # `pip install --user` in ~/.local/bin, `uv tool list` does not show it, so
+  # the probe said "not at the pin" on every apply, and `uv tool install`
+  # failed with "Executable already exists: zizmor (use --force to overwrite)".
+  # Every summary then said zizmor's install failed, although zizmor runs.
+  # `creates:` had skipped quietly. UV_TOOL_DIR (empty, so `uv tool list` shows
+  # nothing) and UV_TOOL_BIN_DIR (holding the copies) stage that host without
+  # touching the image's own uv tools, and offline: the fixed role never runs
+  # the install here.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  local d t
+  d=$(mktemp -d /tmp/sch-foreign-uv.XXXXXX)
+  mkdir -p "$d/tools" "$d/bin"
+  for t in zizmor uv-secure pip-audit; do
+    printf '#!/bin/sh\necho "%s from pip --user"\n' "$t" > "$d/bin/$t"
+    chmod 755 "$d/bin/$t"
+  done
+  cd "$ROLE_DIR"
+  run env UV_TOOL_DIR="$d/tools" UV_TOOL_BIN_DIR="$d/bin" \
+    ansible-playbook site.yml --connection=local --limit localhost \
+    --tags github,uv -e podman_enabled=false -e verify_protections=false
+  local out="$output" rc="$status"
+  local intact=yes
+  for t in zizmor uv-secure pip-audit; do
+    [ "$("$d/bin/$t")" = "$t from pip --user" ] || intact=no
+  done
+  rm -rf "$d"
+  echo "$out" | grep -E 'optional audit tool|not installed by `uv tool`|Executable already exists' | head -10
+  [ "$rc" -eq 0 ]
+  [ "$intact" = yes ]
+  if echo "$out" | grep -qE '(zizmor|uv-secure / pip-audit) \(optional audit tools?[^)]*\) — install failed'; then
+    echo "the summary reports a failed install of a tool that is installed and runs" >&2
+    false
+  fi
+  # Not `! task_changed`: bash's errexit ignores a negated command, so it could not fail the test.
+  local task
+  for task in 'Install zizmor' 'Install uv-managed tools'; do
+    if task_changed "$out" "$task"; then
+      echo "$task installed over a copy uv does not manage" >&2
+      false
+    fi
+  done
+  # Leaving it alone is said, not silent.
+  echo "$out" | grep -q "$d/bin/zizmor was not installed by \`uv tool\`"
+  echo "$out" | grep -q "$d/bin/pip-audit was not installed by \`uv tool\`"
+}
+
+@test "tool pins: lockfile-lint's probe reads root's global prefix, not another copy earlier on the caller's PATH" {
+  # MEASURED (review of the version probes): the probe read whichever
+  # lockfile-lint `command -v` found, but the install writes root's global
+  # prefix. With another lockfile-lint at another version earlier on PATH (an
+  # nvm/fnm global; a local connection inherits the caller's PATH), the probe
+  # never matched the pin and every apply reinstalled the system copy:
+  # changed=1 on every re-apply.
+  [ -z "${SKIP_SLOW:-}" ] || skip "SKIP_SLOW set"
+  command -v npm >/dev/null 2>&1 || skip "npm not installed"
+  local pin sysroot
+  pin=$(sed -nE 's/^lockfile_lint_version: *"([^"]+)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  if [ "$(id -u)" -eq 0 ]; then sysroot=$(npm root -g 2>/dev/null); else sysroot=$(sudo -n npm root -g 2>/dev/null); fi
+  grep -qE "\"version\": *\"$pin\"" "$sysroot/lockfile-lint/package.json" 2>/dev/null \
+    || skip "root's global lockfile-lint is not at the pin $pin, so a reinstall would be correct"
+  local d
+  d=$(mktemp -d /tmp/sch-userpfx.XXXXXX)
+  mkdir -p "$d/lib/node_modules/lockfile-lint/bin" "$d/bin"
+  printf '{\n  "name": "lockfile-lint",\n  "version": "4.14.1"\n}\n' > "$d/lib/node_modules/lockfile-lint/package.json"
+  printf '#!/bin/sh\necho 4.14.1\n' > "$d/lib/node_modules/lockfile-lint/bin/lockfile-lint.js"
+  chmod 755 "$d/lib/node_modules/lockfile-lint/bin/lockfile-lint.js"
+  ln -s ../lib/node_modules/lockfile-lint/bin/lockfile-lint.js "$d/bin/lockfile-lint"
+  cd "$ROLE_DIR"
+  run env PATH="$d/bin:$PATH" ansible-playbook site.yml --connection=local --limit localhost \
+    --tags npm -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false
+  local out="$output" rc="$status"
+  rm -rf "$d"
+  echo "$out" | grep -A2 'lockfile-lint' | grep -E '^(TASK|ok|changed|skipping)' | head -12
+  [ "$rc" -eq 0 ]
+  if task_changed "$out" 'Install lockfile-lint globally'; then
+    echo "reinstalled root's lockfile-lint $pin because another copy came first on PATH" >&2
+    false
+  fi
+}
+
 # ---- The end-of-run summary ----
 #
 # MEASURED on every stock VM: the "NOT applied" summary left out npm < 11.10

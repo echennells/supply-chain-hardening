@@ -57,7 +57,7 @@ Pinned tool versions (`npq_version`, `sfw_version`, `zizmor_version`,
 
 ## Refreshing auditing tools
 
-The role installs auditing tools (`govulncheck`, `pip-audit`, `uv-secure`, `zizmor`, `pinact`, `lockfile-lint`, and `cargo-audit` when opted in). Nothing in the role runs them; they are there for you to run. A re-apply reinstalls one only when it is missing or its installed version differs from its pin in `defaults/main.yml`, so bumping a pin takes effect on the next apply (the opt-in cargo audit tools only check that the binary exists). After a toolchain upgrade (new Go, new Rust), force a rebuild:
+The role installs auditing tools (`govulncheck`, `pip-audit`, `uv-secure`, `zizmor`, `pinact`, `lockfile-lint`, and `cargo-audit` when opted in). Nothing in the role runs them; they are there for you to run. A re-apply reinstalls one only when it is missing or its installed version differs from its pin in `defaults/main.yml`, so bumping a pin takes effect on the next apply (the opt-in cargo audit tools only check that the binary exists). "Differs" includes newer: a `uv tool upgrade zizmor`, `go install ...@latest` or `npm i -g lockfile-lint@latest` is put back to the pin on the next apply. The version read is the copy the install would replace (uv's own tool list, the binary in Go's install directory, `lockfile-lint` under root's `npm root -g`). A `zizmor`, `uv-secure` or `pip-audit` that uv did not install (pipx, `pip install --user`) in uv's bin directory is left as it is, and the apply prints a note saying so. After a toolchain upgrade (new Go, new Rust), force a rebuild:
 
 ```bash
 ansible-playbook site.yml -e refresh_tools=true

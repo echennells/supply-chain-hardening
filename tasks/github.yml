@@ -21,17 +21,44 @@
   check_mode: false
   failed_when: false
 
-- name: Detect the installed zizmor version (reinstall when the pin moves)
+- name: Detect the installed zizmor (uv-managed version, or a copy uv does not manage)
   # `creates:` checked only that a binary existed, so bumping zizmor_version
   # never reinstalled anything unless refresh_tools was set. `uv tool list`
   # prints "<name> v<version>" per tool (MEASURED uv 0.13.9), and
-  # `uv tool install name==<other>` replaces the installed version.
-  ansible.builtin.command: "{{ uv_for_github.stdout }} tool list"
+  # `uv tool install name==<other>` replaces the version uv installed.
+  # It does NOT replace an executable it did not install: a zizmor from pipx or
+  # `pip install --user` in uv's bin dir makes it fail with "Executable already
+  # exists: zizmor (use `--force` to overwrite)", rc=2 (MEASURED uv 0.13.9). So
+  # the probe looks where the install writes (`uv tool dir --bin`, which honours
+  # UV_TOOL_BIN_DIR and XDG_BIN_HOME) and reports such a copy as "foreign",
+  # which the install leaves alone, as `creates:` did. refresh_tools leaves it
+  # alone too: `--force` would overwrite a tool the user installed themselves.
+  ansible.builtin.shell:
+    cmd: |
+      uv='{{ uv_for_github.stdout }}'
+      bin=$("$uv" tool dir --bin 2>/dev/null) || bin="$HOME/.local/bin"
+      ver=$("$uv" tool list 2>/dev/null | awk '$1 == "zizmor" { sub(/^v/, "", $2); print $2; exit }')
+      if [ -n "$ver" ]; then
+        echo "uv $ver"
+      elif [ -e "$bin/zizmor" ] || [ -L "$bin/zizmor" ]; then
+        echo "foreign $bin/zizmor"
+      fi
+    executable: /bin/bash
   register: zizmor_installed
   changed_when: false
   check_mode: false
   failed_when: false
   when: uv_for_github.rc == 0
+
+- name: Note an existing zizmor that uv does not manage (left in place)
+  ansible.builtin.debug:
+    msg: >-
+      {{ zizmor_installed.stdout | trim | regex_replace('^foreign ', '') }} was not
+      installed by `uv tool`, so the role leaves it as it is and does not install
+      zizmor {{ zizmor_version }} over it.
+  when:
+    - zizmor_installed.stdout is defined
+    - zizmor_installed.stdout is match('foreign ')
 
 - name: Install zizmor (GitHub Actions workflow auditor)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
@@ -47,7 +74,8 @@
     cmd: "{{ uv_for_github.stdout }} tool install zizmor=={{ zizmor_version }}"
   when:
     - uv_for_github.rc == 0
-    - refresh_tools | bool or ('zizmor v' ~ zizmor_version) not in (zizmor_installed.stdout_lines | default([]))
+    - zizmor_installed.stdout | default('') is not match('foreign ')
+    - refresh_tools | bool or (zizmor_installed.stdout | default('') | trim) != ('uv ' ~ zizmor_version)
   # A failed install changed nothing, so it must not report `changed`: with
   # failed_when: false and no changed_when, a persistently failing install broke
   # idempotency on every re-apply.

@@ -383,8 +383,10 @@ socket_firewall_install: true
 # reinstalls on the next apply; the opt-in cargo audit tools still only check
 # that the binary exists). Set to true via CLI —
 # `ansible-playbook site.yml -e refresh_tools=true` — to re-install everything
-# regardless. Useful after a toolchain upgrade (Go, Rust, etc.) where existing
-# binaries are valid but built against an older compiler.
+# regardless (except a zizmor / uv-secure / pip-audit that uv did not install,
+# which is always left alone: `uv tool install` would need --force). Useful
+# after a toolchain upgrade (Go, Rust, etc.) where existing binaries are valid
+# but built against an older compiler.
 refresh_tools: false
 
 # npm PATH wrapper (default on; the agent-relevant protection layer)

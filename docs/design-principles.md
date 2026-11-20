@@ -643,9 +643,17 @@ installs were guarded by `creates:` (or `which`), which checks only that a
 binary exists, so a bumped pin never reached a host that already had the
 tool. The guards now compare the installed version with the pin
 (`go version -m`, `uv tool list`, the package's own `package.json`).
+The first version of those probes read the wrong copy: lockfile-lint's
+followed the caller's `PATH` while the install writes root's global
+prefix, and the uv probe could not see a zizmor from pipx sitting where
+`uv tool install` refuses to overwrite it. MEASURED: lockfile-lint was
+reinstalled on every re-apply (changed=1 each time), and the zizmor install
+failed on every apply, so every summary said zizmor was not installed while
+it ran.
 
 **Principle**: version-pin tools we install, and make the idempotence check
-compare versions, not existence.
+compare versions, not existence: the version of the copy the install would
+replace, and leave alone a copy some other installer put there.
 
 ---
 

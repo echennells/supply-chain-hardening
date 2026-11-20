@@ -216,17 +216,42 @@
       {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — uv is not installed, so /usr/local/bin/pip and /usr/local/bin/pip3 were not deployed and `pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. Install uv and re-apply.'] }}
   when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
 
-- name: Detect installed uv tool versions (reinstall when a pin moves)
+- name: Detect installed uv tools (uv-managed versions, or copies uv does not manage)
   # `creates:` checked only that a binary existed, so bumping uv_secure_version
   # or pip_audit_version never reinstalled anything unless refresh_tools was
   # set. `uv tool list` prints "<name> v<version>" per tool (MEASURED uv
-  # 0.13.9), and `uv tool install name==<other>` replaces the installed version.
-  ansible.builtin.command: "{{ uv_binary_path.stdout }} tool list"
+  # 0.13.9), and `uv tool install name==<other>` replaces the version uv
+  # installed. It does NOT replace an executable it did not install (pipx,
+  # `pip install --user`): it fails with "Executable already exists", rc=2. The
+  # probe therefore also looks where the install writes (`uv tool dir --bin`)
+  # and reports such a copy as "foreign", which the install leaves alone, as
+  # `creates:` did. Same probe as zizmor in tasks/github.yml.
+  ansible.builtin.shell:
+    cmd: |
+      uv='{{ uv_binary_path.stdout }}'
+      bin=$("$uv" tool dir --bin 2>/dev/null) || bin="$HOME/.local/bin"
+      list=$("$uv" tool list 2>/dev/null)
+      for name in uv-secure pip-audit; do
+        ver=$(printf '%s\n' "$list" | awk -v n="$name" '$1 == n { sub(/^v/, "", $2); print $2; exit }')
+        if [ -n "$ver" ]; then
+          echo "$name uv $ver"
+        elif [ -e "$bin/$name" ] || [ -L "$bin/$name" ]; then
+          echo "$name foreign $bin/$name"
+        fi
+      done
+    executable: /bin/bash
   register: uv_tools_installed
   changed_when: false
   check_mode: false
   failed_when: false
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
+
+- name: Note an existing uv-secure / pip-audit that uv does not manage (left in place)
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.split(' ', 2)[2] }} was not installed by `uv tool`, so the role
+      leaves it as it is and does not install its pinned version over it.
+  loop: "{{ uv_tools_installed.stdout_lines | default([]) | select('match', '[^ ]+ foreign ') | list }}"
 
 - name: Install uv-managed tools
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
@@ -254,7 +279,8 @@
     - { name: pip-audit, version: "{{ pip_audit_version }}" }
   when:
     - uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
-    - refresh_tools | bool or (item.name ~ ' v' ~ item.version) not in (uv_tools_installed.stdout_lines | default([]))
+    - uv_tools_installed.stdout_lines | default([]) | select('match', item.name ~ ' foreign ') | list | length == 0
+    - refresh_tools | bool or (item.name ~ ' uv ' ~ item.version) not in (uv_tools_installed.stdout_lines | default([]))
   # A failed install changed nothing, so it must not report `changed`: with
   # failed_when: false and no changed_when, a persistently failing install broke
   # idempotency on every re-apply.
