@@ -3806,6 +3806,67 @@ EOF
   end_section
 }
 
+# ---- intel off: take back the npm and npx wrappers an intel run left ----
+#
+# This script deploys the npm and npx wrappers only with intel: sfw, and they
+# do nothing else, so with intel off there should be none. MEASURED (round-2
+# VM test on a persistent Debian 12 host, and reproduced in debian:trixie-slim
+# at 6c77f4e): a run with INTEL=sfw at 8281a6b wrapped /usr/bin/npm and
+# /usr/bin/npx with wrappers that run sfw without SFW_SKIP_UPDATE_CHECK. A
+# later run with intel unset left both in place while its record said
+# sfw_installed=false and wrappers_deployed=cargo, and once sfw's hourly update
+# check came due every npm and npx call failed in sfw's words, "[sfw] Failed to
+# prepare firewall binary: EACCES ... next-check", rc=1.
+#
+# So a run without intel moves the real binary back over a wrapper that
+# carries this script's npm/npx header (line 2, exactly, so the role's npm
+# wrapper is never touched) and whose real binary is where this script put it.
+# Anything else is left in place with a warning that says what to do. sfw
+# itself stays installed: with no wrapper nothing runs it. The cargo wrapper
+# is not this function's: see warn_stale_cargo_wrapper below.
+unwrap_intel_wrapper() {
+  local tool="$1" target real owner
+  target=$(command -v "$tool" 2>/dev/null) || return 0
+  [[ -f "$target" && ! -L "$target" ]] || return 0
+  [[ "$(sed -n 2p "$target" 2>/dev/null)" == "# Managed by supply-chain-harden action" ]] || return 0
+  real=$(grep -oE "^REAL_NP[MX]='[^']*'" "$target" 2>/dev/null | head -n 1 | sed "s/^[^=]*='//; s/'\$//") || real=""
+  if [[ "$real" != "${target}-real" || ! -x "$real" \
+        || "$(sed -n 2p "$real" 2>/dev/null)" == "# Managed by supply-chain-harden action" ]]; then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and cannot put the real $tool back: the wrapper names '${real:-<none>}', not an executable ${target}-real. It is left in place. Re-run with INTEL=sfw to bring it up to date, or put the real $tool back at $target."
+    return 0
+  fi
+  if ! can_write "$target"; then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and no root and no usable sudo to remove it. It is left in place. Re-run harden.sh with sudo to remove it, or with INTEL=sfw to bring it up to date."
+    return 0
+  fi
+  if [[ "${CAN_ESCALATE:-0}" -ne 1 && ! -O "$target" ]]; then
+    owner=$(ls -ld -- "$target" | awk '{print $3}')
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed as $owner, and it routes $tool through sfw. This run has intel off but no root and no usable sudo, and it does not replace a file $owner owns, so it is left in place. Re-run harden.sh as $owner or with sudo to remove it, or with INTEL=sfw to bring it up to date."
+    return 0
+  fi
+  # mv, not cp: it restores the entry the wrapping moved aside, a symlink
+  # included (apt's /usr/bin/npm is one), and never writes through it.
+  $SUDO mv -f -- "$real" "$target"
+  log "$tool: intel is off, so the $tool wrapper an earlier intel: sfw run left at $target was removed and the real $tool moved back"
+}
+
+# The cargo wrapper carries --locked as well as the sfw route, so it is never
+# removed here, and harden_cargo re-renders it on every run that includes
+# cargo. A run without cargo leaves it as it is, so say so when it is one that
+# routes through sfw with no SFW_SKIP_UPDATE_CHECK, as 8281a6b's did. MEASURED
+# (debian:trixie-slim, 8281a6b with INTEL=sfw, then this script with
+# ECOSYSTEMS=npm,pip): an hour later `cargo fetch` failed for a non-root
+# caller with "[sfw] Failed to prepare firewall binary: EACCES ... next-check".
+warn_stale_cargo_wrapper() {
+  local target
+  target=$(command -v cargo 2>/dev/null) || return 0
+  [[ -f "$target" ]] || return 0
+  sed -n 2p "$target" 2>/dev/null | grep -q 'supply-chain-harden wrapper' || return 0
+  grep -q '^ *if \[ "true" = "true" \] && \[ "${SCH_NET:-0}" = "1" \]' "$target" 2>/dev/null || return 0
+  grep -q 'SFW_SKIP_UPDATE_CHECK' "$target" 2>/dev/null && return 0
+  warn "cargo: $target is a cargo wrapper from an earlier hardening run that routes cargo through sfw without SFW_SKIP_UPDATE_CHECK, and cargo is not in this run's ecosystems, so it was not re-rendered. For an account other than root, once sfw's hourly update check is due, every cargo command that reaches the network fails with sfw's \"EACCES ... next-check\". Re-run with cargo in ECOSYSTEMS to replace it."
+}
+
 # ---- Main loop ----
 
 IFS=',' read -ra REQUESTED <<< "$ECOSYSTEMS"
@@ -3833,7 +3894,11 @@ done
 
 if [[ "$INSTALL_SFW" == "true" ]]; then
   install_sfw_and_wrap
+else
+  unwrap_intel_wrapper npm
+  unwrap_intel_wrapper npx
 fi
+case " ${HARDENED[*]:-} " in *" cargo "*) ;; *) warn_stale_cargo_wrapper ;; esac
 
 # ---- Outputs ----
 ecosystems_str=$(IFS=,; echo "${HARDENED[*]:-}")
