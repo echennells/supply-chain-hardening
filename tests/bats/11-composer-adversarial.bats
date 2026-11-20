@@ -16,6 +16,31 @@ setup() {
   rm -f /tmp/marker-composer-script
 }
 
+# The audit keys are version-tiered (tasks/composer.yml): audit.abandoned from
+# composer 2.7.0, audit.block-insecure and audit.block-abandoned from 2.9.0. The
+# role omits a key the detected composer does not know, so config.json stays
+# valid there, and records the gap. These tests assumed the image's upstream
+# composer and failed on every composer below 2.9 (an apt host: 2.2.6 on Ubuntu
+# 22.04, 2.7.1 on 24.04). Below the tier they check that the key is absent,
+# which is what the role promises there, and then skip with the reason.
+composer_version() {
+  composer --version --no-ansi --no-plugins 2>/dev/null \
+    | sed -nE 's/^Composer (version )?([0-9]+\.[0-9]+\.[0-9]+).*$/\2/p' | head -1
+}
+# audit_tier_gate <key> <min>: returns when the installed composer has <key>;
+# below <min> it checks config.json does not write <key>, then skips
+audit_tier_gate() {
+  local key="$1" min="$2" v
+  v=$(composer_version)
+  [ -n "$v" ] || skip "could not read the composer version"
+  [ "$(printf '%s\n%s\n' "$min" "$v" | sort -V | head -1)" = "$min" ] && return 0
+  if grep -q "\"$key\"" "$HOME/.config/composer/config.json"; then
+    echo "FAIL: composer $v predates $key ($min), but config.json writes it" >&2
+    return 1
+  fi
+  skip "composer $v predates audit.$key (added in $min): the role omits it, checked absent"
+}
+
 @test "Composer config enforces HTTPS" {
   assert_file_contains "$HOME/.config/composer/config.json" '"secure-http": true'
 }
@@ -40,16 +65,19 @@ setup() {
 
 @test "Composer audit.abandoned defaults to fail (Composer >=2.7; test env runs 2.9+)" {
   # Tier 2+ — matches Composer's own upstream default since 2.7.0.
+  audit_tier_gate abandoned 2.7.0
   assert_file_contains "$HOME/.config/composer/config.json" '"abandoned": "fail"'
 }
 
 @test "Composer audit.block-insecure is enabled (Composer >=2.9 tier)" {
   # Tier 1 only — refuses updates to packages with known security advisories.
   # Test container installs Composer via upstream installer so hits Tier 1.
+  audit_tier_gate block-insecure 2.9.0
   assert_file_contains "$HOME/.config/composer/config.json" '"block-insecure": true'
 }
 
 @test "Composer audit.block-abandoned is enabled (Composer >=2.9 tier)" {
+  audit_tier_gate block-abandoned 2.9.0
   assert_file_contains "$HOME/.config/composer/config.json" '"block-abandoned": true'
 }
 
