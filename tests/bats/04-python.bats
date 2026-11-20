@@ -113,3 +113,30 @@ load setup
   [ "$status" -eq 2 ]
   [[ "$output" == *"only for 'uv'"* ]]
 }
+
+@test "uv: the hatch's build report lists what built, never a refusal" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  [ -x /usr/local/bin/supply-chain-allow-build ] || skip "escape hatch not deployed"
+  sdist=$(find_fixture_sdist python-sdist-pkg)
+  [ -n "$sdist" ] || skip "sdist fixture not found"
+  d=$(mktemp -d)
+  uv venv -q "$d/venv"
+  # A refusal: --no-build on the command line outranks the lifted config.
+  # MEASURED on uv 0.8.17 to 0.13.9: uv explains it with "Building source
+  # distributions for `x` is disabled", which the report listed under "built
+  # from source during this command".
+  run env VIRTUAL_ENV="$d/venv" UV_CACHE_DIR="$d/c1" \
+    /usr/local/bin/supply-chain-allow-build -- uv pip install --no-build "$sdist"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Building source distributions"*"disabled"* ]]
+  [[ "$output" == *"uv reported no source builds for this command"* ]]
+  [[ "$output" != *"built from source during this command"* ]]
+  # FIXTURE CONTROL: without --no-build the hatch builds the same sdist, and
+  # the report lists it. A fresh cache, or uv reuses a wheel it built earlier.
+  run env VIRTUAL_ENV="$d/venv" UV_CACHE_DIR="$d/c2" \
+    /usr/local/bin/supply-chain-allow-build -- uv pip install "$sdist"
+  [ "$status" -eq 0 ] || skip "the fixture did not build here (its build backend comes from the index): $(tail -3 <<<"$output")"
+  [[ "$output" == *"built from source during this command"* ]]
+  grep -A3 'built from source during this command' <<<"$output" | grep -qE '^ +(Building|Built) test-sdist-only'
+  rm -rf "$d"
+}

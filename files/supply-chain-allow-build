@@ -119,7 +119,15 @@ set -e
 
 # --- auto-verify: report what actually built from source, so the vouching is
 #     visible rather than implicit (the agent's "check the cache after"). ---
-built="$(grep -iE '(^|[[:space:]])(Building|Built)[[:space:]]' "$out" | sed 's/^/    /' || true)"
+# Only uv's own progress lines count: the verb, capitalised, with nothing but
+# indentation before it ("   Building <dist> @ <url>", "      Built <dist> @
+# <url>"). A REFUSAL also says "Building": MEASURED on uv 0.8.17, 0.12.5,
+# 0.12.6 and 0.13.9, a no-build refusal prints "╰─▶ Building source
+# distributions for `x` is disabled" (0.13.9: "cause: Building ..."), and the
+# old case-insensitive, unanchored pattern listed that as a source build. The
+# second grep drops that sentence however a uv version indents it.
+built="$(grep -E '^[[:space:]]*(Building|Built)[[:space:]]' "$out" \
+         | grep -vE 'source distributions? .*(is|are) disabled' | sed 's/^/    /' || true)"
 if [ -n "$built" ]; then
   echo "[$PROG] built from source during this command (review these):" >&2
   printf '%s\n' "$built" >&2
