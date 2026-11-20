@@ -368,8 +368,11 @@ X
     echo "rootProject.name = 'p'" > "$t/proj/settings.gradle"
     printf '%s\n' "$bs" > "$t/proj/build.gradle"
   fi
+  # macOS runners have no timeout(1); bound the run only where it exists.
+  local to=()
+  if have timeout; then to=(timeout 300); elif have gtimeout; then to=(gtimeout 300); fi
   ( cd "$t/proj" && GRADLE_USER_HOME="$TEST_HOME/.gradle" \
-      timeout 300 gradle --offline --no-daemon -q --console=plain help 2>&1 )
+      ${to[@]+"${to[@]}"} gradle --offline --no-daemon -q --console=plain help 2>&1 )
 }
 
 @test "gradle: a dynamic version on the plugin classpath is refused, in build and settings scripts (CMP 4.6)" {

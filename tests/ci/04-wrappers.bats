@@ -424,7 +424,8 @@ path_stubs() {
   stub_bin cargo
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
   d=$(lockdir)
-  touch -d '2020-01-01' "$BATS_TEST_TMPDIR/proj/Cargo.lock"
+  # -t, not -d: BSD touch on the macOS runners has no -d.
+  touch -t 202001010000 "$BATS_TEST_TMPDIR/proj/Cargo.lock"
   : > "$BATS_TEST_TMPDIR/proj/Cargo.toml"
   run bash -c "cd '$d' && '$TEST_BIN/cargo' build 2>&1"
   [[ "$output" == *"ARGS=[build --locked]"* ]]
