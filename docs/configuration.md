@@ -53,7 +53,8 @@ not set the derived values individually. The unit trap is spelled out in
 
 Pinned tool versions (`npq_version`, `sfw_version`, `zizmor_version`,
 `cargo_cooldown_version`, `cosign_version` + checksums, …) are also in
-`defaults/main.yml`.
+`defaults/main.yml`. `sfw_version` must be 2.0.6 or later; a re-apply replaces
+an installed sfw older than that (see [limitations.md](limitations.md)).
 
 ## Refreshing auditing tools
 
