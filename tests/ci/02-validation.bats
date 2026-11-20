@@ -171,3 +171,29 @@ setup() { common_setup; }
   assert_file_contains "$OUT_FILE" "ecosystems_effective=pip"
   [[ "$output" != *"Not fully in force"* ]]
 }
+
+@test "packaging: both scripts run by path, the way the action.yml files call them" {
+  # action/action.yml runs `${{ github.action_path }}/harden.sh` and
+  # action/verify/action.yml runs `"${{ github.action_path }}/../verify.sh"`:
+  # by path, with no interpreter in front. Everything else in this suite calls
+  # them through `bash`, which never needs the execute bit, so commit 7f51aac
+  # could drop it from verify.sh (100755 -> 100644) with every test still
+  # passing, while every consumer of the verify action got rc=126 "Permission
+  # denied" and no rows (MEASURED from a `git archive` of that tree).
+  local root="$BATS_TEST_DIRNAME/../.." f mode
+  # The premise: the action files still call the scripts by path.
+  grep -qF 'run: ${{ github.action_path }}/harden.sh' "$root/action/action.yml"
+  grep -qF '"${{ github.action_path }}/../verify.sh" "${args[@]}"' "$root/action/verify/action.yml"
+  run env -i PATH="$PATH" HOME="$TEST_HOME" "$root/action/harden.sh" --help
+  [ "$status" -eq 0 ]
+  run env -i PATH="$PATH" HOME="$TEST_HOME" "$root/action/verify/../verify.sh" --help
+  [ "$status" -eq 0 ]
+  # A checkout's file mode follows git's, but a tree copied without modes would
+  # pass the lines above for the wrong reason, so check what git records too.
+  if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    for f in action/harden.sh action/verify.sh; do
+      mode=$(git -C "$root" ls-files -s -- "$f" | cut -d' ' -f1)
+      [ "$mode" = 100755 ] || { echo "$f is mode $mode in git, not 100755"; return 1; }
+    done
+  fi
+}
