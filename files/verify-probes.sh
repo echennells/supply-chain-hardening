@@ -1110,6 +1110,109 @@ fi
 # ATTRIBUTION IS NOT CLAIMED BY ANY ROW. uv never reports which file it loaded
 # (checked: -v, -vv, RUST_LOG=trace, with and without --show-settings), so no
 # row can say "our file is in effect" - only "a config uv reads sets this".
+
+# ---- exclude-newer as uv prints it, for row 6 --------------------------------
+# uv 0.13.9 (MEASURED) prints the setting as one struct with a GLOBAL cutoff and
+# a PER-PACKAGE map, the map holding what exclude-newer-package sets:
+#     exclude_newer: ExcludeNewer {
+#         global: Some( Absolute( 2026-11-18T00:00:00Z ) ),      or
+#         global: Some( Relative( ExcludeNewerSpan( 30d ) ) ),
+#         package: ExcludeNewerPackage( {
+#             PackageName( "boto3" ): Disabled,                   (= false)
+#             PackageName( "botocore" ): Enabled( Absolute( 2099-01-01T00:00:00Z ) ),
+#         } ),
+#     },
+# (one token per line in the real dump). A map entry decides for that package
+# whatever the global says: with the global at 2026-11-18, botocore = false,
+# = "2099-01-01T00:00:00Z" and = "1 second" each let botocore 1.44.7 resolve,
+# the same as no gate at all, where the host config alone gave 1.44.5.
+#
+# scv_uv_en_block: the exclude_newer field on one line, from its own line to the
+# next field at the same depth. An older one-line form (exclude_newer: None, or
+# a flat Some(<ts>)) is just that line.
+scv_uv_en_block() { # uv --show-settings dump on stdin
+  awk '
+    on { match($0, /^[[:space:]]*/); if (RLENGTH <= ind) exit; print; next }
+    /^[[:space:]]*exclude_newer:/ { match($0, /^[[:space:]]*/); ind = RLENGTH; on = 1; print }
+  ' | tr '\n' ' ' | tr -s ' '
+}
+# scv_uv_en_global / scv_uv_en_pkgs: the two halves of that block. A block with
+# no `global:` (older uv) is all global, and has no map.
+scv_uv_en_global() { # block
+  case "$1" in
+    *global:*) printf '%s' "${1#*global:}" | sed 's/package:.*//' ;;
+    *)         printf '%s' "$1" ;;
+  esac
+}
+scv_uv_en_pkgs() { # block -> one "name<TAB>value" line per map entry
+  case "$1" in *package:*) ;; *) return 0 ;; esac
+  printf '%s\n' "${1#*package:}" | awk '{
+    n = split($0, a, /PackageName\(/)
+    for (i = 2; i <= n; i++) {
+      if (!match(a[i], /"[^"]*"/)) continue
+      name = substr(a[i], RSTART + 1, RLENGTH - 2); v = substr(a[i], RSTART + RLENGTH)
+      sub(/^[^:]*:/, "", v); print name "\t" v
+    }
+  }'
+}
+# scv_uv_span_secs: a span as uv prints it (jiff's friendly form: 1s, 90m, 30d,
+# 1w 2d 3h, 1500ms) in seconds; nothing for a unit it does not know. uv refuses
+# months and years in exclude-newer ("use days instead"), so every unit it can
+# print is a fixed length. A negative span prints as "1d ago"; MEASURED, uv
+# then resolved botocore exactly as far back as it does for "1 day" (1.44.6), so
+# "ago" is read as the same span, not as a cutoff in the future.
+scv_uv_span_secs() { # span
+  printf '%s\n' "$1" | awk '{
+    s = $0; sub(/[[:space:]]*ago[[:space:]]*$/, "", s); gsub(/[[:space:],]+/, "", s)
+    if (s == "") exit 1
+    tot = 0
+    while (s != "") {
+      if (!match(s, /^[0-9]+(\.[0-9]+)?/)) exit 1
+      v = substr(s, 1, RLENGTH) + 0; s = substr(s, RLENGTH + 1)
+      match(s, /^[^0-9.]+/); u = substr(s, 1, RLENGTH); s = substr(s, RLENGTH + 1)
+      if (u == "w") f = 604800; else if (u == "d") f = 86400; else if (u == "h") f = 3600
+      else if (u == "m") f = 60; else if (u == "s") f = 1; else if (u == "ms") f = 0.001
+      else if (u == "us" || u == "\302\265s") f = 0.000001; else if (u == "ns") f = 0.000000001
+      else exit 1
+      tot += v * f
+    }
+    printf "%d\n", tot
+  }'
+}
+# scv_uv_cutoff: one exclude-newer value -> the cutoff as epoch seconds, "off"
+# when it gates nothing (Disabled, or no global at all), "?" when it cannot be
+# read. A span is resolved the way uv resolves it, against now. When a value
+# carries both an instant and a span (uv 0.10.x printed the resolved instant
+# beside the span) the instant wins, as in rows 1-3.
+scv_uv_cutoff() { # value text, now (epoch seconds)
+  local t="$1" ts sp secs e
+  case "$t" in *Disabled*) printf 'off'; return 0 ;; esac
+  ts=$(printf '%s' "$t" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]*Z' | head -1)
+  if [ -n "$ts" ]; then
+    e=$(scv_epoch "$ts"); printf '%s' "${e:-?}"; return 0
+  fi
+  case "$t" in
+    *ExcludeNewerSpan\(*)
+      sp=$(printf '%s' "$t" | sed 's/.*ExcludeNewerSpan([[:space:]]*//; s/[,)].*//; s/[[:space:]]*$//')
+      secs=$(scv_uv_span_secs "$sp")
+      if [ -n "$secs" ]; then printf '%s' "$(( $2 - secs ))"; else printf '?'; fi
+      return 0 ;;
+  esac
+  case "$t" in
+    *None*|'') printf 'off' ;;
+    *[!\ ,]*)  printf '?' ;;
+    *)         printf 'off' ;;
+  esac
+}
+# scv_uv_when: a cutoff for a row detail.
+scv_uv_when() { # epoch | off | ?
+  case "$1" in
+    off) printf 'no cutoff' ;;
+    '?') printf 'an unreadable value' ;;
+    *)   date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s' "$1" ;;
+  esac
+}
+
 if have uv; then
   # The CI verifier scopes rows to the ecosystems harden.sh recorded; the host
   # verifier has no such record and reports on whatever it finds. One body for
@@ -1458,31 +1561,75 @@ if have uv; then
       else
         uvcnb=$(printf '%s\n' "$uvcdump" | grep 'no_build:' | head -1 | sed 's/.*no_build:[ ]*//; s/,.*//')
         uvcix=$(printf '%s\n' "$uvcdump" | grep 'index_strategy:' | head -1 | sed 's/.*index_strategy:[ ]*//; s/,.*//')
-        uvcwin=$(printf '%s\n' "$uvcdump" | grep -A10 'exclude_newer:' | head -11)
-        case "$uvcwin" in
-          *Some*) uvccut=$(printf '%s\n' "$uvcwin" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]*Z' | head -1) ;;
-          *)      uvccut="" ;;
-        esac
-        uvcspan=""
-        case "$uvcwin" in
-          *ExcludeNewerSpan\(*)
-            uvcspan=$(printf '%s\n' "$uvcwin" \
-                      | sed -n 's/.*ExcludeNewerSpan([[:space:]]*\([^[:space:],)][^,)]*\).*/\1/p' | head -1)
-            [ -n "$uvcspan" ] || uvcspan=$(printf '%s\n' "$uvcwin" \
-                      | sed -n '/ExcludeNewerSpan(/{n;s/^[[:space:]]*//;s/[[:space:],)]*$//;p;}' | head -1) ;;
-        esac
-        uvweak=""; uvodd=""
+        uvweak=""; uvodd=""; uvnote=""
         if [ "$uvnb" = All ] && [ "$uvcnb" != All ]; then
           uvweak="no-build: All -> ${uvcnb:-<absent>} (sdists build and run setup.py)"
         fi
-        if [ -n "$uvcut$uvspan" ] && [ -z "$uvccut$uvcspan" ]; then
-          uvweak="${uvweak:+$uvweak; }exclude-newer: removed (a release published minutes ago resolves)"
-        elif [ -n "$uvcut" ] && [ -n "$uvccut" ]; then
-          [ "$uvccut" \> "$uvcut" ] && \
-            uvweak="${uvweak:+$uvweak; }exclude-newer: $uvcut -> $uvccut (later, so newer releases resolve)"
-        elif [ -n "$uvcut$uvspan" ] && [ "$uvcut|$uvspan" != "$uvccut|$uvcspan" ]; then
-          uvodd="exclude-newer: ${uvcut:-span $uvspan} -> ${uvccut:-span $uvcspan}"
-        fi
+        # exclude-newer: the global cutoff AND every exclude-newer-package entry,
+        # each resolved to an instant (a span against now, as uv does) and set
+        # against what uv reported from "/". This row used to compare the global
+        # alone, so `exclude-newer-package = { botocore = false }` here printed
+        # OK while botocore resolved as if there were no gate (MEASURED, see
+        # scv_uv_en_block), and any span was WEAK "cannot order" - "1 second",
+        # which gates nothing, as much as a stricter "30 days".
+        #
+        # A cutoff later than the host's is not counted as weaker while it is
+        # still at least the window this surface promised (scv_want_hours): the
+        # host's own instant lags behind now by up to a refresh interval, so a
+        # project that pins exclude-newer = "2 days" on a 48h host resolves what
+        # the host resolves (MEASURED: botocore 1.44.5 both ways) and is not a
+        # weakening. Without a recorded window, any later cutoff counts.
+        uvnows=$(date -u +%s)
+        uvwant=""; uvwh=$(scv_want_hours)
+        case "$uvwh" in ''|*[!0-9]*) ;; *) uvwant=$(( uvnows - uvwh * 3600 )) ;; esac
+        uvhb=$(printf '%s\n' "$uvdump" | scv_uv_en_block)
+        uvcb=$(printf '%s\n' "$uvcdump" | scv_uv_en_block)
+        uvhp=$(scv_uv_en_pkgs "$uvhb"); uvcp=$(scv_uv_en_pkgs "$uvcb")
+        uvhgv=$(scv_uv_en_global "$uvhb"); uvcgv=$(scv_uv_en_global "$uvcb")
+        # One line per thing to compare: "<name, empty for the global>|<host
+        # value>|<value here>". A package either side does not name takes that
+        # side's global, which is what uv does with it. `|` and not a tab: read
+        # treats a tab in IFS as whitespace and would swallow the empty name.
+        uvcmp=$(
+          printf '|%s|%s\n' "$uvhgv" "$uvcgv"
+          printf '%s\n%s\n' "$uvhp" "$uvcp" | cut -f1 | grep -v '^$' | sort -u | while IFS= read -r uvpn; do
+            uvph=$(printf '%s\n' "$uvhp" | awk -F'\t' -v n="$uvpn" '$1 == n { print $2; exit }')
+            uvpc=$(printf '%s\n' "$uvcp" | awk -F'\t' -v n="$uvpn" '$1 == n { print $2; exit }')
+            printf '%s|%s|%s\n' "$uvpn" "${uvph:-$uvhgv}" "${uvpc:-$uvcgv}"
+          done
+        )
+        while IFS='|' read -r uvpn uvph uvpc; do
+          [ "$uvph" = "$uvpc" ] && continue
+          uvh=$(scv_uv_cutoff "$uvph" "$uvnows"); uvc=$(scv_uv_cutoff "$uvpc" "$uvnows")
+          [ "$uvh" = off ] && continue
+          if [ -n "$uvpn" ]; then uvwhat="exclude-newer-package $uvpn"; else uvwhat="exclude-newer"; fi
+          uvsp=""
+          case "$uvpc" in *ExcludeNewerSpan\(*)
+            uvsp=$(printf '%s' "$uvpc" | sed 's/.*ExcludeNewerSpan([[:space:]]*//; s/[,)].*//; s/[[:space:]]*$//')
+            case "$uvsp" in
+              *ago) uvsp=" (span \"$uvsp\", which uv resolves like ${uvsp% ago} before now)" ;;
+              *)    uvsp=" (span $uvsp before now)" ;;
+            esac ;;
+          esac
+          if [ "$uvc" = off ]; then
+            case "$uvpc" in *Disabled*) uvoff=1 ;; *) uvoff="" ;; esac
+            if [ -n "$uvoff" ]; then
+              uvweak="${uvweak:+$uvweak; }$uvwhat: $(scv_uv_when "$uvh") -> false ($uvpn skips the age gate entirely; a release of it published minutes ago resolves)"
+            else
+              uvweak="${uvweak:+$uvweak; }$uvwhat: $(scv_uv_when "$uvh") -> removed (a release published minutes ago resolves)"
+            fi
+          elif [ "$uvh" = '?' ] || [ "$uvc" = '?' ]; then
+            uvodd="${uvodd:+$uvodd; }$uvwhat: $(printf '%s' "$uvph" | tr -s ' ') -> $(printf '%s' "$uvpc" | tr -s ' ')"
+          elif [ "$uvc" -le "$uvh" ]; then
+            :
+          elif [ -n "$uvwant" ] && [ "$uvc" -le "$uvwant" ]; then
+            uvnote="${uvnote:+$uvnote; }$uvwhat here is $(scv_uv_when "$uvc")$uvsp, later than the host's $(scv_uv_when "$uvh") but still at least the ${uvwh}h this host promised"
+          else
+            uvweak="${uvweak:+$uvweak; }$uvwhat: $(scv_uv_when "$uvh") -> $(scv_uv_when "$uvc")$uvsp (later, so newer releases${uvpn:+ of $uvpn} resolve)"
+          fi
+        done <<EOF_UVCMP
+$uvcmp
+EOF_UVCMP
         if [ "${uvix:-}" = FirstIndex ] && [ -n "$uvcix" ] && [ "$uvcix" != FirstIndex ]; then
           uvweak="${uvweak:+$uvweak; }index-strategy: FirstIndex -> $uvcix (a secondary index can shadow a package name)"
         fi
@@ -1494,7 +1641,7 @@ if have uv; then
             "in $PWD uv reports a setting this verifier cannot order against the host's: $uvodd${uvcand:+ (nearest uv config: $uvcand)}"
         elif [ -n "$uvcand" ]; then
           row OK PARSED "uv repo config override" \
-            "in $PWD uv reports no-build, exclude-newer and index-strategy no weaker than the host probe - $uvcand does not weaken them"
+            "in $PWD uv reports no-build, exclude-newer (global and per package) and index-strategy no weaker than the host probe${uvnote:+ ($uvnote)} - $uvcand does not weaken them"
         else
           row "N/A" - "uv repo config override" \
             "no uv.toml or pyproject.toml uv config at or above $PWD, and uv reports the same settings here as from /"

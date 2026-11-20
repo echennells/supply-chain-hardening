@@ -384,16 +384,77 @@ verify_from() { # dir [VAR=value ...]
   fi
 }
 
-@test "verify: a repo uv.toml that moves exclude-newer later is a GAP; a stricter one is OK" {
+# The host cutoff uv reports from /, or skip: with no host gate there is
+# nothing for a repo config to weaken.
+uv_host_gate() {
+  ( cd / && uv pip list --show-settings 2>/dev/null ) | tr -d ' \n' | grep -q 'exclude_newer:ExcludeNewer{global:Some(' \
+    || skip "uv reports no global exclude-newer from / on this host"
+}
+
+@test "verify: a repo exclude-newer later than the host's is a GAP, a span is resolved, a stricter one is OK" {
   command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  uv_host_gate
   d="$BATS_TEST_TMPDIR/uvproj2"; mkdir -p "$d"
   printf 'exclude-newer = "2099-01-01T00:00:00Z"\n' > "$d/uv.toml"
   verify_from "$d"
   echo "$output" | grep "uv repo config override" | grep -q "^GAP"
   echo "$output" | grep "uv repo config override" | grep -q -- "-> 2099-01-01T00:00:00Z"
-  printf 'no-build = true\n' > "$d/uv.toml"
+  # A span is resolved against now, as uv resolves it. "1 second" gates
+  # nothing (MEASURED: botocore resolved as with no gate at all); it used to
+  # read WEAK "cannot order".
+  printf 'exclude-newer = "1 second"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q "span 1s before now"
+  # Stricter, as a span and as an instant: OK. (This case used to stage
+  # no-build = true, which is not a stricter exclude-newer.)
+  printf 'exclude-newer = "3650 days"\n' > "$d/uv.toml"
   verify_from "$d"
   echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  printf 'exclude-newer = "2020-01-01T00:00:00Z"\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  # A span equal to the window this host promised is not a weakening, even
+  # though it lands later than the host's own day-truncated instant.
+  wh=$(sed -n "s/^SCV_MIN_AGE_HOURS='\([0-9][0-9]*\)'.*/\1/p" "$VERIFY" | head -1)
+  if [ -n "$wh" ]; then
+    printf 'exclude-newer = "%s hours"\n' "$wh" > "$d/uv.toml"
+    verify_from "$d"
+    echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  fi
+}
+
+@test "verify: a repo exclude-newer-package exemption is a GAP, not OK" {
+  command -v uv >/dev/null 2>&1 || skip "uv not installed"
+  uv_host_gate
+  d="$BATS_TEST_TMPDIR/uvpkg"; mkdir -p "$d"
+  printf 'exclude-newer-package = { botocore = "2099-01-01T00:00:00Z" }\n' > "$d/uv.toml"
+  # CONTROL: uv itself reports the entry there, so the row has the data. On a
+  # uv without exclude-newer-package this skips rather than passes.
+  ( cd "$d" && uv pip list --show-settings 2>/dev/null ) | tr -d ' \n' \
+    | grep -q 'PackageName("botocore",):Enabled(Absolute(2099-01-01T00:00:00Z' \
+    || skip "this uv does not report exclude-newer-package"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  echo "$output" | grep "uv repo config override" | grep -q "exclude-newer-package botocore: .* -> 2099-01-01T00:00:00Z"
+  printf 'exclude-newer-package = { botocore = false }\n' > "$d/uv.toml"
+  if ( cd "$d" && uv pip list --show-settings 2>/dev/null ) | tr -d ' \n' | grep -q 'PackageName("botocore",):Disabled'; then
+    verify_from "$d"
+    echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+    echo "$output" | grep "uv repo config override" | grep -q "botocore skips the age gate entirely"
+  fi
+  printf 'exclude-newer-package = { botocore = "1 second" }\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
+  # Stricter for one package is not a weakening.
+  printf 'exclude-newer-package = { botocore = "2020-01-01T00:00:00Z" }\n' > "$d/uv.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^OK"
+  # The same exemption from pyproject.toml [tool.uv].
+  rm -f "$d/uv.toml"
+  printf '[project]\nname = "p"\nversion = "0"\n[tool.uv]\nexclude-newer-package = { botocore = "2099-01-01T00:00:00Z" }\n' > "$d/pyproject.toml"
+  verify_from "$d"
+  echo "$output" | grep "uv repo config override" | grep -q "^GAP"
 }
 
 # A project whose lockfile does not name its one gem: the same admission fixture
