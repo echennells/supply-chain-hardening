@@ -210,5 +210,12 @@ Say so when it matters to the task:
 - **A repo can switch off some gates.** The verifier reports the cases it can see.
 - **A cloned repo's agent config can run code** with no package manager involved, for
   example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`.
+- **Headless `claude -p` and Agent SDK runs show no trust prompt.** A repo's
+  `.claude/settings.json` hooks, helpers and `env` block apply anyway, and that `env`
+  overwrites variables exported in the shell. No package-manager variable is on the
+  list a project may not set, so by the docs (not run) it can override this env layer.
+  `--setting-sources user` reads no project settings; `--bare` still applies the
+  project's `env`; turning hooks off takes `--settings '{"disableAllHooks": true}'`.
+  [Claude Code docs](https://code.claude.com/docs/en/permissions#what-runs-before-you-trust-a-folder)
 
 The full list: [docs/limitations.md](docs/limitations.md).
