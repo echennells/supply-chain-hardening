@@ -5204,7 +5204,7 @@ else
   # absolute file paths.  The candidate paths below are used ONLY to spot a
   # hardening file stranded outside that set; none is assumed correct.
   napplied=$(nuget_dotnet nuget config paths 2>/dev/null | while IFS= read -r ngl; do
-    case "$ngl" in /*) [ -f "$ngl" ] && printf '%s\n' "$ngl" ;; esac
+    case "$ngl" in (/*) [ -f "$ngl" ] && printf '%s\n' "$ngl" ;; esac
   done)
 
   # Is this file OURS?  A file merely mentioning signatureValidationMode is NOT
