@@ -211,6 +211,19 @@
     - sfw_check.rc == 0
     - sfw_cache_reset.stdout | default('') is not search('^old-shim ', multiline=True)
 
+- name: Record what a real run would install over a working sfw (a --check run does not)
+  # The install below is a command, which --check skips (changed=0), so a dry
+  # run over an sfw at another version than sfw_version looked converged.
+  ansible.builtin.set_fact:
+    sch_apply_notes: >-
+      {{ (sch_apply_notes | default([])) + ['Socket Firewall — this --check run did not replace the installed sfw ' ~ sfw_installed_version ~ ' with sfw_version ' ~ sfw_version ~ '; a real run would.'] }}
+  when:
+    - ansible_check_mode
+    - sfw_version_moved | default(false) | bool
+    - sfw_check.rc == 0
+    - sfw_cache_reset.stdout | default('') is not search('^old-shim ', multiline=True)
+    - npm_root_for_socket.rc | default(1) == 0
+
 - name: Install Socket Firewall Free via npm (requires Node >= 20)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
   # abort the play: the config-file layer is the load-bearing protection and

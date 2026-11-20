@@ -631,6 +631,27 @@ task_result() { printf '%s\n' "$output" | grep -F -A1 "$1" | tail -n 1; }
   [ -e "$c/latest" ]
 }
 
+# --check skips the install (a command), so a dry run over an sfw at another
+# version reported changed=0 and nothing else: it looked converged.
+@test "upgrade: a --check run over an sfw at another version says a real run would replace it, and changes nothing" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to apply the socket tasks"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  [ "$(dirname "$(sfw_pkg_json)")" = "${c%/.sfw-cache}" ] || skip "root's npm root -g is not where the sfw on PATH lives"
+  sfw_snapshot "$c"
+  want=$SFW_SNAP_PIN
+  before=$(stat -c %i "${c%/.sfw-cache}")
+  sfw_relabel 2.0.7
+  socket_apply --check
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"this --check run did not replace the installed sfw 2.0.7 with sfw_version $want; a real run would"* ]]
+  [ "$(sfw_label)" = 2.0.7 ]
+  [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+  sfw_relabel "$want"
+}
+
 # --- an sfw moved aside after a failed fetch --------------------------------
 #
 # When the warm cannot fetch the firewall binary, sfw is moved aside
