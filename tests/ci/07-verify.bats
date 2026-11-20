@@ -345,11 +345,11 @@ exec '"$realpy"' "$@"'
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
   other="$BATS_TEST_TMPDIR/theirs"
   mkdir -p "$other"; chmod 755 "$other"; sudo chown 65534 "$other"
-  sed -i "s|^COOLDOWN_EXE=.*|&\nCOOLDOWN_BIN='$other'|" "$TEST_BIN/cargo"
+  filter_file "$TEST_BIN/cargo" awk -v l="COOLDOWN_BIN='$other'" '{ print } /^COOLDOWN_EXE=/ { print l }'
   grep -q "^COOLDOWN_BIN='$other'\$" "$TEST_BIN/cargo"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    FUNCTIONAL  cargo publish-age gate"*"PREPENDS $other to PATH"* ]]
-  sed -i "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$TEST_HOME/.cargo/bin'|" "$TEST_BIN/cargo"
+  filter_file "$TEST_BIN/cargo" sed "s|^COOLDOWN_BIN=.*|COOLDOWN_BIN='$TEST_HOME/.cargo/bin'|"
   run verify_sourced --emit=plain
   sudo rm -rf "$other"
   [[ "$output" == *"cargo publish-age gate"* ]]
@@ -1498,7 +1498,7 @@ GO
   run verify -- --emit=plain
   [[ "$output" == *"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
 
-  sed -i '/^GOTOOLCHAIN=/d' "$TEST_HOME/.config/go/env"
+  filter_file "$TEST_HOME/.config/go/env" sed '/^GOTOOLCHAIN=/d'
   run verify -- --emit=plain
   [[ "$output" == *"GAP"*"go settings persisted"*"GOTOOLCHAIN='<unset>'"* ]]
 }
@@ -1532,4 +1532,19 @@ GO
   run verify_sourced --emit=plain --fail-on=config
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"*"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
+}
+
+@test "the shipped scripts parse under bash 3.2, the /bin/bash macOS runs them with" {
+  # MEASURED: files/verify-probes.sh had a `case ... in /*)` inside `$( ... )`,
+  # which bash 3.2 cannot parse ("syntax error near unexpected token ;;"), so on
+  # a Mac whose bash is /bin/bash the verifier died at the NuGet section. It was
+  # there since v2.0.0; nothing parsed the scripts with the bash macOS ships.
+  # Only the macOS job has a bash 3 to check with.
+  /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]' 2>/dev/null \
+    || skip "/bin/bash is bash 4 or later here; this runs on the macOS job"
+  local f
+  for f in "$HARDEN_SH" "$VERIFY_SH" "${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"; do
+    run /bin/bash -n "$f"
+    [ "$status" -eq 0 ] || { echo "$f: $output"; return 1; }
+  done
 }

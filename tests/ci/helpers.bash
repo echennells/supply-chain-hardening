@@ -205,3 +205,16 @@ assert_file_lacks() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Rewrite a file in place, keeping its mode and owner: `filter_file FILE CMD...`
+# runs CMD with FILE on stdin and writes its stdout back over FILE. Use it
+# instead of `sed -i`: BSD sed on the macOS runners has no plain -i (it takes
+# the script as a backup suffix) and no \n in a replacement.
+filter_file() {
+  local f="$1" tmp
+  shift
+  tmp="$BATS_TEST_TMPDIR/filter_file.$$.$RANDOM"
+  "$@" < "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+  if [ -w "$f" ]; then cat "$tmp" > "$f"; else sudo cp "$tmp" "$f"; fi
+  rm -f "$tmp"
+}

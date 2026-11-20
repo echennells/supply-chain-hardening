@@ -266,6 +266,21 @@ sfw_teardown() {
   rm -f /tmp/sfwprior-bin
   [ "$status" -eq 0 ]
 
+  # The reset re-downloads the firewall binary from GitHub. When GitHub refuses
+  # it (a known CI flake, HTTP 403), the role says so by name and the play
+  # completes. The security half still has to hold: the planted binary is gone
+  # and nothing in the cache is writable by another account. Only the "a fresh
+  # binary is in place" half needs the download, so skip just that.
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    [ "$(readlink "$c/latest" 2>/dev/null)" != /tmp/sfwprior-bin ]
+    if [ -d "$c" ]; then
+      run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+      [ -z "$output" ]
+    fi
+    if [ -n "$stray" ]; then [ ! -e "${stray%/.sfw-cache}" ]; fi
+    skip "sfw's binary could not be re-downloaded from GitHub; the reset's security checks passed"
+  fi
+
   # Root-owned, writable by nobody else, and `latest` is the downloaded binary.
   run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
   echo "non-root or group/other-writable: $output"
@@ -435,6 +450,19 @@ sfw_teardown() {
   rm -f "$sfw_path.broken"
   [ "$status" -eq 0 ]
   hash -r
+  # Reinstalling replaces the package directory, so the warm downloads the
+  # firewall binary again. If GitHub refuses it (a known CI flake), the role
+  # names that and moves sfw aside rather than leave a wrapper that fails. That
+  # is correct; what cannot be checked without the download is skipped, but
+  # the 2.0.4 shim must not be what is left on PATH.
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    if s=$(readlink -f "$(command -v sfw 2>/dev/null)" 2>/dev/null) && [ -n "$s" ] \
+       && grep -q '"version": "2.0.4"' "${s%/dist/*}/package.json"; then
+      echo "the 2.0.4 shim is still what sfw runs: $s"
+      return 1
+    fi
+    skip "sfw's binary could not be downloaded from GitHub after the reinstall; the 2.0.4 shim was not left in place"
+  fi
   shim=$(readlink -f "$(command -v sfw)")
   grep -q SFW_SKIP_UPDATE_CHECK "$shim"
   grep -q "\"version\": \"$want\"" "${shim%/dist/*}/package.json"
