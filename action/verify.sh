@@ -952,9 +952,27 @@ else
   # GOTOOLCHAIN is the probe because it is the one setting harden.sh writes that
   # differs from Go's default (auto); GOFLAGS was the probe until harden.sh
   # stopped writing it (its -mod=readonly made go ignore vendor/).
+  #
+  # Go before 1.21 has no GOTOOLCHAIN and cannot switch toolchains. MEASURED on
+  # go1.18.10, go1.19.13 and go1.20.14, offline: `go env -w GOTOOLCHAIN=local`
+  # fails ("unknown go command variable GOTOOLCHAIN"), `go env GOTOOLCHAIN`
+  # prints an empty line even with GOTOOLCHAIN=local exported, and a go.mod
+  # saying `go 1.22` is built by the local go or refused ("cannot compile Go
+  # 1.22 code"), a `toolchain` line is "unknown directive", and nothing is
+  # fetched. Every other value harden.sh persists there equals go's default, so
+  # no probe can tell persisted from unset: N/A, not a GAP. Probing GOTOOLCHAIN
+  # anyway printed a config-class GAP that failed --fail-on=config on all three,
+  # which includes what Ubuntu 22.04 (1.18) and Debian 12 (1.19) ship.
+  # The version comes from `go version` (GOVERSION needs go1.16), run from /
+  # with GOTOOLCHAIN=local so a go.mod in the working directory cannot make
+  # this lookup switch toolchains: it asks about the installed go.
+  gminor=$(cd / && GOTOOLCHAIN=local go version 2>/dev/null | grep -oE 'go1\.[0-9]+' | head -1 | cut -d. -f2)
   gt=$(env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN -u GOPRIVATE \
            -u GONOPROXY -u GOINSECURE -u GONOSUMDB go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')
-  if [ "$gt" = "local" ]; then
+  if [ -n "$gminor" ] && [ "$gminor" -lt 21 ]; then
+    na_absent "go settings persisted" \
+      "go1.$gminor predates GOTOOLCHAIN (go1.21), so a go.mod cannot make it fetch another toolchain and there is nothing to lock. The other settings harden.sh persists (GOSUMDB, GOPROXY, empty GOPRIVATE/GONOPROXY/GONOSUMDB/GOINSECURE) equal go's defaults, so no value tells persisted from unset"
+  elif [ "$gt" = "local" ]; then
     row OK FUNCTIONAL "go settings persisted" "GOTOOLCHAIN=local survives with the env layer stripped (go env -w)"
   else
     live=$(go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')

@@ -919,3 +919,34 @@ echo 'PYTHON STARTED (python3)' >> '$log'; exit 1"
   run verify -- --emit=plain
   [[ "$output" == *"GAP"*"go settings persisted"*"GOTOOLCHAIN='<unset>'"* ]]
 }
+
+@test "go: before go1.21 'settings persisted' is N/A, not a GAP, and verify passes --fail-on=config" {
+  # go1.18-go1.20 have no GOTOOLCHAIN (see stub_go_env), and every other value
+  # harden.sh persists equals go's default, so there is nothing to tell
+  # persisted from unset. Probing GOTOOLCHAIN anyway printed "GOTOOLCHAIN='<unset>',
+  # so a go.mod can make go download and run another toolchain", which go1.20
+  # cannot do, and failed the step under --fail-on=any and --fail-on=config.
+  # MEASURED in golang:1.18/1.19/1.20 images with the env file sourced.
+  stub_go_env go1.20.14
+  run harden ECOSYSTEMS=go -- --emit=plain
+  [ "$status" -eq 0 ]
+  # FIXTURE CONTROL: the stub refused GOTOOLCHAIN as go1.20 does, so nothing
+  # persisted it, while the keys go1.20 knows were persisted.
+  [ "$(grep -c '^GOTOOLCHAIN=' "$TEST_HOME/.config/go/env")" = 0 ]
+  grep -qx "GOSUMDB=sum.golang.org" "$TEST_HOME/.config/go/env"
+
+  for fo in config any; do
+    run verify_sourced --emit=plain "--fail-on=$fo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"N/A"*"go settings persisted"*"go1.20 predates GOTOOLCHAIN (go1.21)"* ]]
+    [ "$(grep -c '^GAP' <<<"$output")" = 0 ]
+  done
+
+  # The version gate is go's, not the stub's file: go1.21 knows GOTOOLCHAIN
+  # and is probed as before.
+  stub_go_env go1.21.13
+  harden ECOSYSTEMS=go -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK"*"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
+}
