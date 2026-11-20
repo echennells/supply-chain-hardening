@@ -597,6 +597,40 @@ task_result() { printf '%s\n' "$output" | grep -F -A1 "$1" | tail -n 1; }
   [ -e "$sfw_path.broken" ]
 }
 
+# The version move runs the install over a working sfw. When that install
+# fails, npm leaves the old package in place. MEASURED with sfw 2.0.6 and
+# sfw_version=2.0.99 (not published): the warm ran the old sfw (ok), another
+# account's npm install still went through it, and the summary said "install
+# failed. npm installs are not threat-intel filtered" and counted a protection
+# NOT applied, on every apply.
+@test "upgrade: a failed replacement over a working sfw names the sfw still in use, and claims no protection lost" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to apply the socket tasks"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  sfw_snapshot "$c"
+  want=$SFW_SNAP_PIN
+  bin=$(command -v sfw)
+  before=$(stat -c %i "${c%/.sfw-cache}")
+
+  socket_apply -e sfw_version=2.0.99
+  echo "$output" | tail -25
+  [ "$status" -eq 0 ]
+  st=$(task_result "Install Socket Firewall Free via npm"); echo "install: $st"
+  [[ "$st" == ok:* ]] || { echo "the install did not run, or counted as a change"; return 1; }
+  [[ "$output" == *"replacing sfw $want with sfw_version 2.0.99 failed (exit "* ]] \
+    || { echo "no entry names the failed replacement (did npm install 2.0.99?)"; return 1; }
+  [[ "$output" == *"sfw $want at /"*" is still installed and in use"* ]]
+  [[ "$output" != *"install failed. npm installs are not threat-intel filtered"* ]]
+  [[ "$output" != *"protection(s) were NOT applied"* ]]
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+  hash -r
+  [ "$(command -v sfw)" = "$bin" ]
+  [ "$(sfw_label)" = "$want" ]
+  [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+  [ -e "$c/latest" ]
+}
+
 # --- an sfw moved aside after a failed fetch --------------------------------
 #
 # When the warm cannot fetch the firewall binary, sfw is moved aside

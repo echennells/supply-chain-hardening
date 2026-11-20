@@ -442,6 +442,23 @@
     - sfw_warm is defined
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'old'
 
+# The install runs over a working sfw whenever sfw_version moves. When that
+# install fails (a version that is not published, the registry unreachable),
+# npm leaves the old package where it was: MEASURED with sfw 2.0.6 installed
+# and sfw_version=2.0.99, the warm ran the old /usr/bin/sfw (ok) and another
+# account's npm install still went through it. "install failed. npm installs
+# are not threat-intel filtered" was then false on every apply. So a failed
+# install counts as a lost protection only when no working sfw is left: the
+# warm did not end ok, or a non-root caller could not run it.
+- name: Work out whether a failed sfw install left a working sfw in use
+  ansible.builtin.set_fact:
+    sfw_failed_install_kept: >-
+      {{ sfw_install is defined and sfw_install is not skipped
+         and (sfw_install.rc | default(0)) != 0
+         and (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'ok'
+         and (sfw_warm.stdout_lines | default([''], true) | first) is match('path=/')
+         and (sfw_user_check.stdout | default('') | trim) != 'broken' }}
+
 - name: Record skipped protection — Socket Firewall (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
@@ -449,6 +466,13 @@
   when:
     - sfw_install is defined
     - sfw_install.rc | default(0) != 0
+    - not (sfw_failed_install_kept | bool)
+
+- name: Record that a failed sfw install left the sfw it was replacing in use
+  ansible.builtin.set_fact:
+    sch_apply_notes: >-
+      {{ (sch_apply_notes | default([])) + ['Socket Firewall — ' ~ (('replacing sfw ' ~ sfw_installed_version ~ ' with sfw_version ' ~ sfw_version) if (sfw_version_moved | default(false) | bool) else ('installing sfw@' ~ sfw_version)) ~ ' failed (exit ' ~ (sfw_install.rc | string) ~ '); ' ~ (('sfw ' ~ sfw_installed_version) if (sfw_installed_version | default('') | length > 0) else 'the sfw already there') ~ ' at ' ~ sfw_warm.stdout_lines[0][5:] ~ ' is still installed and in use. Check that sfw_version names a published release and that root can reach the registry, then re-apply.'] }}
+  when: sfw_failed_install_kept | bool
 
 - name: Record skipped protection — Socket Firewall (npm is per-user)
   ansible.builtin.set_fact:

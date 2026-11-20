@@ -324,7 +324,8 @@
 
 # Settings the run did not honour while the protection they feed stayed in
 # place: an sfw_version that was not installed over a working sfw (below
-# 2.0.6, or a dist-tag or range). Listed apart, so the NOT-applied count above never claims a
+# 2.0.6, a dist-tag or range, or an install that failed and left the old sfw
+# in use). Listed apart, so the NOT-applied count above never claims a
 # protection is missing because of them, and the operator still learns that
 # the setting was not applied.
 - name: Report settings this run did not apply as configured
