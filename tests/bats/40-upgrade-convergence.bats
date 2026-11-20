@@ -293,7 +293,7 @@ sfw_teardown() {
   [ "$(id -u)" = 0 ] || skip "needs root to seed root-owned state"
   c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
   [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
-  grep -qx '# Managed by ansible-supply-chain-security' /usr/local/bin/npm 2>/dev/null \
+  grep -q '^# Managed by ansible-supply-chain-security' /usr/local/bin/npm 2>/dev/null \
     || skip "no npm wrapper at /usr/local/bin/npm to route root's installs through sfw"
   id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
   sfw_snapshot "$c"
