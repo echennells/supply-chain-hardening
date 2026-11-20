@@ -154,7 +154,8 @@ exec "$@"'
   [[ "$output" == *"npm: intel is off, so the npm wrapper an earlier intel: sfw run left at $TEST_BIN/npm was removed and the real npm moved back"* ]]
   [[ "$output" == *"npx: intel is off"*"moved back"* ]]
   # The real binaries are back where they were, and nothing routes through sfw.
-  [ ! -e "$TEST_BIN/npm-real" ] && [ ! -e "$TEST_BIN/npx-real" ]
+  [ ! -e "$TEST_BIN/npm-real" ]
+  [ ! -e "$TEST_BIN/npx-real" ]
   assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
   assert_file_lacks "$TEST_BIN/npx" "supply-chain-harden"
   run env PATH="$TEST_BIN:$PATH" npm install foo
@@ -184,7 +185,8 @@ esac'
   [ "$status" -eq 0 ]
   assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
   assert_file_lacks "$TEST_BIN/npx" "supply-chain-harden"
-  [ ! -e "$TEST_BIN/npm-real" ] && [ ! -e "$TEST_BIN/npx-real" ]
+  [ ! -e "$TEST_BIN/npm-real" ]
+  [ ! -e "$TEST_BIN/npx-real" ]
   run env PATH="$TEST_BIN:$PATH" npm install foo
   [ "$output" = "STUB:npm ARGS=[install foo]" ]
 }

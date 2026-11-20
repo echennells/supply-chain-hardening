@@ -1588,10 +1588,12 @@ path_without_timeout() {
     echo "capture=[$(run_bounded 5 echo hi)]"' _ "$blk"
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ hang\ rc=124\ secs=([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -lt 10 ]
+  [[ "$output" =~ hang\ rc=124\ secs=([0-9]+) ]]
+  [ "${BASH_REMATCH[1]}" -lt 10 ]
   # A child left holding the $( ) open is stopped too, as timeout(1) stops
   # its whole process group.
-  [[ "$output" =~ child\ rc=124\ secs=([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -lt 10 ]
+  [[ "$output" =~ child\ rc=124\ secs=([0-9]+) ]]
+  [ "${BASH_REMATCH[1]}" -lt 10 ]
   [[ "$output" == *"fail rc=7"* ]]
   [[ "$output" == *"env=[bar] after=[unset]"* ]]
   [[ "$output" == *"capture=[hi]"* ]]

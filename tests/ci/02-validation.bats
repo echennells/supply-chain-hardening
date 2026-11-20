@@ -262,7 +262,8 @@ setup() { common_setup; }
   run harden -- --emit=plain
   umask 022
   [ "$status" -eq 0 ]
-  [ -f "$TEST_HOME/.cargo/config.toml" ] && [ -f "$TEST_HOME/.m2/settings.xml" ]
+  [ -f "$TEST_HOME/.cargo/config.toml" ]
+  [ -f "$TEST_HOME/.m2/settings.xml" ]
   [ -f "$TEST_HOME/.config/go/env" ]
   local bad
   bad=$(find "$TEST_HOME" "$TEST_BIN" "$TEST_TMP" -mindepth 1 \( -perm -0002 -o -perm -0020 \) ! -type l 2>/dev/null)
