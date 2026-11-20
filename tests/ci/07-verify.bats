@@ -1250,7 +1250,9 @@ forge_record() { # a COMPLETE-looking record scoped to npm only
 @test "describe_binary: a script nobody recognised is not called a wrapper" {
   stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
   run verify -- --emit=plain
-  [[ "$(grep 'bun PATH wrapper' <<<"$output")" == *"(a script that is not ours)"* ]]
+  # stub_bin writes a #!/bin/bash script, which describe_binary names by its
+  # interpreter.
+  [[ "$(grep 'bun PATH wrapper' <<<"$output")" == *"(a shell script that is not ours)"* ]]
   [[ "$output" != *"another wrapper script"* ]]
 }
 
