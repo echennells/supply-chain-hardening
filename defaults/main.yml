@@ -637,8 +637,11 @@ lockfile_lint_version: "5.1.0"
 # A re-apply installs this version over an installed sfw of any other version,
 # up or down (the root-owned sfw root runs, replaced in the npm prefix it is
 # installed under), except that a pin below 2.0.6 never replaces a 2.0.6+ sfw.
-# An installed sfw older than 2.0.6 is replaced, and moved aside (recorded) if
-# the replacement is still too old.
+# Only a plain X.Y.Z does that: anything else, such as a dist-tag or a range
+# (latest, ^2.0.6, 2), is installed where sfw is absent or older than 2.0.6,
+# and a working sfw is kept (the run summary says so). An installed sfw older
+# than 2.0.6 is replaced, and moved aside (recorded) if the replacement is
+# still too old.
 sfw_version: "2.0.6"
 
 # zizmor, installed via `uv tool install`.

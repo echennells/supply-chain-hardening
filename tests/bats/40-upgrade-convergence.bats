@@ -544,8 +544,57 @@ task_result() { printf '%s\n' "$output" | grep -F -A1 "$1" | tail -n 1; }
   [ "$status" -eq 0 ]
   [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
   [[ "$output" == *"sfw_version=2.0.4 is below 2.0.6"*"was left in place"* ]]
+  # In the run summary, as a setting not applied, not as a missing protection.
+  [[ "$output" == *"setting(s) were not applied as configured"* ]]
+  [[ "$output" != *"protection(s) were NOT applied"* ]]
   [ "$(sfw_label)" = "$want" ]
   [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+}
+
+# A dist-tag or a range has no version to compare. Ansible's version test
+# raised on one ("Version comparison failed: '<' not supported between
+# instances of 'str' and 'int'"), so the version move above failed the play at
+# its first task (MEASURED: sfw_version=latest and ^2.0.6 over sfw 2.0.6, rc=2;
+# a full apply skipped every include after socket.yml). Before the version move
+# existed such a pin was accepted, and installed only where sfw was absent or
+# too old. It still is, and over a working sfw the summary says it was kept.
+@test "upgrade: an sfw_version naming no single release (a dist-tag or a range) keeps a working sfw, says so, and the play goes on" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to install a global sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  sfw_snapshot "$c"
+  before=$(stat -c %i "${c%/.sfw-cache}")
+  local pin
+  for pin in latest '^2.0.6' 2; do
+    socket_apply -e "sfw_version=$pin"
+    echo "$output" | tail -20
+    [[ "$output" != *"Version comparison failed"* ]] || { echo "sfw_version=$pin failed the play on a version test"; return 1; }
+    [ "$status" -eq 0 ]
+    [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+    [[ "$output" == *"sfw_version=$pin is not a plain X.Y.Z version"*"that sfw was kept and is in use"* ]]
+    # `2` is a range to npm (any 2.x), not a version below 2.0.6.
+    [[ "$output" != *"is below 2.0.6"* ]]
+    [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+  done
+
+  # Over an sfw older than 2.0.6 such a pin is what the install asks npm for,
+  # and the record of an sfw still too old afterwards renders (it ran the same
+  # version test). '<2.0.6' resolves to 2.0.4, so it stays too old.
+  npm install -g --ignore-scripts sfw@2.0.4 >/dev/null 2>&1 || skip "could not install sfw@2.0.4 (offline?)"
+  rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
+  hash -r
+  sfw_path=$(command -v sfw)
+  socket_apply -e 'sfw_version=<2.0.6'
+  echo "$output" | tail -25
+  [[ "$output" != *"Version comparison failed"* ]] || { echo "sfw_version=<2.0.6 failed the play on a version test"; return 1; }
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == changed:* ]]
+  [[ "$output" == *"sfw 2.0.4 at $sfw_path predates 2.0.6"* ]]
+  [[ "$output" == *"resolved to a release below 2.0.6, or the new copy is behind this one"* ]]
+  hash -r
+  [ -z "$(command -v sfw)" ]
+  [ -e "$sfw_path.broken" ]
 }
 
 # --- an sfw moved aside after a failed fetch --------------------------------

@@ -11,6 +11,21 @@
       tags: [socket, npm]
   when: sfw_cache_reset is not defined
 
+- name: Tell whether sfw_version names one release or something only the registry resolves
+  # The tasks below compare sfw_version with 2.0.6 and with the installed sfw.
+  # A dist-tag or a range (latest, ^2.0.6, 2) has no version to compare, and
+  # Ansible's version test raises on a non-numeric one ("Version comparison
+  # failed: '<' not supported between instances of 'str' and 'int'"), which
+  # failed the play at the first such task and skipped every include after
+  # this file (MEASURED: sfw_version=latest and ^2.0.6 over sfw 2.0.6, rc=2).
+  # Only an exact X.Y.Z is compared. Anything else is still what the install
+  # asks npm for where sfw is absent or older than 2.0.6, as before the version
+  # move existed, but it never replaces a working sfw: whether that sfw already
+  # satisfies it is the registry's answer, not this role's. The run summary
+  # says so.
+  ansible.builtin.set_fact:
+    sfw_pin_exact: "{{ (sfw_version | string) is match('^[0-9]+[.][0-9]+[.][0-9]+$') }}"
+
 - name: Check that root can run npm (a per-user Node is invisible to become)
   # The install below runs `npm install -g` as root, and root's PATH is sudo's
   # secure_path, not the user's shell. On a host whose only Node is per-user
@@ -132,17 +147,23 @@
     # A bump or a pin-down. Never to a version below 2.0.6, which the wrappers
     # cannot use (the old-shim path below handles an sfw_version that low), and
     # never over an sfw the reset did not trust: the install runs root's npm,
-    # which on a hardened host is the npm wrapper, which runs sfw.
+    # which on a hardened host is the npm wrapper, which runs sfw. Only for an
+    # exact sfw_version (sfw_pin_exact): Jinja's `and` stops at the first false
+    # operand, so the version test never sees a dist-tag or a range.
     sfw_version_moved: >-
-      {{ (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
+      {{ sfw_pin_exact | bool
+         and (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
           | default([''], true) | first | default('', true) | trim) not in ['', sfw_version | string]
          and sfw_version is version('2.0.6', '>=')
          and sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True) }}
-    # sfw_version is installed, only moved aside by an earlier apply.
+    # sfw_version is installed, only moved aside by an earlier apply. For a
+    # dist-tag or a range, any sfw moved aside counts: the role cannot tell
+    # whether it satisfies the pin, and a retry that fails again changes nothing.
     sfw_retry_aside: >-
       {{ sfw_installed.stdout | default('') is search('^aside=', multiline=True)
-         and (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
-              | default([''], true) | first | default('', true) | trim) == sfw_version | string }}
+         and (not (sfw_pin_exact | bool)
+              or (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
+                  | default([''], true) | first | default('', true) | trim) == sfw_version | string) }}
     # Where the install puts sfw: the prefix of the sfw it replaces, when that is
     # not root's npm's own (see the probe), with the globalconfig npm would
     # otherwise read. Empty: npm's own prefix, as for a fresh install.
@@ -160,17 +181,35 @@
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
 
-- name: Note an sfw_version below 2.0.6 that leaves a newer sfw in place
-  ansible.builtin.debug:
-    msg: >-
-      sfw_version={{ sfw_version }} is below 2.0.6, which the npm and cargo wrappers
-      need, so the installed sfw {{ sfw_installed_version }} was left in place
-      rather than replaced with it.
+# The records up to the install are not protections that were skipped: a
+# working sfw is in use in each case. They go to sch_apply_notes, which the run
+# summary lists apart from the NOT-applied count (tasks/main.yml), so the
+# operator sees that sfw_version was not honoured without being told a
+# protection is missing.
+- name: Record that an sfw_version below 2.0.6 left a newer sfw in place
+  ansible.builtin.set_fact:
+    sch_apply_notes: >-
+      {{ (sch_apply_notes | default([])) + ['Socket Firewall — sfw_version=' ~ sfw_version ~ ' is below 2.0.6, which the npm and cargo wrappers need, so the installed sfw ' ~ sfw_installed_version ~ ' was left in place rather than replaced with it, and is in use.'] }}
   when:
-    - sfw_installed_version | default('') | length > 0
+    - sfw_pin_exact | bool
+    # Starts with X.Y.Z, so the loose comparison below decides on those three
+    # numbers and never meets a string where the other side has a number.
+    - sfw_installed_version | default('') is match('[0-9]+[.][0-9]+[.][0-9]+')
     - sfw_installed_version | default('') != sfw_version | string
     - sfw_version is version('2.0.6', '<')
     - sfw_installed_version is version('2.0.6', '>=')
+
+- name: Record that an sfw_version naming no single release left the installed sfw in place
+  ansible.builtin.set_fact:
+    sch_apply_notes: >-
+      {{ (sch_apply_notes | default([])) + ['Socket Firewall — sfw_version=' ~ sfw_version ~ ' is not a plain X.Y.Z version (it is, say, a dist-tag or a range, which only the registry resolves), so the role cannot tell whether the installed sfw ' ~ sfw_installed_version ~ ' already satisfies it; that sfw was kept and is in use. A re-apply installs sfw_version only where sfw is absent or older than 2.0.6; pin an X.Y.Z version to move a working sfw to it.'] }}
+  when:
+    - not (sfw_pin_exact | bool)
+    - sfw_installed_version | default('') | length > 0
+    # Not when the install runs anyway (sfw absent for the applying user, or
+    # older than 2.0.6): then this pin is what it installs.
+    - sfw_check.rc == 0
+    - sfw_cache_reset.stdout | default('') is not search('^old-shim ', multiline=True)
 
 - name: Install Socket Firewall Free via npm (requires Node >= 20)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
@@ -369,9 +408,36 @@
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'broken'
 
 - name: Record skipped protection — Socket Firewall older than 2.0.6
+  vars:
+    sfw_old_path: "{{ sfw_warm.stdout_lines[0][5:] }}"
+    sfw_old_version: >-
+      {{ sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true) }}
+    sfw_install_where: "{{ sfw_install_target | default('', true) | default(\"root's npm prefix\", true) }}"
+    # What happened to the replacement, and what to do. Only an exact
+    # sfw_version is compared with 2.0.6 (sfw_pin_exact): a dist-tag or a
+    # range may have resolved to anything.
+    sfw_old_outcome: >-
+      {%- if ansible_check_mode -%}
+      This --check run changed nothing: a real run replaces it with sfw@{{ sfw_version }}, and moves it aside only if it is still older than 2.0.6.
+      {%- elif sfw_install is not defined or sfw_install is skipped -%}
+      It was not replaced (see the other Socket Firewall entries). It was moved aside so npm and cargo keep working, unfiltered. Install sfw 2.0.6 or later as root and re-apply.
+      {%- elif (sfw_install.rc | default(0)) != 0 -%}
+      Replacing it with sfw@{{ sfw_version }} failed (exit {{ sfw_install.rc }}). It was moved aside so npm and cargo keep working, unfiltered. Install sfw 2.0.6 or later as root and re-apply.
+      {%- elif sfw_pin_exact | bool and sfw_version is version('2.0.6', '<') -%}
+      Replacing it with sfw@{{ sfw_version }} left it unchanged: sfw_version must be 2.0.6 or later. It was moved aside so npm and cargo keep working, unfiltered. Set sfw_version to 2.0.6 or later, or install sfw 2.0.6 or later as root, and re-apply.
+      {%- else -%}
+      {%- if sfw_pin_exact | bool -%}
+      sfw@{{ sfw_version }} was installed under {{ sfw_install_where }}, but root still found this older sfw first on its PATH.
+      {%- else -%}
+      sfw@{{ sfw_version }} was installed under {{ sfw_install_where }}, but root still found this older sfw first on its PATH: {{ sfw_version }} resolved to a release below 2.0.6, or the new copy is behind this one on root's PATH.
+      {%- endif %} It was moved aside so npm and cargo keep working, unfiltered.
+      {%- if sfw_pin_exact | bool %} Remove it, or install sfw {{ sfw_version }} in its place, as root, and re-apply.
+      {%- else %} Pin sfw_version to 2.0.6 or later and re-apply.
+      {%- endif -%}
+      {%- endif -%}
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — sfw ' ~ (sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true)) ~ ' at ' ~ sfw_warm.stdout_lines[0][5:] ~ ' predates 2.0.6, so it ignores SFW_SKIP_UPDATE_CHECK, which the npm and cargo wrappers set so that a non-root caller never writes its root-owned cache. With it, every non-root npm and cargo call through sfw fails from an hour after each update check ("[sfw] Failed to prepare firewall binary: EACCES ... next-check"). ' ~ (('This --check run changed nothing: a real run replaces it with sfw@' ~ sfw_version ~ ', and moves it aside only if it is still older than 2.0.6.') if ansible_check_mode else (((('Replacing it with sfw@' ~ sfw_version ~ ' failed (exit ' ~ (sfw_install.rc | string) ~ ').') if (sfw_install.rc | default(0)) != 0 else (('Replacing it with sfw@' ~ sfw_version ~ ' left it unchanged: sfw_version must be 2.0.6 or later.') if sfw_version is version('2.0.6', '<') else ('sfw@' ~ sfw_version ~ ' was installed under ' ~ (sfw_install_target | default('', true) | default("root's npm prefix", true)) ~ ', but root still finds this older sfw first on its PATH.'))) if (sfw_install is defined and sfw_install is not skipped) else 'It was not replaced (see the other Socket Firewall entries).') ~ ' It was moved aside so npm and cargo keep working, unfiltered. ' ~ (('Remove it, or install sfw ' ~ sfw_version ~ ' in its place, as root, and re-apply.') if (sfw_install is defined and sfw_install is not skipped and (sfw_install.rc | default(0)) == 0 and sfw_version is version('2.0.6', '>=')) else 'Install sfw 2.0.6 or later as root and re-apply.')))] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — sfw ' ~ sfw_old_version ~ ' at ' ~ sfw_old_path ~ ' predates 2.0.6, so it ignores SFW_SKIP_UPDATE_CHECK, which the npm and cargo wrappers set so that a non-root caller never writes its root-owned cache. With it, every non-root npm and cargo call through sfw fails from an hour after each update check ("[sfw] Failed to prepare firewall binary: EACCES ... next-check"). ' ~ sfw_old_outcome] }}
   when:
     - sfw_warm is defined
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'old'
