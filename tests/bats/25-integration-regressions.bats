@@ -358,6 +358,8 @@ restore_uv() {
       || { echo "no reinstall attempt recorded for $t" >&2; false; }
   done
   [ "$checked" -gt 0 ] || skip "none of the role's optional tools is installed here"
+  # The audit tools are not protections, so the header counts them apart.
+  echo "$output" | grep -qE 'protection\(s\) were NOT applied on this host, plus [0-9]+ optional audit tool entr(y|ies) \(not protections'
 }
 
 @test "tool pins: tools already at their pins are not reinstalled" {
@@ -506,7 +508,16 @@ summary_of() { # the summary task's msg, one line per entry
   echo "$sum"
   [ "$status" -eq 0 ]
   echo "$sum" | grep -q 'Yarn hardening — yarn 1.22.22 is Yarn classic, which never reads .yarnrc.yml'
-  echo "$sum" | grep -q 'pip / pip3 wrapper — uv is not installed, so /usr/local/bin/pip and /usr/local/bin/pip3 were not deployed'
+  echo "$sum" | grep -q 'pip / pip3 wrapper — this run found no uv, so it did not deploy /usr/local/bin/pip or /usr/local/bin/pip3'
+  # The wrappers are system-wide and outlive the apply that wrote them. Where an
+  # earlier apply left one (this image's build did), "pip runs the real pip"
+  # would be false: the entry has to say the old wrapper is still there.
+  if grep -qx '# Managed by ansible-supply-chain-security' /usr/local/bin/pip 2>/dev/null; then
+    echo "$sum" | grep -q 'The wrappers an earlier apply left there are still in place'
+    if echo "$sum" | grep -q 'runs the real pip'; then echo "claims the real pip runs past a wrapper that is there" >&2; false; fi
+  else
+    echo "$sum" | grep -q '`pip install` runs the real pip'
+  fi
   if echo "$sum" | grep -qE 'deployed /usr/local/bin/pip already does|Everything else in the role applied normally'; then
     echo "the summary still claims coverage it does not have" >&2
     false
@@ -583,6 +594,12 @@ summary_of() { # the summary task's msg, one line per entry
   echo "$output" | tail -30
   ! echo "$output" | grep -q "refused the probe"
   [ "$status" -eq 0 ]
+  # verify.yml does not run under --check, so the summary must not point at a
+  # report "that follows" (it said so whenever verify_protections was true).
+  if echo "$output" | grep -q 'supply-chain-verify report that follows'; then
+    echo "the --check summary promises a verifier report that never runs" >&2
+    false
+  fi
 }
 
 @test "no optional tool install may abort the play" {

@@ -205,6 +205,29 @@
       exec "$UV" pip "$@"
   when: uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0
 
+- name: Look for pip wrappers an earlier apply left in place (no uv on this run)
+  # The uv lookup above is per-user (it includes $HOME/.local/bin), but the
+  # wrappers are system-wide. When another account, or this one before uv was
+  # removed, applied the role with uv present, /usr/local/bin/pip is still our
+  # wrapper, so "the wrappers were not deployed and pip runs the real pip"
+  # would be false (MEASURED: a second sudo user applying on a host root had
+  # hardened got that entry while /usr/local/bin/pip was the wrapper). Prints
+  # the uv path that apply baked in.
+  ansible.builtin.shell:
+    cmd: |
+      for f in /usr/local/bin/pip /usr/local/bin/pip3; do
+        grep -qx '# Managed by ansible-supply-chain-security' "$f" 2>/dev/null || continue
+        sed -nE "s/^UV='(.*)'$/\1/p" "$f" | head -1
+        exit 0
+      done
+      exit 1
+    executable: /bin/bash
+  register: pip_wrapper_left
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
+
 - name: Record skipped protection — pip / pip3 wrapper (uv absent)
   # The wrappers are deployed only when uv exists (they exec it; without it they
   # would refuse every pip call). The summary used to say nothing when they were
@@ -213,7 +236,7 @@
   # VM matrix: no stock image ships uv, so no wrapper on any of them.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — uv is not installed, so /usr/local/bin/pip and /usr/local/bin/pip3 were not deployed and `pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. Install uv and re-apply.'] }}
+      {{ (skipped_protections | default([])) + ['pip / pip3 wrapper — this run found no uv, so it did not deploy /usr/local/bin/pip or /usr/local/bin/pip3. ' ~ (('The wrappers an earlier apply left there are still in place and were not updated: each runs the first uv it can execute (/usr/local/bin/uv, /usr/bin/uv, the ' ~ (pip_wrapper_left.stdout | trim | default('<none>', true)) ~ ' recorded at that apply, then PATH) and refuses every pip command (exit 127) when it finds none. ') if pip_wrapper_left.rc | default(1) == 0 else ('`pip install` runs the real pip, with neither uv age gate (exclude-newer) nor uv no-build. ' ~ ('/etc/pip.conf only-binary still refuses a sdist resolved from an index, but a sdist named by path or URL still runs its setup.py (tests/bats/48-caller-context-coverage.bats), and ' if pip_only_binary | bool else '') ~ 'the pip age gate needs pip 26.0. ')) ~ 'Install uv and re-apply.'] }}
   when: not (uv_binary_path.rc == 0 and uv_binary_path.stdout | length > 0)
 
 - name: Detect installed uv tools (uv-managed versions, or copies uv does not manage)
