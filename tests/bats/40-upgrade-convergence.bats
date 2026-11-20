@@ -813,6 +813,76 @@ sfw_prefix_teardown() {
   [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
 }
 
+# An older sfw with no npm prefix to replace it in (a local install under /opt,
+# linked into /usr/local/bin) still shadows the replacement, which goes to root's
+# npm's prefix. The warm moves the old one aside, so root's PATH then reaches
+# the new copy, cold. The summary used to say "Remove it, or install sfw 2.0.6
+# in its place, as root, and re-apply", advice for a file already moved aside.
+# MEASURED: a plain re-apply warms the new copy and converges.
+SHADOW_STAGED=""
+sfw_shadow_teardown() {
+  [ -n "$SHADOW_STAGED" ] || return 0
+  local l
+  for l in /usr/local/bin/sfw /usr/local/bin/sfw.broken; do
+    case "$(readlink "$l" 2>/dev/null)" in /opt/sch-oldsfw/*) rm -f "$l" ;; esac
+  done
+  rm -rf /opt/sch-oldsfw
+  hash -r
+  SHADOW_STAGED=""
+}
+
+@test "upgrade: an older sfw outside any npm prefix that shadows the replacement is moved aside, and the summary says a re-apply finishes" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "stages an sfw under /opt and links it into /usr/local/bin"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  [ ! -e /usr/local/bin/sfw ] && [ ! -L /usr/local/bin/sfw ] && [ ! -e /opt/sch-oldsfw ] \
+    || skip "an sfw is already in /usr/local/bin"
+  sfw_snapshot "$c"
+  img=$SFW_SNAP_BIN
+
+  SHADOW_STAGED=1
+  mkdir -p /opt/sch-oldsfw
+  (cd /opt/sch-oldsfw && npm install --ignore-scripts --no-audit --no-fund sfw@2.0.4) >/dev/null 2>&1 \
+    || skip "could not install sfw@2.0.4 (offline?)"
+  old=/opt/sch-oldsfw/node_modules/sfw
+  # Warm with a copy of the image's cache, so the install's own npm call (the
+  # npm wrapper runs whichever sfw is first on PATH) downloads nothing.
+  cp -a "$c" "$old/.sfw-cache"
+  t=$(readlink "$old/.sfw-cache/latest")
+  case "$t" in "$c"/*) ln -sfn "$old/.sfw-cache/${t#"$c"/}" "$old/.sfw-cache/latest" ;; esac
+  ln -s "$(readlink -f /opt/sch-oldsfw/node_modules/.bin/sfw)" /usr/local/bin/sfw
+  hash -r
+  [ "$(command -v sfw)" = /usr/local/bin/sfw ] || skip "/usr/local/bin is not ahead of $img on PATH"
+
+  socket_apply
+  echo "$output" | grep -E 'Socket Firewall|fatal|FAILED|PLAY RECAP' | head -20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw 2.0.4 at /usr/local/bin/sfw predates 2.0.6"* ]]
+  [[ "$output" == *"It was moved aside to /usr/local/bin/sfw.broken, and root now runs $img, which this run did not warm"*"Re-apply to finish."* ]] \
+    || { echo "the summary does not say the old sfw is aside and a re-apply finishes"; return 1; }
+  [[ "$output" != *"Remove it, or install sfw"* ]]
+  [ -L /usr/local/bin/sfw.broken ]
+  hash -r
+  [ "$(command -v sfw)" = "$img" ]
+
+  # The re-apply the summary asks for: nothing to install, the new copy warmed.
+  socket_apply
+  echo "$output" | grep -E 'Socket Firewall|fatal|FAILED|PLAY RECAP' | head -20
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+  [[ "$output" != *"predates 2.0.6"* ]]
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    skip "sfw's binary could not be downloaded from GitHub for the warm; the shadow was moved aside and the summary said so"
+  fi
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+  hash -r
+  [ "$(command -v sfw)" = "$img" ]
+  [ -e "$c/latest" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+}
+
 # ---- cargo: a system-path wrapper that an earlier version left behind ----
 #
 # MEASURED (VM#2's u2204/u2404 layout, reproduced on Ubuntu 26.04 with apt
@@ -880,6 +950,7 @@ cargo_teardown() {
 teardown() {
   hosts_restore
   sfw_prefix_teardown
+  sfw_shadow_teardown
   sfw_teardown
   cargo_teardown
 }

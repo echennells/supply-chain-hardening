@@ -321,11 +321,13 @@
       # skipped, or sfw_version pins an older release): it ignores the
       # SFW_SKIP_UPDATE_CHECK the wrappers set, so every non-root call through
       # it would fail an hour after each update check. Move it aside, as for a
-      # failed warm, and record why. Not in a --check run.
+      # failed warm, and record why. Not in a --check run. `next=` is the sfw
+      # root finds once it is aside (the one the install above put elsewhere,
+      # when this one shadowed it), which this run does not warm.
       shim=$(readlink -f "$P"); pkg=${shim%/*}; pkg=${pkg%/*}
       if [ -f "$pkg/package.json" ] && ! grep -q SFW_SKIP_UPDATE_CHECK "$shim"; then
         echo "version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$pkg/package.json" | head -n 1)"
-        {{ 'true' if ansible_check_mode else 'mv -f "$P" "$P.broken" 2>/dev/null' }}
+        {{ 'true' if ansible_check_mode else 'mv -f "$P" "$P.broken" 2>/dev/null && { n=$(command -v sfw 2>/dev/null) && echo "next=$n"; }' }}
         echo old
         exit 0
       fi
@@ -434,6 +436,9 @@
     sfw_old_path: "{{ sfw_warm.stdout_lines[0][5:] }}"
     sfw_old_version: >-
       {{ sfw_warm.stdout | regex_search('^version=(.*)$', '\1', multiline=True) | default(['unknown'], true) | first | default('unknown', true) }}
+    # The sfw root finds now that this one is aside (see the warm).
+    sfw_next_path: >-
+      {{ sfw_warm.stdout | regex_search('^next=(.*)$', '\1', multiline=True) | default([''], true) | first | default('', true) | trim }}
     sfw_install_where: "{{ sfw_install_target | default('', true) | default(\"root's npm prefix\", true) }}"
     # What happened to the replacement, and what to do. Only an exact
     # sfw_version is compared with 2.0.6 (sfw_pin_exact): a dist-tag or a
@@ -452,9 +457,13 @@
       sfw@{{ sfw_version }} was installed under {{ sfw_install_where }}, but root still found this older sfw first on its PATH.
       {%- else -%}
       sfw@{{ sfw_version }} was installed under {{ sfw_install_where }}, but root still found this older sfw first on its PATH: {{ sfw_version }} resolved to a release below 2.0.6, or the new copy is behind this one on root's PATH.
-      {%- endif %} It was moved aside so npm and cargo keep working, unfiltered.
-      {%- if sfw_pin_exact | bool %} Remove it, or install sfw {{ sfw_version }} in its place, as root, and re-apply.
-      {%- else %} Pin sfw_version to 2.0.6 or later and re-apply.
+      {%- endif %} It was moved aside to {{ sfw_old_path }}.broken
+      {%- if sfw_next_path | length > 0 -%}
+      , and root now runs {{ sfw_next_path }}, which this run did not warm: until a re-apply warms and checks it, other accounts' npm and cargo calls through sfw run unfiltered with a warning, and root's first one downloads its firewall binary. Re-apply to finish.
+      {%- elif sfw_pin_exact | bool -%}
+      , so npm and cargo keep working, unfiltered, and root's PATH reaches no other sfw. Install sfw {{ sfw_version }} where the old one was, as root, or put the new copy on root's PATH, and re-apply.
+      {%- else -%}
+      , so npm and cargo keep working, unfiltered. Pin sfw_version to 2.0.6 or later and re-apply.
       {%- endif -%}
       {%- endif -%}
   ansible.builtin.set_fact:
