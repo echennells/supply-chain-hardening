@@ -794,19 +794,46 @@ write_etc() {
   # SIGPIPE-then-fail-the-pipeline when WRITE_ETC=false. `set -o pipefail`
   # would otherwise halt the script on the first ecosystem that calls
   # write_etc with WRITE_ETC=false.
-  local content
+  local content dir owner
   content=$(cat)
   if [[ "$WRITE_ETC" != "true" ]]; then
     return 0
   fi
-  if ! can_write "$path"; then
-    # No privilege and the path is not ours. The per-user config for this
-    # ecosystem was already written by the caller, so this is a reduction in
-    # coverage (sudo callers in a later step), not a loss of protection.
-    warn "cannot write $path (no root and no usable sudo) — per-user config still applies, but a later \`sudo\` step will not see it"
-    return 0
+  dir=$(dirname "$path")
+  if [[ "${CAN_ESCALATE:-0}" -ne 1 ]]; then
+    # NO ROOT AND NO SUDO. The per-user config for this ecosystem was already
+    # written by the caller, so skipping /etc is a reduction in coverage (sudo
+    # callers in a later step), not a loss of protection, and it is never fatal.
+    #
+    # MEASURED (6c77f4e): root ran harden.sh, then a second account ran it in
+    # the same container. When root's run had been under umask 0000, /etc/uv
+    # was drwxrwxrwx, so the directory test passed, `tee` hit root's 0644
+    # uv.toml, and set -e ended the run on a bare "tee: /etc/uv/uv.toml:
+    # Permission denied" with every ecosystem after uv not applied. Without
+    # privilege this writes only what this account already owns: a file
+    # another account owns is left alone and named, and a directory another
+    # account owns is not written into even when its mode allows it, because
+    # root's tools would then read a file this account controls.
+    if [[ -e "$path" && ! -O "$path" ]]; then
+      owner=$(ls -ld -- "$path" | awk '{print $3}')
+      if grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$path" 2>/dev/null; then
+        log "$path is already in place, written by an earlier hardening run as $owner, and is left as it is: this run has no root and no usable sudo to update a file $owner owns. Per-user config applies to $(id -un). To update it, re-run harden.sh as $owner or with sudo."
+      else
+        warn "cannot write $path: it belongs to $owner, this project did not write it, and this run has no root and no usable sudo. Per-user config still applies, but a later \`sudo\` step reads $owner's file. To replace it, re-run harden.sh as root or with sudo."
+      fi
+      return 0
+    fi
+    if [[ ! -d "$dir" || ! -w "$dir" ]]; then
+      warn "cannot write $path (no root and no usable sudo) — per-user config still applies, but a later \`sudo\` step will not see it"
+      return 0
+    fi
+    if [[ ! -O "$dir" ]]; then
+      owner=$(ls -ld -- "$dir" | awk '{print $3}')
+      warn "not writing $path: $dir belongs to $owner but this account can write to it ($(_sch_mode "$dir")), so a file created there would be one $(id -un) controls and $owner's tools read. Per-user config still applies. Remove group and other write from $dir (chmod go-w, as $owner), or re-run harden.sh as root or with sudo."
+      return 0
+    fi
   fi
-  $SUDO mkdir -p "$(dirname "$path")"
+  $SUDO mkdir -p "$dir"
   echo "$content" | $SUDO tee "$path" >/dev/null
   $SUDO chmod 644 "$path"
 }
@@ -891,13 +918,31 @@ require_privilege() {
   local tool="$1" target="$2"
   local status="${3:-PARTIAL}"
   local msg="${4:-PATH wrapper not deployed: no root and no usable sudo in this job (common in \`container:\` jobs on slim images). Config-file layer still applies.}"
-  can_write "$target" && return 0
-  warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
-  # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
-  # lands in neither summary list and the ecosystem disappears from the verdict
-  # line while still showing in the table below it.
-  set_eco_status "$tool" "$status" "$msg"
-  return 1
+  local owner
+  if ! can_write "$target"; then
+    warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
+    # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
+    # lands in neither summary list and the ecosystem disappears from the verdict
+    # line while still showing in the table below it.
+    set_eco_status "$tool" "$status" "$msg"
+    return 1
+  fi
+  # The directory lets this account in, but the wrapper already there is
+  # another account's: an earlier run as root left it in a directory others can
+  # write (the official rust images' /usr/local/cargo/bin is 0777). MEASURED
+  # (6c77f4e): a second account's run then died on a bare "cp: cannot create
+  # regular file '.../cargo': Permission denied", and nothing after cargo was
+  # applied. Re-rendering it would mean replacing a file another account owns
+  # (root runs it), so leave it, say whose it is, and carry on with the
+  # per-user layer. A tool binary that is not our wrapper is wrapped as before.
+  if [[ "${CAN_ESCALATE:-0}" -ne 1 && -f "$target" && ! -O "$target" ]] \
+     && grep -q 'supply-chain-harden' "$target" 2>/dev/null; then
+    owner=$(ls -ld -- "$target" | awk '{print $3}')
+    warn "$tool: the PATH wrapper at $target belongs to $owner, from an earlier hardening run, and is left as it is: this job has no root and no usable sudo to replace a file $owner owns. It still runs when $(id -un) calls $tool. To update it, re-run harden.sh as $owner or with sudo."
+    set_eco_status "$tool" "$status" "PATH wrapper not re-deployed: the one at $target belongs to $owner and this job has no root and no usable sudo. Config-file layer still applies."
+    return 1
+  fi
+  return 0
 }
 
 # subst_inplace <file> <sed-script>

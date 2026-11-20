@@ -157,6 +157,41 @@ EOF
   [[ "$output" == *"degraded: bun"* ]]
 }
 
+@test "a second account without sudo leaves root's wrapper alone, names it, and applies the rest" {
+  # MEASURED at 6c77f4e: root hardened first, so the cargo wrapper was root's,
+  # in a directory every account could write (the official rust images'
+  # /usr/local/cargo/bin is 0777). A second account with no sudo then ran
+  # harden.sh: the directory check passed, `cp` hit root's file, and set -e
+  # ended the run on a bare "cp: cannot create regular file ... Permission
+  # denied", rc=1, with nothing after cargo applied. The wrapper must not be
+  # replaced (root runs it), and the refusal must say whose it is and what to do.
+  command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null \
+    || skip "needs passwordless sudo to plant a wrapper root owns"
+  stub_bin cargo 'case "${1:-}" in --version|-V) echo "cargo 1.100.0 (abc 2026-11-05)";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  # The first run wraps through sudo, as root's run would: a root-owned wrapper
+  # in a directory this account can write.
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  [ "$(ls -ln "$TEST_BIN/cargo" | awk '{print $3}')" = 0 ]
+  grep -q 'supply-chain-harden' "$TEST_BIN/cargo"
+  local before home2="${BATS_TEST_TMPDIR}/home2"
+  before=$(cksum < "$TEST_BIN/cargo")
+  mkdir -p "$home2"
+  run env -i PATH="${NOSUDO}:${TEST_BIN}:${PATH}" HOME="$home2" \
+    GRADLE_USER_HOME="$home2/.gradle" TMPDIR="$TEST_TMP" WRITE_ETC=false \
+    ECOSYSTEMS=cargo,bundler bash "$HARDEN_SH" --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"Permission denied"* ]]
+  [[ "$output" == *"the PATH wrapper at $TEST_BIN/cargo belongs to root"* ]]
+  [[ "$output" == *"re-run harden.sh as root or with sudo"* ]]
+  [[ "$output" == *"degraded: "*cargo* ]]
+  # Root's wrapper is untouched; this account's own layer, and the ecosystem
+  # after cargo, still landed.
+  [ "$(cksum < "$TEST_BIN/cargo")" = "$before" ]
+  [ "$(ls -ln "$TEST_BIN/cargo" | awk '{print $3}')" = 0 ]
+  [ -f "$home2/.cargo/config.toml" ]
+  [ -f "$home2/.bundle/config" ]
+}
+
 @test "write_etc without privilege warns instead of failing the run" {
   stub_bin npm 'case "${1:-}" in --version|-v) echo "11.10.0";; *) echo STUB;; esac'
   run env -i PATH="${NOSUDO}:${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
