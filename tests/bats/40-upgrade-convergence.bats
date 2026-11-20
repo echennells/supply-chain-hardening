@@ -476,6 +476,140 @@ sfw_teardown() {
   [ "$(cat "$c/next-check")" = "2026-01-01T00:00:00.000Z" ]
 }
 
+# --- sfw_version: a bump, or a pin-down, reaches a host that has sfw ---------
+#
+# The install ran only when sfw was absent (or older than 2.0.6), so moving
+# sfw_version never reached a host that already had sfw. MEASURED on 6c77f4e:
+# with the installed package at another version than sfw_version, either way, a
+# re-apply left it as it was (changed=0). Only one sfw release is 2.0.6 or later
+# (the registry's list on 2026-11-20: 1.0.0, 2.0.1-2.0.4, 2.0.6), so the other
+# version is the installed package.json relabelled: what the role reads to decide.
+
+sfw_pkg_json() { echo "$(npm root -g)/sfw/package.json"; }
+sfw_relabel() { sed -i "s/\"version\": *\"[^\"]*\"/\"version\": \"$1\"/" "$(sfw_pkg_json)"; }
+sfw_label() { sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$(sfw_pkg_json)" 2>/dev/null | head -n 1; }
+socket_apply() {
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false "$@"
+}
+task_result() { printf '%s\n' "$output" | grep -F -A1 "$1" | tail -n 1; }
+
+@test "upgrade: an installed sfw at another version than sfw_version is replaced, both ways, and a re-apply then changes nothing" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to install a global sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  [ "$(dirname "$(sfw_pkg_json)")" = "${c%/.sfw-cache}" ] || skip "root's npm root -g is not where the sfw on PATH lives"
+  want=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  sfw_snapshot "$c"
+  local from
+  for from in 2.0.7 2.0.5; do
+    sfw_relabel "$from"
+    [ "$(sfw_label)" = "$from" ]
+    socket_apply
+    echo "$output" | tail -20
+    [ "$status" -eq 0 ]
+    st=$(task_result "Install Socket Firewall Free via npm")
+    echo "installed $from, sfw_version $want: install $st"
+    [[ "$st" == changed:* ]] || { echo "an sfw labelled $from was not replaced with $want"; return 1; }
+    [ "$(sfw_label)" = "$want" ]
+    hash -r
+    # Reinstalling replaces the package directory, so the warm downloads the
+    # firewall binary again. When GitHub refuses it (a known flake), sfw is moved
+    # aside and named in the summary; what still has to hold is the version,
+    # and nothing anyone else can write in the cache.
+    if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+      if [ -d "$c" ]; then
+        run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+        [ -z "$output" ]
+      fi
+      skip "sfw's binary could not be downloaded from GitHub after the reinstall; the version converged to $want"
+    fi
+    [ -e "$c/latest" ]
+    run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+    [ -z "$output" ]
+  done
+
+  # Converged: nothing to replace.
+  socket_apply
+  [ "$status" -eq 0 ]
+  st=$(task_result "Install Socket Firewall Free via npm")
+  [[ "$st" == skipping:* ]] || { echo "a re-apply at sfw_version still ran the install: $st"; return 1; }
+
+  # A pin below 2.0.6 does not take a working sfw down to a version the
+  # wrappers cannot use; the apply says so.
+  before=$(stat -c %i "${c%/.sfw-cache}")
+  socket_apply -e sfw_version=2.0.4
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+  [[ "$output" == *"sfw_version=2.0.4 is below 2.0.6"*"was left in place"* ]]
+  [ "$(sfw_label)" = "$want" ]
+  [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+}
+
+# --- an sfw moved aside after a failed fetch --------------------------------
+#
+# When the warm cannot fetch the firewall binary, sfw is moved aside
+# (sfw -> sfw.broken) and every later apply reinstalls it to try again. MEASURED
+# on 6c77f4e with GitHub unreachable: each re-apply reported the install changed
+# (changed=1), ending exactly where it began. It now counts as a change only
+# when sfw comes back.
+HOSTS_SAVED=""
+hosts_block_github() {
+  cp /etc/hosts "$BATS_TEST_TMPDIR/hosts.saved" && HOSTS_SAVED=1
+  local h
+  for h in github.com api.github.com objects.githubusercontent.com release-assets.githubusercontent.com codeload.github.com; do
+    echo "127.0.0.1 $h" >> /etc/hosts
+  done
+}
+hosts_restore() {
+  [ -n "$HOSTS_SAVED" ] || return 0
+  cat "$BATS_TEST_TMPDIR/hosts.saved" > /etc/hosts; HOSTS_SAVED=""
+}
+
+@test "upgrade: an sfw moved aside after a failed fetch is retried on every apply, and reported changed only when it comes back" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to move sfw and edit /etc/hosts"
+  [ -w /etc/hosts ] || skip "/etc/hosts is not writable here"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  sfw_snapshot "$c"
+  bin=$(command -v sfw)
+
+  # What a failed warm leaves: sfw moved aside, and no binary cached.
+  hosts_block_github
+  mv "$bin" "$bin.broken"; rm -rf "$c"; hash -r
+  socket_apply
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]] \
+    || { echo "the fetch did not fail with GitHub blocked; nothing to test"; return 1; }
+  st=$(task_result "Install Socket Firewall Free via npm"); echo "blocked: install $st"
+  [[ "$st" == ok:* ]]
+  st=$(task_result "Warm the Socket Firewall binary cache"); echo "blocked: warm $st"
+  [[ "$st" == ok:* ]]
+  hash -r
+  [ -z "$(command -v sfw)" ]
+
+  # Reachable again: the same retry brings sfw back, and that is the change.
+  hosts_restore
+  socket_apply
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    skip "GitHub refused the download with nothing blocked (a known flake); the blocked half passed"
+  fi
+  st=$(task_result "Warm the Socket Firewall binary cache"); echo "reachable: warm $st"
+  [[ "$st" == changed:* ]]
+  hash -r
+  [ "$(command -v sfw)" = "$bin" ]
+  rm -f "$bin.broken"
+  [ -e "$c/latest" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+}
+
 # ---- cargo: a system-path wrapper that an earlier version left behind ----
 #
 # MEASURED (VM#2's u2204/u2404 layout, reproduced on Ubuntu 26.04 with apt
@@ -541,6 +675,7 @@ cargo_teardown() {
 # Both sections above leave state for later files when a test fails partway;
 # bats runs one teardown, so it calls both.
 teardown() {
+  hosts_restore
   sfw_teardown
   cargo_teardown
 }

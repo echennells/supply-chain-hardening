@@ -37,10 +37,81 @@
   changed_when: false
   check_mode: false
   failed_when: false
+  # Also when sfw is present: the version probe below runs root's npm too.
   when:
-    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
+
+- name: Detect the sfw the install below would replace (reinstall when sfw_version moves)
+  # The install used to run only when sfw was absent (or older than 2.0.6), so
+  # bumping sfw_version never reached a host that already had sfw (MEASURED on
+  # 6c77f4e: an installed sfw whose version differed from sfw_version, in either
+  # direction, was left as it was, changed=0). Same rule as lockfile-lint in
+  # npm.yml: read the install TARGET, the package.json under `npm root -g` of
+  # the npm root runs, and leave alone an sfw some other installer put
+  # elsewhere.
+  #
+  # `aside=` is an sfw an earlier apply moved aside (sfw -> sfw.broken) because
+  # its firewall binary could not be fetched or run. The install below still
+  # runs over it, to retry with a fresh package directory, but it only counts as
+  # a change when that retry leaves a working sfw (see the warm). MEASURED on
+  # 6c77f4e with GitHub unreachable: every re-apply reinstalled, failed the
+  # warm, moved sfw aside again and reported changed=1, ending where it began.
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      root=$(npm root -g 2>/dev/null) || exit 0
+      f="$root/sfw/package.json"
+      [ -f "$f" ] || exit 0
+      echo "version=$(sed -nE 's/^ *"version": *"([^"]+)".*/\1/p' "$f" | head -n 1)"
+      bin="$(npm prefix -g 2>/dev/null)/bin/sfw"
+      if [ ! -e "$bin" ] && [ ! -L "$bin" ] && { [ -e "$bin.broken" ] || [ -L "$bin.broken" ]; }; then
+        echo "aside=$bin.broken"
+      fi
+    executable: /bin/bash
+  register: sfw_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+    - npm_root_for_socket.rc | default(1) == 0
+
+- name: Work out whether this run installs sfw, and whether that only retries one moved aside
+  ansible.builtin.set_fact:
+    sfw_installed_version: >-
+      {{ sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
+         | default([''], true) | first | default('', true) | trim }}
+    # A bump or a pin-down. Never to a version below 2.0.6, which the wrappers
+    # cannot use (the old-shim path below handles an sfw_version that low), and
+    # never over an sfw the reset did not trust: the install runs root's npm,
+    # which on a hardened host is the npm wrapper, which runs sfw.
+    sfw_version_moved: >-
+      {{ (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
+          | default([''], true) | first | default('', true) | trim) not in ['', sfw_version | string]
+         and sfw_version is version('2.0.6', '>=')
+         and sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True) }}
+    # sfw_version is installed, only moved aside by an earlier apply.
+    sfw_retry_aside: >-
+      {{ sfw_installed.stdout | default('') is search('^aside=', multiline=True)
+         and (sfw_installed.stdout | default('') | regex_search('^version=(.*)$', '\1', multiline=True)
+              | default([''], true) | first | default('', true) | trim) == sfw_version | string }}
+  when:
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+
+- name: Note an sfw_version below 2.0.6 that leaves a newer sfw in place
+  ansible.builtin.debug:
+    msg: >-
+      sfw_version={{ sfw_version }} is below 2.0.6, which the npm and cargo wrappers
+      need, so the installed sfw {{ sfw_installed_version }} was left in place
+      rather than replaced with it.
+  when:
+    - sfw_installed_version | default('') | length > 0
+    - sfw_installed_version | default('') != sfw_version | string
+    - sfw_version is version('2.0.6', '<')
+    - sfw_installed_version is version('2.0.6', '>=')
 
 - name: Install Socket Firewall Free via npm (requires Node >= 20)
   # NON-FATAL BY DESIGN. An optional scanner failing to install must never
@@ -60,13 +131,23 @@
   # the wrappers depend on SFW_SKIP_UPDATE_CHECK, which only 2.0.6 reads. npm
   # replaces the package directory, so the cache goes with it and the warm
   # below downloads the binary again (MEASURED from 2.0.4 to 2.0.6).
+  #
+  # And over an sfw whose version is not sfw_version, either way (see the
+  # version probe above). A retry over one an earlier apply moved aside, at the
+  # same version, is reported by the warm instead: it changed something only if
+  # sfw works afterwards.
   ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
   when:
-    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
+    - >-
+      sfw_check.rc != 0
+      or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
+      or sfw_version_moved | default(false) | bool
     - npm_for_socket.rc == 0
     - node_major_version.stdout | int >= 20
     - npm_root_for_socket.rc | default(1) == 0
-  changed_when: true
+  changed_when:
+    - sfw_install.rc | default(1) == 0
+    - not (sfw_retry_aside | default(false) | bool)
   register: sfw_install
   failed_when: false
 
@@ -148,11 +229,15 @@
       fi
     executable: /bin/bash
   register: sfw_warm
-  # changed_when/check_mode go in as an ADJACENT PAIR — the invariant test in
-  # 25-integration-regressions.bats requires check_mode: on the line directly
-  # after changed_when: false, so a --check run gets a real answer rather than
-  # a skipped task and an undefined register. A comment between them breaks it.
-  changed_when: false
+  # Changed only when it brings back an sfw an earlier apply moved aside (the
+  # install above reinstalled it without counting that as a change). check_mode:
+  # false so a --check run gets a real answer rather than a skipped task and an
+  # undefined register.
+  changed_when: >-
+    sfw_retry_aside | default(false) | bool
+    and sfw_install is defined and sfw_install is not skipped
+    and sfw_install.rc | default(1) == 0
+    and (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'ok'
   check_mode: false
   failed_when: false
   when:
@@ -245,6 +330,9 @@
     - npm_root_for_socket is defined
     - npm_root_for_socket.rc is defined
     - npm_root_for_socket.rc != 0
+    # The check now runs with sfw present too (for the version probe); this
+    # entry says "not installed", so only when sfw is absent or must be replaced.
+    - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
 
 - name: Warn if Node too old for Socket Firewall
   ansible.builtin.debug:

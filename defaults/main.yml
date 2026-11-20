@@ -634,8 +634,11 @@ lockfile_lint_version: "5.1.0"
 # sfw must be 2.0.6 or later: the npm and cargo wrappers run it with
 # SFW_SKIP_UPDATE_CHECK=1, which older versions ignore (there is no 2.0.5), and
 # then every non-root call through it fails an hour after each update check.
-# Unlike the other tools here, an installed sfw older than 2.0.6 is replaced at
-# re-apply, and moved aside (recorded) if the replacement is still too old.
+# A re-apply installs this version over an installed sfw of any other version,
+# up or down (the copy under root's `npm root -g`; an sfw installed elsewhere is
+# left alone), except that a pin below 2.0.6 never replaces a 2.0.6+ sfw. An
+# installed sfw older than 2.0.6 is replaced, and moved aside (recorded) if the
+# replacement is still too old.
 sfw_version: "2.0.6"
 
 # zizmor, installed via `uv tool install`.
