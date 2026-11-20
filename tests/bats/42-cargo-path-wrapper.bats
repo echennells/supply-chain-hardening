@@ -373,3 +373,34 @@ make_sfw_pkg() {
   echo "$output"
   [[ "$output" == *"SFW-STUB SKIP=1"* ]]
 }
+
+@test "cargo+sfw: the real sfw runs a non-root caller's cargo once its update check is due" {
+  # The tests above use a stub sfw. This one runs the installed sfw, so it
+  # fails if sfw writes its root-owned cache for a non-root caller: backdate
+  # next-check past sfw's 1h window, as VM#1 measured, and run the deployed
+  # wrapper as nobody against a stub cargo. sfw's firewall runs its child
+  # behind a local proxy (MEASURED, sfw-free 1.16.0: CARGO_HTTP_PROXY is set,
+  # for any child command), so the stub reports it as proof sfw was in the chain.
+  command -v cargo >/dev/null || skip "cargo not installed"
+  [ "$(id -u)" = 0 ] || skip "needs root to backdate sfw's cache and run as another account"
+  grep -q 'pfx="sfw"' "$(cargo_path)" || skip "wrapper rendered without the sfw route (cargo_socket_firewall=false)"
+  sfw_bin=$(command -v sfw) || skip "sfw not installed"
+  s=$(readlink -f "$sfw_bin"); s=${s%/*}; c=${s%/*}/.sfw-cache
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  make_probe without-cooldown
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\necho "PROXY=${CARGO_HTTP_PROXY:-none}"\n' > "$PROBE_DIR/cargo-real"
+  chmod -R a+rX "$PROBE_DIR"
+  saved=$(cat "$c/next-check" 2>/dev/null)
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
+
+  run su -s /bin/bash nobody -c "cd '$PROBE_DIR/proj' && PATH='$PROBE_DIR:${sfw_bin%/*}:/usr/bin:/bin' '$PROBE_DIR/cargo' fetch 2>&1"
+  after=$(cat "$c/next-check")
+  [ -n "$saved" ] && printf '%s' "$saved" > "$c/next-check"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Failed to prepare firewall binary"* ]]
+  [[ "$output" != *"sfw has no firewall binary cached"* ]]
+  [[ "$output" == *"fetch --locked"* ]]
+  [[ "$output" == *"PROXY=http://127.0.0.1:"* ]]
+  [ "$after" = "2026-01-01T00:00:00.000Z" ]
+}

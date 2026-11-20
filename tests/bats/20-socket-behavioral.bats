@@ -106,6 +106,18 @@ teardown() {
   # No wrapper warning means the wrapper took its sfw branch, not a pass-through.
   [[ "$output" != *"[supply-chain-hardening] warning"* ]]
   [ -e "$PROJ/app/node_modules/sfw-probe-pkg" ]
+
+  # And positively: sfw's firewall is in the chain. It runs its child behind a
+  # local proxy with its own CA (MEASURED, sfw-free 1.16.0: HTTPS_PROXY and
+  # NODE_EXTRA_CA_CERTS=/tmp/sfw-*/socketFirewallCa.crt; neither is set
+  # without sfw). `npm exec` goes through the same branch of the wrapper.
+  printf 'console.log("CA=" + (process.env.NODE_EXTRA_CA_CERTS || "none"))\n' > "$PROJ/env.js"
+  chmod 644 "$PROJ/env.js"
+  run su - "$SFW_USER" -c "cd '$PROJ/app' && npm exec --yes -- node ../env.js 2>&1"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CA="*socketFirewall* ]]
+
   # And sfw left the root-owned cache alone.
   [ "$(cat "$CACHE/next-check")" = "2026-01-01T00:00:00.000Z" ]
 }
