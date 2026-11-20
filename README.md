@@ -31,7 +31,7 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 | **Pre-install reputation (npq)** | x | x | x | | | | | | | | | | |
 | **Socket Firewall** | x | | | | | † | x | | | | | | |
 | **Exact version pinning** | x | | x | x | | | | | | | | | |
-| **Hash/integrity verification** | x | | | | | § | | x | | | x | | x |
+| **Hash/integrity verification** | x | | | | | ¶ | | x | | | x | | x |
 | **HTTPS-only / source pinning** | | | | | | | x | x | x | | x | x | x |
 | **Lockfile enforcement** | | | | | | | x | | | x | | | |
 
@@ -43,7 +43,7 @@ Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a 
 
 `§` = uv's `no-build` refuses every sdist. Where pip runs without the redirect to uv (no uv on the host, `python3 -m pip`, a venv's own `pip`), pip's `only-binary = :all:` refuses an sdist it resolves from an index or `--find-links`, but **not one named by path or URL**: `pip install ./x.tar.gz` still runs its `setup.py`. `supply-chain-verify` grades that row WEAK.
 
-`§` = **uv's default, restated.** uv has verified any hashes a requirements file supplies since 0.5.3, and the role's `[pip] verify-hashes = true` only writes that default down. It does not require hashes, so an install that names none, which is most ad-hoc installs, is not hash-checked.
+`¶` = **uv's default, restated.** uv has verified any hashes a requirements file supplies since 0.5.3, and the role's `[pip] verify-hashes = true` only writes that default down. It does not require hashes, so an install that names none, which is most ad-hoc installs, is not hash-checked.
 
 Go has no lockfile-enforcement tick because the role adds nothing there: Go's own default already refuses to change `go.mod`/`go.sum` during a build. Earlier versions wrote `GOFLAGS=-mod=readonly`, which restated that default and made Go ignore a project's `vendor/` directory.
 
