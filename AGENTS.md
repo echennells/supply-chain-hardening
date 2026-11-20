@@ -58,8 +58,8 @@ supply-chain-verify
   26.04 with apt ansible-core 2.20.1 and `-K`), tell the user. The fix is a newer
   ansible-core for their user (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo
   for the apply. Don't change their sudoers yourself.
-- If the play stops on an existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or
-  `/etc/uv/uv.toml`, don't override it yourself. It may be a corporate registry setting.
+- If the play stops on an existing `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml`,
+  don't override it yourself. It may be a corporate registry setting.
   Show it to the user, and pass `-e accept_etc_overwrite=true` only if they agree.
 - The same goes for a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or
   `~/.nuget/NuGet/NuGet.Config` the role did not write: show it to the user, and pass

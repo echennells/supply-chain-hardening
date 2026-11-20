@@ -35,7 +35,7 @@ This action ships the hardening that makes sense for **ephemeral CI runners**. F
 - cargo PATH wrapper (`--locked` injection) + publish-age gate config
 - Optional malware intelligence (Socket Firewall) + npm/npx wrappers
 - Optional cargo-cooldown backend to enforce the cargo age gate
-- `/etc/*` writes for `sudo` callers in the same job
+- `/etc/*` writes (and root's `~/.yarnrc.yml`) for `sudo` callers in the same job
 
 **Intentionally NOT in the action (long-lived-host concerns):**
 - `npq` interactive aliases (don't fire in CI's non-interactive shells)
@@ -482,7 +482,7 @@ short green table.
 | `strict` | `true` | When `true`, age-gate violations fail the install. When `false`, the package manager falls back to an older satisfying version if available. |
 | `intel` | `none` | `none` or `sfw`. With `sfw`, installs Socket Firewall and wraps `npm` and `npx` to route fetches through threat-intel blocking; `cargo` too via `cargo_socket_firewall`. Downloads a ~137 MB firewall binary from GitHub during hardening (measured 79 s); if that fails, npm is left unwrapped with a warning and the `sfw-installed` output is false. Requires Node ≥ 20. |
 | `install_sfw` | — | **Deprecated**, use `intel`. `true` is treated as `intel: sfw`. Setting both is an error rather than a silent precedence rule. |
-| `write_etc` | `true` | Write system-wide `/etc/*` config in addition to user-home config. Useful if any subsequent step uses `sudo npm install` etc. Requires passwordless sudo, which all stock GitHub runners have. |
+| `write_etc` | `true` | Write system-wide `/etc/*` config, and root's `~/.yarnrc.yml` (Yarn reads no system-wide file; a root file this project did not write is copied next to itself first, with a warning), in addition to user-home config. Useful if any subsequent step uses `sudo npm install` etc. Requires passwordless sudo, which all stock GitHub runners have. |
 | `install_cargo_cooldown` | `false` | Install the `cargo-cooldown` backend that **enforces** the cargo publish-age gate. Compiles from source, costing minutes on a cold runner — hence off by default, same trade-off as `intel: sfw`. With it off the gate config is still written and `--locked` still injected, but `cargo update` can resolve a freshly published crate unchecked. Already-cached installs are picked up automatically. |
 | `composer_allow_plugins` | `false` | When `false`, composer wrapper injects `--no-plugins` and JSON config sets `"allow-plugins": {}` — the empty allowlist, which denies every plugin. NOT the literal `false`: that is a hard fatal below composer 2.2.15 and again on 2.3.0-2.3.7, because the upstream fix was not backported linearly. Set to `true` for workflows that legitimately need composer Plugin classes (e.g., `composer/installers`, `phpstan/extension-installer`). `--no-scripts` injection still applies regardless. |
 
