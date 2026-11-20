@@ -115,20 +115,29 @@
       shim=$(readlink -f "$p") || exit 0
       pkg=${shim%/*}; pkg=${pkg%/*}
       [ -f "$pkg/package.json" ] || exit 0
+      # The npm package's own manifest, not any package.json that happens to
+      # sit two levels above some other program called sfw.
+      grep -Eq '^ *"name": *"sfw"' "$pkg/package.json" || exit 0
       [ "$(stat -c %u "$shim")" = 0 ] && [ "$(stat -c %u "$pkg")" = 0 ] || exit 0
       echo "version=$(sed -nE 's/^ *"version": *"([^"]+)".*/\1/p' "$pkg/package.json" | head -n 1)"
       [ -z "$aside" ] || echo "aside=$p"
       own=$(npm prefix -g 2>/dev/null) || own=""
+      # target= is where the install below really goes: the old sfw's prefix
+      # only when the prefix= and globalconfig= lines it passes to npm were
+      # printed, npm's own prefix otherwise.
+      target=$own
       case "$pkg" in
         */lib/node_modules/sfw)
           prefix=${pkg%/lib/node_modules/sfw}
           if [ -n "$prefix" ] && [ -n "$own" ] && [ "$(readlink -f "$prefix")" != "$(readlink -f "$own")" ]; then
             gc=$(npm config get globalconfig 2>/dev/null) || gc=""
-            [ -n "$gc" ] && echo "prefix=$prefix" && echo "globalconfig=$gc"
+            if [ -n "$gc" ]; then
+              echo "prefix=$prefix"; echo "globalconfig=$gc"; target=$prefix
+            fi
           fi
           ;;
       esac
-      echo "target=${prefix:-$own}"
+      echo "target=$target"
     executable: /bin/bash
   register: sfw_installed
   changed_when: false
