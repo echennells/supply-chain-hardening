@@ -319,6 +319,37 @@ EOF
   echo "$output" | grep '"protection": "python startup hooks"' | grep -q '"status": "WEAK"'
 }
 
+@test "verify: go module mode is WEAK under GOFLAGS=-mod=mod, and N/A rather than OK when GOFLAGS is Go's default" {
+  # goflags_mod defaults to "", so the role writes no GOFLAGS and Go's own module
+  # mode applies. An OK row for that default would count it as a protection of
+  # ours. -mod=mod is the value that undoes it: `go build` may then add
+  # requirements and rewrite go.mod/go.sum without `go get` (MEASURED on go1.27.4).
+  grep -q "goflags_mod is empty" "$VERIFY" || skip "role applied with goflags_mod set; this case covers the default"
+  cat > "$FAKEBIN/go" <<'STUB'
+#!/bin/bash
+[ "$1" = env ] || exit 0
+case "$2" in
+  GOFLAGS) printf '%s\n' "${STUB_GOFLAGS:-}" ;;
+  *) echo ;;
+esac
+STUB
+  chmod +x "$FAKEBIN/go"
+  STUB_GOFLAGS="-mod=mod -trimpath" PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
+  echo "$output" | grep "go module mode" | grep -q "WEAK"
+  echo "$output" | grep "go module mode" | grep -q -- "-mod=mod"
+
+  PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
+  echo "$output" | grep "go module mode" | grep -q "N/A"
+  echo "$output" | grep "go module mode" | grep -q "BYDESIGN"
+  # Counted, not `! grep`: a negated command does not fail a bats test unless
+  # it is the last line.
+  [ "$(echo "$output" | grep "go module mode" | grep -cE '^(OK|WEAK|GAP)')" = 0 ]
+
+  # -mod=vendor is not -mod=mod: still not a finding.
+  STUB_GOFLAGS="-mod=vendor" PATH="$FAKEBIN:$PATH" run "$VERIFY" --verbose
+  echo "$output" | grep "go module mode" | grep -q "N/A"
+}
+
 @test "output: the default is the compact one-line-per-row view" {
   run "$VERIFY"
   [ "$status" -eq 0 ] || [ "$status" -eq 1 ]     # gap or no gap, never a crash
