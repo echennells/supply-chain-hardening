@@ -126,7 +126,12 @@ set -e
 # distributions for `x` is disabled" (0.13.9: "cause: Building ..."), and the
 # old case-insensitive, unanchored pattern listed that as a source build. The
 # second grep drops that sentence however a uv version indents it.
-built="$(grep -E '^[[:space:]]*(Building|Built)[[:space:]]' "$out" \
+# Colour codes come off first: under FORCE_COLOR=1, CLICOLOR_FORCE=1 or
+# `--color always` uv wraps the verb in SGR sequences ("ESC[36mESC[1mBuilding"),
+# so the anchored grep found nothing and the report said "no source builds"
+# while the sdist built (MEASURED, uv 0.12.5 and 0.13.9).
+esc=$(printf '\033')
+built="$(sed "s/${esc}\[[0-9;]*m//g" "$out" | grep -E '^[[:space:]]*(Building|Built)[[:space:]]' \
          | grep -vE 'source distributions? .*(is|are) disabled' | sed 's/^/    /' || true)"
 if [ -n "$built" ]; then
   echo "[$PROG] built from source during this command (review these):" >&2
