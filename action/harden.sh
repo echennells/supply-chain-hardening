@@ -440,16 +440,54 @@ err() {
   esac
 }
 
-# run_bounded <seconds> <cmd...> — `timeout` where it exists. macOS runners
-# ship none (gtimeout only with coreutils), and a missing bound must not turn
-# into a missing command: without either, the command runs unbounded.
+# >>> run_bounded
+# run_bounded <seconds> <command> [args...]: runs the command, stopped after
+# <seconds>: timeout(1) where it exists, then gtimeout (Homebrew coreutils),
+# then a background-and-kill fallback. Stock macOS has neither, and a missing
+# bound must turn into neither a missing command nor a hang. Returns the
+# command's status, or 124 when it was stopped, as timeout(1) does. Variables
+# assigned on the call (`VAR=x run_bounded ...`) reach the command. Like
+# timeout(1), which signals its whole process group, the fallback stops what
+# the command started as well (found with pgrep), so a child left holding a
+# $( ) open cannot keep the hang going. The same block is in action/harden.sh,
+# action/verify.sh and templates/verify.sh.j2; tests/ci/07-verify.bats checks
+# that they match.
 run_bounded() {
-  local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
-  else "$@"
+  local _rb_secs="$1" _rb_pid _rb_w _rb_rc=0 _rb_t0="$SECONDS"
+  shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$_rb_secs" "$@"; return; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$_rb_secs" "$@"; return; fi
+  "$@" &
+  _rb_pid=$!
+  # The watcher writes nowhere: inside $( ), an inherited stdout would hold
+  # the substitution open until the watcher's own sleep ended.
+  ( _rb_n=0
+    while kill -0 "$_rb_pid" 2>/dev/null; do
+      if [ "$_rb_n" -ge "$_rb_secs" ]; then
+        _rb_all=$_rb_pid _rb_q=$_rb_pid
+        while _rb_q=$(pgrep -P "$(echo $_rb_q | tr ' ' ',')" 2>/dev/null | tr '\n' ' ') \
+              && [ -n "${_rb_q%% }" ]; do
+          _rb_all="$_rb_all $_rb_q"
+        done
+        kill -TERM $_rb_all 2>/dev/null || true
+        sleep 2
+        kill -KILL $_rb_all 2>/dev/null || true
+        exit 0
+      fi
+      sleep 1
+      _rb_n=$((_rb_n + 1))
+    done ) >/dev/null 2>&1 &
+  _rb_w=$!
+  # 2>/dev/null: bash 3.2 reports the stopped job ("Terminated") here.
+  wait "$_rb_pid" 2>/dev/null || _rb_rc=$?
+  kill "$_rb_w" 2>/dev/null || true
+  wait "$_rb_w" 2>/dev/null || true
+  if [ "$_rb_rc" -gt 128 ] && [ $((SECONDS - _rb_t0)) -ge "$_rb_secs" ]; then
+    return 124
   fi
+  return "$_rb_rc"
 }
+# <<< run_bounded
 
 # GitLab's collapsible sections require section_end to carry the SAME name
 # as its section_start, but every end_section call site is argument-less.
@@ -481,6 +519,25 @@ if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
   err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
   exit 2
 fi
+
+# ---- Nothing this script creates is writable by group or others ----
+#
+# MEASURED (harden.sh at 6c77f4e, run as root under `umask 0000`, the default of
+# GitLab's Docker and Kubernetes executors): /etc/uv was left drwxrwxrwx, every
+# per-user config and the directory it sat in (~/.npmrc, ~/.cargo,
+# ~/.config/uv/uv.toml, ~/.m2/settings.xml, 32 paths in all) world-writable, and
+# with intel=sfw the root `npm install -g` left /usr/local/lib/node_modules/sfw,
+# the code root runs on every npm call, 0777. Any other account could rewrite
+# what the next build reads or root executes.
+#
+# go-w is added to whatever the caller's umask is, here, before the first
+# write, so it also covers every tool this script starts (npm, cargo, go env
+# -w). A stricter umask (077) is kept. The few files every account must be
+# able to read (/etc, the wrappers, the sfw install) get explicit modes where
+# they are written. SCH_CALLER_UMASK is kept for the one place that honours the
+# caller's own grant: a directory created for an explicit HARDENING_ENV_FILE.
+SCH_CALLER_UMASK=$(umask)
+umask go-w
 
 # ---- The env file and the run record: where they go, and who else can touch them ----
 #
@@ -611,7 +668,7 @@ _sch_create() {
     [ -d "$d" ] || ( umask 077 && mkdir -p -- "$d" ) 2>/dev/null || true
   else
     # The caller's umask plus o-w: a group-shared directory stays group-shared.
-    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$(umask) | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
+    [ -d "$d" ] || ( umask "$(printf '%04o' "$(( 0$SCH_CALLER_UMASK | 02 ))")" && mkdir -p -- "$d" ) 2>/dev/null || true
   fi
   why=$(_sch_unsafe_target "$f")
   if [ -n "$why" ]; then
@@ -794,19 +851,57 @@ write_etc() {
   # SIGPIPE-then-fail-the-pipeline when WRITE_ETC=false. `set -o pipefail`
   # would otherwise halt the script on the first ecosystem that calls
   # write_etc with WRITE_ETC=false.
-  local content
+  local content dir owner
   content=$(cat)
   if [[ "$WRITE_ETC" != "true" ]]; then
     return 0
   fi
-  if ! can_write "$path"; then
-    # No privilege and the path is not ours. The per-user config for this
-    # ecosystem was already written by the caller, so this is a reduction in
-    # coverage (sudo callers in a later step), not a loss of protection.
-    warn "cannot write $path (no root and no usable sudo) — per-user config still applies, but a later \`sudo\` step will not see it"
-    return 0
+  dir=$(dirname "$path")
+  if [[ "${CAN_ESCALATE:-0}" -ne 1 ]]; then
+    # NO ROOT AND NO SUDO. The per-user config for this ecosystem was already
+    # written by the caller, so skipping /etc is a reduction in coverage (sudo
+    # callers in a later step), not a loss of protection, and it is never fatal.
+    #
+    # MEASURED (6c77f4e): root ran harden.sh, then a second account ran it in
+    # the same container. When root's run had been under umask 0000, /etc/uv
+    # was drwxrwxrwx, so the directory test passed, `tee` hit root's 0644
+    # uv.toml, and set -e ended the run on a bare "tee: /etc/uv/uv.toml:
+    # Permission denied" with every ecosystem after uv not applied. Without
+    # privilege this writes only what this account already owns: a file
+    # another account owns is left alone and named, and a directory another
+    # account owns is not written into even when its mode allows it, because
+    # root's tools would then read a file this account controls.
+    if [[ -e "$path" && ! -O "$path" ]]; then
+      owner=$(ls -ld -- "$path" | awk '{print $3}')
+      if grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$path" 2>/dev/null; then
+        log "$path is already in place, written by an earlier hardening run as $owner, and is left as it is: this run has no root and no usable sudo to update a file $owner owns. Per-user config applies to $(id -un). To update it, re-run harden.sh as $owner or with sudo."
+      else
+        warn "cannot write $path: it belongs to $owner, this project did not write it, and this run has no root and no usable sudo. Per-user config still applies, but a later \`sudo\` step reads $owner's file. To replace it, re-run harden.sh as root or with sudo."
+      fi
+      return 0
+    fi
+    if [[ ! -d "$dir" || ! -w "$dir" ]]; then
+      warn "cannot write $path (no root and no usable sudo) — per-user config still applies, but a later \`sudo\` step will not see it"
+      return 0
+    fi
+    if [[ ! -O "$dir" ]]; then
+      owner=$(ls -ld -- "$dir" | awk '{print $3}')
+      warn "not writing $path: $dir belongs to $owner but this account can write to it ($(_sch_mode "$dir")), so a file created there would be one $(id -un) controls and $owner's tools read. Per-user config still applies. Remove group and other write from $dir (chmod go-w, as $owner), or re-run harden.sh as root or with sudo."
+      return 0
+    fi
   fi
-  $SUDO mkdir -p "$(dirname "$path")"
+  # 0755 for a directory this creates (/etc/uv) whatever the umask: under 077 it
+  # was 0700, and no other account could read the uv.toml inside it.
+  $SUDO mkdir -p -m 0755 "$dir"
+  # And converge one an earlier run left writable by others (/etc/uv after a run
+  # under umask 0000, measured above). /etc itself is the system's, not ours.
+  if [[ "$dir" != /etc ]]; then
+    case "$(_sch_mode "$dir")" in
+      ?????w*|????????w*)
+        $SUDO chmod go-w "$dir"
+        log "removed group and other write from $dir, which an earlier run left writable by other accounts" ;;
+    esac
+  fi
   echo "$content" | $SUDO tee "$path" >/dev/null
   $SUDO chmod 644 "$path"
 }
@@ -891,13 +986,31 @@ require_privilege() {
   local tool="$1" target="$2"
   local status="${3:-PARTIAL}"
   local msg="${4:-PATH wrapper not deployed: no root and no usable sudo in this job (common in \`container:\` jobs on slim images). Config-file layer still applies.}"
-  can_write "$target" && return 0
-  warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
-  # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
-  # lands in neither summary list and the ecosystem disappears from the verdict
-  # line while still showing in the table below it.
-  set_eco_status "$tool" "$status" "$msg"
-  return 1
+  local owner
+  if ! can_write "$target"; then
+    warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
+    # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
+    # lands in neither summary list and the ecosystem disappears from the verdict
+    # line while still showing in the table below it.
+    set_eco_status "$tool" "$status" "$msg"
+    return 1
+  fi
+  # The directory lets this account in, but the wrapper already there is
+  # another account's: an earlier run as root left it in a directory others can
+  # write (the official rust images' /usr/local/cargo/bin is 0777). MEASURED
+  # (6c77f4e): a second account's run then died on a bare "cp: cannot create
+  # regular file '.../cargo': Permission denied", and nothing after cargo was
+  # applied. Re-rendering it would mean replacing a file another account owns
+  # (root runs it), so leave it, say whose it is, and carry on with the
+  # per-user layer. A tool binary that is not our wrapper is wrapped as before.
+  if [[ "${CAN_ESCALATE:-0}" -ne 1 && -f "$target" && ! -O "$target" ]] \
+     && grep -q 'supply-chain-harden' "$target" 2>/dev/null; then
+    owner=$(ls -ld -- "$target" | awk '{print $3}')
+    warn "$tool: the PATH wrapper at $target belongs to $owner, from an earlier hardening run, and is left as it is: this job has no root and no usable sudo to replace a file $owner owns. It still runs when $(id -un) calls $tool. To update it, re-run harden.sh as $owner or with sudo."
+    set_eco_status "$tool" "$status" "PATH wrapper not re-deployed: the one at $target belongs to $owner and this job has no root and no usable sudo. Config-file layer still applies."
+    return 1
+  fi
+  return 0
 }
 
 # subst_inplace <file> <sed-script>
@@ -2644,10 +2757,13 @@ sanitize_cooldown_env() {
   fi
   export COOLDOWN_MINUTES=__MIN_AGE_MIN__
   # The crates.io window, read by CARGO-COOLDOWN (a repo cooldown.toml's
-  # `[registry] min-publish-age` otherwise sets it). Cargo itself ignores this
-  # name: MEASURED on cargo 1.100.0, set alone it neither gated nor warned.
-  # Cargo's own gate is CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE. See the role's
-  # templates/cargo-wrapper.sh.j2 for the measurement.
+  # `[registry] min-publish-age` otherwise sets it). Cargo itself gates nothing
+  # on this name. MEASURED (itoa = "1", "365 days"): cargo 1.100.0 locked the
+  # newest itoa and printed nothing; cargo 1.99.0 locked the newest too and
+  # printed "warning: ignoring `registry.min-publish-age` without
+  # `-Zmin-publish-age`", so on 1.99 each routed build shows that line.
+  # Cargo's own gate is CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE, from 1.100. See
+  # the role's templates/cargo-wrapper.sh.j2 for the measurement.
   export CARGO_REGISTRY_MIN_PUBLISH_AGE="__RELEASE_AGE_HOURS__ hours"
   export COOLDOWN_INCOMPATIBLE_PUBLISH_AGE=__VIOLATION_ACTION__
   export COOLDOWN_LOCKFILE_BASELINE=floor
@@ -2662,8 +2778,11 @@ sanitize_cooldown_env() {
   # workspace while a loose requirement is silently cooled. MEASURED on cargo
   # 1.100.0 + cargo-cooldown 0.3.5. On this path cargo-cooldown IS the gate
   # (it still denies and cools with this set, measured), so the native resolver
-  # is told to defer to it. Only on 1.100+: older cargo warns about the
-  # unknown setting.
+  # is told to defer to it: MEASURED on cargo 1.100.0, a 365-day
+  # CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE with this set locked the newest itoa,
+  # silently. Only on 1.100+: cargo 1.99.0 gates nothing either way and prints
+  # "warning: ignoring `resolver.incompatible-publish-age` without
+  # `-Zmin-publish-age`" for it (MEASURED).
   if cargo_has_native_gate; then
     export CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow
   fi
@@ -3436,9 +3555,16 @@ install_sfw_and_wrap() {
   #
   # Pinned and --ignore-scripts, like the role's own tool installs (ECH-185):
   # a floating `sfw@2` gave this enforcement tool no age gate at all.
+  #
+  # umask 022, as for the warm below: every account runs this package, and only
+  # root may write it. MEASURED (6c77f4e, root under umask 0000):
+  # /usr/local/lib/node_modules/sfw and dist/sfw.mjs were left 0777, so any
+  # account could replace the code root runs on its next npm call. A caller's
+  # 077, which sudo merges with its own umask, would instead make it unreadable
+  # to everyone but root.
   local npm_bin
   npm_bin=$(command -v npm)
-  $SUDO "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
+  $SUDO sh -c 'umask 022; exec "$@"' sh "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
@@ -3680,6 +3806,67 @@ EOF
   end_section
 }
 
+# ---- intel off: take back the npm and npx wrappers an intel run left ----
+#
+# This script deploys the npm and npx wrappers only with intel: sfw, and they
+# do nothing else, so with intel off there should be none. MEASURED (round-2
+# VM test on a persistent Debian 12 host, and reproduced in debian:trixie-slim
+# at 6c77f4e): a run with INTEL=sfw at 8281a6b wrapped /usr/bin/npm and
+# /usr/bin/npx with wrappers that run sfw without SFW_SKIP_UPDATE_CHECK. A
+# later run with intel unset left both in place while its record said
+# sfw_installed=false and wrappers_deployed=cargo, and once sfw's hourly update
+# check came due every npm and npx call failed in sfw's words, "[sfw] Failed to
+# prepare firewall binary: EACCES ... next-check", rc=1.
+#
+# So a run without intel moves the real binary back over a wrapper that
+# carries this script's npm/npx header (line 2, exactly, so the role's npm
+# wrapper is never touched) and whose real binary is where this script put it.
+# Anything else is left in place with a warning that says what to do. sfw
+# itself stays installed: with no wrapper nothing runs it. The cargo wrapper
+# is not this function's: see warn_stale_cargo_wrapper below.
+unwrap_intel_wrapper() {
+  local tool="$1" target real owner
+  target=$(command -v "$tool" 2>/dev/null) || return 0
+  [[ -f "$target" && ! -L "$target" ]] || return 0
+  [[ "$(sed -n 2p "$target" 2>/dev/null)" == "# Managed by supply-chain-harden action" ]] || return 0
+  real=$(grep -oE "^REAL_NP[MX]='[^']*'" "$target" 2>/dev/null | head -n 1 | sed "s/^[^=]*='//; s/'\$//") || real=""
+  if [[ "$real" != "${target}-real" || ! -x "$real" \
+        || "$(sed -n 2p "$real" 2>/dev/null)" == "# Managed by supply-chain-harden action" ]]; then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and cannot put the real $tool back: the wrapper names '${real:-<none>}', not an executable ${target}-real. It is left in place. Re-run with INTEL=sfw to bring it up to date, or put the real $tool back at $target."
+    return 0
+  fi
+  if ! can_write "$target"; then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and no root and no usable sudo to remove it. It is left in place. Re-run harden.sh with sudo to remove it, or with INTEL=sfw to bring it up to date."
+    return 0
+  fi
+  if [[ "${CAN_ESCALATE:-0}" -ne 1 && ! -O "$target" ]]; then
+    owner=$(ls -ld -- "$target" | awk '{print $3}')
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed as $owner, and it routes $tool through sfw. This run has intel off but no root and no usable sudo, and it does not replace a file $owner owns, so it is left in place. Re-run harden.sh as $owner or with sudo to remove it, or with INTEL=sfw to bring it up to date."
+    return 0
+  fi
+  # mv, not cp: it restores the entry the wrapping moved aside, a symlink
+  # included (apt's /usr/bin/npm is one), and never writes through it.
+  $SUDO mv -f -- "$real" "$target"
+  log "$tool: intel is off, so the $tool wrapper an earlier intel: sfw run left at $target was removed and the real $tool moved back"
+}
+
+# The cargo wrapper carries --locked as well as the sfw route, so it is never
+# removed here, and harden_cargo re-renders it on every run that includes
+# cargo. A run without cargo leaves it as it is, so say so when it is one that
+# routes through sfw with no SFW_SKIP_UPDATE_CHECK, as 8281a6b's did. MEASURED
+# (debian:trixie-slim, 8281a6b with INTEL=sfw, then this script with
+# ECOSYSTEMS=npm,pip): an hour later `cargo fetch` failed for a non-root
+# caller with "[sfw] Failed to prepare firewall binary: EACCES ... next-check".
+warn_stale_cargo_wrapper() {
+  local target
+  target=$(command -v cargo 2>/dev/null) || return 0
+  [[ -f "$target" ]] || return 0
+  sed -n 2p "$target" 2>/dev/null | grep -q 'supply-chain-harden wrapper' || return 0
+  grep -q '^ *if \[ "true" = "true" \] && \[ "${SCH_NET:-0}" = "1" \]' "$target" 2>/dev/null || return 0
+  grep -q 'SFW_SKIP_UPDATE_CHECK' "$target" 2>/dev/null && return 0
+  warn "cargo: $target is a cargo wrapper from an earlier hardening run that routes cargo through sfw without SFW_SKIP_UPDATE_CHECK, and cargo is not in this run's ecosystems, so it was not re-rendered. For an account other than root, once sfw's hourly update check is due, every cargo command that reaches the network fails with sfw's \"EACCES ... next-check\". Re-run with cargo in ECOSYSTEMS to replace it."
+}
+
 # ---- Main loop ----
 
 IFS=',' read -ra REQUESTED <<< "$ECOSYSTEMS"
@@ -3707,7 +3894,11 @@ done
 
 if [[ "$INSTALL_SFW" == "true" ]]; then
   install_sfw_and_wrap
+else
+  unwrap_intel_wrapper npm
+  unwrap_intel_wrapper npx
 fi
+case " ${HARDENED[*]:-} " in *" cargo "*) ;; *) warn_stale_cargo_wrapper ;; esac
 
 # ---- Outputs ----
 ecosystems_str=$(IFS=,; echo "${HARDENED[*]:-}")

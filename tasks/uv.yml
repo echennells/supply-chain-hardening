@@ -226,7 +226,10 @@
     # to close for users. PyPI provides integrity; the pin is the other half.
     # Looped over name/version pairs so the skip test can compare each pin with
     # the version `uv tool list` reported above.
-    cmd: "{{ uv_binary_path.stdout }} tool install {{ item.name }}=={{ item.version }}"
+    # umask go-w: see "Install lockfile-lint globally" in tasks/npm.yml.
+    # MEASURED under umask 0000: ~/.local/bin, which uv creates here and which
+    # is on the user's PATH, was left 0777.
+    cmd: "sh -c 'umask go-w && exec \"$@\"' sch-umask {{ uv_binary_path.stdout }} tool install {{ item.name }}=={{ item.version }}"
   loop:
     - { name: uv-secure, version: "{{ uv_secure_version }}" }
     - { name: pip-audit, version: "{{ pip_audit_version }}" }

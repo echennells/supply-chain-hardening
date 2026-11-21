@@ -60,7 +60,10 @@
   # the wrappers depend on SFW_SKIP_UPDATE_CHECK, which only 2.0.6 reads. npm
   # replaces the package directory, so the cache goes with it and the warm
   # below downloads the binary again (MEASURED from 2.0.4 to 2.0.6).
-  ansible.builtin.command: npm install -g --ignore-scripts sfw@{{ sfw_version }}
+  # umask 022: see "Install lockfile-lint globally" in tasks/npm.yml. A 0777
+  # package directory here undoes the cache reset above: whoever can write it
+  # can rename .sfw-cache and put their own in its place.
+  ansible.builtin.command: sh -c 'umask 022 && exec "$@"' sch-umask npm install -g --ignore-scripts sfw@{{ sfw_version }}
   when:
     - sfw_check.rc != 0 or sfw_cache_reset.stdout | default('') is search('^old-shim ', multiline=True)
     - npm_for_socket.rc == 0

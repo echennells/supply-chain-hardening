@@ -2,7 +2,8 @@
 # Shared verifier probe body — concatenated by BOTH surfaces after their own
 # context preamble. Assembled mechanically from the reviewed probe designs.
 #
-# Requires from the calling surface: row(), have(), and (CI only) requested().
+# Requires from the calling surface: row(), have(), run_bounded() (the block
+# fenced by `# >>> run_bounded` in both preambles), and (CI only) requested().
 #
 # KNOWN: 5 helper functions are defined more than once (identical bodies;
 # each probe carries its ecosystem's preamble so it can be read standalone).
@@ -287,15 +288,11 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
   # reads those two variables.
   scv__wa=""; case "${scv__wt##*/}" in composer) scv__wa="--no-plugins --no-interaction" ;; esac
   if scv__wp=$(mktemp 2>/dev/null); then
-    # Bound the probe like the sibling verifiers (timeout 30): a hanging tool or
-    # a hanging front-runner shim must not hang the whole verify. `timeout`
-    # preserves the SCH_WRAPPER_PROBE env var for the tool; absent it (macOS),
-    # fall back unbounded rather than skip the probe.
-    if command -v timeout >/dev/null 2>&1; then
-      COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" timeout 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
-    else
-      COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
-    fi
+    # Bound the probe like the sibling verifiers (30 s): a hanging tool or a
+    # hanging front-runner shim must not hang the whole verify. run_bounded
+    # keeps the bound where there is no timeout(1) (stock macOS), where this
+    # used to run unbounded, and the variables set on the call reach the tool.
+    COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" run_bounded 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
     while IFS= read -r scv__wl; do
       [ -n "$scv__wl" ] || continue
       if [ -f "$scv__wl" ] && grep -q 'supply-chain-harden' "$scv__wl" 2>/dev/null; then
@@ -3049,10 +3046,10 @@ cargo_positive_int() {
 }
 
 # macOS runners have no `timeout`. Never let its absence turn a probe into a
-# hang or a false GAP.
+# hang or a false GAP: run_bounded keeps the bound there. (Until it did, the
+# fallback here was an unbounded run, which is exactly a hang.)
 cargo_run_ok() {
-  if have timeout; then RUSTUP_AUTO_INSTALL=0 timeout 20 "$@" >/dev/null 2>&1
-  else RUSTUP_AUTO_INSTALL=0 "$@" >/dev/null 2>&1; fi
+  RUSTUP_AUTO_INSTALL=0 run_bounded 20 "$@" >/dev/null 2>&1
 }
 
 # The cargo wrapper's sfw_ready test, run for the caller: prints sfw's cache
@@ -3076,23 +3073,18 @@ sfw_cold_cache_for_caller() {
   printf '%s/.sfw-cache\n' "$p"
 }
 
-# `exec -a` is a bash builtin, so it must run INSIDE bash -c for `timeout` to
-# bound it. This is the invocation that actually dispatches into rustup AS
+# `exec -a` is a bash builtin, so it must run INSIDE bash -c for the bound to
+# apply to it. This is the invocation that actually dispatches into rustup AS
 # cargo - i.e. the one that could trigger a toolchain download - so it is the
-# one that needs RUSTUP_AUTO_INSTALL=0 and the timeout, not the call that fails
+# one that needs RUSTUP_AUTO_INSTALL=0 and the bound, not the call that fails
 # fast under its own name.
 cargo_run_ok_as_cargo() { # <delegate> <args...>
   local p="$1"; shift
-  if have timeout; then
-    RUSTUP_AUTO_INSTALL=0 timeout 20 bash -c 'exec -a cargo "$0" "$@"' "$p" "$@" >/dev/null 2>&1
-  else
-    RUSTUP_AUTO_INSTALL=0 bash -c 'exec -a cargo "$0" "$@"' "$p" "$@" >/dev/null 2>&1
-  fi
+  RUSTUP_AUTO_INSTALL=0 run_bounded 20 bash -c 'exec -a cargo "$0" "$@"' "$p" "$@" >/dev/null 2>&1
 }
 
 cargo_delegate_err() { # <delegate>
-  { if have timeout; then RUSTUP_AUTO_INSTALL=0 timeout 20 "$1" --version
-    else RUSTUP_AUTO_INSTALL=0 "$1" --version; fi; } 2>&1 | head -1
+  { RUSTUP_AUTO_INSTALL=0 run_bounded 20 "$1" --version; } 2>&1 | head -1
 }
 
 # VERSION TIER. cargo-cooldown 0.3.5 (what the role AND the action pin) has MSRV
@@ -3975,12 +3967,10 @@ XML
 # urls we do not control, so strip what corrupts the table.
 mvn_safe() { printf '%s' "$1" | tr -d '%\\' | tr '\t' ' ' | cut -c1-200; }
 
-# A hung JVM must not hang the whole verifier. `timeout` is absent on stock
-# macOS, so degrade to a plain call rather than skipping the probe.
+# A hung JVM must not hang the whole verifier, on stock macOS (no timeout(1))
+# either: run_bounded.
 mvn_run() {
-  if command -v timeout >/dev/null 2>&1; then timeout 120 mvn "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout 120 mvn "$@"
-  else mvn "$@"; fi
+  run_bounded 120 mvn "$@"
 }
 
 # The path maven named, with ONE layer of decoration removed. A reformatted
@@ -4614,13 +4604,10 @@ SCEOF
   # GRADLE_USER_HOME IT resolves is half of what is under test. (The smoke test
   # at action-smoke.yml:687 passes --init-script explicitly and therefore does
   # NOT test discovery.)
-  # `timeout` where available bounds a host init script that resolves plugins
-  # from an unreachable network; macOS often has none, hence the fallback.
-  if have timeout; then
-    ( cd "$tmp" && timeout 180 gradle --no-daemon -q --console=plain scProbe 2>&1 )
-  else
-    ( cd "$tmp" && gradle --no-daemon -q --console=plain scProbe 2>&1 )
-  fi
+  # Bounded (run_bounded, timeout(1) or not): a host init script that resolves
+  # plugins from an unreachable network must not hang the verifier. A stop
+  # comes back as 124, which the caller reports as a timeout.
+  ( cd "$tmp" && run_bounded 180 gradle --no-daemon -q --console=plain scProbe 2>&1 )
   rc=$?
   rm -rf "$tmp"
   return "$rc"
@@ -4926,13 +4913,10 @@ tasks.register('scProbe') { doLast { } }
 SCEOF
   # No --init-script and no -g: gradle discovering our file from the
   # GRADLE_USER_HOME IT resolves is half of what is under test.
-  # `timeout` where available bounds a host init script that resolves plugins
-  # from an unreachable network; macOS often has none, hence the fallback.
-  if have timeout; then
-    ( cd "$tmp" && timeout 180 gradle --no-daemon -q --console=plain scProbe 2>&1 )
-  else
-    ( cd "$tmp" && gradle --no-daemon -q --console=plain scProbe 2>&1 )
-  fi
+  # Bounded (run_bounded, timeout(1) or not): a host init script that resolves
+  # plugins from an unreachable network must not hang the verifier. A stop
+  # comes back as 124, which the caller reports as a timeout.
+  ( cd "$tmp" && run_bounded 180 gradle --no-daemon -q --console=plain scProbe 2>&1 )
   rc=$?
   rm -rf "$tmp"
   return "$rc"

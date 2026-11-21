@@ -266,7 +266,7 @@ Three levels, most specific last:
 
 | | |
 |---|---|
-| `intel: none` | the default — nothing installed |
+| `intel: none` | the default — nothing installed. On a host an earlier `intel: sfw` run hardened, the npm and npx wrappers it left are removed and the real binaries moved back. Any run that includes `cargo` re-renders the cargo wrapper, whose sfw route follows `cargo_socket_firewall` |
 | `SUPPLY_CHAIN_HARDEN_SKIP: true` | on one step's `env:`, skips the whole action for that step |
 | `ecosystems:` | narrow the list to drop an ecosystem entirely |
 

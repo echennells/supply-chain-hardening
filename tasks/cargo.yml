@@ -212,7 +212,9 @@
   #
   # NON-FATAL: an optional backend failing to build must never abort the play.
   ansible.builtin.command:
-    cmd: "{{ cargo_check.stdout | dirname }}/cargo install --locked cargo-cooldown@{{ cargo_cooldown_version }}"
+    # umask go-w: see "Install lockfile-lint globally" in tasks/npm.yml. The
+    # backend this builds is what the wrapper runs on every cargo build.
+    cmd: "sh -c 'umask go-w && exec \"$@\"' sch-umask {{ cargo_check.stdout | dirname }}/cargo install --locked cargo-cooldown@{{ cargo_cooldown_version }}"
   environment:
     PATH: "{{ cargo_home }}/bin:{{ ansible_env.PATH }}"
   when:
@@ -233,7 +235,8 @@
   # that no code path uses, and was the sole reason the role needed a
   # `curl | bash` bootstrap. Enable this and wire them into CI yourself.
   ansible.builtin.command:
-    cmd: "{{ cargo_check.stdout | dirname }}/cargo install --locked {{ item.key }}@{{ item.value }}"
+    # umask go-w: see "Install lockfile-lint globally" in tasks/npm.yml.
+    cmd: "sh -c 'umask go-w && exec \"$@\"' sch-umask {{ cargo_check.stdout | dirname }}/cargo install --locked {{ item.key }}@{{ item.value }}"
     creates: "{{ omit if refresh_tools | bool else cargo_home + '/bin/' + item.key }}"
   environment:
     PATH: "{{ cargo_home }}/bin:{{ ansible_env.PATH }}"

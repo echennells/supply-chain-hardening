@@ -1534,6 +1534,88 @@ GO
   [[ "$output" == *"OK"*"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
 }
 
+# A directory holding every command on this PATH except timeout and gtimeout:
+# the PATH of a stock Mac, which has neither (gtimeout comes with Homebrew's
+# coreutils). Prints its path.
+path_without_timeout() {
+  local d="${BATS_TEST_TMPDIR}/notimeout" p f b
+  mkdir -p "$d"
+  local IFS=:
+  for p in $PATH; do
+    [ -d "$p" ] || continue
+    for f in "$p"/*; do
+      b=${f##*/}
+      case "$b" in timeout|gtimeout) continue ;; esac
+      [ -x "$f" ] && [ ! -e "$d/$b" ] && ln -s "$f" "$d/$b"
+    done
+  done
+  echo "$d"
+}
+
+@test "with no timeout or gtimeout on PATH (stock macOS) the wrapper probe still runs" {
+  # The probe asks a wrapper whether it ran (SCH_WRAPPER_PROBE) instead of
+  # guessing from PATH position. Without timeout(1) it has to run through
+  # run_bounded's own fallback, and the variable set on the call has to reach
+  # the wrapper through it, or this row falls back to position evidence.
+  stub_bin bun 'case "${1:-}" in --version) echo "1.3.4";; *) echo "STUB:bun ARGS=[$*]";; esac'
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  local nt
+  nt=$(path_without_timeout)
+  run env -i PATH="$TEST_BIN:$nt" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    bash -c 'if command -v timeout || command -v gtimeout; then echo "a timeout is still visible"; exit 99; fi
+             set -a; . "$1"; set +a; HARDENING_ENV_FILE="$1" bash "$2" --emit=plain' _ "$ENV_FILE" "$VERIFY_SH"
+  [ "$status" -ne 99 ] || { echo "$output"; false; }
+  [[ "$output" == *"OK     FUNCTIONAL  bun PATH wrapper"*"observed running when bun was invoked"* ]] \
+    || { echo "$output" | grep 'bun PATH wrapper'; false; }
+}
+
+@test "run_bounded stops a hanging command where neither timeout nor gtimeout exists" {
+  # MEASURED at 6c77f4e with both hidden: a bun that hung on --version kept
+  # verify.sh running until it was killed from outside after 60 s; every probe
+  # fell back to an unbounded run. /bin/bash is bash 3.2 on the macOS job.
+  local nt blk
+  nt=$(path_without_timeout)
+  blk="${BATS_TEST_TMPDIR}/rb.sh"
+  sed -n '/^# >>> run_bounded$/,/^# <<< run_bounded$/p' "$VERIFY_SH" > "$blk"
+  [ -s "$blk" ]
+  run env -i PATH="$nt" /bin/bash -c '
+    . "$1"
+    command -v timeout >/dev/null || command -v gtimeout >/dev/null && { echo "a timeout is still visible"; exit 99; }
+    t0=$SECONDS; run_bounded 2 sleep 30; echo "hang rc=$? secs=$((SECONDS - t0))"
+    t0=$SECONDS; out=$(run_bounded 2 sh -c "sh -c \"sleep 30\" & sleep 30" 2>&1); echo "child rc=$? secs=$((SECONDS - t0))"
+    run_bounded 5 sh -c "exit 7"; echo "fail rc=$?"
+    echo "env=[$(FOO=bar run_bounded 5 sh -c "echo \$FOO")] after=[${FOO-unset}]"
+    echo "capture=[$(run_bounded 5 echo hi)]"' _ "$blk"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ hang\ rc=124\ secs=([0-9]+) ]]
+  [ "${BASH_REMATCH[1]}" -lt 10 ]
+  # A child left holding the $( ) open is stopped too, as timeout(1) stops
+  # its whole process group.
+  [[ "$output" =~ child\ rc=124\ secs=([0-9]+) ]]
+  [ "${BASH_REMATCH[1]}" -lt 10 ]
+  [[ "$output" == *"fail rc=7"* ]]
+  [[ "$output" == *"env=[bar] after=[unset]"* ]]
+  [[ "$output" == *"capture=[hi]"* ]]
+}
+
+@test "run_bounded is one block, the same in harden.sh, verify.sh and the role's verifier" {
+  # Both verifiers run their wrapper rows before the shared probe body is
+  # sourced, so each preamble carries the block (as with go discovery), and the
+  # shared body uses it. A copy that drifts is a bound that differs by surface.
+  block() { sed -n '/^# >>> run_bounded$/,/^# <<< run_bounded$/p' "$1"; }
+  local role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$VERIFY_SH") <(block "$HARDEN_SH")
+  diff <(block "$VERIFY_SH") <(block "$role")
+  # And nothing calls timeout(1) directly any more, outside that block.
+  local f probes="${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"
+  for f in "$VERIFY_SH" "$HARDEN_SH" "$role" "$probes"; do
+    run bash -c 'sed "/^# >>> run_bounded$/,/^# <<< run_bounded$/d" "$1" | grep -nE "(^|[;&|(]|then|else)[[:space:]]*([A-Z_]+=[^ ]* )*g?timeout [0-9]"' _ "$f"
+    [ "$status" -ne 0 ] || { echo "$f: $output"; false; }
+  done
+}
+
 @test "the shipped scripts parse under bash 3.2, the /bin/bash macOS runs them with" {
   # MEASURED: files/verify-probes.sh had a `case ... in /*)` inside `$( ... )`,
   # which bash 3.2 cannot parse ("syntax error near unexpected token ;;"), so on
