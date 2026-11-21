@@ -36,6 +36,14 @@ ROLE_ONLY = {
         "fails with it set and passes without it, and on 0.13.9 a lockfile "
         "written with it set fails `--locked` where it is not. A CI job is "
         "where `--locked` runs.",
+    "pnpm_config_minimum_release_age_exclude":
+        "the role exports the operator's own list (pnpm_minimum_release_age_exclude, "
+        "as JSON) so a repository's pnpm-workspace.yaml minimumReleaseAgeExclude "
+        "cannot exempt the package an attack ships: on a host, the repository may "
+        "be one someone cloned. The action does not: in CI the repository is the "
+        "project being built, and exempting its own freshly published packages is "
+        "a legitimate choice the action offers no other knob for. Both export "
+        "pnpm_config_minimum_release_age.",
     "GOFLAGS":
         "written by the role only when goflags_mod is set; the default is empty "
         "and the action has no such input, so by default neither side writes "

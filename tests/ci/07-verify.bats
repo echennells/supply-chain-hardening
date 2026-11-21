@@ -41,9 +41,9 @@ setup() {
   [[ "$output" == *"OK"*"env layer propagation"*"all "*" variables present in this step's environment"* ]]
   run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
     GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
-    bash -c "set -a; source '$ENV_FILE'; set +a; unset pnpm_config_minimum_release_age_exclude
+    bash -c "set -a; source '$ENV_FILE'; set +a; unset pnpm_config_minimum_release_age
              HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
-  [[ "$output" == *"GAP"*"env layer propagation"*"missing: pnpm_config_minimum_release_age_exclude"* ]]
+  [[ "$output" == *"GAP"*"env layer propagation"*"missing: pnpm_config_minimum_release_age"* ]]
 }
 
 @test "names the env file in the diagnosis so the fix is obvious" {
