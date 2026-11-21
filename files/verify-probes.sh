@@ -3947,7 +3947,7 @@ else
     # Each half sets a verdict, an evidence level and a clause, or a reason it
     # has nothing to judge (*na). The row is the worse half.
     blpv=""; blpe=""; blpm=""; blpna=""
-    blcv=""; blce=""; blcm=""; blcna=""
+    blcv=""; blce=""; blcm=""; blcna=""; blcunk=0
     if [ -n "$blkeys" ] && [ "$blhost" -ne 1 ]; then
       blpna="its $(cq "$blshow") was not judged: lockfile pinning was not shown in effect at the user level either (see bundler lockfile pinning), so there is nothing for it to switch off"
     elif [ -n "$blkeys" ]; then
@@ -3976,7 +3976,12 @@ else
       rm -rf "$bl3" 2>/dev/null
     fi
     if [ -n "$blckeys" ] && [ -z "$bver" ]; then
-      blcna="its $(cq "$blcshow") was not judged: bundler's version could not be read, so whether it implements cooldown is unknown"
+      # No version, no claim either way: the row must not say the file
+      # "switches nothing off". MEASURED (4.0.13): with a key indented by two
+      # spaces in the checkout, bundler raised NoMethodError there and this
+      # verifier read no version, so a real host reaches this branch.
+      blcunk=1
+      blcna="it sets $(cq "$blcshow"), and bundler's version could not be read, so whether that bundler implements cooldown, and so what the line does, is unknown"
     elif [ -n "$blckeys" ] && [ "$bcd_has" -ne 1 ]; then
       blcna="its $(cq "$blcshow") is inert: bundler $bver has no cooldown (see bundler publish-age gate)"
     elif [ -n "$blckeys" ]; then
@@ -4015,6 +4020,8 @@ else
     done
     if [ -n "$blv" ]; then
       row "$blv" "$ble" "bundler local config override" "the local config at $(cq "$blcfg") $blm"
+    elif [ "$blcunk" -eq 1 ]; then
+      row "N/A" - "bundler local config override" "the local config at $(cq "$blcfg") was not judged: $blm"
     elif [ -n "$blm" ]; then
       row "N/A" - "bundler local config override" "the local config at $(cq "$blcfg") switches nothing off: $blm"
     else

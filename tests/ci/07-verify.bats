@@ -878,8 +878,9 @@ bundler_local_layer() { echo "Set for your local app ($CHECKOUT/.bundle/config):
   bundler_age_stub 'no version here' 0
   run verify_sourced --emit=plain
   local r; r=$(grep 'bundler local config override' <<<"$output")
-  [[ "$r" == N/A*"was not judged: bundler's version could not be read"* ]]
-  [[ "$r" != *"inert"* && "$r" != *"has no cooldown"* ]] || { echo "unproven claim: $r" >&2; return 1; }
+  [[ "$r" == N/A*"was not judged"*"bundler's version could not be read"* ]]
+  [[ "$r" != *"inert"* && "$r" != *"has no cooldown"* && "$r" != *"switches nothing off"* ]] \
+    || { echo "unproven claim: $r" >&2; return 1; }
   # FIXTURE CONTROL: the same stub window with no BUNDLE_COOLDOWN line in the
   # file, and bundler naming the environment as the layer. The local row must
   # not blame a file that does not set the key, and the publish-age row passes
