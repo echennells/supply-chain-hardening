@@ -349,6 +349,7 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
 # A stub cargo that reports the cooldown environment it was handed, plus a
 # cargo-cooldown where harden.sh looks for one, so builds route through it.
 cooldown_stubs() {
+  skip_if_root_stages_cooldown
   local ver="${1:-1.99.0}"
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo '"$ver"' (abc 2026-11-12)";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}] GLOBAL=[${CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE-unset}] RESOLVER=[${CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE-unset}] TESTTIME=[${__CARGO_TEST_INVOCATION_TIME-unset}]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
@@ -1143,6 +1144,31 @@ exec "$@"'
   run harden ECOSYSTEMS=bun,cargo,composer,npm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc" "ignore-scripts=true"
+}
+
+@test "test isolation: harden() wraps a pass-through in TEST_BIN, never a tool outside the test's directory" {
+  # Tools outside BATS_TEST_TMPDIR, on PATH after TEST_BIN, the way
+  # /usr/bin/composer is on a CI runner. Without shield_host_tools
+  # (helpers.bash), harden.sh moved each to <name>-real in that directory and
+  # wrote its wrapper in its place.
+  local host="$BATS_FILE_TMPDIR/host-bin-$BATS_TEST_NUMBER" t oldpath="$PATH"
+  mkdir -p "$host"
+  for t in composer bun bunx cargo deno; do
+    printf '#!/bin/bash\ncase "${1:-}" in --version|-v|version) echo "%s 9.9.9" ;; *) echo "HOST:%s ARGS=[$*]" ;; esac\n' "$t" "$t" > "$host/$t"
+    chmod +x "$host/$t"
+  done
+  (cd "$host" && cksum composer bun bunx cargo deno) > "$BATS_TEST_TMPDIR/before"
+  PATH="$host:$PATH"
+  run harden ECOSYSTEMS=composer,bun,cargo,deno -- --emit=plain
+  PATH="$oldpath"
+  [ "$status" -eq 0 ]
+  (cd "$host" && cksum composer bun bunx cargo deno) > "$BATS_TEST_TMPDIR/after"
+  diff "$BATS_TEST_TMPDIR/before" "$BATS_TEST_TMPDIR/after"
+  [ "$(ls "$host")" = "$(printf 'bun\nbunx\ncargo\ncomposer\ndeno')" ]
+  # harden.sh did wrap: the stub in TEST_BIN, which still reaches the tool.
+  assert_file_contains "$TEST_BIN/composer" "supply-chain-harden"
+  run env PATH="$TEST_BIN:$host:$PATH" "$TEST_BIN/composer" show
+  [[ "$output" == *"HOST:composer ARGS=["*"show"* ]]
 }
 
 # --- rustup proxies ----------------------------------------------------------

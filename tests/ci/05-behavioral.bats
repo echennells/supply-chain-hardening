@@ -193,9 +193,9 @@ composer_hostile_checkout() {
   have composer || skip "composer not installed"
   have php || skip "php not installed"
   REAL_COMPOSER=$(command -v composer)
-  # Earlier files in this suite run `harden ECOSYSTEMS=composer` with no stub,
-  # which wraps the system composer when sudo is passwordless (a CI runner).
-  # Go around that wrapper to the binary it execs.
+  # harden() no longer wraps a host composer (shield_host_tools in
+  # helpers.bash), but one a real hardening run, or an older copy of this suite,
+  # wrapped may still be on PATH. Go around that wrapper to the binary it execs.
   if grep -q 'supply-chain-harden' "$REAL_COMPOSER" 2>/dev/null; then
     REAL_COMPOSER=$(sed -n "s/^REAL_COMPOSER='\(.*\)'\$/\1/p" "$REAL_COMPOSER" | head -1)
     [ -n "$REAL_COMPOSER" ] && [ -x "$REAL_COMPOSER" ] || skip "composer on PATH is a hardening wrapper whose real binary could not be read"

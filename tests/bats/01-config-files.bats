@@ -272,8 +272,11 @@ load setup
   ! grep -qE '^block-exotic-subdeps=' /etc/npmrc
 }
 
-@test "/etc/yarnrc.yml: enableScripts false (sudo-safe yarn hardening)" {
-  assert_file_contains "/etc/yarnrc.yml" "enableScripts: false"
+@test "root's ~/.yarnrc.yml: enableScripts false (sudo coverage); no /etc/yarnrc.yml, which Yarn never reads" {
+  local root_home
+  root_home=~root
+  assert_file_contains "$root_home/.yarnrc.yml" "enableScripts: false"
+  [ ! -e /etc/yarnrc.yml ]
 }
 
 @test "/etc/pip.conf: only-binary=:all: (sudo-safe pip wheels-only)" {

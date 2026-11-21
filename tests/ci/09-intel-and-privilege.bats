@@ -36,6 +36,7 @@ harden_nosudo() {
     if [[ "$a" == "--" ]]; then sep=1; continue; fi
     if [[ $sep -eq 1 ]]; then args+=("$a"); else envs+=("$a"); fi
   done
+  shield_host_tools "${envs[@]}"
   env -i PATH="${NOSUDO}:${TEST_BIN}:${PATH}" HOME="$TEST_HOME" \
     GRADLE_USER_HOME="${TEST_HOME}/.gradle" TMPDIR="$TEST_TMP" WRITE_ETC=false \
     "${envs[@]}" bash "$HARDEN_SH" "${args[@]}"
@@ -296,6 +297,8 @@ EOF
 }
 
 @test "an unwritable target degrades with a reason instead of dying" {
+  # Root writes into a 0555 directory, so as root there is no unwritable target.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
   local ro="${BATS_TEST_TMPDIR}/ro"
   mkdir -p "$ro"
   cat > "$ro/bun" <<'EOF'
@@ -319,6 +322,7 @@ EOF
   # neither summary list, so the ecosystem vanishes from the one line most
   # people read while still appearing in the table below it — reported and
   # unreported at once. Caught in review of this very change.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
   local ro="${BATS_TEST_TMPDIR}/ro2"
   mkdir -p "$ro"
   cat > "$ro/bun" <<'EOF'
@@ -372,6 +376,9 @@ EOF
 }
 
 @test "write_etc without privilege warns instead of failing the run" {
+  # As root there is no missing privilege to test: harden.sh runs its writes
+  # directly, so this would write the real /etc/npmrc.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: this would write the host's /etc/npmrc"
   stub_bin npm 'case "${1:-}" in --version|-v) echo "11.10.0";; *) echo STUB;; esac'
   run env -i PATH="${NOSUDO}:${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
     WRITE_ETC=true ECOSYSTEMS=npm bash "$HARDEN_SH" --emit=plain

@@ -227,7 +227,9 @@
       set -e
       missing_marker=0
       conflict=""
-      for f in /etc/npmrc /etc/yarnrc.yml /etc/pip.conf /etc/uv/uv.toml; do
+      # No /etc/yarnrc.yml: Yarn never reads it, and the role no longer writes it
+      # (tasks/yarn.yml).
+      for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
         # Recognize files placed by EITHER supply-chain surface — the role
         # ("ansible-supply-chain-security") OR the GitHub Action
         # ("supply-chain-harden action"). Same project; before this, a host

@@ -67,6 +67,30 @@ environment, which the role's env layer sets. It compares each named
 package's `latest` with what was installed, so a transitive dependency that
 the gate held back is not reported. It does not explain an `ETARGET`.
 
+## uv: `uv sync` in your own project fails with "marked as `--no-build`"
+
+```
+error: Distribution `myproj==0.1.0 @ editable+.` can't be installed because it is marked as `--no-build` but has no binary distribution
+```
+
+On uv 0.12.5 and older, `uv sync` and `uv run` exit 2 like this in a project
+that has its own `[build-system]`. The role sets `no-build = true`
+(`uv_no_build`), as does `harden.sh`, and those uv versions apply it to the
+project itself. From uv 0.12.6, uv builds your own project (its changelog:
+"Allow explicit `uv build` and non-editable first-party workspace packages
+when `no-build` is enabled"; a plain `uv sync`, which installs the project
+editable, built it too). Measured on 2026-11-20: uv 0.8.17, 0.9.16, 0.9.17,
+0.11.16 and 0.12.5 fail; 0.12.6, 0.12.7 and 0.13.9 build the project.
+
+For a project whose source you trust:
+
+- `supply-chain-allow-build uv sync` built it on uv 0.8.17 and 0.12.5. It
+  lifts `no-build` for that one command and keeps the other uv settings. That
+  also lets the command build any dependency that ships only an sdist, and
+  the helper lists what it built. The role installs the helper; the action
+  and `harden.sh` do not.
+- Or upgrade uv to 0.12.6 or later.
+
 ## Yarn (Berry): `YN0028` in a project with no `yarn.lock`
 
 ```

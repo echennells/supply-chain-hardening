@@ -1339,6 +1339,37 @@ harden_yarn() {
     fi
   } > "$HOME/.yarnrc.yml"
 
+  # Root's ~/.yarnrc.yml, not /etc/yarnrc.yml: Yarn Berry reads no system-wide
+  # file (MEASURED on 4.9.4, 4.10.3, 4.11.0 and 4.18.1: settings in
+  # /etc/yarnrc.yml never took effect, and the bundles name no /etc path), and
+  # on Linux sudo sets HOME=/root (MEASURED: sudo 1.9.13p3 on Debian 12,
+  # 1.9.15p5 on Ubuntu 24.04), so this is the file a later `sudo yarn` step
+  # reads. See tasks/yarn.yml. Root's home from the passwd database: /var/root
+  # on macOS. Root's own file is in use for `sudo yarn` and may hold a registry
+  # and its token, so one this project did not write is copied next to itself
+  # first and the replacement is a warning, as keep_user_copy does for the
+  # per-user registry files. An /etc/yarnrc.yml an earlier version wrote is
+  # removed; anyone else's is left alone.
+  local root_home root_rc root_bak
+  root_home=~root
+  case "$root_home" in /*) ;; *) root_home="" ;; esac
+  if [[ "$WRITE_ETC" == "true" ]] && [[ -n "$root_home" ]] && [[ "$root_home" != "$HOME" ]] \
+     && can_write "$root_home/.yarnrc.yml"; then
+    root_rc="$root_home/.yarnrc.yml"
+    if $SUDO test -e "$root_rc" \
+       && ! $SUDO grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$root_rc" 2>/dev/null; then
+      root_bak="${root_rc}.$$.$(date +%Y-%m-%d@%H:%M:%S)~"
+      if ! $SUDO cp -p "$root_rc" "$root_bak"; then
+        err "yarn: could not copy $root_rc to $root_bak before replacing it; refusing to replace a file this project did not write without a copy"
+        exit 1
+      fi
+      warn "yarn: replaced $root_rc (root's own, read by \`sudo yarn\`), which this project did not write. Any registry or token in it no longer applies to \`sudo yarn\`; the previous file is at $root_bak"
+    fi
+  fi
+  if [[ "$WRITE_ETC" == "true" ]] && can_write /etc/yarnrc.yml && $SUDO test -f /etc/yarnrc.yml \
+     && $SUDO grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' /etc/yarnrc.yml 2>/dev/null; then
+    $SUDO rm -f /etc/yarnrc.yml && log "yarn: removed /etc/yarnrc.yml, which an earlier version wrote and Yarn never reads"
+  fi
   {
     echo "# Managed by supply-chain-harden action"
     echo "npmMinimalAgeGate: $YARN_AGE"
@@ -1354,7 +1385,7 @@ harden_yarn() {
     if [[ "$has_hardened" == "true" ]]; then
       echo "enableHardenedMode: true"
     fi
-  } | write_etc /etc/yarnrc.yml
+  } | if [[ -n "$root_home" ]] && [[ "$root_home" != "$HOME" ]]; then write_etc "$root_home/.yarnrc.yml"; else cat >/dev/null; fi
 
   HARDENED+=("yarn")
   set_tool_version "yarn" "$yarn_version"

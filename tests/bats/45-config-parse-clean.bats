@@ -10,8 +10,8 @@
 # Coverage is limited to configs with a reliable, fast, offline-ish parse check.
 # Intentionally NOT covered — stated so the gap is explicit, not silent
 # (docs/design-principles.md Axis 4, "absent signal read as a passing signal"):
-#   - /etc/yarnrc.yml : yarn berry's config reader needs a project context and
-#                       its exit status is unreliable outside one.
+#   - ~/.yarnrc.yml : yarn berry's config reader needs a project context and
+#                     its exit status is unreliable outside one.
 #   - gradle init script : parsing it needs a full JVM + gradle run (slow, and
 #                          usually reaches the network) — wrong shape for a lint.
 
