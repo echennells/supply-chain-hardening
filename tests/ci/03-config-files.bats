@@ -71,6 +71,56 @@ setup() { common_setup; }
   [[ "$output" == *"control characters"* ]]
 }
 
+# --- pnpm 11+ env layer -------------------------------------------------------
+# pnpm 11+ reads pnpm_config_* (lower case; upper case only from 11.0.6), and it
+# outranks a project's pnpm-workspace.yaml, which outranks config.yaml (MEASURED
+# on 11.0.0, 11.0.9, 11.28.13 and 12.21.0). The exclude list has to be JSON: pnpm
+# 12 ignores an empty value.
+
+@test "pnpm: the env layer carries the age gate and an empty exclude list, in lower case" {
+  run harden ECOSYSTEMS=pnpm -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$ENV_FILE" '^export pnpm_config_minimum_release_age=2880$'
+  assert_file_contains "$ENV_FILE" '^export pnpm_config_minimum_release_age_exclude=\\\[\\\]$'
+  assert_file_lacks "$ENV_FILE" "PNPM_CONFIG_"
+  # Sourced, the exclude list is the JSON array pnpm parses, and the age follows
+  # release_age_hours in minutes.
+  run env -i bash -c "source '$ENV_FILE'; printf '%s|%s' \"\$pnpm_config_minimum_release_age\" \"\$pnpm_config_minimum_release_age_exclude\""
+  [ "$status" -eq 0 ]
+  [ "$output" = "2880|[]" ]
+  rm -f "$ENV_FILE"
+  run harden ECOSYSTEMS=pnpm RELEASE_AGE_HOURS=72 -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$ENV_FILE" '^export pnpm_config_minimum_release_age=4320$'
+}
+
+@test "pnpm: GitHub mode writes the same two variables to GITHUB_ENV, unquoted" {
+  : > "$TEST_TMP/ghenv"
+  run harden GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
+             ECOSYSTEMS=pnpm -- --emit=github
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_TMP/ghenv" '^pnpm_config_minimum_release_age=2880$'
+  assert_file_contains "$TEST_TMP/ghenv" '^pnpm_config_minimum_release_age_exclude=\[\]$'
+}
+
+@test "pnpm: pnpm_config_ignore_scripts is never exported, with or without an allowlist" {
+  # true would silently skip the builds a project approves with its own
+  # ignoreScripts: false + allowBuilds; false would override a project's own
+  # ignoreScripts: true (MEASURED on 11.0.9, 11.28.13 and 12.21.0).
+  : > "$TEST_TMP/ghenv"
+  run harden GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
+             ECOSYSTEMS=pnpm -- --emit=github
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$ENV_FILE" "ignore_scripts"
+  assert_file_lacks "$TEST_TMP/ghenv" "ignore_scripts"
+  rm -f "$ENV_FILE"; : > "$TEST_TMP/ghenv"
+  run harden GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
+             ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild" -- --emit=github
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$ENV_FILE" "ignore_scripts"
+  assert_file_lacks "$TEST_TMP/ghenv" "ignore_scripts"
+}
+
 @test "yarn: scripts off and age gate on, at every version" {
   run harden ECOSYSTEMS=yarn -- --emit=plain
   [ "$status" -eq 0 ]
@@ -153,6 +203,36 @@ setup() { common_setup; }
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.config/uv/uv.toml" "no-build = true"
   assert_file_contains "$TEST_HOME/.config/uv/uv.toml" "verify-hashes = true"
+}
+
+@test "uv: UV_EXCLUDE_NEWER is never exported, in plain or GitHub mode" {
+  # It would outrank a repository's own exclude-newer, and also a project that
+  # pins an earlier one so its uv.lock checks clean everywhere. uv records the
+  # cutoff in uv.lock, and MEASURED on uv 0.8.17, 0.11.16 and 0.12.7 such a
+  # project's `uv sync --locked` fails with it set; on 0.13.9 a lockfile written
+  # with it set fails where it is not. The cutoff stays in uv.toml only.
+  : > "$TEST_TMP/ghenv"
+  run harden ECOSYSTEMS=uv,pip -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.config/uv/uv.toml" '^exclude-newer = "'
+  assert_file_lacks "$ENV_FILE" "UV_EXCLUDE_NEWER"
+  rm -f "$ENV_FILE"
+  run harden GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
+             ECOSYSTEMS=uv,pip -- --emit=github
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$ENV_FILE" "UV_EXCLUDE_NEWER"
+  assert_file_lacks "$TEST_TMP/ghenv" "UV_EXCLUDE_NEWER"
+  # The pip gate, which shares the cutoff, is still exported.
+  assert_file_contains "$TEST_TMP/ghenv" '^PIP_UPLOADED_PRIOR_TO=[0-9]\{4\}-'
+}
+
+@test "uv: an inherited UV_EXCLUDE_NEWER reaches neither uv.toml nor the env file" {
+  # The caller's own value is left in the caller's environment; harden.sh writes
+  # none of its own to the env file, so a later step does not get a second one.
+  run harden UV_EXCLUDE_NEWER=2099-01-01T00:00:00Z ECOSYSTEMS=uv -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_lacks "$ENV_FILE" "UV_EXCLUDE_NEWER"
+  assert_file_lacks "$TEST_HOME/.config/uv/uv.toml" "2099"
 }
 
 @test "bun: ignoreScripts is the real key, not the invented lifecycleScripts" {

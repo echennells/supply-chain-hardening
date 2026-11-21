@@ -32,6 +32,20 @@ setup() {
   [[ "$output" == *"variables reached this step"* ]]
 }
 
+@test "the env-layer record counts the lower-case pnpm variables, and names one that did not arrive" {
+  # pnpm 11 reads pnpm_config_* in lower case, so the record holds lower-case
+  # names; the propagation check has to treat them like any other.
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  grep -q '^export pnpm_config_minimum_release_age=' "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK"*"env layer propagation"*"all "*" variables present in this step's environment"* ]]
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
+    bash -c "set -a; source '$ENV_FILE'; set +a; unset pnpm_config_minimum_release_age_exclude
+             HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"GAP"*"env layer propagation"*"missing: pnpm_config_minimum_release_age_exclude"* ]]
+}
+
 @test "names the env file in the diagnosis so the fix is obvious" {
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify -- --emit=plain
