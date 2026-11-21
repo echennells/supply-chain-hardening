@@ -91,11 +91,24 @@ def walk(tasks, f, become):
             walk(t.get(k), f, b)
         c = t.get("ansible.builtin.command")
         cmd = c if isinstance(c, str) else (c or {}).get("cmd") if isinstance(c, dict) else None
+        argv = None
+        a = c.get("argv") if isinstance(c, dict) else None
+        if isinstance(a, list):
+            argv = [str(x) for x in a]
+        elif isinstance(a, str):
+            # An argv built by a Jinja expression (the sfw install, whose npm
+            # flags come from a probe): rendered with every variable undefined,
+            # so each `default(...)` gives the fresh-install form.
+            import ast, jinja2
+            argv = [str(x) for x in ast.literal_eval(jinja2.Environment().from_string(a).render())]
+        if argv is not None:
+            cmd = " ".join(argv)
         if not cmd or not install.search(cmd):
             continue
         seen += 1
         name = "%s: %s" % (os.path.basename(f), t.get("name"))
-        argv = [os.path.expanduser(os.path.expandvars(a)) for a in shlex.split(cmd)]
+        if argv is None:
+            argv = [os.path.expanduser(os.path.expandvars(a)) for a in shlex.split(cmd)]
         if argv[:2] != ["sh", "-c"] or len(argv) < 5:
             bad.append("%s runs with the caller's umask: %s" % (name, cmd))
             continue
