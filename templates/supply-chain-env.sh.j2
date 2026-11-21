@@ -9,6 +9,21 @@ export NPM_CONFIG_SAVE_EXACT={{ npm_save_exact | lower }}
 export NPM_CONFIG_FUND={{ npm_fund | lower }}
 export NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}
 export NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}
+# pnpm 11+ reads pnpm_config_* from the environment, and it outranks a
+# project's pnpm-workspace.yaml (MEASURED on 11.0.0, 11.0.9, 11.28.13 and
+# 12.21.0: a workspace minimumReleaseAge: 0 resolved the version the gate
+# refuses only without it). Lowercase: the uppercase form is read only from
+# 11.0.6. pnpm 10 reads neither, and npm never reads pnpm_config_*.
+# The exclude list is the operator's own (pnpm_minimum_release_age_exclude),
+# as a JSON array: a workspace minimumReleaseAgeExclude otherwise still exempts
+# the packages it names from the age above. pnpm 12 ignores an empty value, so
+# no exclusions is written as [].
+# pnpm_config_ignore_scripts is deliberately NOT exported, either way: true
+# also silently skips the builds a project approves with its own
+# `ignoreScripts: false` + allowBuilds (the route defaults/main.yml documents
+# for pnpm 11+), and false would override a project's own ignoreScripts: true.
+export pnpm_config_minimum_release_age={{ pnpm_minimum_release_age_minutes }}
+export pnpm_config_minimum_release_age_exclude={{ sch_pnpm_exclude_json | quote }}
 
 # === Python (pip / uv) ===
 export PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}
@@ -24,6 +39,15 @@ export PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}
 # accepted and inert below that (MEASURED). Absolute Z-suffixed instant only --
 # see defaults/main.yml and the preflight assert.
 export PIP_UPLOADED_PRIOR_TO={{ sch_pip_cutoff }}
+{% endif %}
+{% if sch_uv_env_cutoff | default('') | length > 0 %}
+# Opt-in (uv_exclude_newer_env). The same cutoff as exclude-newer in uv.toml,
+# and it outranks a project's own exclude-newer, in a login shell. Off by
+# default because it also outranks a project that pins an earlier cutoff so
+# its uv.lock stays valid on hosts without the role: see defaults/main.yml.
+# Never empty and never a span: defaults/main.yml sets sch_uv_env_cutoff only
+# to an absolute RFC 3339 instant (an empty value is exit 2 on every uv).
+export UV_EXCLUDE_NEWER={{ sch_uv_env_cutoff }}
 {% endif %}
 export UV_LINK_MODE=copy
 # Note: we deliberately do NOT set UV_NO_SYSTEM_CONFIG=1 here, even though

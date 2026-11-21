@@ -31,9 +31,10 @@
 # With no argument: everything the caller may do. As root that is --system,
 # plus --user when root is the deploying user; as {{ ansible_user_id }}, --user.
 #
-# The PIP_UPLOADED_PRIOR_TO env var outranks pip.conf, and a shell that is
-# already open keeps the value it logged in with. New logins get the
-# advanced one.
+# The PIP_UPLOADED_PRIOR_TO env var outranks pip.conf, and UV_EXCLUDE_NEWER
+# (exported only with uv_exclude_newer_env) outranks every uv.toml. A shell
+# that is already open keeps the values it logged in with. New logins get the
+# advanced ones.
 set -eu
 
 me=supply-chain-age-gate-refresh
@@ -95,6 +96,9 @@ case "$mode" in
 {% if sch_refresh_pip | bool %}
     advance /etc/pip.conf "^uploaded-prior-to = $ts\$" "uploaded-prior-to = $cut"
     advance /etc/profile.d/supply-chain-hardening.sh "^export PIP_UPLOADED_PRIOR_TO=$ts\$" "export PIP_UPLOADED_PRIOR_TO=$cut"
+{% endif %}
+{% if sch_refresh_uv | bool and sch_uv_env_cutoff | default('') | length > 0 %}
+    advance /etc/profile.d/supply-chain-hardening.sh "^export UV_EXCLUDE_NEWER=$ts\$" "export UV_EXCLUDE_NEWER=$cut"
 {% endif %}
     ;;
   --user)

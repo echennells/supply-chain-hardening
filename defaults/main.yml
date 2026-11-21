@@ -230,6 +230,52 @@ python_safe_path: false
 
 # uv settings
 uv_no_build: true
+# Export UV_EXCLUDE_NEWER in /etc/profile.d, set to the same cutoff as the
+# exclude-newer in uv.toml (advanced by the refresh timer when rolling).
+#
+# WHAT IT CLOSES. A project's own exclude-newer (uv.toml or pyproject.toml
+# [tool.uv]) outranks the uv.toml files the role writes, so a repository can
+# move the age gate to 2099 for every uv command run inside it. The env var
+# outranks the project's value. MEASURED 2026-11-20 on uv 0.8.17, 0.9.16, 0.9.17,
+# 0.11.16, 0.12.7 and 0.13.9 (`uv pip compile`, `uv lock`). It does not outrank a
+# project's exclude-newer-package, which still loosens the gate per package, or
+# a command-line --exclude-newer. It reaches login shells only (not cron,
+# systemd units or a container CMD), like the rest of /etc/profile.d.
+#
+# WHY IT IS OFF BY DEFAULT. It also outranks a project that pins an EARLIER
+# exclude-newer on purpose, which is what docs/limitations.md tells a project
+# to do so that its uv.lock passes `uv lock --check` on hosts with and without
+# the role. uv records the cutoff it resolved with in uv.lock, so (MEASURED
+# 2026-11-21, a pyproject pinning 2024-05-01 under a host cutoff of 2024-10-01):
+#   uv 0.8.17, 0.11.16, 0.12.7: with the variable set, `uv sync --locked` and
+#     `uv lock --check` fail on that project's existing lockfile, and `uv lock`
+#     rewrites its exclude-newer to the host's (0.8.17 and 0.11.16 also moved
+#     the packages forward). Without it, nothing changed.
+#   uv 0.13.9: the existing lockfile still passes, but one written on the
+#     host records the host cutoff instead of the project's, and fails
+#     `--locked` wherever the variable is not set (CI, a teammate's machine).
+# The failure shows in someone else's `--locked` run as "The lockfile at
+# `uv.lock` needs to be updated", with the cutoff change in uv's verbose
+# output and no mention of this variable. That fails the attribution test
+# (docs/design-principles.md), so the role does not turn it on for everyone.
+# Projects that set no exclude-newer of their own behave the same with and
+# without it (MEASURED on the same four versions).
+#
+# TURN IT ON on a host that runs uv inside repositories it did not write, such
+# as an agent host, where a repository moving its own cutoff is closer to the
+# threat than to the workflow. Only an absolute RFC 3339 instant is exported;
+# an empty value or a span such as "48 hours" would make uv exit 2 on every
+# command (a span on uv 0.9.16 and older). With uv_exclude_newer pinned to a
+# date or a span, nothing is exported and the end-of-run summary says so.
+# The GitHub Action never exports it: a CI job is where `--locked` runs.
+uv_exclude_newer_env: false
+# Internal: the value exported as UV_EXCLUDE_NEWER, or '' for none. Do not
+# override; set uv_exclude_newer_env. Only an absolute RFC 3339 instant: uv
+# exits 2 on every command for an empty UV_EXCLUDE_NEWER (every version), and
+# for a span such as "48 hours" on 0.9.16 and older (MEASURED); a bare date is
+# read in the host's local time zone. A pinned uv_exclude_newer flows through
+# as it is; `rolling` is the same computed cutoff uv.toml gets.
+sch_uv_env_cutoff: "{{ sch_uv_cutoff if (uv_exclude_newer_env | bool) and ((sch_uv_cutoff | string) is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$')) else '' }}"
 # uv settings (additions from the version-tiering audit; see docs/version-tiering-audit.md)
 uv_index_strategy: "first-index"        # anti-dep-confusion; alternatives: unsafe-best-match, unsafe-first-match
 uv_allow_insecure_host: []              # allowlist of hosts allowed to skip TLS verification; empty = none
@@ -271,6 +317,13 @@ pnpm_minimum_release_age_strict: true
 # updates and want to install them immediately rather than wait for the gate.
 # Example: pnpm_minimum_release_age_exclude: ["@myorg/internal-pkg", "scoped/own"]
 pnpm_minimum_release_age_exclude: []
+# Internal: that list as the compact JSON array the env layer exports as
+# pnpm_config_minimum_release_age_exclude for pnpm 11+. Do not override. JSON
+# because pnpm 12 ignores an empty value and a bare word (MEASURED on 12.21.0).
+# MEASURED on Ubuntu 24.04 that pam_env (libpam 1.5.3; ssh, sudo, sudo -i,
+# su -) and the systemd 259 environment generator both pass the value through
+# with its inner quotes, so /etc/environment carries it too.
+sch_pnpm_exclude_json: "{{ pnpm_minimum_release_age_exclude | to_json(separators=[',', ':']) }}"
 # Build-script allowlist (`only-built-dependencies`). The NAMES take effect on
 # pnpm 10 only: pnpm 11+ ignores the list in the global config and has no
 # global allowlist (MEASURED on 11.0.0 / 11.28.12 / 12.21.0); there, a project

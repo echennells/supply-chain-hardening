@@ -1296,6 +1296,21 @@ harden_pnpm() {
     fi
   } > "$HOME/.config/pnpm/rc"
 
+  # pnpm 11+ reads pnpm_config_* from the environment, and it outranks a
+  # project's pnpm-workspace.yaml, which outranks the config.yaml above
+  # (MEASURED on 11.0.0, 11.0.9, 11.28.13 and 12.21.0: a workspace
+  # minimumReleaseAge: 0 or minimumReleaseAgeExclude list resolved the version
+  # the gate refuses only without these). Lowercase: the uppercase form is read
+  # only from 11.0.6, and pnpm 10 reads neither. The exclude list is [] like the
+  # config.yaml above, as JSON: pnpm 12 ignores an empty value. Azure's docs say
+  # a task.setvariable name reaches later steps upper-cased, which pnpm reads
+  # only from 11.0.6 (not measured on Azure).
+  # pnpm_config_ignore_scripts is deliberately NOT exported: true silently skips
+  # the builds a project approves with its own `ignoreScripts: false` +
+  # allowBuilds, and false would override a project's own ignoreScripts: true.
+  write_env pnpm_config_minimum_release_age "$PNPM_AGE_MINUTES"
+  write_env pnpm_config_minimum_release_age_exclude '[]'
+
   HARDENED+=("pnpm")
   local pnpm_version
   pnpm_version=$(detect_version pnpm "pnpm --version")
@@ -1473,6 +1488,16 @@ EOF
 harden_uv() {
   section "uv"
   write_env UV_LINK_MODE copy
+  # UV_EXCLUDE_NEWER IS DELIBERATELY NOT EXPORTED, although it would outrank a
+  # repository's own exclude-newer (the role exports it only when
+  # uv_exclude_newer_env is set). It also outranks a project that pins an
+  # earlier exclude-newer so that its uv.lock checks clean everywhere, and uv
+  # records the cutoff in uv.lock. MEASURED (pyproject pinning 2024-05-01, host
+  # cutoff 2024-10-01): on uv 0.8.17, 0.11.16 and 0.12.7 that project's
+  # `uv sync --locked` fails with it set and passes without it; on 0.13.9 a
+  # lockfile written with it set fails `--locked` wherever it is not. A CI job
+  # is where `--locked` runs. Projects with no exclude-newer of their own
+  # behaved the same either way. See docs/limitations.md.
 
   # WHERE THE USER-LEVEL uv.toml LIVES — resolved from uv's environment, never
   # hardcoded. uv's user config is $XDG_CONFIG_HOME/uv/uv.toml and falls back

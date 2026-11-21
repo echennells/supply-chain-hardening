@@ -27,6 +27,15 @@ ROLE_ONLY = {
         "protection. A CI job's whole purpose is running code from a checkout, "
         "so the trade is wrong there in a way it is not on an agent host. "
         "Revisit if ECH-183 lands profiles.",
+    "UV_EXCLUDE_NEWER":
+        "opt-in on the role (uv_exclude_newer_env, default false) and never "
+        "exported by the action. It outranks a repository's own exclude-newer, "
+        "and also a project that pins an earlier one so its uv.lock checks "
+        "clean on every host. uv records the cutoff in uv.lock: MEASURED on "
+        "uv 0.8.17, 0.11.16 and 0.12.7, such a project's `uv sync --locked` "
+        "fails with it set and passes without it, and on 0.13.9 a lockfile "
+        "written with it set fails `--locked` where it is not. A CI job is "
+        "where `--locked` runs.",
     "GOFLAGS":
         "written by the role only when goflags_mod is set; the default is empty "
         "and the action has no such input, so by default neither side writes "
@@ -42,9 +51,11 @@ ACTION_ONLY = {
         "step cannot resolve it differently; the role relies on writing into "
         "the passwd home instead. Documented at tasks/gradle.yml:39.",
 }
-role = {m.group(1) for m in (re.match(r"\s*export\s+([A-Z_][A-Z0-9_]*)=", l)
+# Lower case too: pnpm 11 reads pnpm_config_* and reads the upper-case form
+# only from 11.0.6, so both sides export those names in lower case.
+role = {m.group(1) for m in (re.match(r"\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=", l)
                              for l in open("templates/supply-chain-env.sh.j2")) if m}
-act  = {m.group(1) for m in (re.search(r"write_env\s+([A-Z_][A-Z0-9_]*)", l)
+act  = {m.group(1) for m in (re.match(r"\s*write_env\s+([A-Za-z_][A-Za-z0-9_]*)\s", l)
                              for l in open("action/harden.sh")) if m}
 missing = sorted(v for v in role - act if v not in ROLE_ONLY)
 extra   = sorted(v for v in act - role if v not in ACTION_ONLY)

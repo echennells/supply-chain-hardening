@@ -5,6 +5,20 @@
 # Config files deployed unconditionally — harmless if the tool isn't
 # installed yet, ready the instant it is.
 
+- name: Record skipped protection — UV_EXCLUDE_NEWER needs an absolute cutoff
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['UV_EXCLUDE_NEWER — uv_exclude_newer_env
+         is on, but uv_exclude_newer is pinned to ' ~ (sch_uv_cutoff | string) ~ ', which is
+         not an absolute RFC 3339 instant (a date is read in local time, and a span is
+         a hard error on uv 0.9.16 and older in an env var), so it was not exported. A
+         project''s own exclude-newer still outranks the host cutoff. Pin an instant such
+         as 2026-10-19T00:00:00Z to export it.'] }}
+  when:
+    - uv_exclude_newer_env | default(false) | bool
+    - sch_uv_env_cutoff | length == 0
+  tags: [shell]
+
 - name: Deploy system-wide supply chain env vars
   become: true
   ansible.builtin.template:
@@ -33,6 +47,9 @@
       - "NPM_CONFIG_FUND={{ npm_fund | lower }}"
       - "NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}"
       - "NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}"
+      - "pnpm_config_minimum_release_age={{ pnpm_minimum_release_age_minutes }}"
+      # A JSON array, never empty: "[]" for no exclusions (see defaults/main.yml).
+      - "pnpm_config_minimum_release_age_exclude={{ sch_pnpm_exclude_json }}"
       - "PYTHONDONTWRITEBYTECODE={{ python_dont_write_bytecode | int }}"
       - "PIP_DISABLE_PIP_VERSION_CHECK={{ pip_disable_version_check | int }}"
       - "UV_LINK_MODE=copy"
