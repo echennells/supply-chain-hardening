@@ -1,6 +1,6 @@
 # Tests
 
-581 container tests verify the supply chain hardening works (`make test`), plus 345 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+600 container tests verify the supply chain hardening works (`make test`), plus 351 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -57,6 +57,7 @@
 | 49-age-gate-refresh.bats | 10 | The rolling uv/pip cutoff refresher, driven directly (the image runs no systemd): deployed root-owned with no timer; advances every stale cutoff, changing only that line and keeping owner and mode; a second run rewrites nothing; a duplicated line is reported, not rewritten; every rewrite is logged; root also advances root's own files; the verifier reads stale as a freeze and refreshed as OK; `--sfw` runs sfw's update check as root (skip variable cleared, umask 022) and keeps going when it fails |
 | 50-preflight-gnu-date.bats | 4 | The GNU date preflight probes the CONTROLLER, where the rolling uv/pip cutoff lookup runs, not the target: a non-GNU target is not refused, a non-GNU controller fails at preflight with the fix instead of a bare lookup error at render, and pinning the cutoff skips the probe |
 | 51-verifier-composer-plugin-safety.bats | 3 | The verifier's composer probes run none of a hostile checkout's plugins or scripts, and every one is non-interactive, root-safe and reads a version with no project; a FIXTURE CONTROL shows the same command without those protections does run the plugin |
+| 52-env-layer-overrides.bats | 19 | The env variables that outrank a project's own config, through the shipped templates rendered and sourced like a login shell: no `UV_EXCLUDE_NEWER` by default; with `uv_exclude_newer_env` on, the same instant `uv.toml` gets (rolling or pinned), never empty, a span or a bare date, and advanced by the refresh timer; a repo `uv.toml` / `pyproject [tool.uv]` `exclude-newer` in 2099 resolves at the env cutoff for `uv pip compile` and `uv lock` (FIXTURE CONTROL without it), a repo `exclude-newer-package` still loosens its package, `uv run` / `uv tool run` work; pnpm 11+ resolves past a workspace `minimumReleaseAge: 0` or exclude list only without `pnpm_config_*` (`npm_config_*` does nothing), a workspace `ignoreScripts: false` still runs because that is not exported, and why: `pnpm_config_ignore_scripts=true` silently skips an approved build; pnpm 10 is untouched; `/etc/environment` carries the pnpm pair; the verifier's uv and pnpm rows with and without the variables (network tests skip offline) |
 
 ## Adversarial tests
 
@@ -119,7 +120,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 581 tests
+make test          # build container + run all 600 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

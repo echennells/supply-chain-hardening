@@ -65,6 +65,10 @@ supply-chain-verify
   `~/.nuget/NuGet/NuGet.Config` the role did not write: show it to the user, and pass
   `-e accept_user_config_overwrite=true` only if they agree.
 - On agent hosts and CI images, add `-e verify_fail_on_gap=true` so a gap fails the play.
+- On an agent host that runs uv inside repositories nobody vetted, offer
+  `-e uv_exclude_newer_env=true`, which stops a repo's own `exclude-newer` from
+  lifting the uv age gate in login shells. Ask first: a project that pins its own
+  `exclude-newer` then fails `uv sync --locked` ([docs/configuration.md](docs/configuration.md)).
 - If Ansible stops with "could not initialize the preferred locale", run it with
   `LC_ALL=C.UTF-8`. Over SSH the client's locale is often forwarded and missing on the
   host; Debian 12 and 13 cloud images hit this.
