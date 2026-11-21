@@ -1741,9 +1741,35 @@ EOF_UVCMP
         if [ "${uvix:-}" = FirstIndex ] && [ -n "$uvcix" ] && [ "$uvcix" != FirstIndex ]; then
           uvweak="${uvweak:+$uvweak; }index-strategy: FirstIndex -> $uvcix (a secondary index can shadow a package name)"
         fi
+        # UV_EXCLUDE_NEWER IN THIS ENVIRONMENT. It outranks a project's
+        # exclude-newer (MEASURED, uv 0.8.17 to 0.13.9), so both dumps above
+        # carry its value as the global and a project's later cutoff never shows
+        # as a weakening here. That is what uv does in this shell, and it is
+        # all this shell has: cron, a systemd unit or a container CMD gets no
+        # /etc/profile.d and uses the project's value. So ask both places once
+        # more without the variable, and if the project's global is weaker
+        # there, say so. The variable leaves exclude-newer-package alone, which
+        # the comparison above already caught.
+        uvmask=""
+        if [ -n "${UV_EXCLUDE_NEWER:-}" ] && [ -n "$uvcand" ]; then
+          uvhg0=$( (cd / && env -u UV_EXCLUDE_NEWER uv pip list --show-settings) 2>/dev/null | scv_uv_en_block)
+          uvcg0=$(env -u UV_EXCLUDE_NEWER uv pip list --show-settings 2>/dev/null | scv_uv_en_block)
+          uvhg0=$(scv_uv_en_global "$uvhg0"); uvcg0=$(scv_uv_en_global "$uvcg0")
+          uvh0=$(scv_uv_cutoff "$uvhg0" "$uvnows"); uvc0=$(scv_uv_cutoff "$uvcg0" "$uvnows")
+          if [ "$uvh0" != off ] && [ "$uvh0" != '?' ] && [ "$uvc0" != '?' ]; then
+            if [ "$uvc0" = off ]; then
+              uvmask="$(scv_uv_when "$uvh0") -> no cutoff"
+            elif [ "$uvc0" -gt "$uvh0" ] && { [ -z "$uvwant" ] || [ "$uvc0" -gt "$uvwant" ]; }; then
+              uvmask="$(scv_uv_when "$uvh0") -> $(scv_uv_when "$uvc0")"
+            fi
+          fi
+        fi
         if [ -n "$uvweak" ]; then
           row GAP PARSED "uv repo config override" \
-            "in $PWD uv reports weaker settings than the host probe: $uvweak. A uv.toml or pyproject.toml [tool.uv] at or above this directory${uvcand:+ (nearest: $uvcand)} outranks the host config, so every uv command run here, and pip through the wrapper, uses it"
+            "in $PWD uv reports weaker settings than the host probe: $uvweak. A uv.toml or pyproject.toml [tool.uv] at or above this directory${uvcand:+ (nearest: $uvcand)} outranks the host config, so every uv command run here, and pip through the wrapper, uses it${uvmask:+. Without UV_EXCLUDE_NEWER, exclude-newer here also goes $uvmask}"
+        elif [ -n "$uvmask" ]; then
+          row WEAK PARSED "uv repo config override" \
+            "in $PWD $uvcand moves exclude-newer $uvmask, but UV_EXCLUDE_NEWER=$UV_EXCLUDE_NEWER in this environment outranks it, so uv resolves at that cutoff in this shell. A context without the variable (cron, a systemd unit, a container CMD, any shell that did not log in) uses the project's value"
         elif [ -n "$uvodd" ]; then
           row WEAK PARSED "uv repo config override" \
             "in $PWD uv reports a setting this verifier cannot order against the host's: $uvodd${uvcand:+ (nearest uv config: $uvcand)}"
