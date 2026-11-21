@@ -36,6 +36,16 @@ setup() {
 }
 
 @test "SYSTEM: pip wrapper is not writable by non-root" {
+  # tasks/uv.yml deploys the wrapper only where it finds uv (it would refuse
+  # every pip call without one) and records the skip in the run summary. With
+  # no uv and no wrapper an earlier apply left, there is nothing to check; with
+  # uv present, a missing wrapper still fails below. MEASURED on 6c77f4e with
+  # uv hidden: this test failed on `stat` of a file the role never writes there.
+  if [ ! -e /usr/local/bin/pip ] && [ ! -L /usr/local/bin/pip ] \
+     && [ ! -x /usr/local/bin/uv ] && [ ! -x /usr/bin/uv ] && [ ! -x "$HOME/.local/bin/uv" ] \
+     && ! command -v uv >/dev/null 2>&1; then
+    skip "no uv on this host, so the role deploys no pip wrapper (tasks/uv.yml records it in the run summary)"
+  fi
   perms=$(stat -c %a /usr/local/bin/pip)
   [ "$perms" = "755" ]
   owner=$(stat -c %U /usr/local/bin/pip)

@@ -303,10 +303,10 @@
       ✓ No missing prerequisites within this run's scope.
       ⚠ This was NOT a full run, so this is not a statement of full coverage:
       {% if ansible_run_tags | default(['all']) != ['all'] %}
-        - limited to tags: {{ ansible_run_tags | join(', ') }}
+        - limited to tags: {{ ansible_run_tags | sort | join(', ') }}
       {% endif %}
       {% if ansible_skip_tags | default([]) | length > 0 %}
-        - skipping tags: {{ ansible_skip_tags | join(', ') }}
+        - skipping tags: {{ ansible_skip_tags | sort | join(', ') }}
       {% endif %}
       {% if not (socket_firewall_install | bool) %}
         - socket_firewall_install=false — Socket Firewall and the npm PATH
@@ -320,6 +320,22 @@
       ansible_run_tags | default(['all']) != ['all']
       or ansible_skip_tags | default([]) | length > 0
       or not (socket_firewall_install | bool)
+  tags: always
+
+# Settings the run did not honour while the protection they feed stayed in
+# place: an sfw_version that was not installed over a working sfw (below
+# 2.0.6, a dist-tag or range, or an install that failed and left the old sfw
+# in use). Listed apart, so the NOT-applied count above never claims a
+# protection is missing because of them, and the operator still learns that
+# the setting was not applied.
+- name: Report settings this run did not apply as configured
+  ansible.builtin.debug:
+    msg: |-
+      {{ sch_apply_notes | length }} setting(s) were not applied as configured. No protection is missing because of them; each entry names what is in use instead:
+      {% for item in sch_apply_notes %}
+        {{ loop.index }}. {{ item }}
+      {% endfor %}
+  when: sch_apply_notes | default([]) | length > 0
   tags: always
 
 # Runs last, after every ecosystem has been applied, because it inspects the

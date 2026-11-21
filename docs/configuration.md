@@ -54,8 +54,12 @@ not set the derived values individually. The unit trap is spelled out in
 
 Pinned tool versions (`npq_version`, `sfw_version`, `zizmor_version`,
 `cargo_cooldown_version`, `cosign_version` + checksums, …) are also in
-`defaults/main.yml`. `sfw_version` must be 2.0.6 or later; a re-apply replaces
-an installed sfw older than that (see [limitations.md](limitations.md)).
+`defaults/main.yml`. `sfw_version` must be 2.0.6 or later. A re-apply installs
+it over an installed sfw of any other version, up or down, and replaces one older
+than 2.0.6 (see [limitations.md](limitations.md)). Moving a working sfw needs a
+plain X.Y.Z: anything else, such as `latest` or `^2.0.6`, is installed only
+where sfw is absent or older than 2.0.6, and the run summary says when it kept
+the installed sfw instead.
 
 ## Refreshing auditing tools
 

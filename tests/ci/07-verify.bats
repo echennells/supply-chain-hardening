@@ -293,13 +293,20 @@ exec '"$realpy"' "$@"'
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fetch 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" == *"sudo sh -c 'umask 022; sfw true && chmod -R go+rX "*"/.sfw-cache'"* ]]
 
   run verify_sourced --emit=plain
   row=$(printf '%s\n' "$output" | grep 'cargo threat-intel filtering')
   echo "$row"
   [[ "$row" == "GAP    FUNCTIONAL  cargo threat-intel filtering"* ]]
   [[ "$row" == *"runs cargo WITHOUT sfw"* ]]
-  [[ "$row" == *"sudo sfw true"* ]]
+  # The command must leave a binary other accounts can run: under a umask of
+  # 077 (a caller's own on Debian 13, or sudoers `Defaults umask=0077`), a bare
+  # `sudo sfw true` downloaded it into a 0700 cache and every other account
+  # still failed (MEASURED, sfw 2.0.6 on Ubuntu 24.04 and Debian 13). The path
+  # is matched loosely: readlink -f resolves macOS's /var to /private/var.
+  [[ "$row" == *"sudo sh -c 'umask 022; sfw true && chmod -R go+rX "*"/.sfw-cache'"* ]]
+  [[ "$row" == *"re-run action/harden.sh"* ]]
   [[ "$row" != *"EVERY cargo build"* ]]
 
   # An sfw that cannot execute with a binary cached is still the failing case.

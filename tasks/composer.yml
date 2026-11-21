@@ -37,10 +37,12 @@
 #              2.2.6. composer-config.json.j2 emits {} — the empty allowlist,
 #              same protection — below 2.2.15 and when the version is unknown.
 #   <= 2.1   : --no-scripts is not an application-level option; only
-#              install/update/require/remove/dump-autoload declare it.
-#              composer-wrapper.sh.j2 injects it on every invocation from
-#              2.2.0 (except a script run by name) and per-subcommand below. --no-plugins IS global that far
-#              back and is always injected.
+#              install/update/require/remove/dump-autoload/create-project
+#              (and reinstall, 2.1) declare it. composer-wrapper.sh.j2
+#              injects it on every invocation from 2.2.0 (except a script run
+#              by name) and per command below, under any alias or unique
+#              prefix of the name. --no-plugins IS global that far back and
+#              is always injected.
 
 - name: Detect installed Composer version (empty if not installed)
   # Pull the X.Y.Z out of `composer --version` output:
@@ -264,6 +266,13 @@
 # composer-real, so the wrapper survives (MEASURED, 2.8.8 -> 2.9.5 through the
 # wrapper). Re-apply anyway, so the version-tiered settings follow.
 
+# The three read-only probes below run whether or not composer_path_wrapper is
+# on: composer_path_wrapper=false has to find the wrapper an earlier apply left
+# and put composer-real back (the restore task at the end). Gating them on the
+# switch left the restore reading registers of skipped tasks, which have no rc
+# or stdout. MEASURED on 6c77f4e: a re-apply with composer_path_wrapper=false
+# failed the play there with "'dict object' has no attribute 'rc'", and the
+# wrapper stayed in place.
 - name: Find current composer path for wrapping
   ansible.builtin.shell:
     cmd: |
@@ -279,7 +288,6 @@
   changed_when: false
   check_mode: false
   failed_when: false
-  when: composer_path_wrapper | bool
 
 - name: Determine whether current composer binary is our wrapper or the real binary
   ansible.builtin.shell:
@@ -294,20 +302,16 @@
   changed_when: false
   check_mode: false
   when:
-    - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
 
 - name: Check whether a composer-real backup exists (from prior wrapper run)
   ansible.builtin.stat:
     path: "{{ composer_binary_path.stdout }}-real"
   register: composer_real_backup
   when:
-    - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
 
 - name: Rename real composer to composer-real (refresh backup if a re-install overwrote wrapper)
   # No gate on `not composer_real_backup.stat.exists`: if a re-install
@@ -319,10 +323,9 @@
     cmd: "mv {{ composer_binary_path.stdout }} {{ composer_binary_path.stdout }}-real"
   when:
     - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
-    - composer_binary_kind.stdout == 'is_real'
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
+    - composer_binary_kind.stdout | default('') == 'is_real'
   changed_when: true
 
 - name: Deploy composer wrapper at the discovered composer path
@@ -337,22 +340,23 @@
     composer_real_path: "{{ composer_binary_path.stdout }}-real"
   when:
     - composer_path_wrapper | bool
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
 
 - name: Record skipped protection — wrapper --no-scripts is subcommand-gated (Composer <= 2.1)
   # MEASURED (composer 2.0.14 → 2.10.3): --no-scripts became an
   # application-level option in 2.2.0. On 2.0/2.1 only install, update,
-  # require, remove and dump-autoload declare it, and injecting it anywhere
-  # else makes `composer show`, `composer config` and `composer diagnose` die
-  # with `The "--no-scripts" option does not exist.` The wrapper therefore
-  # gates the injection on those hosts — which means the subcommands that are
-  # NOT in that list run without it. Same record when the version could not be
-  # detected, because the wrapper then renders the same safe baseline.
+  # require, remove, dump-autoload, create-project and reinstall (2.1.14's
+  # `composer list --format=json`; 2.0.14 has no reinstall) declare it, and
+  # injecting it anywhere else makes `composer show`, `composer config` and
+  # `composer diagnose` die with `The "--no-scripts" option does not exist.`
+  # The wrapper therefore gates the injection on those hosts — which means the
+  # subcommands that are NOT in that list run without it. Same record when the
+  # version could not be detected, because the wrapper then renders the same
+  # safe baseline.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['composer wrapper --no-scripts (partial) — Composer ' ~ (composer_detected_version | default('', true) | default('<undetected>', true)) ~ ' does not accept --no-scripts as a global option (it became one in 2.2.0), so the wrapper injects it only for install/update/require/remove/dump-autoload. create-project and exec run WITHOUT it on this host (a script run by name runs on every version, on purpose). --no-plugins is unaffected. Upgrade Composer to >= 2.2 and re-run to cover every lifecycle command.'] }}
+      {{ (skipped_protections | default([])) + ['composer wrapper --no-scripts (partial) — Composer ' ~ (composer_detected_version | default('', true) | default('<undetected>', true)) ~ ' does not accept --no-scripts as a global option (it became one in 2.2.0), so the wrapper injects it only for the commands that declare it here (install, update, require, remove, dump-autoload, create-project, reinstall, under any alias or abbreviation). Every other command, exec included, runs WITHOUT it on this host (a script run by name runs on every version, on purpose). --no-plugins is unaffected. Upgrade Composer to >= 2.2 and re-run to cover every command.'] }}
   when:
     - composer_path_wrapper | bool
     - composer_binary_path is defined
@@ -362,16 +366,16 @@
       or composer_detected_version is version('2.2.0', '<')
 
 - name: Restore original composer binary when wrapper is disabled
+  # composer_path_wrapper=false: the documented way back (defaults/main.yml).
+  # Puts composer-real back at the path the wrapper held. The env-var layer
+  # (COMPOSER_SKIP_SCRIPTS) is left as it is.
   become: true
   ansible.builtin.command:
-    cmd: "mv {{ composer_binary_path.stdout }}-real {{ composer_binary_path.stdout }}"
+    argv: [mv, -f, "{{ composer_binary_path.stdout }}-real", "{{ composer_binary_path.stdout }}"]
   when:
     - not (composer_path_wrapper | bool)
-    - composer_binary_path is defined
-    - composer_binary_path.rc == 0
-    - composer_binary_path.stdout | length > 0
-    - composer_binary_kind is defined
-    - composer_binary_kind.stdout == 'is_wrapper'
-    - composer_real_backup is defined
-    - composer_real_backup.stat.exists
+    - composer_binary_path.rc | default(1) == 0
+    - composer_binary_path.stdout | default('') | length > 0
+    - composer_binary_kind.stdout | default('') == 'is_wrapper'
+    - composer_real_backup.stat.exists | default(false)
   changed_when: true

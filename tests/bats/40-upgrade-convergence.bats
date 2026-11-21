@@ -476,6 +476,413 @@ sfw_teardown() {
   [ "$(cat "$c/next-check")" = "2026-01-01T00:00:00.000Z" ]
 }
 
+# --- sfw_version: a bump, or a pin-down, reaches a host that has sfw ---------
+#
+# The install ran only when sfw was absent (or older than 2.0.6), so moving
+# sfw_version never reached a host that already had sfw. MEASURED on 6c77f4e:
+# with the installed package at another version than sfw_version, either way, a
+# re-apply left it as it was (changed=0). Only one sfw release is 2.0.6 or later
+# (the registry's list on 2026-11-20: 1.0.0, 2.0.1-2.0.4, 2.0.6), so the other
+# version is the installed package.json relabelled: what the role reads to decide.
+
+sfw_pkg_json() { echo "$(npm root -g)/sfw/package.json"; }
+sfw_relabel() { sed -i "s/\"version\": *\"[^\"]*\"/\"version\": \"$1\"/" "$(sfw_pkg_json)"; }
+sfw_label() { sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$(sfw_pkg_json)" 2>/dev/null | head -n 1; }
+socket_apply() {
+  cd "$ROLE_DIR"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags socket -e podman_enabled=false -e verify_protections=false "$@"
+}
+task_result() { printf '%s\n' "$output" | grep -F -A1 "$1" | tail -n 1; }
+
+@test "upgrade: an installed sfw at another version than sfw_version is replaced, both ways, and a re-apply then changes nothing" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to install a global sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  [ "$(dirname "$(sfw_pkg_json)")" = "${c%/.sfw-cache}" ] || skip "root's npm root -g is not where the sfw on PATH lives"
+  want=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  sfw_snapshot "$c"
+  local from
+  for from in 2.0.7 2.0.5; do
+    sfw_relabel "$from"
+    [ "$(sfw_label)" = "$from" ]
+    socket_apply
+    echo "$output" | tail -20
+    [ "$status" -eq 0 ]
+    st=$(task_result "Install Socket Firewall Free via npm")
+    echo "installed $from, sfw_version $want: install $st"
+    [[ "$st" == changed:* ]] || { echo "an sfw labelled $from was not replaced with $want"; return 1; }
+    [ "$(sfw_label)" = "$want" ]
+    hash -r
+    # Reinstalling replaces the package directory, so the warm downloads the
+    # firewall binary again. When GitHub refuses it (a known flake), sfw is moved
+    # aside and named in the summary; what still has to hold is the version,
+    # and nothing anyone else can write in the cache.
+    if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+      if [ -d "$c" ]; then
+        run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+        [ -z "$output" ]
+      fi
+      skip "sfw's binary could not be downloaded from GitHub after the reinstall; the version converged to $want"
+    fi
+    [ -e "$c/latest" ]
+    run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+    [ -z "$output" ]
+  done
+
+  # Converged: nothing to replace.
+  socket_apply
+  [ "$status" -eq 0 ]
+  st=$(task_result "Install Socket Firewall Free via npm")
+  [[ "$st" == skipping:* ]] || { echo "a re-apply at sfw_version still ran the install: $st"; return 1; }
+
+  # A pin below 2.0.6 does not take a working sfw down to a version the
+  # wrappers cannot use; the apply says so.
+  before=$(stat -c %i "${c%/.sfw-cache}")
+  socket_apply -e sfw_version=2.0.4
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+  [[ "$output" == *"sfw_version=2.0.4 is below 2.0.6"*"was left in place"* ]]
+  # In the run summary, as a setting not applied, not as a missing protection.
+  [[ "$output" == *"setting(s) were not applied as configured"* ]]
+  [[ "$output" != *"protection(s) were NOT applied"* ]]
+  [ "$(sfw_label)" = "$want" ]
+  [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+}
+
+# A dist-tag or a range has no version to compare. Ansible's version test
+# raised on one ("Version comparison failed: '<' not supported between
+# instances of 'str' and 'int'"), so the version move above failed the play at
+# its first task (MEASURED: sfw_version=latest and ^2.0.6 over sfw 2.0.6, rc=2;
+# a full apply skipped every include after socket.yml). Before the version move
+# existed such a pin was accepted, and installed only where sfw was absent or
+# too old. It still is, and over a working sfw the summary says it was kept.
+@test "upgrade: an sfw_version naming no single release (a dist-tag or a range) keeps a working sfw, says so, and the play goes on" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to install a global sfw"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  sfw_snapshot "$c"
+  before=$(stat -c %i "${c%/.sfw-cache}")
+  local pin
+  for pin in latest '^2.0.6' 2; do
+    socket_apply -e "sfw_version=$pin"
+    echo "$output" | tail -20
+    [[ "$output" != *"Version comparison failed"* ]] || { echo "sfw_version=$pin failed the play on a version test"; return 1; }
+    [ "$status" -eq 0 ]
+    [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+    [[ "$output" == *"sfw_version=$pin is not a plain X.Y.Z version"*"that sfw was kept and is in use"* ]]
+    # `2` is a range to npm (any 2.x), not a version below 2.0.6.
+    [[ "$output" != *"is below 2.0.6"* ]]
+    [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+  done
+
+  # Over an sfw older than 2.0.6 such a pin is what the install asks npm for,
+  # and the record of an sfw still too old afterwards renders (it ran the same
+  # version test). '<2.0.6' resolves to 2.0.4, so it stays too old.
+  npm install -g --ignore-scripts sfw@2.0.4 >/dev/null 2>&1 || skip "could not install sfw@2.0.4 (offline?)"
+  rm -rf "$c"; cp -a "$BATS_TEST_TMPDIR/sfw-cache-saved" "$c"
+  hash -r
+  sfw_path=$(command -v sfw)
+  socket_apply -e 'sfw_version=<2.0.6'
+  echo "$output" | tail -25
+  [[ "$output" != *"Version comparison failed"* ]] || { echo "sfw_version=<2.0.6 failed the play on a version test"; return 1; }
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == changed:* ]]
+  [[ "$output" == *"sfw 2.0.4 at $sfw_path predates 2.0.6"* ]]
+  [[ "$output" == *"resolved to a release below 2.0.6, or the new copy is behind this one"* ]]
+  hash -r
+  [ -z "$(command -v sfw)" ]
+  [ -e "$sfw_path.broken" ]
+}
+
+# The version move runs the install over a working sfw. When that install
+# fails, npm leaves the old package in place. MEASURED with sfw 2.0.6 and
+# sfw_version=2.0.99 (not published): the warm ran the old sfw (ok), another
+# account's npm install still went through it, and the summary said "install
+# failed. npm installs are not threat-intel filtered" and counted a protection
+# NOT applied, on every apply.
+@test "upgrade: a failed replacement over a working sfw names the sfw still in use, and claims no protection lost" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to apply the socket tasks"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  sfw_snapshot "$c"
+  want=$SFW_SNAP_PIN
+  bin=$(command -v sfw)
+  before=$(stat -c %i "${c%/.sfw-cache}")
+
+  socket_apply -e sfw_version=2.0.99
+  echo "$output" | tail -25
+  [ "$status" -eq 0 ]
+  st=$(task_result "Install Socket Firewall Free via npm"); echo "install: $st"
+  [[ "$st" == ok:* ]] || { echo "the install did not run, or counted as a change"; return 1; }
+  [[ "$output" == *"replacing sfw $want with sfw_version 2.0.99 failed (exit "* ]] \
+    || { echo "no entry names the failed replacement (did npm install 2.0.99?)"; return 1; }
+  [[ "$output" == *"sfw $want at /"*" is still installed and in use"* ]]
+  [[ "$output" != *"install failed. npm installs are not threat-intel filtered"* ]]
+  [[ "$output" != *"protection(s) were NOT applied"* ]]
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+  hash -r
+  [ "$(command -v sfw)" = "$bin" ]
+  [ "$(sfw_label)" = "$want" ]
+  [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+  [ -e "$c/latest" ]
+}
+
+# --check skips the install (a command), so a dry run over an sfw at another
+# version reported changed=0 and nothing else: it looked converged.
+@test "upgrade: a --check run over an sfw at another version says a real run would replace it, and changes nothing" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to apply the socket tasks"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  [ "$(dirname "$(sfw_pkg_json)")" = "${c%/.sfw-cache}" ] || skip "root's npm root -g is not where the sfw on PATH lives"
+  sfw_snapshot "$c"
+  want=$SFW_SNAP_PIN
+  before=$(stat -c %i "${c%/.sfw-cache}")
+  sfw_relabel 2.0.7
+  socket_apply --check
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"this --check run did not replace the installed sfw 2.0.7 with sfw_version $want; a real run would"* ]]
+  [ "$(sfw_label)" = 2.0.7 ]
+  [ "$(stat -c %i "${c%/.sfw-cache}")" = "$before" ]
+  sfw_relabel "$want"
+}
+
+# --- an sfw moved aside after a failed fetch --------------------------------
+#
+# When the warm cannot fetch the firewall binary, sfw is moved aside
+# (sfw -> sfw.broken) and every later apply reinstalls it to try again. MEASURED
+# on 6c77f4e with GitHub unreachable: each re-apply reported the install changed
+# (changed=1), ending exactly where it began. It now counts as a change only
+# when sfw comes back.
+HOSTS_SAVED=""
+hosts_block_github() {
+  cp /etc/hosts "$BATS_TEST_TMPDIR/hosts.saved" && HOSTS_SAVED=1
+  local h
+  for h in github.com api.github.com objects.githubusercontent.com release-assets.githubusercontent.com codeload.github.com; do
+    echo "127.0.0.1 $h" >> /etc/hosts
+  done
+}
+hosts_restore() {
+  [ -n "$HOSTS_SAVED" ] || return 0
+  cat "$BATS_TEST_TMPDIR/hosts.saved" > /etc/hosts; HOSTS_SAVED=""
+}
+
+@test "upgrade: an sfw moved aside after a failed fetch is retried on every apply, and reported changed only when it comes back" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to move sfw and edit /etc/hosts"
+  [ -w /etc/hosts ] || skip "/etc/hosts is not writable here"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  sfw_snapshot "$c"
+  bin=$(command -v sfw)
+
+  # What a failed warm leaves: sfw moved aside, and no binary cached.
+  hosts_block_github
+  mv "$bin" "$bin.broken"; rm -rf "$c"; hash -r
+  socket_apply
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]] \
+    || { echo "the fetch did not fail with GitHub blocked; nothing to test"; return 1; }
+  st=$(task_result "Install Socket Firewall Free via npm"); echo "blocked: install $st"
+  [[ "$st" == ok:* ]]
+  st=$(task_result "Warm the Socket Firewall binary cache"); echo "blocked: warm $st"
+  [[ "$st" == ok:* ]]
+  hash -r
+  [ -z "$(command -v sfw)" ]
+
+  # Reachable again: the same retry brings sfw back, and that is the change.
+  hosts_restore
+  socket_apply
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    skip "GitHub refused the download with nothing blocked (a known flake); the blocked half passed"
+  fi
+  st=$(task_result "Warm the Socket Firewall binary cache"); echo "reachable: warm $st"
+  [[ "$st" == changed:* ]]
+  hash -r
+  [ "$(command -v sfw)" = "$bin" ]
+  rm -f "$bin.broken"
+  [ -e "$c/latest" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+}
+
+# --- an sfw under another npm prefix than root's npm uses --------------------
+#
+# MEASURED 2026-11-20 on a live Ubuntu 24.04 host with NodeSource Node 24: sfw
+# 2.0.4 sat under /usr/local (an earlier role run with Ubuntu's apt npm, whose
+# prefix is /usr/local), and root's npm, now NodeSource's, has prefix /usr. The
+# replacement went to /usr/lib/node_modules and /usr/bin/sfw, root's PATH still
+# found /usr/local/bin/sfw 2.0.4 first, the warm moved that aside, and the run
+# summary said the replacement "left it unchanged: sfw_version must be 2.0.6 or
+# later", which was false. The 2.0.6 was neither warmed nor checked in that run.
+# The test image is NodeSource too, so the image's own sfw is moved out of the
+# way and 2.0.4 is staged under /usr/local, as on that host.
+PREFIX_STAGED=""
+sfw_prefix_teardown() {
+  [ -n "$PREFIX_STAGED" ] || return 0
+  local own=$PREFIX_OWN saved="$BATS_TEST_TMPDIR/own-sfw"
+  echo "# teardown: putting the image's sfw back under $own" >&3
+  rm -rf /usr/local/lib/node_modules/sfw
+  rm -f /usr/local/bin/sfw /usr/local/bin/sfw.broken
+  [ -n "$PREFIX_MADE_LIB" ] && rm -rf /usr/local/lib/node_modules
+  if [ -d "$saved/pkg" ]; then
+    rm -rf "$own/lib/node_modules/sfw"; rm -f "$own/bin/sfw" "$own/bin/sfw.broken"
+    mv "$saved/pkg" "$own/lib/node_modules/sfw"
+    # The link's (relative) target is kept, and it is back in its directory.
+    mv "$saved/bin" "$own/bin/sfw"
+  fi
+  hash -r
+  PREFIX_STAGED=""
+}
+
+@test "upgrade: an sfw under another npm prefix than root's npm is replaced where it is, with no false message" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "moves the global sfw and installs one under /usr/local"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  own=$(cd / && npm prefix -g)
+  [ -n "$own" ] && [ "$own" != /usr/local ] || skip "root's npm already uses /usr/local; there is no second prefix to stage"
+  [ "${c%/.sfw-cache}" = "$own/lib/node_modules/sfw" ] && [ -L "$own/bin/sfw" ] \
+    || skip "the image's sfw is not where root's npm puts it"
+  [ ! -e /usr/local/lib/node_modules/sfw ] && [ ! -e /usr/local/bin/sfw ] || skip "an sfw is already under /usr/local"
+  want=$(sed -n 's/^sfw_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml")
+  gc=$(cd / && npm config get globalconfig)
+
+  # The live host's layout: no sfw under root's npm's prefix, 2.0.4 under
+  # /usr/local, warm (the image's cache, so the install's own npm call through
+  # the wrapper does not download the binary for 2.0.4).
+  PREFIX_OWN=$own; PREFIX_MADE_LIB=""
+  [ -d /usr/local/lib/node_modules ] || PREFIX_MADE_LIB=1
+  mkdir -p "$BATS_TEST_TMPDIR/own-sfw"
+  PREFIX_STAGED=1
+  mv "$own/lib/node_modules/sfw" "$BATS_TEST_TMPDIR/own-sfw/pkg"
+  mv "$own/bin/sfw" "$BATS_TEST_TMPDIR/own-sfw/bin"
+  hash -r
+  (cd / && npm install -g --prefix /usr/local --globalconfig "$gc" --ignore-scripts sfw@2.0.4) >/dev/null 2>&1 \
+    || skip "could not install sfw@2.0.4 (offline?)"
+  lc=/usr/local/lib/node_modules/sfw/.sfw-cache
+  cp -a "$BATS_TEST_TMPDIR/own-sfw/pkg/.sfw-cache" "$lc"
+  # An absolute `latest` would point at the moved copy, outside this cache.
+  t=$(readlink "$lc/latest")
+  case "$t" in "$c"/*) ln -sfn "$lc/${t#"$c"/}" "$lc/latest" ;; esac
+  hash -r
+  [ "$(command -v sfw)" = /usr/local/bin/sfw ]
+  grep -q '"version": "2.0.4"' /usr/local/lib/node_modules/sfw/package.json
+
+  socket_apply
+  echo "$output" | grep -E 'Socket Firewall|fatal|FAILED|PLAY RECAP' | head -20
+  [ "$status" -eq 0 ]
+  # What the summary said on that host. Each is false once the replacement
+  # lands where the old sfw was.
+  if [[ "$output" == *"left it unchanged"* || "$output" == *"predates 2.0.6"* ]]; then
+    echo "the run summary still reports the sfw it replaced"; return 1
+  fi
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == changed:* ]]
+  # The replacement went where the old sfw was, and nothing into root's npm's
+  # own prefix.
+  grep -q "\"version\": \"$want\"" /usr/local/lib/node_modules/sfw/package.json
+  grep -rqs SFW_SKIP_UPDATE_CHECK /usr/local/lib/node_modules/sfw/dist/
+  [ ! -e "$own/lib/node_modules/sfw" ] || { echo "a second sfw was installed under $own"; return 1; }
+  [ ! -e "$own/bin/sfw" ]
+  [ ! -L "$own/bin/sfw" ]
+  hash -r
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    skip "sfw's binary could not be downloaded from GitHub after the reinstall; it was replaced under /usr/local, at $want, with no false message"
+  fi
+  # One sfw on root's PATH, at sfw_version, warmed by root, and nobody else can
+  # write its cache.
+  run type -ap sfw
+  [ "$output" = /usr/local/bin/sfw ] || { echo "sfw on PATH: $output"; return 1; }
+  [ ! -e /usr/local/bin/sfw.broken ]
+  [ -e "$lc/latest" ]
+  run find "$lc" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+
+  # Converged: the next apply has nothing to replace.
+  socket_apply
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+}
+
+# An older sfw with no npm prefix to replace it in (a local install under /opt,
+# linked into /usr/local/bin) still shadows the replacement, which goes to root's
+# npm's prefix. The warm moves the old one aside, so root's PATH then reaches
+# the new copy, cold. The summary used to say "Remove it, or install sfw 2.0.6
+# in its place, as root, and re-apply", advice for a file already moved aside.
+# MEASURED: a plain re-apply warms the new copy and converges.
+SHADOW_STAGED=""
+sfw_shadow_teardown() {
+  [ -n "$SHADOW_STAGED" ] || return 0
+  local l
+  for l in /usr/local/bin/sfw /usr/local/bin/sfw.broken; do
+    case "$(readlink "$l" 2>/dev/null)" in /opt/sch-oldsfw/*) rm -f "$l" ;; esac
+  done
+  rm -rf /opt/sch-oldsfw
+  hash -r
+  SHADOW_STAGED=""
+}
+
+@test "upgrade: an older sfw outside any npm prefix that shadows the replacement is moved aside, and the summary says a re-apply finishes" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "stages an sfw under /opt and links it into /usr/local/bin"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  [ ! -e /usr/local/bin/sfw ] && [ ! -L /usr/local/bin/sfw ] && [ ! -e /opt/sch-oldsfw ] \
+    || skip "an sfw is already in /usr/local/bin"
+  sfw_snapshot "$c"
+  img=$SFW_SNAP_BIN
+
+  SHADOW_STAGED=1
+  mkdir -p /opt/sch-oldsfw
+  (cd /opt/sch-oldsfw && npm install --ignore-scripts --no-audit --no-fund sfw@2.0.4) >/dev/null 2>&1 \
+    || skip "could not install sfw@2.0.4 (offline?)"
+  old=/opt/sch-oldsfw/node_modules/sfw
+  # Warm with a copy of the image's cache, so the install's own npm call (the
+  # npm wrapper runs whichever sfw is first on PATH) downloads nothing.
+  cp -a "$c" "$old/.sfw-cache"
+  t=$(readlink "$old/.sfw-cache/latest")
+  case "$t" in "$c"/*) ln -sfn "$old/.sfw-cache/${t#"$c"/}" "$old/.sfw-cache/latest" ;; esac
+  ln -s "$(readlink -f /opt/sch-oldsfw/node_modules/.bin/sfw)" /usr/local/bin/sfw
+  hash -r
+  [ "$(command -v sfw)" = /usr/local/bin/sfw ] || skip "/usr/local/bin is not ahead of $img on PATH"
+
+  socket_apply
+  echo "$output" | grep -E 'Socket Firewall|fatal|FAILED|PLAY RECAP' | head -20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw 2.0.4 at /usr/local/bin/sfw predates 2.0.6"* ]]
+  [[ "$output" == *"It was moved aside to /usr/local/bin/sfw.broken, and root now runs $img, which this run did not warm"*"Re-apply to finish."* ]] \
+    || { echo "the summary does not say the old sfw is aside and a re-apply finishes"; return 1; }
+  [[ "$output" != *"Remove it, or install sfw"* ]]
+  [ -L /usr/local/bin/sfw.broken ]
+  hash -r
+  [ "$(command -v sfw)" = "$img" ]
+
+  # The re-apply the summary asks for: nothing to install, the new copy warmed.
+  socket_apply
+  echo "$output" | grep -E 'Socket Firewall|fatal|FAILED|PLAY RECAP' | head -20
+  [ "$status" -eq 0 ]
+  [[ "$(task_result "Install Socket Firewall Free via npm")" == skipping:* ]]
+  [[ "$output" != *"predates 2.0.6"* ]]
+  if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
+    skip "sfw's binary could not be downloaded from GitHub for the warm; the shadow was moved aside and the summary said so"
+  fi
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+  hash -r
+  [ "$(command -v sfw)" = "$img" ]
+  [ -e "$c/latest" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+}
+
 # ---- cargo: a system-path wrapper that an earlier version left behind ----
 #
 # MEASURED (VM#2's u2204/u2404 layout, reproduced on Ubuntu 26.04 with apt
@@ -541,6 +948,9 @@ cargo_teardown() {
 # Both sections above leave state for later files when a test fails partway;
 # bats runs one teardown, so it calls both.
 teardown() {
+  hosts_restore
+  sfw_prefix_teardown
+  sfw_shadow_teardown
   sfw_teardown
   cargo_teardown
 }

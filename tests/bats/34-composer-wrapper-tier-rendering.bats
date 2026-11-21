@@ -249,6 +249,32 @@ J
   [[ "$output" == "ARGV: "* && "$output" != *"--no-scripts"* ]]
 }
 
+# composer resolves an alias or a unique prefix of a built-in to the command
+# itself, so on <= 2.1 those must get --no-scripts too. MEASURED on 6c77f4e with
+# composer 2.1.14: `req`, `upd`, `up`, `ins`, `dump` and `rem` got none and ran
+# the root update and autoload-dump scripts (the real-composer test is in
+# 16-composer-behavioral.bats). The commands that do not declare the option on
+# 2.1.14 (`composer list --format=json`) must still not get it, or they die with
+# 'The "--no-scripts" option does not exist.'; neither must a name composer
+# calls ambiguous (`in`: init, install, info).
+@test "wrapper-route: composer <= 2.1 resolves aliases and unique prefixes before deciding" {
+  route_setup
+  [ -x "$WRAPPER_DIR/route-2.1.sh" ] || skip "rendering failed"
+  local args
+  for args in "i" "ins" "inst" "u" "up" "upd" "upgrade" "upg" "req x/y" "requ x/y" "rem x/y" "remo x/y" \
+              "rm x/y" "uninstall x/y" "dump" "du" "dumpa" "dumpautoload" "cr a/b" "create-project a/b" \
+              "rei x/y" "reinstall x/y" "UPD" "-n upd" "-d /tmp req x/y"; do
+    # shellcheck disable=SC2086
+    route route-2.1 $args
+    [[ "$output" == "ARGV: "* && "$output" == *"--no-scripts"* ]] || { echo "'$args' did not get --no-scripts: $output"; return 1; }
+  done
+  for args in "show" "sh" "info" "in" "re" "d" "conf" "config" "exec phpunit" "valid" "status" "outdated" "--version" ""; do
+    # shellcheck disable=SC2086
+    route route-2.1 $args
+    [[ "$output" == "ARGV: "* && "$output" != *"--no-scripts"* ]] || { echo "'$args' got --no-scripts: $output"; return 1; }
+  done
+}
+
 @test "wrapper-render: recursion guard present in both renderings" {
   # If a refactor of the Jinja conditional breaks the guard pattern, this
   # surfaces it before the wrapper gets shipped to production hosts.

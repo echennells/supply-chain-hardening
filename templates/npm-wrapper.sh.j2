@@ -73,7 +73,7 @@ sfw_ready() {
   [ -e "$_p/.sfw-cache/latest" ] && return 0
   if [ -e "$_p/.sfw-cache" ]; then [ -w "$_p/.sfw-cache" ] && return 0
   else [ -w "$_p" ] && return 0; fi
-  sfw_why="sfw has no firewall binary cached that this account can run ($_p/.sfw-cache), and only root can fetch it; run 'sudo sfw true' once or re-apply the role"
+  sfw_why="sfw has no firewall binary cached that this account can run ($_p/.sfw-cache), and only root can fetch it; run  sudo sh -c 'umask 022; sfw true && chmod -R go+rX $_p/.sfw-cache'  once, or re-apply the role"
   return 1
 }
 

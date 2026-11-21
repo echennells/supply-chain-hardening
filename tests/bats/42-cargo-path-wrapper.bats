@@ -60,7 +60,11 @@ probe_err() {
       && PATH="$PROBE_DIR:/usr/bin:/bin" "$PROBE_DIR/cargo" "$@" 2>&1 >/dev/null )
 }
 
-teardown() { [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"; return 0; }
+teardown() {
+  [ -n "${PROBE_DIR:-}" ] && rm -rf "$PROBE_DIR"
+  apt_layout_teardown
+  return 0
+}
 
 # ---- the wrapper must be valid shell ----
 #
@@ -336,6 +340,91 @@ path_probe() {
   out=$(probe build)
   [[ "$out" == *"cooldown build"* ]]
   [[ "$out" == *"PATH=$PROBE_DIR:/usr/bin:/bin:$PROBE_DIR/backend"* ]]
+}
+
+# ---- the root-owned backend copy on an apt-style cargo (a fresh install) ----
+#
+# A cargo outside every home (apt's /usr/bin/cargo) is wrapped for root and for
+# every account, so tasks/cargo.yml copies the deploying user's pinned
+# cargo-cooldown to a root-owned /usr/local/libexec copy and the wrapper names
+# that, never the deployer's ~/.cargo/bin. Until this test only the upgrade
+# path in 40-upgrade-convergence.bats reached that copy: the image's cargo is
+# rustup's, in /root/.cargo/bin, so the build-time apply never wraps a system
+# path. Here the layout is built by hand: the toolchain's real cargo binary at
+# /usr/bin/cargo (Ubuntu 24.04's apt cargo, 1.75, is too old to build the
+# backend, so a real apt cargo would only exercise the degraded path), and a
+# deploying account with the pinned cargo-cooldown in its CARGO_HOME and no
+# cargo of its own there, so discovery picks /usr/bin/cargo. The apply runs as
+# root with that account's HOME, like the per-user config tests in 25-*.
+APT_LAYOUT=""
+APT_BACKEND_DIR=/usr/local/libexec/supply-chain-hardening
+apt_layout_teardown() {
+  [ -n "$APT_LAYOUT" ] || return 0
+  rm -f /usr/bin/cargo /usr/bin/cargo-real /tmp/marker-cargodev-cooldown-ran
+  case "$APT_LAYOUT" in *backend*) rm -rf "$APT_BACKEND_DIR" ;; esac
+  id cargodev >/dev/null 2>&1 && userdel -r cargodev >/dev/null 2>&1
+  APT_LAYOUT=""
+}
+
+@test "cargo: on a system-path cargo, root's build runs the root-owned backend copy and never the deployer's own" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "writes /usr/bin/cargo and adds an account"
+  local pin sysroot have p ch
+  pin=$(sed -n 's/^cargo_cooldown_version: *"\{0,1\}\([0-9.]*\)"\{0,1\}.*/\1/p' "$ROLE_DIR/defaults/main.yml" | head -1)
+  have=$("$HOME/.cargo/bin/cargo-cooldown" --version 2>/dev/null | awk '{print $NF}')
+  [ -n "$pin" ] && [ "$have" = "$pin" ] || skip "no cargo-cooldown $pin in ~/.cargo/bin to stand in for the deployer's build"
+  [ ! -e /usr/bin/cargo ] && [ ! -e /usr/bin/cargo-real ] || skip "a cargo is already installed at /usr/bin"
+  [ ! -e /usr/local/bin/cargo ] || skip "discovery would pick /usr/local/bin/cargo first"
+  [ ! -e "$APT_BACKEND_DIR" ] || skip "$APT_BACKEND_DIR already exists"
+  sysroot=$(RUSTUP_AUTO_INSTALL=0 rustc --print sysroot 2>/dev/null)
+  [ -x "$sysroot/bin/cargo" ] && [ -x "$sysroot/bin/rustc" ] || skip "no real cargo/rustc binaries in the toolchain"
+  APT_LAYOUT=cargo,backend
+  install -m 0755 "$sysroot/bin/cargo" /usr/bin/cargo
+  id cargodev >/dev/null 2>&1 || useradd -m -s /bin/bash cargodev
+  install -d -o cargodev -g cargodev /home/cargodev/.cargo /home/cargodev/.cargo/bin
+  install -m 0755 -o cargodev -g cargodev "$HOME/.cargo/bin/cargo-cooldown" /home/cargodev/.cargo/bin/cargo-cooldown
+
+  cd "$ROLE_DIR"
+  run env HOME=/home/cargodev CARGO_HOME=/home/cargodev/.cargo \
+    ansible-playbook site.yml --connection=local --limit localhost \
+      --tags cargo -e podman_enabled=false -e verify_protections=false
+  echo "$output" | grep -E 'fatal|FAILED|gate backend|PLAY RECAP' -A1 | head -20
+  [ "$status" -eq 0 ]
+  # The wrapper went to the system path and names the root-owned copy, which is
+  # the deployer's pinned build, byte for byte, and nothing in the deployer's home.
+  grep -q 'supply-chain-hardening' /usr/bin/cargo
+  grep -qx "COOLDOWN_EXE='$APT_BACKEND_DIR/cargo/cargo-cooldown'" /usr/bin/cargo
+  if grep -q '/home/cargodev' /usr/bin/cargo; then echo "the wrapper names the deployer's home"; return 1; fi
+  [ "$(stat -c '%U %a' "$APT_BACKEND_DIR/cargo/cargo-cooldown")" = "root 755" ]
+  [ "$(stat -c '%U %a' "$APT_BACKEND_DIR/cargo")" = "root 755" ]
+  cmp "$APT_BACKEND_DIR/cargo/cargo-cooldown" "$HOME/.cargo/bin/cargo-cooldown"
+
+  # The deployer's own binary becomes one that must never run as root.
+  printf '#!/bin/sh\ntouch /tmp/marker-cargodev-cooldown-ran\nexit 1\n' > /home/cargodev/.cargo/bin/cargo-cooldown
+  chown cargodev:cargodev /home/cargodev/.cargo/bin/cargo-cooldown
+  rm -f /tmp/marker-cargodev-cooldown-ran
+  p="$BATS_TEST_TMPDIR/aptproj"; ch="$BATS_TEST_TMPDIR/aptcargohome"
+  mkdir -p "$p/src" "$ch"
+  printf '[package]\nname = "aptproj"\nversion = "0.1.0"\nedition = "2021"\n' > "$p/Cargo.toml"
+  echo 'fn main() {}' > "$p/src/main.rs"
+  # Root's own CARGO_HOME and PATH hold no cargo-cooldown, so the copy the
+  # wrapper appends to PATH is the only one cargo can start.
+  local clean=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  ( cd "$p" && env CARGO_HOME="$ch" RUSTC="$sysroot/bin/rustc" PATH="$clean" /usr/bin/cargo-real generate-lockfile --offline )
+
+  # FIXTURE CONTROL: cargo does start the deployer's binary when it can reach it.
+  run bash -c 'cd "$1" && env CARGO_HOME="$2" RUSTC="$3" PATH="/home/cargodev/.cargo/bin:$4" /usr/bin/cargo-real cooldown build --offline' \
+    _ "$p" "$ch" "$sysroot/bin/rustc" "$clean"
+  [ -e /tmp/marker-cargodev-cooldown-ran ] || { echo "the planted cargo-cooldown never ran even when reachable: $output"; return 1; }
+  rm -f /tmp/marker-cargodev-cooldown-ran
+
+  run bash -c 'cd "$1" && env CARGO_HOME="$2" RUSTC="$3" PATH="$4" /usr/bin/cargo build --offline 2>&1' \
+    _ "$p" "$ch" "$sysroot/bin/rustc" "$clean"
+  echo "$output" | tail -8
+  [ "$status" -eq 0 ]
+  # cargo-cooldown ran (its own line), and it was not the deployer's.
+  [[ "$output" == *"cooled down"* ]]
+  [ ! -e /tmp/marker-cargodev-cooldown-ran ]
 }
 
 @test "cargo: a backend owned by another account is refused, attributably, and never run" {

@@ -19,6 +19,41 @@
 
 load setup
 
+# Several rows below need the wrapper to reach a uv and get past its uv check:
+# the --version answer and the --user and download refusals come after it. As
+# root (the container suite), or as the account the role was applied for, that
+# holds. A second, non-root account is refused first, with exit 126 or 127
+# (rows 6 and 12 check those messages), when the only uv it can see belongs to
+# another account, or sits where one could replace it, so those rows skip for
+# it instead of failing on the wrong thing. MEASURED as a non-root account that
+# was not the deployer: those rows failed, and so did the one that moves the
+# deployer's uv aside. A uv root owns along its whole path (the suite image's
+# /root/.local/bin/uv) is one that account may run, and the rows still run.
+#
+# This applies the wrapper's rule (sch_trusted) to the files itself rather than
+# asking the wrapper, so a wrapper that refuses a uv it should run still fails.
+require_runnable_uv() {
+  [ "$(id -u)" = 0 ] && return 0
+  local c p baked
+  baked=$(sed -n "s/^UV='\(.*\)'$/\1/p" /usr/local/bin/pip 2>/dev/null | head -n 1)
+  for c in /usr/local/bin/uv /usr/bin/uv "$baked" "$(command -v uv 2>/dev/null)" "${XDG_BIN_HOME:-$HOME/.local/bin}/uv"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    p=$(readlink -f "$c") || continue
+    # Its own uv.
+    [ -O "$p" ] && return 0
+    # Root-owned, and neither it nor a directory above it (up to one this
+    # account owns) is writable by group or others, unless sticky.
+    [ -n "$(find "$p" -maxdepth 0 -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ] || continue
+    while [ "$p" != / ]; do
+      p=$(dirname "$p")
+      [ -O "$p" ] && return 0
+      [ -n "$(find "$p" -maxdepth 0 -user 0 \( -perm -1000 -o \( ! -perm -020 ! -perm -002 \) \) 2>/dev/null)" ] || continue 2
+    done
+    return 0
+  done
+  skip "no uv $(id -un) may run here: the only uv it can see belongs to another account, or sits where another account could replace it, so the wrapper refuses before this row"
+}
+
 @test "pip wrapper has a defensive guard against missing uv" {
   # Wrapper must refuse to run if its embedded uv path is empty or
   # non-executable, instead of falling through to `exec  pip "$@"`.
@@ -59,7 +94,9 @@ load setup
   [ -n "$uv_path" ] || skip "couldn't extract uv path from wrapper"
   [ -x "$uv_path" ] || skip "uv at $uv_path not executable"
 
-  # Move uv aside temporarily
+  # Move uv aside temporarily. Only its owner (the account the role was
+  # applied for) or root can.
+  [ -w "$(dirname "$uv_path")" ] || skip "$(id -un) cannot move $uv_path aside (it belongs to the account the role was applied for)"
   mv "$uv_path" "${uv_path}.bats-hidden"
 
   # Run pip wrapper with a 5-second timeout. Must NOT loop forever.
@@ -151,6 +188,7 @@ FAKE
 @test "pip wrapper: --version answers, naming uv and the redirect" {
   [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
   command -v uv >/dev/null 2>&1 || skip "uv not on PATH; wrapper not deployed"
+  require_runnable_uv
   run /usr/local/bin/pip --version
   [ "$status" -eq 0 ]
   [[ "$output" == *"uv-pip "* ]]
@@ -162,6 +200,7 @@ FAKE
 @test "pip wrapper: --user is refused with a message naming the control and the route" {
   [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
   command -v uv >/dev/null 2>&1 || skip "uv not on PATH; wrapper not deployed"
+  require_runnable_uv
   run /usr/local/bin/pip install --user six
   [ "$status" -eq 2 ]
   [[ "$output" == *"[supply-chain-hardening] error: 'pip --user' is not available here"* ]]
@@ -172,10 +211,14 @@ FAKE
 @test "pip wrapper: download is refused with a message naming the control" {
   [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
   command -v uv >/dev/null 2>&1 || skip "uv not on PATH; wrapper not deployed"
+  require_runnable_uv
   run /usr/local/bin/pip download six
   [ "$status" -eq 2 ]
   [[ "$output" == *"[supply-chain-hardening] error: 'pip download' is not available here"* ]]
-  # A package that happens to be called "download" is not the subcommand.
+  # A package that happens to be called "download" is not the subcommand. The
+  # fixture is a root-owned fake uv; as a normal user (the November 2026 VM
+  # runs) chown failed here, after the refusal above had passed.
+  require_root "gives the fake uv to root"
   fake_uv_wrapper 0
   run "$FAKE_DIR/pip" install download
   [ "$status" -eq 0 ]
@@ -253,6 +296,7 @@ FAKE
 @test "pip wrapper: a real sdist is still refused through the wrapper (no-build unchanged)" {
   [ -f /usr/local/bin/pip ] || skip "pip wrapper not deployed"
   command -v uv >/dev/null 2>&1 || skip "uv not on PATH; wrapper not deployed"
+  require_runnable_uv
   sdist=$(find_fixture_sdist python-sdist-pkg)
   [ -n "$sdist" ] || skip "sdist fixture not built"
   uv venv -q "$BATS_TEST_TMPDIR/venv"

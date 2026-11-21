@@ -62,18 +62,25 @@
 # it, after the caller asked to run that script.
 #
 # --no-scripts IS NOT AN APPLICATION-LEVEL OPTION ON COMPOSER <= 2.1.
-# MEASURED (composer 2.0.14 → 2.10.3): on 2.0/2.1 only install, update,
-# require, remove and dump-autoload declare --no-scripts; injecting it
-# unconditionally makes `composer show`, `composer config`, `composer
-# diagnose` and friends die with
+# MEASURED (composer 2.0.14 → 2.10.3): on 2.0/2.1 only some commands declare
+# --no-scripts (`composer list --format=json` on 2.1.14: install, update,
+# require, remove, dump-autoload, create-project and reinstall; 2.0.14 has no
+# reinstall); injecting it unconditionally makes `composer show`, `composer
+# config`, `composer diagnose` and friends die with
 #     The "--no-scripts" option does not exist.
 # It became a global (application-level) option in composer 2.2.0. So the
 # injection below is tiered on the version detected at apply time:
 #   composer >= 2.2  → inject on every invocation (this host: see the
 #                      NO_SCRIPTS_IS_GLOBAL value rendered below)
 #   composer <= 2.1, or version not detected at apply time (safe baseline)
-#                    → inject only for the subcommands that declare it.
-#                      Other subcommands run WITHOUT --no-scripts there;
+#                    → inject only for the commands that declare it,
+#                      however the caller spelled them: an alias (`i`,
+#                      `upgrade`) or a unique prefix (`req`, `upd`, `dump`)
+#                      is the same command to composer. MEASURED on 2.1.14:
+#                      when only the full names got it, `composer req x`,
+#                      `upd`, `ins`, `dump` and `rem x` ran the root
+#                      pre/post-update-cmd and autoload-dump scripts.
+#                      Other commands run WITHOUT --no-scripts there;
 #                      that gap is recorded in skipped_protections.
 # --no-plugins IS application-level on 2.0/2.1, so it is always injected.
 # Re-run the role after upgrading composer to move to the >= 2.2 tier.
@@ -199,6 +206,42 @@ builtins_starting_with() {
   printf '%s' "$out"
 }
 
+# The command composer runs for the built-in name $1 (an alias names its command).
+canonical_builtin() {
+  case "$1" in
+    i) echo install ;;
+    u|upgrade) echo update ;;
+    r) echo require ;;
+    rm|uninstall) echo remove ;;
+    dumpautoload) echo dump-autoload ;;
+    selfupdate) echo self-update ;;
+    cc|clearcache) echo clear-cache ;;
+    info) echo show ;;
+    why) echo depends ;;
+    why-not) echo prohibits ;;
+    run) echo run-script ;;
+    home) echo browse ;;
+    repo) echo repository ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# The built-in command composer runs for $1, resolved the way its console does:
+# an exact name or alias, else the one command that every built-in starting with
+# $1 belongs to. Prints nothing when composer would call $1 ambiguous or unknown
+# (it then refuses to run anything).
+builtin_command_for() {
+  local b c one=""
+  case "$BUILTIN_COMMANDS" in *" $1 "*) canonical_builtin "$1"; return 0 ;; esac
+  for b in $(builtins_starting_with "$1" | tr -d ','); do
+    c=$(canonical_builtin "$b")
+    if [ -z "$one" ]; then one=$c
+    elif [ "$one" != "$c" ]; then return 0
+    fi
+  done
+  printf '%s\n' "$one"
+}
+
 # How the composer.json composer will read defines the name $1: prints "key"
 # for a "scripts" key, "alias<TAB><key>" for a "scripts-aliases" alias of a
 # key, and nothing otherwise. It finds the file the way composer does:
@@ -278,12 +321,12 @@ if [ "$EXPLICIT_SCRIPT" = "true" ]; then
 elif [ "$NO_SCRIPTS_IS_GLOBAL" = "true" ]; then
   FLAGS+=(--no-scripts)
 else
-  # Safe baseline: inject --no-scripts only where composer <= 2.1 declares it.
-  # Aliases included: they are the same command object with the same option
-  # definition, and an alias a given composer doesn't know fails on the command
-  # name, not on us.
-  case "$SUBCOMMAND" in
-    install|i|update|u|upgrade|require|remove|rm|uninstall|dump-autoload|dumpautoload|du)
+  # Safe baseline: inject --no-scripts only where composer <= 2.1 declares it,
+  # on the command composer resolves the name to (an alias or a unique prefix
+  # is the same command object, with the same option definition). A name a
+  # given composer doesn't know fails on the command name, not on us.
+  case "$(builtin_command_for "$SUBCOMMAND")" in
+    install|update|require|remove|dump-autoload|create-project|reinstall)
       FLAGS+=(--no-scripts) ;;
   esac
 fi

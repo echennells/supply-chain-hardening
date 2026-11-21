@@ -3512,7 +3512,7 @@ else
     # cache) and would blame sfw for builds that are running. A wrapper from
     # before sfw_ready existed does run sfw, and does fail, so it falls through.
     row GAP FUNCTIONAL "cargo threat-intel filtering" \
-      "sfw has no firewall binary cached that this account can run (${scold}), and only root can fetch it, so the wrapper runs cargo WITHOUT sfw and warns - builds work, crate downloads are unfiltered. Re-apply the role or re-run the hardening step, or run 'sudo sfw true' once"
+      "sfw has no firewall binary cached that this account can run (${scold}), and only root can fetch it, so the wrapper runs cargo WITHOUT sfw and warns - builds work, crate downloads are unfiltered. To fix: $(scv_reapply), or run  sudo sh -c 'umask 022; sfw true && chmod -R go+rX ${scold}'  once"
   elif ! cargo_run_ok env SFW_SKIP_UPDATE_CHECK=1 sfw --version \
        && ! cargo_run_ok env SFW_SKIP_UPDATE_CHECK=1 sfw --help; then
     # SFW_SKIP_UPDATE_CHECK=1: the wrappers run sfw that way, so a non-root
