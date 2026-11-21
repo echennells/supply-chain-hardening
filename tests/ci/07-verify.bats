@@ -34,8 +34,10 @@ setup() {
 
 @test "the env-layer record counts the lower-case pnpm variables, and names one that did not arrive" {
   # pnpm 11 reads pnpm_config_* in lower case, so the record holds lower-case
-  # names; the propagation check has to treat them like any other.
-  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  # names; the propagation check has to treat them like any other. npm too, so
+  # the record holds more than the one pnpm variable and a missing one is named
+  # rather than reported as "NONE of 1".
+  harden ECOSYSTEMS=npm,pnpm -- --emit=plain >/dev/null
   grep -q '^export pnpm_config_minimum_release_age=' "$ENV_FILE"
   run verify_sourced --emit=plain
   [[ "$output" == *"OK"*"env layer propagation"*"all "*" variables present in this step's environment"* ]]
