@@ -94,7 +94,8 @@
   #      to a reported gap instead of taking out half the role. An optional
   #      vulnerability scanner must never cost the load-bearing config layer.
   ansible.builtin.command:
-    cmd: "{{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@{{ govulncheck_version }}"
+    # umask go-w: see "Install lockfile-lint globally" in tasks/npm.yml.
+    cmd: "sh -c 'umask go-w && exec \"$@\"' sch-umask {{ go_check.stdout }} install golang.org/x/vuln/cmd/govulncheck@{{ govulncheck_version }}"
   environment:
     GOTOOLCHAIN: auto
   # A failed install changed nothing, so it must not report `changed`: with

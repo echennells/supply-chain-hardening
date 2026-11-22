@@ -10,6 +10,13 @@ make test-ci          # or: bats tests/ci/
 No docker, no Ansible, no network. The whole suite runs in a few seconds
 against throwaway `$HOME` and `$TMPDIR` directories.
 
+Run it as a normal user. As root, `harden.sh` copies the cargo-cooldown it
+finds to `/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown`,
+where the role installs the host's shared cargo gate backend, so a test's stub
+would replace the real one. As root, the tests that stage a cargo-cooldown
+therefore skip (`skip_if_root_stages_cooldown`), and `harden()` refuses to
+start `harden.sh` while one is in place.
+
 ## Why this exists separately from `tests/bats/`
 
 `tests/bats/` tests the **Ansible role**, and needs a built container with the

@@ -156,11 +156,15 @@ SCV_EXPECT='{{ scv_expect | join(" ") }}'
 # Appended to every "N/A BYDESIGN" detail so a suppressed row can always be
 # traced back to the decision that suppressed it.
 {% set scv_scope_notes = [] %}
+{#- Sorted: Ansible hands the tags over as a set, so their order changes from run
+    to run (MEASURED on 6c77f4e: three applies with the same --tags rendered
+    three orders), and this fragment then changed, with the assembled verifier,
+    on a re-apply that changed nothing. -#}
 {% if ansible_run_tags | default(['all']) != ['all'] %}
-{%- set _ = scv_scope_notes.append('this run was limited to tags ' ~ (ansible_run_tags | join(','))) %}
+{%- set _ = scv_scope_notes.append('this run was limited to tags ' ~ (ansible_run_tags | sort | join(','))) %}
 {% endif %}
 {% if ansible_skip_tags | default([]) | length > 0 %}
-{%- set _ = scv_scope_notes.append('this run skipped tags ' ~ (ansible_skip_tags | join(','))) %}
+{%- set _ = scv_scope_notes.append('this run skipped tags ' ~ (ansible_skip_tags | sort | join(','))) %}
 {% endif %}
 SCV_EXPECT_WHY='not enabled in the role configuration for this host{% if scv_scope_notes %} ({{ scv_scope_notes | join("; ") }}, so ecosystem coverage was NOT narrowed){% endif %}'
 
@@ -298,6 +302,55 @@ row() { # status, strength, protection, detail
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# >>> run_bounded
+# run_bounded <seconds> <command> [args...]: runs the command, stopped after
+# <seconds>: timeout(1) where it exists, then gtimeout (Homebrew coreutils),
+# then a background-and-kill fallback. Stock macOS has neither, and a missing
+# bound must turn into neither a missing command nor a hang. Returns the
+# command's status, or 124 when it was stopped, as timeout(1) does. Variables
+# assigned on the call (`VAR=x run_bounded ...`) reach the command. Like
+# timeout(1), which signals its whole process group, the fallback stops what
+# the command started as well (found with pgrep), so a child left holding a
+# $( ) open cannot keep the hang going. The same block is in action/harden.sh,
+# action/verify.sh and templates/verify.sh.j2; tests/ci/07-verify.bats checks
+# that they match.
+run_bounded() {
+  local _rb_secs="$1" _rb_pid _rb_w _rb_rc=0 _rb_t0="$SECONDS"
+  shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$_rb_secs" "$@"; return; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$_rb_secs" "$@"; return; fi
+  "$@" &
+  _rb_pid=$!
+  # The watcher writes nowhere: inside $( ), an inherited stdout would hold
+  # the substitution open until the watcher's own sleep ended.
+  ( _rb_n=0
+    while kill -0 "$_rb_pid" 2>/dev/null; do
+      if [ "$_rb_n" -ge "$_rb_secs" ]; then
+        _rb_all=$_rb_pid _rb_q=$_rb_pid
+        while _rb_q=$(pgrep -P "$(echo $_rb_q | tr ' ' ',')" 2>/dev/null | tr '\n' ' ') \
+              && [ -n "${_rb_q%% }" ]; do
+          _rb_all="$_rb_all $_rb_q"
+        done
+        kill -TERM $_rb_all 2>/dev/null || true
+        sleep 2
+        kill -KILL $_rb_all 2>/dev/null || true
+        exit 0
+      fi
+      sleep 1
+      _rb_n=$((_rb_n + 1))
+    done ) >/dev/null 2>&1 &
+  _rb_w=$!
+  # 2>/dev/null: bash 3.2 reports the stopped job ("Terminated") here.
+  wait "$_rb_pid" 2>/dev/null || _rb_rc=$?
+  kill "$_rb_w" 2>/dev/null || true
+  wait "$_rb_w" 2>/dev/null || true
+  if [ "$_rb_rc" -gt 128 ] && [ $((SECONDS - _rb_t0)) -ge "$_rb_secs" ]; then
+    return 124
+  fi
+  return "$_rb_rc"
+}
+# <<< run_bounded
 
 # True when version $1 >= $2 (dotted numeric). GNU sort -V; hosts are Linux.
 # Used as a deterministic, offline backstop for gates that only exist above a
@@ -898,7 +951,7 @@ if have sfw; then
   if [ -n "$sfw_foreign" ]; then
     row GAP FUNCTIONAL "Socket Firewall" "sfw's cache is not root-only ($sfw_foreign). sfw runs the cached binary without checking it again, for root too, so whoever can write there chooses what the npm and cargo wrappers run, including under sudo. Re-apply the role: it removes the cache and downloads the binary again"
   elif [ -n "$sfw_cold" ]; then
-    row GAP FUNCTIONAL "Socket Firewall" "sfw has no firewall binary cached that this account can run ($sfw_cold), and only root can fetch it, so the npm and cargo wrappers run without sfw and warn - installs work, unfiltered. Re-apply the role, or run 'sudo sfw true' once"
+    row GAP FUNCTIONAL "Socket Firewall" "sfw has no firewall binary cached that this account can run ($sfw_cold), and only root can fetch it, so the npm and cargo wrappers run without sfw and warn - installs work, unfiltered. Re-apply the role, or run  sudo sh -c 'umask 022; sfw true && chmod -R go+rX $sfw_cold'  once"
   elif sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
     row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
   else
@@ -1033,11 +1086,8 @@ wrapper_ran() {
   # prompt, and a version probe must not boot the checkout it is standing in.
   # Only composer reads those two variables.
   wa=""; case "${w##*/}" in composer) wa="--no-plugins --no-interaction" ;; esac
-  if have timeout; then
-    _wr_err=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" timeout 30 "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
-  else
-    _wr_err=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
-  fi
+  # Bounded on every host, timeout(1) or not: see run_bounded.
+  _wr_err=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" run_bounded 30 "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
   # RAN IS NOT WORKS. The run-probe fires first thing, so a wrapper that then
   # REFUSES this account still records a run. The pip-to-uv wrapper exits 126
   # with a [supply-chain-hardening] error when the only uv it finds belongs to

@@ -157,6 +157,43 @@ teardown() {
   [ ! -e "$CACHE" ]
 }
 
+@test "sfw: the cold-cache warning names a command that leaves a binary every account can run" {
+  # The warning used to say "run 'sudo sfw true' once". Where sudo runs that
+  # under a umask of 077 (a caller's 077 carries through sudo on Debian 13, as
+  # does sudoers `Defaults umask=0077`), sfw 2.0.6 downloaded the binary into a
+  # 0700 cache and every other account kept getting this warning (MEASURED,
+  # Ubuntu 24.04 with `Defaults umask=0077`). That cache is staged here from the
+  # warm one, so nothing is downloaded: next-check is fresh, so root's run makes
+  # no update check either.
+  sfw_preconditions
+  sfw_user_project
+  cp -a "$CACHE" "$CACHE.bats-cold"
+  chmod -R go-rwx "$CACHE"
+  date -u -d '+30 min' +%Y-%m-%dT%H:%M:%S.000Z | tr -d '\n' > "$CACHE/next-check"
+  run su - "$SFW_USER" -c "cd '$PROJ/app' && npm install --no-audit --no-fund ../pkg 2>&1"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  cmd=$(printf '%s\n' "$output" | sed -n "s/.*run  \(sudo sh -c '[^']*'\)  once.*/\1/p" | head -n 1)
+  echo "hint: $cmd"
+  [[ "$cmd" == "sudo sh -c 'umask 022; sfw true && chmod -R go+rX $CACHE'" ]]
+  # FIXTURE CONTROL: the old hint, `sfw true` as root, leaves the cache as it is.
+  ( umask 077; sfw true ) >/dev/null 2>&1
+  run su - "$SFW_USER" -c "cd '$PROJ/app' && npm install --no-audit --no-fund ../pkg 2>&1"
+  [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  # The hint's command as root under umask 077 (the suite already runs as root,
+  # so without its sudo): the warning is gone and nothing in the cache can be
+  # written by another account.
+  run bash -c "umask 077; ${cmd#sudo }"
+  [ "$status" -eq 0 ]
+  run su - "$SFW_USER" -c "cd '$PROJ/app' && npm install --no-audit --no-fund ../pkg 2>&1"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"sfw has no firewall binary cached"* ]]
+  run find "$CACHE" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+}
+
 @test "sfw: no account but root can change the binary sfw runs" {
   # sfw runs .sfw-cache/latest without re-checking its digest, for root too
   # (`sudo npm install` goes through the wrapper). VM#1: on Debian's npm the

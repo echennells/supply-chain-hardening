@@ -29,6 +29,34 @@ load setup
   assert_file_contains "$HOME/.yarnrc.yml" 'defaultSemverRangePrefix: ""'
 }
 
+@test "yarn: /etc/yarnrc.yml is never read, so sudo coverage is root's own ~/.yarnrc.yml" {
+  # The role used to write /etc/yarnrc.yml "for sudo and other users". MEASURED
+  # on Yarn 4.9.4 to 4.18.1: Yarn Berry reads no system-wide file. Pinned to
+  # 4.11.0, whose defaults (enableScripts true, gate 0) cannot pass for ours.
+  require_root "plants /etc/yarnrc.yml for one command"
+  command -v corepack >/dev/null 2>&1 || skip "corepack not installed"
+  [ ! -e /etc/yarnrc.yml ] || skip "an /etc/yarnrc.yml is already here, and it is not this test's to move"
+  local root_home d e
+  root_home=~root
+  d=$(mktemp -d); e=$(mktemp -d)
+  printf '{"name":"p","version":"0.0.0","packageManager":"yarn@4.11.0"}\n' > "$d/package.json"
+  export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_HOME="${COREPACK_HOME:-$root_home/.cache/node/corepack}"
+  # An account with no ~/.yarnrc.yml (an empty HOME), with /etc/yarnrc.yml set.
+  printf 'enableScripts: false\nnpmMinimalAgeGate: 4321\n' > /etc/yarnrc.yml
+  run bash -c "cd '$d' && HOME='$e' yarn config get npmMinimalAgeGate"
+  rm -f /etc/yarnrc.yml
+  [ "$status" -eq 0 ] || skip "corepack could not run yarn 4.11.0 here: $output"
+  [ "$(tail -1 <<<"$output")" != 4321 ]
+  run bash -c "cd '$d' && HOME='$e' yarn config get enableScripts"
+  [ "$(tail -1 <<<"$output")" = true ]
+  # A sudo'd yarn has HOME=/root, so root's own file is what applies.
+  run bash -c "cd '$d' && HOME='$root_home' yarn config get npmMinimalAgeGate"
+  [ "$(tail -1 <<<"$output")" = "$(sed -n 's/^npmMinimalAgeGate: //p' "$root_home/.yarnrc.yml")" ]
+  run bash -c "cd '$d' && HOME='$root_home' yarn config get enableScripts"
+  [ "$(tail -1 <<<"$output")" = false ]
+  rm -rf "$d" "$e"
+}
+
 @test "bun: minimumReleaseAge set" {
   assert_file_contains "$HOME/.bunfig.toml" "minimumReleaseAge"
 }

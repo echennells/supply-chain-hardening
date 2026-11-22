@@ -9,7 +9,10 @@
 #
 # Isolation: every test gets a throwaway $HOME and $TMPDIR and runs the
 # script under `env -i`, so nothing touches the developer's real config and
-# no ambient CI variable leaks in to skew platform auto-detection.
+# no ambient CI variable leaks in to skew platform auto-detection. harden()
+# also gives every tool harden.sh wraps in place a stub in TEST_BIN first
+# (shield_host_tools), so a real composer, bun, cargo or deno on the host is
+# never the binary it replaces.
 #
 # WHAT THIS SUITE CANNOT REACH — read before trusting a green run:
 #   - action.yml. Nothing here exercises the composite action's inputs,
@@ -59,6 +62,8 @@ harden() {
     if [[ "$a" == "--" ]]; then sep=1; continue; fi
     if [[ $sep -eq 1 ]]; then args+=("$a"); else envs+=("$a"); fi
   done
+  refuse_root_cooldown_copy "${envs[@]}" || return 97
+  shield_host_tools "${envs[@]}"
   # GRADLE_USER_HOME is part of the isolation, not part of the fixture.
   # Relocating HOME does NOT relocate gradle: gradle's default user home is
   # <user.home>/.gradle, and on Linux the JVM reads user.home from the PASSWD
@@ -75,6 +80,71 @@ harden() {
     WRITE_ETC=false \
     "${envs[@]}" \
     bash "$HARDEN_SH" "${args[@]}"
+}
+
+# shield_host_tools [VAR=value ...]
+#
+# harden.sh REPLACES some tools at the path it finds them on: it moves composer,
+# bun, cargo and deno to <path>-real and writes its wrapper in their place,
+# rewrites bunx, and with sfw (INSTALL_SFW=true or INTEL=sfw) does the same to
+# npm and npx. With TEST_BIN first on PATH a stub there is what it finds; a
+# test that stubs none falls through to the host's own binary, and with a
+# usable sudo (every CI runner) or as root, that binary was wrapped. MEASURED at
+# 6c77f4e, tests/ci as a user with passwordless sudo in a container with apt
+# composer 2.8.8: after 03-config-files.bats, /usr/bin/composer was the
+# harden.sh wrapper and /usr/bin/composer-real the original.
+# So each of those names that would resolve outside this test's directory gets
+# a pass-through stub in TEST_BIN first. harden.sh wraps the stub, the host's
+# tool still answers through it (version, behaviour), and the host's binary is
+# left as it was. A test that stubs a tool itself is unaffected.
+# As root, harden.sh copies the cargo-cooldown it finds in $CARGO_HOME/bin to
+# /usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown (a wrapper
+# root runs is shared, so it gets a root-owned backend). That is the HOST path
+# where the role installs the real shared gate backend, and a test's stub
+# there is a no-op gate for every system cargo wrapper. MEASURED (tests/ci as
+# root, run-ci-x container): 04-wrappers.bats and 07-verify.bats each created
+# that file. A fixture that stages a cargo-cooldown calls this first.
+skip_if_root_stages_cooldown() {
+  [ "$(id -u)" -ne 0 ] || skip "running as root: harden.sh would copy this test's stub cargo-cooldown to the host's /usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown; run tests/ci as a non-root user"
+}
+
+# The safety net under that skip, for a fixture that forgets it: harden()
+# refuses to start harden.sh as root while a cargo-cooldown sits where it
+# looks. A refusal, not a skip: under `run`, bats' skip only ends the subshell.
+refuse_root_cooldown_copy() {
+  [ "$(id -u)" -eq 0 ] || return 0
+  local ch="${TEST_HOME}/.cargo" a
+  for a in "$@"; do
+    case "$a" in CARGO_HOME=*) ch=${a#CARGO_HOME=} ;; esac
+  done
+  [ -e "$ch/bin/cargo-cooldown" ] || return 0
+  echo "tests/ci: refusing to run harden.sh as root with $ch/bin/cargo-cooldown in place: it would replace the host's /usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown. The fixture must call skip_if_root_stages_cooldown." >&2
+  return 1
+}
+
+shield_host_tools() {
+  local tools="composer bun bunx cargo deno" t p a
+  for a in "$@"; do
+    case "$a" in INSTALL_SFW=true|INTEL=sfw) tools="$tools npm npx" ;; esac
+  done
+  for t in $tools; do
+    p=$(PATH="${TEST_BIN}:${PATH}"; command -v "$t" 2>/dev/null) || continue
+    case "$p" in
+      /*) ;;
+      *) continue ;;
+    esac
+    case "$p" in "${BATS_TEST_TMPDIR}"/*) continue ;; esac
+    {
+      printf '#!/bin/bash\n# tests/ci: pass-through to the host %s, so harden.sh wraps this file and not that one\n' "$t"
+      # harden.sh installs sfw with `npm install -g`, which no pass-through may
+      # carry to the host's own npm prefix.
+      if [ "$t" = npm ]; then
+        printf 'case " $* " in *" -g "*|*" --global "*) echo "tests/ci: refusing a global npm install from a test (it would change the host npm prefix); stub npm" >&2; exit 97 ;; esac\n'
+      fi
+      printf 'exec %q "$@"\n' "$p"
+    } > "${TEST_BIN}/${t}"
+    chmod +x "${TEST_BIN}/${t}"
+  done
 }
 
 # verify [VAR=value ...] [-- script args ...]
@@ -98,9 +168,14 @@ verify() {
       envs+=("$a")
     fi
   done
+  # GRADLE_USER_HOME for the same reason as in harden(): the verifier runs a
+  # real gradle where one is installed, and without it gradle used the PASSWD
+  # home. MEASURED at 6c77f4e in the same container as shield_host_tools: after
+  # 07-verify.bats the tester's real ~/.gradle held caches/, daemon/ and native/.
   env -i \
     PATH="${TEST_BIN}:${PATH}" \
     HOME="$TEST_HOME" \
+    GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
     TMPDIR="$TEST_TMP" \
     HARDENING_ENV_FILE="$ENV_FILE" \
     "${envs[@]}" \
@@ -111,6 +186,7 @@ verify() {
 # what a correctly-configured job looks like.
 verify_sourced() {
   env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
     bash -c "set -a; source '$ENV_FILE'; set +a
              HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' $*"
 }

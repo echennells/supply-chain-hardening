@@ -34,7 +34,7 @@ not set the derived values individually. The unit trap is spelled out in
 | `age_gate_refresh` | `true` | Keep the uv `exclude-newer` and pip `uploaded-prior-to` cutoffs rolling instead of frozen at apply time: on Linux hosts running systemd, `supply-chain-age-gate-refresh.timer` re-runs the apply-time formula every 6 hours and rewrites only the role's own cutoff lines. A cutoff set to anything other than `rolling` (`uv_exclude_newer`, `pip_uploaded_prior_to`) is a pin and is never advanced, even if it equals today's value. Without systemd the skip is listed in the run summary. `false` removes the timer. With `socket_firewall_install`, the timer also runs Socket Firewall's update check as root (`--sfw`), which the npm and cargo wrappers skip so that non-root callers never write sfw's root-owned cache; without the timer, sfw's binary is updated at re-apply. See [limitations.md](limitations.md). |
 | `verify_protections` | `true` | Run `supply-chain-verify` at the end of every apply. |
 | `verify_fail_on_gap` | `false` | Fail the play if the verifier reports any `GAP`. Turn on for CI images and agent hosts. **Known permanent GAP:** wherever the cargo wrapper routes builds through cargo-cooldown (by default on rustup hosts with rustc >= 1.91.1), `cargo lockfile writers routed` is a GAP no configuration closes, because cargo-cooldown has no subcommand for `cargo add`, `generate-lockfile`, `vendor` or `remove`; the wrapper only warns on them. The role's verifier has no gap classes, so this fails the play on every such host. (The action classes it with the toolchain gaps, so `fail-on: config` passes.) |
-| `accept_etc_overwrite` | `false` | Allow the role to overwrite a pre-existing, unmanaged `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or `/etc/uv/uv.toml`. Without it the play fails loudly instead of clobbering a corporate registry setting. |
+| `accept_etc_overwrite` | `false` | Allow the role to overwrite a pre-existing, unmanaged `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml`. Without it the play fails loudly instead of clobbering a corporate registry setting. |
 | `accept_user_config_overwrite` | `false` | Allow the role to replace a pre-existing per-user `$CARGO_HOME/config.toml`, `~/.m2/settings.xml` or NuGet `NuGet.Config` that it did not write. The role replaces these files whole, so a private registry or mirror and its credentials in them would be lost. Without it the play stops in preflight, before changing anything, and lists the files. With it each file is backed up next to itself first (`<file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~`) and replaced; nothing is merged. Only files this run would write are checked: `--tags npm` does not stop on a `settings.xml`. dotnet's own first-run `NuGet.Config` (nuget.org only) is backed up and replaced without stopping. The GitHub Action / `harden.sh` path does not stop: it backs up the same files and prints a warning naming each one. |
 | `refresh_tools` | `false` | Re-install the auditing tools even when a binary is already present (see below). |
 | `npm_path_wrapper` | `true` | `/usr/local/bin/npm` wrapper that routes registry-touching subcommands through Socket Firewall. Disable if you can't tolerate ~50–200 ms per call or a hard dependency on `sfw`. |
@@ -54,8 +54,12 @@ not set the derived values individually. The unit trap is spelled out in
 
 Pinned tool versions (`npq_version`, `sfw_version`, `zizmor_version`,
 `cargo_cooldown_version`, `cosign_version` + checksums, …) are also in
-`defaults/main.yml`. `sfw_version` must be 2.0.6 or later; a re-apply replaces
-an installed sfw older than that (see [limitations.md](limitations.md)).
+`defaults/main.yml`. `sfw_version` must be 2.0.6 or later. A re-apply installs
+it over an installed sfw of any other version, up or down, and replaces one older
+than 2.0.6 (see [limitations.md](limitations.md)). Moving a working sfw needs a
+plain X.Y.Z: anything else, such as `latest` or `^2.0.6`, is installed only
+where sfw is absent or older than 2.0.6, and the run summary says when it kept
+the installed sfw instead.
 
 ## Refreshing auditing tools
 

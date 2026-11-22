@@ -58,8 +58,8 @@ supply-chain-verify
   26.04 with apt ansible-core 2.20.1 and `-K`), tell the user. The fix is a newer
   ansible-core for their user (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo
   for the apply. Don't change their sudoers yourself.
-- If the play stops on an existing `/etc/npmrc`, `/etc/yarnrc.yml`, `/etc/pip.conf` or
-  `/etc/uv/uv.toml`, don't override it yourself. It may be a corporate registry setting.
+- If the play stops on an existing `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml`,
+  don't override it yourself. It may be a corporate registry setting.
   Show it to the user, and pass `-e accept_etc_overwrite=true` only if they agree.
 - The same goes for a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or
   `~/.nuget/NuGet/NuGet.Config` the role did not write: show it to the user, and pass
@@ -210,5 +210,12 @@ Say so when it matters to the task:
 - **A repo can switch off some gates.** The verifier reports the cases it can see.
 - **A cloned repo's agent config can run code** with no package manager involved, for
   example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`.
+- **Headless `claude -p` and Agent SDK runs show no trust prompt.** A repo's
+  `.claude/settings.json` hooks, helpers and `env` block apply anyway, and that `env`
+  overwrites variables exported in the shell. No package-manager variable is on the
+  list a project may not set, so by the docs (not run) it can override this env layer.
+  `--setting-sources user` reads no project settings; `--bare` still applies the
+  project's `env`; turning hooks off takes `--settings '{"disableAllHooks": true}'`.
+  [Claude Code docs](https://code.claude.com/docs/en/permissions#what-runs-before-you-trust-a-folder)
 
 The full list: [docs/limitations.md](docs/limitations.md).

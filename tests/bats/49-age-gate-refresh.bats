@@ -166,8 +166,21 @@ refresh() { "$R" --system && "$R" --user; }
 # non-root npm and cargo call failed an hour after each apply). The update
 # check they skip has to run somewhere: as root, from this refresher.
 
+# --sfw refuses every account but root, and says so. As a normal user (the
+# November 2026 VM runs) the two tests below failed on that refusal; there, this
+# checks the refusal and skips the rest.
+sfw_step_needs_root() {
+  [ "$(id -u)" = 0 ] && return 0
+  run "$R" --sfw
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--sfw updates a root-owned cache and needs root"* ]]
+  skip "needs root: --sfw refreshes sfw's root-owned cache (it refused this account by name, as it should)"
+}
+
 @test "refresher --sfw runs sfw's update check as root, with the skip variable cleared and umask 022" {
   grep -q -- '--sfw)' "$R" || skip "refresher rendered without the sfw step (socket_firewall_install=false)"
+  sfw_step_needs_root
   stub=$(mktemp -d)
   cat > "$stub/sfw" <<STUB
 #!/bin/sh
@@ -186,6 +199,7 @@ STUB
   # A failed check leaves the cached binary in place, and it still works; the
   # age-gate cutoffs in the same unit must not fail with it.
   grep -q -- '--sfw)' "$R" || skip "refresher rendered without the sfw step (socket_firewall_install=false)"
+  sfw_step_needs_root
   stub=$(mktemp -d)
   printf '#!/bin/sh\necho "[sfw] simulated failure" >&2\nexit 1\n' > "$stub/sfw"
   chmod +x "$stub/sfw"

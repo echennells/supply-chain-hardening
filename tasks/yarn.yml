@@ -62,14 +62,87 @@
     dest: "{{ ansible_env.HOME }}/.yarnrc.yml"
     mode: "0644"
 
-- name: Deploy hardened /etc/yarnrc.yml (system-wide; covers sudo and non-deploying users)
-  # Yarn Berry walks parent directories, then ~/.yarnrc.yml, then falls
-  # back to /etc/yarnrc.yml. Without the system file, `sudo yarn install`
-  # (HOME=/root) and other-user invocations see no hardening.
+# Yarn Berry has NO system-wide config file. It reads a .yarnrc.yml in the
+# working directory and each parent up to /, then the one in $HOME, and the
+# YARN_* environment above both. MEASURED (Yarn 4.9.4, 4.10.3, 4.11.0 and
+# 4.18.1 via corepack, as root and as a second user): with /etc/yarnrc.yml
+# setting enableScripts: false and npmMinimalAgeGate: 4321, `yarn config get`
+# still reported the defaults, an unknown key added to it raised nothing, a
+# file: dependency's postinstall ran (4.9.4 to 4.11.0), and the bundles
+# contain no "/etc/" string at all. This role used to write /etc/yarnrc.yml
+# "for sudo and other users"; it protected neither.
+# sudo sets HOME=/root (MEASURED: sudo 1.9.13p3 on Debian 12, 1.9.15p5 on
+# Ubuntu 24.04), so root's own ~/.yarnrc.yml is what `sudo yarn` reads
+# (MEASURED, Yarn 4.11.0: enableScripts went from true to false and the gate
+# from 0 to 2880 once /root/.yarnrc.yml existed). Same approach as composer's
+# /root config. Other accounts get only Yarn's own defaults: see
+# docs/limitations.md. Root's home is asked of the passwd database (macOS:
+# /var/root), not assumed.
+- name: Resolve root's home directory (yarn sudo coverage)
+  ansible.builtin.shell:
+    cmd: 'h=~root; case "$h" in /*) printf "%s" "$h" ;; esac'
+    executable: /bin/bash
+  register: yarn_root_home
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+# Unlike /etc/yarnrc.yml, root's ~/.yarnrc.yml is a file Yarn really reads, so
+# one already there is root's own `sudo yarn` configuration and may hold a
+# registry and its npmAuthToken. The preflight refused to overwrite an
+# unmanaged /etc/yarnrc.yml; this keeps that promise for the file that replaced
+# it: one this project did not write is left alone, and the summary says so.
+# When the role runs as root, root's home IS the deploying user's, written
+# above as it always was.
+- name: Check root's ~/.yarnrc.yml before writing it (sudo coverage)
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      f={{ ((yarn_root_home.stdout | trim) ~ '/.yarnrc.yml') | quote }}
+      [ -e "$f" ] || { echo absent; exit 0; }
+      grep -qE "Managed by (ansible-supply-chain-security|supply-chain-harden)" "$f" && { echo ours; exit 0; }
+      echo foreign
+    executable: /bin/bash
+  register: yarn_root_rc
+  changed_when: false
+  check_mode: false
+  when:
+    - (yarn_root_home.stdout | default('') | trim) is match('^/')
+    - (yarn_root_home.stdout | trim) != ansible_env.HOME
+
+- name: Deploy hardened .yarnrc.yml to root's home (sudo coverage)
   become: true
   ansible.builtin.template:
     src: yarnrc.yml.j2
-    dest: /etc/yarnrc.yml
+    dest: "{{ yarn_root_home.stdout | trim }}/.yarnrc.yml"
     owner: root
-    group: root
     mode: "0644"
+  when:
+    - yarn_root_rc is not skipped
+    - (yarn_root_rc.stdout | default('') | trim) in ['absent', 'ours']
+
+# Named apart from "Record skipped protection": tests/bats/32-yarn-tier-rendering.bats
+# lifts the one task with that prefix by name.
+- name: Add root's own ~/.yarnrc.yml to the not-applied summary (sudo coverage)
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + [
+           ('Yarn sudo coverage — ' ~ (yarn_root_home.stdout | trim) ~ '/.yarnrc.yml exists and this project did not write it, so it was left alone (it may hold a registry and its token). `sudo yarn` reads that file, not the yarn settings this role writes. Move it aside, or add the settings from ~/.yarnrc.yml to it, and re-apply.')
+         ] }}
+  when:
+    - yarn_root_rc is not skipped
+    - (yarn_root_rc.stdout | default('') | trim) == 'foreign'
+
+- name: Remove the /etc/yarnrc.yml an earlier version wrote (Yarn never reads it)
+  # Only a file carrying one of this project's markers; anyone else's is left
+  # alone, as the preflight used to protect it.
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      f=/etc/yarnrc.yml
+      [ -f "$f" ] || exit 0
+      grep -qE "Managed by (ansible-supply-chain-security|supply-chain-harden)" "$f" || exit 0
+      rm -f "$f" && echo removed
+    executable: /bin/bash
+  register: yarn_etc_cleanup
+  changed_when: "'removed' in yarn_etc_cleanup.stdout"

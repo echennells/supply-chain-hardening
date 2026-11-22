@@ -349,6 +349,7 @@ lockdir() { mkdir -p "$BATS_TEST_TMPDIR/proj/sub"; touch "$BATS_TEST_TMPDIR/proj
 # A stub cargo that reports the cooldown environment it was handed, plus a
 # cargo-cooldown where harden.sh looks for one, so builds route through it.
 cooldown_stubs() {
+  skip_if_root_stages_cooldown
   local ver="${1:-1.99.0}"
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo '"$ver"' (abc 2026-11-12)";; *) echo "STUB:cargo ARGS=[$*] MIN=${COOLDOWN_MINUTES-} CRATES=${CARGO_REGISTRY_MIN_PUBLISH_AGE-} NOW=${COOLDOWN_NOW-} SKIP=[${COOLDOWN_SKIP_REGISTRIES-unset}] GLOBAL=[${CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE-unset}] RESOLVER=[${CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE-unset}] TESTTIME=[${__CARGO_TEST_INVOCATION_TIME-unset}]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
@@ -615,6 +616,33 @@ J
   [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]]
   run bash -c 'cd / && "$1" -nd "$2" test' _ "$TEST_BIN/composer" "$PROJ"
   [[ "$output" == *"--no-scripts"* ]]
+}
+
+# composer <= 2.1 takes --no-scripts only on the commands that declare it, and
+# resolves an alias or a unique prefix to the command itself. MEASURED on
+# 6c77f4e with composer 2.1.14 behind the role's wrapper (the same body as
+# this one): `req`, `upd`, `ins`, `dump` and `rem` got no --no-scripts and ran
+# the root update and autoload-dump scripts.
+@test "composer: on composer <= 2.1 an alias or unique prefix of a lifecycle command gets --no-scripts" {
+  stub_bin composer 'case "${1:-}" in
+  --version) echo "Composer version 2.1.14 2021-11-30 10:51:43" ;;
+  *) echo "STUB:composer ARGS=[$*]" ;;
+esac'
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  grep -q '^NO_SCRIPTS_IS_GLOBAL=false$' "$TEST_BIN/composer"
+  local args d="$BATS_TEST_TMPDIR/empty"
+  mkdir -p "$d"
+  for args in "install" "ins" "upd" "up" "upgrade" "req x/y" "rem x/y" "dump" "du" "cr a/b" "rei x/y" "UPD"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$d" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* && "$output" == *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
+  # Not on a command that does not declare it there, nor on an ambiguous name.
+  for args in "show" "sh" "conf" "in" "re" "exec x"; do
+    # shellcheck disable=SC2086
+    run bash -c 'cd "$1" && shift && "$@"' _ "$d" "$TEST_BIN/composer" $args
+    [[ "$output" == *"STUB:composer"* && "$output" != *"--no-scripts"* ]] || { echo "'$args': $output"; return 1; }
+  done
 }
 
 @test "composer: --no-plugins is conditional on the input" {
@@ -1116,6 +1144,31 @@ exec "$@"'
   run harden ECOSYSTEMS=bun,cargo,composer,npm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc" "ignore-scripts=true"
+}
+
+@test "test isolation: harden() wraps a pass-through in TEST_BIN, never a tool outside the test's directory" {
+  # Tools outside BATS_TEST_TMPDIR, on PATH after TEST_BIN, the way
+  # /usr/bin/composer is on a CI runner. Without shield_host_tools
+  # (helpers.bash), harden.sh moved each to <name>-real in that directory and
+  # wrote its wrapper in its place.
+  local host="$BATS_FILE_TMPDIR/host-bin-$BATS_TEST_NUMBER" t oldpath="$PATH"
+  mkdir -p "$host"
+  for t in composer bun bunx cargo deno; do
+    printf '#!/bin/bash\ncase "${1:-}" in --version|-v|version) echo "%s 9.9.9" ;; *) echo "HOST:%s ARGS=[$*]" ;; esac\n' "$t" "$t" > "$host/$t"
+    chmod +x "$host/$t"
+  done
+  (cd "$host" && cksum composer bun bunx cargo deno) > "$BATS_TEST_TMPDIR/before"
+  PATH="$host:$PATH"
+  run harden ECOSYSTEMS=composer,bun,cargo,deno -- --emit=plain
+  PATH="$oldpath"
+  [ "$status" -eq 0 ]
+  (cd "$host" && cksum composer bun bunx cargo deno) > "$BATS_TEST_TMPDIR/after"
+  diff "$BATS_TEST_TMPDIR/before" "$BATS_TEST_TMPDIR/after"
+  [ "$(ls "$host")" = "$(printf 'bun\nbunx\ncargo\ncomposer\ndeno')" ]
+  # harden.sh did wrap: the stub in TEST_BIN, which still reaches the tool.
+  assert_file_contains "$TEST_BIN/composer" "supply-chain-harden"
+  run env PATH="$TEST_BIN:$host:$PATH" "$TEST_BIN/composer" show
+  [[ "$output" == *"HOST:composer ARGS=["*"show"* ]]
 }
 
 # --- rustup proxies ----------------------------------------------------------

@@ -255,6 +255,7 @@ exec '"$realpy"' "$@"'
   # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` in a repo
   # cooldown.toml still built a crate published hours earlier through a pinned
   # wrapper. The row used to downgrade this to WEAK.
+  skip_if_root_stages_cooldown
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
@@ -293,13 +294,20 @@ exec '"$realpy"' "$@"'
   run bash -c "cd '$BATS_TEST_TMPDIR/proj' && PATH='$TEST_BIN:$PATH' '$TEST_BIN/cargo' fetch 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"sfw has no firewall binary cached"* ]]
+  [[ "$output" == *"sudo sh -c 'umask 022; sfw true && chmod -R go+rX "*"/.sfw-cache'"* ]]
 
   run verify_sourced --emit=plain
   row=$(printf '%s\n' "$output" | grep 'cargo threat-intel filtering')
   echo "$row"
   [[ "$row" == "GAP    FUNCTIONAL  cargo threat-intel filtering"* ]]
   [[ "$row" == *"runs cargo WITHOUT sfw"* ]]
-  [[ "$row" == *"sudo sfw true"* ]]
+  # The command must leave a binary other accounts can run: under a umask of
+  # 077 (a caller's own on Debian 13, or sudoers `Defaults umask=0077`), a bare
+  # `sudo sfw true` downloaded it into a 0700 cache and every other account
+  # still failed (MEASURED, sfw 2.0.6 on Ubuntu 24.04 and Debian 13). The path
+  # is matched loosely: readlink -f resolves macOS's /var to /private/var.
+  [[ "$row" == *"sudo sh -c 'umask 022; sfw true && chmod -R go+rX "*"/.sfw-cache'"* ]]
+  [[ "$row" == *"re-run action/harden.sh"* ]]
   [[ "$row" != *"EVERY cargo build"* ]]
 
   # An sfw that cannot execute with a binary cached is still the failing case.
@@ -509,10 +517,16 @@ composer_age_stub() { # version [extra line for the config dump]
 esac"
 }
 
-bundler_age_stub() { # version cooldown
+# The third argument is the top layer bundler's `config get cooldown` names
+# (default: the environment); "none" makes that command print no account, the
+# way a bundler that crashed on its config does.
+bundler_age_stub() { # version cooldown [layer line | none]
   stub_bin bundle "case \"\$*\" in
   *--version*) echo '$1' ;;
   *'config get cooldown --parseable'*) echo 'cooldown=$2' ;;
+  *'config get cooldown'*) [ '${3:-}' = none ] && exit 1
+                           echo 'Settings for \`cooldown\` in order of priority. The top value will be used'
+                           echo '${3:-Set via BUNDLE_COOLDOWN: $2}' ;;
   *) echo STUB ;;
 esac"
 }
@@ -810,6 +824,169 @@ esac"
   run verify_sourced --emit=plain
   [[ "$output" == *"WEAK   PARSED      bundler publish-age gate"* ]]
   [[ "$output" == *"below the 2d"* ]]
+}
+
+# A checkout whose own .bundle/config sets BUNDLE_COOLDOWN. Bundler's local
+# config outranks the BUNDLE_COOLDOWN the env layer exports (MEASURED on 4.0.13,
+# 4.0.24 and 4.1.0: a repo "0" let `bundle lock` take a release 22 hours old
+# with BUNDLE_COOLDOWN=2 exported). The "bundler local config override" row
+# used to read only BUNDLE_FROZEN and BUNDLE_DEPLOYMENT from that file, so it
+# said N/A ("cannot switch lockfile pinning off") while the file switched the
+# age gate off. The stub answers the window bundler reports from inside the
+# checkout; the real-bundler test after these measures that answer.
+bundler_cooldown_checkout() { # value [line prefix, e.g. one space]
+  CHECKOUT="$BATS_TEST_TMPDIR/rbcheckout"; mkdir -p "$CHECKOUT/.bundle" "$CHECKOUT/sub"
+  # The verifier sees the physical path (macOS: /var is /private/var).
+  CHECKOUT=$(cd "$CHECKOUT" && pwd -P)
+  printf 'source "https://rubygems.org"\n' > "$CHECKOUT/Gemfile"
+  printf -- '---\n%sBUNDLE_COOLDOWN: "%s"\n' "${2:-}" "$1" > "$CHECKOUT/.bundle/config"
+}
+# What bundler's `config get cooldown` names as the top layer for that file.
+bundler_local_layer() { echo "Set for your local app ($CHECKOUT/.bundle/config): $1"; }
+
+@test "bundler: a checkout's BUNDLE_COOLDOWN \"0\" is a GAP on the local config row, which names the file" {
+  bundler_cooldown_checkout 0
+  bundler_age_stub 4.0.24 0 "$(bundler_local_layer 0)"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "GAP    PARSED      bundler local config override"* ]]
+  [[ "$r" == *"$CHECKOUT/.bundle/config switches the publish-age gate off"* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == GAP*"set by the local config at $CHECKOUT/.bundle/config"* ]]
+}
+
+@test "bundler: a checkout's BUNDLE_COOLDOWN below the declared window is WEAK on the local config row; at or above it, OK" {
+  bundler_cooldown_checkout 1
+  bundler_age_stub 4.0.24 1 "$(bundler_local_layer 1)"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "WEAK   PARSED      bundler local config override"* ]]
+  [[ "$r" == *"shortens the publish-age gate"*"below the 2d"* ]]
+  bundler_cooldown_checkout 7
+  bundler_age_stub 4.0.24 7 "$(bundler_local_layer 7)"
+  run verify_sourced --emit=plain
+  r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "OK     PARSED      bundler local config override"*"leaves the publish-age gate on"* ]]
+}
+
+@test "bundler: the local config row judges BUNDLE_COOLDOWN only where bundler implements it, and only when the file sets it" {
+  # Below 4.0.13 the line is inert, and the publish-age row already reports the
+  # toolchain gap.
+  bundler_cooldown_checkout 0
+  bundler_age_stub 4.0.12 0
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == N/A*"is inert: bundler 4.0.12 has no cooldown"* ]]
+  # A version that cannot be read proves nothing about cooldown either way.
+  bundler_age_stub 'no version here' 0
+  run verify_sourced --emit=plain
+  local r; r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == N/A*"was not judged"*"bundler's version could not be read"* ]]
+  [[ "$r" != *"inert"* && "$r" != *"has no cooldown"* && "$r" != *"switches nothing off"* ]] \
+    || { echo "unproven claim: $r" >&2; return 1; }
+  # FIXTURE CONTROL: the same stub window with no BUNDLE_COOLDOWN line in the
+  # file, and bundler naming the environment as the layer. The local row must
+  # not blame a file that does not set the key, and the publish-age row passes
+  # on bundler's account instead of guessing a layer.
+  bundler_age_stub 4.0.24 0
+  printf -- '---\nBUNDLE_JOBS: "4"\n' > "$CHECKOUT/.bundle/config"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == N/A*"sets none of BUNDLE_FROZEN, BUNDLE_DEPLOYMENT and BUNDLE_COOLDOWN"* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == GAP*"bundler names the layer in force: Set via BUNDLE_COOLDOWN: 0"* ]]
+}
+
+# Bundler parses its config with its own serializer, and a key indented by one
+# space is still a top-level key to it. MEASURED on 4.0.13 and 4.1.0: a repo
+# file holding ` BUNDLE_COOLDOWN: "0"` gave "Set for your local app
+# (<repo>/.bundle/config): 0" with BUNDLE_COOLDOWN=2 exported and
+# ~/.bundle/config at 2, while the verifier, grepping column 0, said the local
+# config row was N/A and that "no local config here sets it, so BUNDLE_COOLDOWN
+# or the user config does".
+@test "bundler: a checkout key indented by one space is still the local config's, and the publish-age row says so" {
+  bundler_cooldown_checkout 0 ' '
+  bundler_age_stub 4.0.24 0 "$(bundler_local_layer 0)"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  local r p
+  r=$(grep 'bundler local config override' <<<"$output"); p=$(grep 'bundler publish-age gate' <<<"$output")
+  [[ "$r" == "GAP    PARSED      bundler local config override"*"$CHECKOUT/.bundle/config switches the publish-age gate off"* ]]
+  [[ "$p" == GAP*"set by the local config at $CHECKOUT/.bundle/config"* ]]
+  [[ "$p" != *"no local config here sets it"* ]] || { echo "publish-age row blames another layer: $p" >&2; return 1; }
+  # A bundler that gives no account: the file is read, leading blanks allowed.
+  bundler_age_stub 4.0.24 0 none
+  run verify_sourced --emit=plain
+  r=$(grep 'bundler local config override' <<<"$output"); p=$(grep 'bundler publish-age gate' <<<"$output")
+  [[ "$r" == "GAP    PARSED      bundler local config override"*"$CHECKOUT/.bundle/config switches the publish-age gate off"* ]]
+  [[ "$p" == GAP*"set by the local config at $CHECKOUT/.bundle/config"* ]]
+  # With no account and no key in the file, the row names no layer at all.
+  printf -- '---\nBUNDLE_JOBS: "4"\n' > "$CHECKOUT/.bundle/config"
+  run verify_sourced --emit=plain
+  p=$(grep 'bundler publish-age gate' <<<"$output")
+  [[ "$p" == GAP*"bundler gave no account of which config layer sets it"* ]]
+  [[ "$p" != *"no local config here sets it"* && "$p" != *"BUNDLE_COOLDOWN or the user config does"* ]] \
+    || { echo "publish-age row guesses a layer: $p" >&2; return 1; }
+}
+
+@test "bundler: with a real bundler, a checkout's BUNDLE_COOLDOWN outranks the exported one and the local config row reports it" {
+  have bundle || skip "bundler not installed"
+  have ruby || skip "ruby not installed"
+  ruby -e 'require "bundler"; exit(Gem::Version.new(Bundler::VERSION) >= Gem::Version.new("4.0.13") ? 0 : 1)' 2>/dev/null \
+    || skip "this bundler predates cooldown (4.0.13)"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  bundler_cooldown_checkout 0
+  # Ground truth: bundler's own answer from inside the checkout, with the env
+  # layer (BUNDLE_COOLDOWN=2) in force.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c \
+    "set -a; . '$ENV_FILE'; set +a; [ \"\$BUNDLE_COOLDOWN\" = 2 ] || exit 9; cd '$CHECKOUT/sub' && bundle config get cooldown --parseable"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cooldown=0"* ]]
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == "GAP    PARSED      bundler local config override"*"switches the publish-age gate off"* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == GAP* ]]
+  # CONTROL: the same checkout without the line. Nothing here overrides the
+  # window, so the local row has nothing to report and the gate reads OK.
+  printf -- '---\nBUNDLE_JOBS: "4"\n' > "$CHECKOUT/.bundle/config"
+  run verify_sourced --emit=plain
+  [[ "$(grep 'bundler local config override' <<<"$output")" == N/A* ]]
+  [[ "$(grep 'bundler publish-age gate' <<<"$output")" == "OK     PARSED      bundler publish-age gate"* ]]
+}
+
+@test "bundler: with a real bundler, keys indented by one space switch the gate and pinning off, and the local config row names the file" {
+  have bundle || skip "bundler not installed"
+  have ruby || skip "ruby not installed"
+  ruby -e 'require "bundler"; exit(Gem::Version.new(Bundler::VERSION) >= Gem::Version.new("4.0.13") ? 0 : 1)' 2>/dev/null \
+    || skip "this bundler predates cooldown (4.0.13)"
+  harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
+  bundler_cooldown_checkout 0 ' '
+  # Ground truth first: bundler itself, with BUNDLE_COOLDOWN=2 exported, names
+  # the checkout's file as the layer in force.
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c \
+    "set -a; . '$ENV_FILE'; set +a; [ \"\$BUNDLE_COOLDOWN\" = 2 ] || exit 9; cd '$CHECKOUT/sub' && bundle config get cooldown"
+  [ "$status" -eq 0 ]
+  [[ "$(grep -m1 'Set ' <<<"$output")" == *"Set for your local app ("*"/.bundle/config): 0" ]]
+  cd "$CHECKOUT/sub"
+  run verify_sourced --emit=plain
+  local r p
+  r=$(grep 'bundler local config override' <<<"$output"); p=$(grep 'bundler publish-age gate' <<<"$output")
+  [[ "$r" == "GAP    PARSED      bundler local config override"*"$CHECKOUT/.bundle/config switches the publish-age gate off"* ]]
+  [[ "$p" == GAP*"set by the local config at $CHECKOUT/.bundle/config"* ]]
+  [[ "$p" != *"no local config here sets it"* ]] || { echo "publish-age row blames another layer: $p" >&2; return 1; }
+  # The pinning half had the same column-0 grep. Pinning has to be in effect
+  # at the user level for the local file to have anything to switch off.
+  [[ "$output" == *"OK     FUNCTIONAL  bundler lockfile pinning"* ]] || skip "lockfile pinning is not in effect at the user level here"
+  printf -- '---\n BUNDLE_FROZEN: "false"\n' > "$CHECKOUT/.bundle/config"
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bash -c \
+    "set -a; . '$ENV_FILE'; set +a; cd '$CHECKOUT/sub' && bundle config get frozen"
+  [[ "$(grep -m1 'Set ' <<<"$output")" == *"Set for your local app ("*"/.bundle/config): false" ]]
+  run verify_sourced --emit=plain
+  r=$(grep 'bundler local config override' <<<"$output")
+  [[ "$r" == "GAP    FUNCTIONAL  bundler local config override"*"switches lockfile pinning off"* ]]
 }
 
 @test "composer: our config in the home composer really reads is OK, anyone else's is a GAP" {
@@ -1370,6 +1547,7 @@ esac"
   # cargo-cooldown has no verb for add/generate-lockfile/vendor/remove, so no
   # re-run routes them. Counted as "fixable by re-running", it made
   # --fail-on=config fail every job that installed cargo-cooldown.
+  skip_if_root_stages_cooldown
   stub_bin cargo 'case "${1:-}" in --version|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
   mkdir -p "$TEST_HOME/.cargo/bin"
   printf '#!/bin/sh\necho "cargo-cooldown 0.3.5"\n' > "$TEST_HOME/.cargo/bin/cargo-cooldown"
@@ -1532,6 +1710,88 @@ GO
   run verify_sourced --emit=plain --fail-on=config
   [ "$status" -eq 0 ]
   [[ "$output" == *"OK"*"go settings persisted"*"GOTOOLCHAIN=local survives with the env layer stripped"* ]]
+}
+
+# A directory holding every command on this PATH except timeout and gtimeout:
+# the PATH of a stock Mac, which has neither (gtimeout comes with Homebrew's
+# coreutils). Prints its path.
+path_without_timeout() {
+  local d="${BATS_TEST_TMPDIR}/notimeout" p f b
+  mkdir -p "$d"
+  local IFS=:
+  for p in $PATH; do
+    [ -d "$p" ] || continue
+    for f in "$p"/*; do
+      b=${f##*/}
+      case "$b" in timeout|gtimeout) continue ;; esac
+      [ -x "$f" ] && [ ! -e "$d/$b" ] && ln -s "$f" "$d/$b"
+    done
+  done
+  echo "$d"
+}
+
+@test "with no timeout or gtimeout on PATH (stock macOS) the wrapper probe still runs" {
+  # The probe asks a wrapper whether it ran (SCH_WRAPPER_PROBE) instead of
+  # guessing from PATH position. Without timeout(1) it has to run through
+  # run_bounded's own fallback, and the variable set on the call has to reach
+  # the wrapper through it, or this row falls back to position evidence.
+  stub_bin bun 'case "${1:-}" in --version) echo "1.3.4";; *) echo "STUB:bun ARGS=[$*]";; esac'
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  local nt
+  nt=$(path_without_timeout)
+  run env -i PATH="$TEST_BIN:$nt" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    bash -c 'if command -v timeout || command -v gtimeout; then echo "a timeout is still visible"; exit 99; fi
+             set -a; . "$1"; set +a; HARDENING_ENV_FILE="$1" bash "$2" --emit=plain' _ "$ENV_FILE" "$VERIFY_SH"
+  [ "$status" -ne 99 ] || { echo "$output"; false; }
+  [[ "$output" == *"OK     FUNCTIONAL  bun PATH wrapper"*"observed running when bun was invoked"* ]] \
+    || { echo "$output" | grep 'bun PATH wrapper'; false; }
+}
+
+@test "run_bounded stops a hanging command where neither timeout nor gtimeout exists" {
+  # MEASURED at 6c77f4e with both hidden: a bun that hung on --version kept
+  # verify.sh running until it was killed from outside after 60 s; every probe
+  # fell back to an unbounded run. /bin/bash is bash 3.2 on the macOS job.
+  local nt blk
+  nt=$(path_without_timeout)
+  blk="${BATS_TEST_TMPDIR}/rb.sh"
+  sed -n '/^# >>> run_bounded$/,/^# <<< run_bounded$/p' "$VERIFY_SH" > "$blk"
+  [ -s "$blk" ]
+  run env -i PATH="$nt" /bin/bash -c '
+    . "$1"
+    command -v timeout >/dev/null || command -v gtimeout >/dev/null && { echo "a timeout is still visible"; exit 99; }
+    t0=$SECONDS; run_bounded 2 sleep 30; echo "hang rc=$? secs=$((SECONDS - t0))"
+    t0=$SECONDS; out=$(run_bounded 2 sh -c "sh -c \"sleep 30\" & sleep 30" 2>&1); echo "child rc=$? secs=$((SECONDS - t0))"
+    run_bounded 5 sh -c "exit 7"; echo "fail rc=$?"
+    echo "env=[$(FOO=bar run_bounded 5 sh -c "echo \$FOO")] after=[${FOO-unset}]"
+    echo "capture=[$(run_bounded 5 echo hi)]"' _ "$blk"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ hang\ rc=124\ secs=([0-9]+) ]]
+  [ "${BASH_REMATCH[1]}" -lt 10 ]
+  # A child left holding the $( ) open is stopped too, as timeout(1) stops
+  # its whole process group.
+  [[ "$output" =~ child\ rc=124\ secs=([0-9]+) ]]
+  [ "${BASH_REMATCH[1]}" -lt 10 ]
+  [[ "$output" == *"fail rc=7"* ]]
+  [[ "$output" == *"env=[bar] after=[unset]"* ]]
+  [[ "$output" == *"capture=[hi]"* ]]
+}
+
+@test "run_bounded is one block, the same in harden.sh, verify.sh and the role's verifier" {
+  # Both verifiers run their wrapper rows before the shared probe body is
+  # sourced, so each preamble carries the block (as with go discovery), and the
+  # shared body uses it. A copy that drifts is a bound that differs by surface.
+  block() { sed -n '/^# >>> run_bounded$/,/^# <<< run_bounded$/p' "$1"; }
+  local role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  [ -n "$(block "$VERIFY_SH")" ]
+  diff <(block "$VERIFY_SH") <(block "$HARDEN_SH")
+  diff <(block "$VERIFY_SH") <(block "$role")
+  # And nothing calls timeout(1) directly any more, outside that block.
+  local f probes="${BATS_TEST_DIRNAME}/../../files/verify-probes.sh"
+  for f in "$VERIFY_SH" "$HARDEN_SH" "$role" "$probes"; do
+    run bash -c 'sed "/^# >>> run_bounded$/,/^# <<< run_bounded$/d" "$1" | grep -nE "(^|[;&|(]|then|else)[[:space:]]*([A-Z_]+=[^ ]* )*g?timeout [0-9]"' _ "$f"
+    [ "$status" -ne 0 ] || { echo "$f: $output"; false; }
+  done
 }
 
 @test "the shipped scripts parse under bash 3.2, the /bin/bash macOS runs them with" {

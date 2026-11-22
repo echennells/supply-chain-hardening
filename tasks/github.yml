@@ -71,7 +71,8 @@
   # exits 127 on hosts where uv is in ~/.local/bin but PATH wasn't
   # exported to ansible's connection environment.
   ansible.builtin.command:
-    cmd: "{{ uv_for_github.stdout }} tool install zizmor=={{ zizmor_version }}"
+    # umask go-w: see "Install lockfile-lint globally" in tasks/npm.yml.
+    cmd: "sh -c 'umask go-w && exec \"$@\"' sch-umask {{ uv_for_github.stdout }} tool install zizmor=={{ zizmor_version }}"
   when:
     - uv_for_github.rc == 0
     - zizmor_installed.stdout | default('') is not match('foreign ')
@@ -171,7 +172,8 @@
   # only, keeping the global hardening intact for user-driven go calls.
   # Also use the absolute go path so bare `go` isn't required on PATH.
   ansible.builtin.command:
-    cmd: "{{ go_for_github.stdout }} install github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@{{ pinact_version }}"
+    # umask go-w: see "Install lockfile-lint globally" in tasks/npm.yml.
+    cmd: "sh -c 'umask go-w && exec \"$@\"' sch-umask {{ go_for_github.stdout }} install github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@{{ pinact_version }}"
   environment:
     GOTOOLCHAIN: auto
   when:

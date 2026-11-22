@@ -227,7 +227,17 @@
   # --ignore-scripts: the role blocks lifecycle scripts for user installs; do the
   # same for its own tools. lockfile-lint is a pure-JS CLI with no required
   # postinstall. Universal npm CLI flag across versions. See tasks/socket.yml.
-  ansible.builtin.command: npm install -g --ignore-scripts lockfile-lint@{{ lockfile_lint_version }}
+  #
+  # `umask 022` around the install: npm creates the package tree with the
+  # umask it inherits, and Ansible sets none. MEASURED (6c77f4e, the role
+  # applied as root under `umask 0000`, the default of GitLab's Docker
+  # executor): /usr/local/lib/node_modules and the lockfile-lint, npq and sfw
+  # trees in it were left 0777, so any account could replace code root runs.
+  # Fixed 022 rather than the caller's mask plus go-w, as for the sfw warm in
+  # tasks/socket.yml: these trees must stay readable by every account, and sudo
+  # merges a caller's 077 into its own. The per-user installs (uv tool, cargo,
+  # go) use `umask go-w` instead, which keeps a stricter mask.
+  ansible.builtin.command: sh -c 'umask 022 && exec "$@"' sch-umask npm install -g --ignore-scripts lockfile-lint@{{ lockfile_lint_version }}
   # A failed install changed nothing (see the other optional tool installs).
   changed_when: lockfile_lint_install.rc | default(1) == 0
   when:
