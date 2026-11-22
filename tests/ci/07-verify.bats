@@ -11,6 +11,8 @@ bats_require_minimum_version 1.5.0
 
 setup() {
   common_setup
+  # The pnpm repo config override fixture's project (pn_project).
+  PNP="$BATS_TEST_TMPDIR/proj"
   command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null \
     || skip "needs passwordless sudo to wrap binaries"
 }
@@ -1820,4 +1822,183 @@ path_without_timeout() {
     run /bin/bash -n "$f"
     [ "$status" -eq 0 ] || { echo "$f: $output"; return 1; }
   done
+}
+
+# ---- pnpm repo config override ------------------------------------------------
+#
+# A project's pnpm-workspace.yaml outranks the global config.yaml harden.sh
+# writes (MEASURED on pnpm 10.34.9 to 12.21.0), and the action exports no
+# pnpm_config_* variable, so in CI the workspace file is in effect. The row
+# reads the file: pnpm 10 and 11 run a project's pnpmfile and fetch its
+# configDependencies for any command in it, `pnpm config get` included.
+
+# pnpm_stub <version>: answers from / and logs every directory it is run in.
+pnpm_stub() {
+  stub_bin pnpm 'echo "$PWD :: $*" >> "'"$BATS_TEST_TMPDIR"'/pnpm-calls"
+case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get minimumReleaseAge"|"config get minimum-release-age") echo 2880 ;;
+  "config get minimumReleaseAgeStrict") echo true ;;
+  *) echo STUB ;;
+esac'
+}
+# pn_project <pnpm-workspace.yaml content>: a workspace at $PNP (set in setup,
+# because pn_verdict runs in a subshell), verified from a package below it, the
+# way pnpm finds the file.
+pn_project() {
+  rm -rf "$PNP"; mkdir -p "$PNP/packages/a"
+  printf '{"name":"p","version":"1.0.0","private":true}\n' > "$PNP/package.json"
+  [ -z "${1:-}" ] || printf '%s\n' "$1" > "$PNP/pnpm-workspace.yaml"
+}
+verify_in() { local d="$1"; shift; ( cd "$d" && verify_sourced "$@" ); }
+pn_row() { grep 'pnpm repo config override' <<<"$output"; }
+pn_verdict() { # <yaml> -> the row, verified from $PNP/packages/a
+  pn_project "$1"
+  run verify_in "$PNP/packages/a" --emit=plain
+  pn_row
+}
+
+@test "pnpm repo config override: a workspace 0 is a GAP, a shorter window WEAK, a longer one OK" {
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local r
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == "GAP    PRESENT     pnpm repo config override"*"minimumReleaseAge 0 in $PNP/pnpm-workspace.yaml switches the age gate off"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict "packages: ['packages/*']
+minimumReleaseAge: '600'   # ten hours")
+  [[ "$r" == WEAK*"minimumReleaseAge 600 in $PNP/pnpm-workspace.yaml is below the 48h (2880 minutes) promised here"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict 'minimumReleaseAge: 4320')
+  [[ "$r" == OK*"minimumReleaseAge 4320"*"is at least the 48h"* ]] || { echo "$r"; return 1; }
+  # A value pnpm 10 and 11 read as no gate.
+  for v in null false true "''" -1; do
+    r=$(pn_verdict "minimumReleaseAge: $v")
+    [[ "$r" == GAP*"switches the age gate off"* ]] || { echo "$v: $r"; return 1; }
+  done
+  # A value that is no number at all is not judged either way.
+  r=$(pn_verdict "minimumReleaseAge: '1d'")
+  [[ "$r" == WEAK*"not a whole number of minutes"* ]] || { echo "$r"; return 1; }
+}
+
+@test "pnpm repo config override: an exclude list is WEAK naming its entries; '*' or '**' is a GAP" {
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local r
+  r=$(pn_verdict "minimumReleaseAgeExclude:
+  - left-pad
+  - '@myorg/*'")
+  [[ "$r" == WEAK*"exempts left-pad, @myorg/* from the age gate"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict "minimumReleaseAgeExclude: ['*', '!typescript']")
+  [[ "$r" == GAP*"lists '*', which exempts every package"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict "minimumReleaseAgeExclude: ['**']")
+  [[ "$r" == GAP*"lists '**'"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict "minimumReleaseAgeExclude: []
+minimumReleaseAge: 2880")
+  [[ "$r" == OK* ]] || { echo "$r"; return 1; }
+}
+
+@test "pnpm repo config override: a pnpm_config_* variable in this environment hides the workspace value (WEAK, not OK, not GAP)" {
+  # The role exports both on a host; a context without them (a systemd unit, a
+  # container CMD) uses the project's value, so neither OK nor GAP is true.
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local r
+  # FIXTURE CONTROL: without the variable the same file is a GAP.
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == GAP* ]] || { echo "$r"; return 1; }
+  echo 'export pnpm_config_minimum_release_age=2880' >> "$ENV_FILE"
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == WEAK*"pnpm_config_minimum_release_age=2880 in this environment outranks it"*"an env variable is what hides the project's weaker setting"*"systemd unit"* ]] || { echo "$r"; return 1; }
+  echo "export pnpm_config_minimum_release_age_exclude='[]'" >> "$ENV_FILE"
+  r=$(pn_verdict "minimumReleaseAgeExclude: [left-pad]")
+  [[ "$r" == WEAK*"exempts left-pad"*"pnpm_config_minimum_release_age_exclude=[] in this environment replaces that list"* ]] || { echo "$r"; return 1; }
+  # The upper-case name is read from pnpm 11.0.6, so it hides nothing on 11.0.0.
+  filter_file "$ENV_FILE" sed 's/^export pnpm_config_minimum_release_age=/export PNPM_CONFIG_MINIMUM_RELEASE_AGE=/'
+  pnpm_stub 11.0.0
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == GAP* ]] || { echo "$r"; return 1; }
+  pnpm_stub 11.0.9
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == WEAK*"PNPM_CONFIG_MINIMUM_RELEASE_AGE=2880 in this environment outranks it"* ]] || { echo "$r"; return 1; }
+}
+
+@test "pnpm repo config override: pnpm is asked from /, never inside the project (its pnpmfile would run)" {
+  # MEASURED on pnpm 10.34.9, 11.0.0 and 11.28.13: `pnpm config get` in a
+  # project loaded its .pnpmfile.cjs and fetched its configDependencies.
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  pn_project "minimumReleaseAge: 600
+pnpmfile: hooks.cjs
+configDependencies:
+  is-number: '7.0.0+sha512-AAAA'"
+  printf 'require("fs").writeFileSync(%s, "x")\n' "'$BATS_TEST_TMPDIR/pnpmfile-ran'" > "$PNP/hooks.cjs"
+  printf '{"name":"p","version":"1.0.0","packageManager":"pnpm@9.15.9"}\n' > "$PNP/package.json"
+  rm -f "$BATS_TEST_TMPDIR/pnpm-calls"
+  run verify_in "$PNP/packages/a" --emit=plain
+  [[ "$(pn_row)" == WEAK*"minimumReleaseAge 600"* ]] || { pn_row; return 1; }
+  # The stub was run (the row asked it something) ...
+  [ -s "$BATS_TEST_TMPDIR/pnpm-calls" ]
+  # ... and never from the project or below it.
+  ! grep -q "^$PNP" "$BATS_TEST_TMPDIR/pnpm-calls" || { cat "$BATS_TEST_TMPDIR/pnpm-calls"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/pnpmfile-ran" ]
+}
+
+@test "pnpm repo config override: without PyYAML the plain-key reader reaches the same verdicts, and refuses YAML it does not follow" {
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local real r; real=$(command -v python3) || skip "no python3"
+  stub_bin python3 "case \"\$*\" in *'import yaml'*) exit 3 ;; esac; exec '$real' \"\$@\""
+  r=$(pn_verdict "packages:
+  - 'packages/*'
+minimumReleaseAge: 0   # off")
+  [[ "$r" == GAP*"switches the age gate off"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict "minimumReleaseAgeExclude:
+  - left-pad   # ours
+  - \"@myorg/*\"")
+  [[ "$r" == WEAK*"exempts left-pad, @myorg/*"* ]] || { echo "$r"; return 1; }
+  # A flow-style document, a merge key and a repeated key are refused, not guessed.
+  for y in '{minimumReleaseAge: 0}' $'base: &b\n  minimumReleaseAge: 0\n<<: *b' $'minimumReleaseAge: 5\nminimumReleaseAge: 0'; do
+    r=$(pn_verdict "$y")
+    [[ "$r" == WEAK*"could not be read by a plain-key reader"*"was not judged"* ]] || { echo "$y: $r"; return 1; }
+  done
+}
+
+@test "pnpm repo config override: N/A with no workspace file, with no age keys, from /, and on a pnpm with no age gate" {
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local r
+  pn_project ""
+  run verify_in "$PNP/packages/a" --emit=plain
+  [[ "$(pn_row)" == "N/A"*"no pnpm-workspace.yaml at or above $PNP/packages/a"* ]] || { pn_row; return 1; }
+  r=$(pn_verdict "packages: ['packages/*']")
+  [[ "$r" == "N/A"*"sets neither minimumReleaseAge nor minimumReleaseAgeExclude"* ]] || { echo "$r"; return 1; }
+  run verify_in / --emit=plain
+  [[ "$(pn_row)" == "N/A"*"ran from /"* ]] || { pn_row; return 1; }
+  pnpm_stub 10.15.1
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == "N/A"*"pnpm 10.15.1 has no minimumReleaseAge (pnpm 10.16.0)"* ]] || { echo "$r"; return 1; }
+}
+
+@test "pnpm repo config override: pnpm 12 refuses false and 0.5 (WEAK, nothing installs); strict false is WEAK on 11+, not on 10; pnpm 10 reads a project .npmrc" {
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local r
+  pnpm_stub 12.21.0
+  r=$(pn_verdict 'minimumReleaseAge: false')
+  [[ "$r" == WEAK*"which pnpm 12.21.0 refuses (ERR_PNPM_INVALID_SETTING), so nothing installs here"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict 'minimumReleaseAge: 0.5')
+  [[ "$r" == WEAK*"refuses (ERR_PNPM_INVALID_SETTING)"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict 'minimumReleaseAge: null')
+  [[ "$r" == OK*"which pnpm 12.21.0 ignores"* ]] || { echo "$r"; return 1; }
+  r=$(pn_verdict 'minimumReleaseAgeStrict: false')
+  [[ "$r" == WEAK*"minimumReleaseAgeStrict false"*"lets a release younger than the window install"* ]] || { echo "$r"; return 1; }
+  pnpm_stub 10.34.9
+  r=$(pn_verdict 'minimumReleaseAgeStrict: false')
+  [[ "$r" == "N/A"* ]] || { echo "$r"; return 1; }
+  pn_project ""
+  printf 'minimum-release-age=0\n' > "$PNP/.npmrc"
+  run verify_in "$PNP" --emit=plain
+  [[ "$(pn_row)" == GAP*"minimum-release-age 0 in $PNP/.npmrc switches the age gate off"* ]] || { pn_row; return 1; }
+  # pnpm 11 no longer reads a project .npmrc for this (MEASURED).
+  pnpm_stub 11.28.13
+  run verify_in "$PNP" --emit=plain
+  [[ "$(pn_row)" == "N/A"*"no pnpm-workspace.yaml"* ]] || { pn_row; return 1; }
 }

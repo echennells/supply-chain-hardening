@@ -72,6 +72,11 @@ setup_file() {
       vars: { pnpm_minimum_release_age_exclude: ["@myorg/internal", "left-pad"] }
     - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/allow.sh" }
       vars: { pnpm_built_dependencies: ["esbuild"] }
+    - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/npm-{{ item }}.sh" }
+      vars: { npm_version_check: { stdout: "{{ item }}" } }
+      loop: ["10.9.8", "11.2.0", "11.8.0", "11.9.0", "12.2.3"]
+    - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/npm-scoped-11.8.0.sh" }
+      vars: { sch_env_npm_version: { stdout: "11.8.0" } }
     - ansible.builtin.template: { src: "{{ refresh_t }}", dest: "{{ out }}/refresh-optin", mode: "0755" }
       vars: { uv_exclude_newer_env: true, sch_refresh_uv: true, sch_refresh_pip: true, socket_firewall_install: false }
     - ansible.builtin.template: { src: "{{ refresh_t }}", dest: "{{ out }}/refresh-default", mode: "0755" }
@@ -154,6 +159,18 @@ uv_line() { grep -E '^export UV_EXCLUDE_NEWER=' "$1"; }
   local f
   for f in default.sh exclude.sh allow.sh optin-rolling.sh; do
     [ "$(grep -cE '^[[:space:]]*export[[:space:]]+(pnpm_config_ignore_scripts|PNPM_CONFIG_)' "$RENDER_DIR/$f")" = 0 ]
+  done
+}
+
+@test "render: NPM_CONFIG_ALLOW_GIT follows the npm found: out below 11.9.0 (11.2 to 11.8 warn about it), in from 11.9.0 and with no npm" {
+  needs_render npm-11.9.0.sh
+  local f
+  for f in default npm-11.9.0 npm-12.2.3; do
+    grep -qx 'export NPM_CONFIG_ALLOW_GIT=none' "$RENDER_DIR/$f.sh" || { echo "$f: not exported" >&2; return 1; }
+  done
+  # npm-scoped-11.8.0: a run scoped away from npm.yml, where shell_env.yml asks npm itself.
+  for f in npm-10.9.8 npm-11.2.0 npm-11.8.0 npm-scoped-11.8.0; do
+    ! grep -q 'ALLOW_GIT' "$RENDER_DIR/$f.sh" || { echo "$f: exported" >&2; return 1; }
   done
 }
 
@@ -487,10 +504,33 @@ JSON
   mkdir -p "$d"; echo '{"name":"pv","version":"1.0.0","private":true}' > "$d/package.json"
   printf 'minimumReleaseAge: 0\n' > "$d/pnpm-workspace.yaml"
   verify_from "$d" -u pnpm_config_minimum_release_age -u PNPM_CONFIG_MINIMUM_RELEASE_AGE
-  echo "$output" | grep "pnpm age gate"
-  echo "$output" | grep "pnpm age gate" | grep -q "^GAP"
+  echo "$output" | grep "pnpm repo config override"
+  echo "$output" | grep "pnpm repo config override" | grep -q "^GAP"
   verify_from "$d" pnpm_config_minimum_release_age=2880
-  echo "$output" | grep "pnpm age gate"
-  echo "$output" | grep "pnpm age gate" | grep -q "^WEAK"
-  echo "$output" | grep "pnpm age gate" | grep -q "Without pnpm_config_minimum_release_age.* pnpm reports 0 in $d"
+  echo "$output" | grep "pnpm repo config override"
+  echo "$output" | grep "pnpm repo config override" | grep -q "^WEAK"
+  echo "$output" | grep "pnpm repo config override" | grep -q "pnpm_config_minimum_release_age=2880 in this environment outranks it"
+  # The host row asks pnpm from /, so the workspace value is no longer its answer.
+  echo "$output" | grep "pnpm age gate" | grep -qv "minimum-release-age=0"
+}
+
+@test "verify: run from a project, the verifier never runs the project's pnpmfile" {
+  # MEASURED on pnpm 10.34.9, 11.0.0 and 11.28.13: `pnpm config get` in a
+  # project loads its .pnpmfile.cjs (top level and updateConfig hook). The pnpm
+  # rows used to ask from the working directory; they ask from / now, and the
+  # workspace row reads the file.
+  command -v pnpm >/dev/null 2>&1 || skip "pnpm not installed"
+  local d="$BATS_TEST_TMPDIR/pnhook" m="$BATS_TEST_TMPDIR/pnpmfile-ran" ctl=none
+  mkdir -p "$d"; echo '{"name":"ph","version":"1.0.0","private":true}' > "$d/package.json"
+  printf 'minimumReleaseAge: 600\n' > "$d/pnpm-workspace.yaml"
+  printf 'require("fs").writeFileSync(%s, "x"); module.exports = { hooks: {} }\n' "'$m'" > "$d/.pnpmfile.cjs"
+  # FIXTURE CONTROL: does this pnpm run the file when asked in the project?
+  (cd "$d" && pnpm config get minimumReleaseAge >/dev/null 2>&1) || true
+  if [ -e "$m" ]; then ctl=ran; rm -f "$m"; fi
+  verify_from "$d"
+  echo "$output" | grep "pnpm repo config override"
+  [ ! -e "$m" ] || { echo "the verifier ran the project's pnpmfile" >&2; return 1; }
+  # Judged from the file (unless this pnpm has no age gate at all).
+  echo "$output" | grep "pnpm repo config override" | grep -qE "^N/A.*has no minimumReleaseAge|minimumReleaseAge 600"
+  [ "$ctl" = ran ] || skip "pnpm $(pnpm --version) does not run a pnpmfile for config get (12.21.0 does not), so the control cannot discriminate; the verifier still ran none"
 }

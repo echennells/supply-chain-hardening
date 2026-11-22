@@ -67,13 +67,12 @@ load setup
   [ "$result" = "none" ]
 }
 
-@test "npm: allow-git=none blocks git deps behaviorally (npm >=11 only)" {
-  # Behavioral verification of allow-git enforcement. Documented in
-  # npm v11 config reference: allow-git=none refuses git-URL dependencies.
-  # On npm <11, this test skips because the key is silently inert there.
-  npm_major=$(npm --version 2>/dev/null | sed -nE 's/^([0-9]+)\..*/\1/p' | head -1)
-  [[ "$npm_major" =~ ^[0-9]+$ ]] || skip "couldn't parse npm major version"
-  [[ "$npm_major" -ge 11 ]] || skip "allow-git enforcement requires npm >=11 (got: $(npm --version 2>/dev/null))"
+@test "npm: allow-git=none blocks git deps behaviorally (npm >=11.9.0 only)" {
+  # Behavioral verification of allow-git enforcement: allow-git=none refuses
+  # git-URL dependencies. npm reads the key from 11.9.0 (MEASURED: 11.8.0
+  # installed a git dependency with it set); below that this test skips.
+  printf '%s\n%s\n' 11.9.0 "$(npm --version 2>/dev/null)" | sort -V -C \
+    || skip "allow-git enforcement requires npm >= 11.9.0 (got: $(npm --version 2>/dev/null))"
 
   # Try installing from a git URL that won't resolve — if npm honors
   # allow-git=none it refuses BEFORE attempting any network fetch.
@@ -92,6 +91,47 @@ load setup
     echo "$result" >&2
     return 1
   fi
+}
+
+# npm_git_project <dir>: a project depending on a one-commit git+file://
+# repository, so nothing reaches the network.
+npm_git_project() {
+  local d="$1" src="$1-src"
+  rm -rf "$d" "$src" "$src.git"; mkdir -p "$d" "$src"
+  printf '{"name":"gitdep","version":"1.0.0"}\n' > "$src/package.json"
+  git -C "$src" init -q && git -C "$src" add -A \
+    && git -C "$src" -c user.email=t@t -c user.name=t commit -qm init \
+    && git clone -q --bare "$src" "$src.git"
+  printf '{"name":"p","version":"1.0.0","private":true,"dependencies":{"gitdep":"git+file://%s"}}\n' "$src.git" > "$d/package.json"
+}
+
+@test "npm: with the user config redirected and a project .npmrc allow-git=all, the env layer still refuses a git dependency" {
+  # actions/setup-node exports NPM_CONFIG_USERCONFIG at its own .npmrc, so npm
+  # skips ~/.npmrc; a project .npmrc can say allow-git=all. NPM_CONFIG_ALLOW_GIT
+  # outranks both (MEASURED on npm 11.9.0 to 12.2.3).
+  printf '%s\n%s\n' 11.9.0 "$(npm --version 2>/dev/null)" | sort -V -C \
+    || skip "npm $(npm --version 2>/dev/null) predates allow-git (11.9.0), and the role does not export it there"
+  command -v git >/dev/null || skip "git not installed"
+  local d="$BATS_TEST_TMPDIR/gitproj" rc="$BATS_TEST_TMPDIR/redirected-npmrc"
+  npm_git_project "$d"
+  printf 'allow-git=all\n' > "$d/.npmrc"
+  : > "$rc"
+  run env -i PATH="$PATH" HOME="$HOME" bash -c ". /etc/profile.d/supply-chain-hardening.sh; cd '$d' && NPM_CONFIG_USERCONFIG='$rc' npm install --no-audit --no-fund 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *EALLOWGIT* ]] || { echo "refused, but not by allow-git: $output"; return 1; }
+  [ ! -e "$d/node_modules/gitdep" ]
+}
+
+@test "npm: FIXTURE CONTROL - the same redirect and project .npmrc install the git dependency without the variable" {
+  printf '%s\n%s\n' 11.9.0 "$(npm --version 2>/dev/null)" | sort -V -C || skip "npm predates allow-git (11.9.0)"
+  command -v git >/dev/null || skip "git not installed"
+  local d="$BATS_TEST_TMPDIR/gitproj" rc="$BATS_TEST_TMPDIR/redirected-npmrc"
+  npm_git_project "$d"
+  printf 'allow-git=all\n' > "$d/.npmrc"
+  : > "$rc"
+  run env -i PATH="$PATH" HOME="$HOME" bash -c ". /etc/profile.d/supply-chain-hardening.sh; unset NPM_CONFIG_ALLOW_GIT; cd '$d' && NPM_CONFIG_USERCONFIG='$rc' npm install --no-audit --no-fund 2>&1"
+  [ "$status" -eq 0 ] || { echo "the fixture did not install: $output"; return 1; }
+  [ -e "$d/node_modules/gitdep/package.json" ]
 }
 
 @test "npm: config get ignore-scripts returns true" {
