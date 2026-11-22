@@ -1157,6 +1157,8 @@ set_tool_version() {
 
 harden_npm() {
   section "npm"
+  local npm_v
+  npm_v=$(detect_version npm "npm --version")
   write_env NPM_CONFIG_IGNORE_SCRIPTS  true
   write_env NPM_CONFIG_AUDIT           true
   write_env NPM_CONFIG_SAVE_EXACT      true
@@ -1170,6 +1172,20 @@ harden_npm() {
   # skips ~/.npmrc, and a setup-node npm reads its prefix's etc/npmrc, not
   # /etc/npmrc. In that setup the env var is the only age gate npm sees.
   write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
+  # allow-git=none needs the env form for the same reason. Written only to the
+  # files below, it was not applied under setup-node's redirect: npm 11.19.1
+  # reported allow-git=all there and installed a git dependency (MEASURED
+  # 2026-11-22 with this script's own files in place). Unlike the age window it
+  # is an on/off switch at its strictest value, so a project can lose nothing
+  # to it; a project's own .npmrc allow-git=all no longer re-enables git
+  # dependencies (the variable outranks it, MEASURED on npm 11.9.0 to 12.2.3).
+  # Version-gated: npm reads allow-git from 11.9.0, and npm 11.2.0 to 11.8.x
+  # print `npm warn Unknown env config "allow-git"` on every command when it
+  # is set (MEASURED). An npm not found yet is assumed current, as for the age
+  # gate below.
+  if [[ -z "$npm_v" ]] || version_ge "$npm_v" "11.9.0"; then
+    write_env NPM_CONFIG_ALLOW_GIT none
+  fi
 
   local content
   content="; Managed by supply-chain-harden action
@@ -1185,7 +1201,7 @@ allow-git=none"
   echo "$content" | write_etc /etc/npmrc
 
   HARDENED+=("npm")
-  set_tool_version "npm" "$(detect_version npm "npm --version")"
+  set_tool_version "npm" "$npm_v"
   # SAY IT HERE, NOT ONLY IN THE VERIFIER.
   #
   # min-release-age landed in npm 11.10.0. Older npm ACCEPTS the key, echoes
@@ -1197,8 +1213,9 @@ allow-git=none"
   # The version is already in hand from detect_version, so this costs nothing.
   # Leaving it to `action/verify.sh` put the truth behind an opt-in step, while
   # the mandatory tool asserted the opposite.
-  local npm_v
-  npm_v=$(detect_version npm "npm --version")
+  if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.9.0"; then
+    log "npm: allow-git=none written to the npmrc files, but npm $npm_v predates it (npm 11.9.0), so git dependencies still install; NPM_CONFIG_ALLOW_GIT not exported"
+  fi
   if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.10.0"; then
     warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) — the age gate is written and NOT enforced. Script blocking is unaffected. Install npm >= 11.10 before this action (e.g. setup-node 24, or npm i -g npm@latest) to make it effective."
     set_eco_status npm INERT "age gate written but npm $npm_v does not implement min-release-age; script blocking still applies"
