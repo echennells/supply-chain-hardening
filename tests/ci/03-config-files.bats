@@ -74,33 +74,34 @@ setup() { common_setup; }
 # --- pnpm 11+ env layer -------------------------------------------------------
 # pnpm 11+ reads pnpm_config_* (lower case; upper case only from 11.0.6), and it
 # outranks a project's pnpm-workspace.yaml, which outranks config.yaml (MEASURED
-# on 11.0.0, 11.0.9, 11.28.13 and 12.21.0). The action exports the age only: the
-# role also exports the exclude list, but in CI the repository is the project
-# being built, and its own minimumReleaseAgeExclude is left to stand.
+# on 11.0.0, 11.0.9, 11.28.13 and 12.21.0). The role exports the age and the
+# exclude list, because on a host the repository may be one someone cloned. The
+# action exports neither: in CI the repository is the project being built, the
+# age variable would cut a project's longer window down to the action's, and the
+# exclude variable would wipe its own list. config.yaml carries the action's
+# window for a project that sets none.
 
-@test "pnpm: the env layer carries the age gate in lower case, and leaves the project's exclude list alone" {
+@test "pnpm: the action exports no pnpm_config_* variable, so the project's workspace settings stand" {
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$ENV_FILE" '^export pnpm_config_minimum_release_age=2880$'
-  assert_file_lacks "$ENV_FILE" "pnpm_config_minimum_release_age_exclude"
+  assert_file_lacks "$ENV_FILE" "pnpm_config_"
   assert_file_lacks "$ENV_FILE" "PNPM_CONFIG_"
-  # Sourced, the age follows release_age_hours in minutes, and no exclude list is set.
-  run env -i bash -c "source '$ENV_FILE'; printf '%s|%s' \"\$pnpm_config_minimum_release_age\" \"\${pnpm_config_minimum_release_age_exclude-unset}\""
-  [ "$status" -eq 0 ]
-  [ "$output" = "2880|unset" ]
+  # The window still reaches a project that sets none, through config.yaml.
+  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 2880$"
   rm -f "$ENV_FILE"
   run harden ECOSYSTEMS=pnpm RELEASE_AGE_HOURS=72 -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$ENV_FILE" '^export pnpm_config_minimum_release_age=4320$'
+  assert_file_lacks "$ENV_FILE" "pnpm_config_"
+  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 4320$"
 }
 
-@test "pnpm: GitHub mode writes the age variable to GITHUB_ENV, unquoted, and no exclude list" {
+@test "pnpm: GitHub mode writes no pnpm_config_* variable to GITHUB_ENV either" {
   : > "$TEST_TMP/ghenv"
   run harden GITHUB_ENV="$TEST_TMP/ghenv" GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
              ECOSYSTEMS=pnpm -- --emit=github
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_TMP/ghenv" '^pnpm_config_minimum_release_age=2880$'
-  assert_file_lacks "$TEST_TMP/ghenv" "pnpm_config_minimum_release_age_exclude"
+  assert_file_lacks "$TEST_TMP/ghenv" "pnpm_config_"
+  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 2880$"
 }
 
 @test "pnpm: pnpm_config_ignore_scripts is never exported, with or without an allowlist" {

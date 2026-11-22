@@ -1296,25 +1296,24 @@ harden_pnpm() {
     fi
   } > "$HOME/.config/pnpm/rc"
 
-  # pnpm 11+ reads pnpm_config_* from the environment, and it outranks a
+  # NO pnpm_config_* VARIABLES ARE EXPORTED HERE, although the role exports two.
+  # pnpm 11+ reads pnpm_config_* from the environment, and that outranks a
   # project's pnpm-workspace.yaml, which outranks the config.yaml above
-  # (MEASURED on 11.0.0, 11.0.9, 11.28.13 and 12.21.0: a workspace
-  # minimumReleaseAge: 0 or minimumReleaseAgeExclude list resolved the version
-  # the gate refuses only without these). Lowercase: the uppercase form is read
-  # only from 11.0.6, and pnpm 10 reads neither. Azure's docs say a
-  # task.setvariable name reaches later steps upper-cased, which pnpm reads only
-  # from 11.0.6 (not measured on Azure).
-  # pnpm_config_minimum_release_age_exclude is NOT exported here, although the
-  # role exports it. On a host the repository may be one someone cloned, and its
-  # minimumReleaseAgeExclude can exempt the very package an attack ships, so the
-  # host's list wins. In CI the repository is the project being built, and a
-  # project that exempts its own freshly published packages (its own scope in a
-  # monorepo) is making a legitimate choice with no other knob here. The
-  # config.yaml above still carries [] for a project that sets no list.
-  # pnpm_config_ignore_scripts is deliberately NOT exported: true silently skips
-  # the builds a project approves with its own `ignoreScripts: false` +
-  # allowBuilds, and false would override a project's own ignoreScripts: true.
-  write_env pnpm_config_minimum_release_age "$PNPM_AGE_MINUTES"
+  # (MEASURED on 11.0.0, 11.0.9, 11.28.13 and 12.21.0). On a host the repository
+  # may be one someone cloned, so the role's values win over its workspace file.
+  # In CI the repository is the project being built, so its own choices stand:
+  #   - pnpm_config_minimum_release_age would set the window exactly, in both
+  #     directions, so a project that chose a longer one (14 days is common
+  #     advice) would silently get the action's shorter one. config.yaml above
+  #     still gives the action's window to a project that sets none.
+  #   - pnpm_config_minimum_release_age_exclude would wipe the project's own
+  #     list, and a monorepo exempting its own freshly published packages would
+  #     fail with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION and no knob here.
+  #   - pnpm_config_ignore_scripts is exported by neither: true silently skips
+  #     the builds a project approves with its own ignoreScripts: false +
+  #     allowBuilds, and false would override a project's own ignoreScripts: true.
+  # A workspace minimumReleaseAge: 0 is the project's call. verify.sh has no
+  # row for a project's pnpm-workspace.yaml yet, unlike uv and composer.
 
   HARDENED+=("pnpm")
   local pnpm_version
