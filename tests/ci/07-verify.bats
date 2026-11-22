@@ -11,8 +11,11 @@ bats_require_minimum_version 1.5.0
 
 setup() {
   common_setup
-  # The pnpm repo config override fixture's project (pn_project).
-  PNP="$BATS_TEST_TMPDIR/proj"
+  # The pnpm repo config override fixture's project (pn_project). Resolved
+  # physically: the row names the directory it found, and on macOS the temp
+  # dir under /var is a symlink to /private/var.
+  PNT=$(cd "$BATS_TEST_TMPDIR" && pwd -P)
+  PNP="$PNT/proj"
   command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null \
     || skip "needs passwordless sudo to wrap binaries"
 }
@@ -1972,10 +1975,10 @@ minimumReleaseAge: 0   # off")
   r=$(pn_verdict "packages: ['packages/*']")
   [[ "$r" == "N/A"*"$PNP/pnpm-workspace.yaml sets neither minimumReleaseAge nor minimumReleaseAgeExclude"* ]] || { echo "$r"; return 1; }
   # A path with a space in it is one path.
-  PNP="$BATS_TEST_TMPDIR/my proj"
+  PNP="$PNT/my proj"
   r=$(pn_verdict 'minimumReleaseAge: 0')
   [[ "$r" == GAP*"minimumReleaseAge 0 in $PNP/pnpm-workspace.yaml switches the age gate off"* ]] || { echo "$r"; return 1; }
-  PNP="$BATS_TEST_TMPDIR/proj"
+  PNP="$PNT/proj"
   run verify_in / --emit=plain
   [[ "$(pn_row)" == "N/A"*"ran from /"* ]] || { pn_row; return 1; }
   pnpm_stub 10.15.1
