@@ -1341,8 +1341,9 @@ harden_pnpm() {
   #   - pnpm_config_ignore_scripts is exported by neither: true silently skips
   #     the builds a project approves with its own ignoreScripts: false +
   #     allowBuilds, and false would override a project's own ignoreScripts: true.
-  # A workspace minimumReleaseAge: 0 is the project's call. verify.sh has no
-  # row for a project's pnpm-workspace.yaml yet, unlike uv and composer.
+  # A workspace minimumReleaseAge: 0 is the project's call. verify.sh, run from
+  # the checkout, reports it in its "pnpm repo config override" row, as it does
+  # a repo's uv and composer config.
 
   HARDENED+=("pnpm")
   local pnpm_version
