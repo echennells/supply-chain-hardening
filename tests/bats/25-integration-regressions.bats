@@ -550,7 +550,9 @@ tag_order() { # seed tags -> the order Ansible's list(set(...)) gives them
     -e podman_enabled=false -e verify_protections=false --tags verify,yarn,nuget
   [ "$status" -eq 0 ]
   for st in "Render this host's verification context" "Assemble the verification command"; do
-    r=$(printf '%s\n' "$output" | grep -F -A1 "$st" | tail -n 1)
+    # The task's own result line, not whatever follows the header: ansible-core
+    # 2.20 on Ubuntu 26.04 prints a [DEPRECATION WARNING] there (round 3).
+    r=$(printf '%s\n' "$output" | awk -v st="$st" 'index($0, st) { f = 1; next } f && /^(ok|changed|skipping|fatal|failed):/ { print; exit }')
     echo "$st: $r"
     [[ "$r" == ok:* ]] || { echo "'$st' reported '$r' on a re-apply with the same tags"; return 1; }
   done

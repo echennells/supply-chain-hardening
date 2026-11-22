@@ -253,6 +253,22 @@ uv_pick() {
   [ "$v" = 24.1 ]
 }
 
+# Reads packaging's locked version (and, with a second argument, the cutoff in
+# [options]) from a uv.lock: tomllib (3.11+), then the tomli backport, else exit
+# 3 so the test skips. Was tomllib-only, and failed on Ubuntu 22.04's Python
+# 3.10 in round 3 of the real-VM test.
+UVLOCK_PY='import sys
+try:
+    import tomllib as t
+except ModuleNotFoundError:
+    try:
+        import tomli as t
+    except ModuleNotFoundError:
+        sys.exit(3)
+d = t.load(open(sys.argv[1], "rb"))
+v = [p["version"] for p in d["package"] if p["name"] == "packaging"][0]
+print(v + (" " + d["options"]["exclude-newer"] if len(sys.argv) > 2 else ""))'
+
 @test "uv: a pyproject [tool.uv] exclude-newer loses to the env for uv lock, and the lockfile records the env's cutoff" {
   command -v uv >/dev/null 2>&1 || skip "uv not installed"
   needs_render optin-pinned.sh
@@ -262,12 +278,13 @@ uv_pick() {
   printf '[project]\nname = "envlock"\nversion = "0.1.0"\nrequires-python = ">=3.8"\ndependencies = ["packaging"]\n\n[tool.uv]\nexclude-newer = "2099-01-01T00:00:00Z"\n' > "$d/pyproject.toml"
   (cd "$d" && env -u UV_EXCLUDE_NEWER UV_CACHE_DIR="$BATS_TEST_TMPDIR/uvcache" uv lock)
   # FIXTURE CONTROL: without the env the project's own 2099 cutoff resolves past 24.1.
-  run python3 -c 'import sys,tomllib; d=tomllib.load(open(sys.argv[1],"rb")); print([p["version"] for p in d["package"] if p["name"]=="packaging"][0])' "$d/uv.lock"
+  run python3 -c "$UVLOCK_PY" "$d/uv.lock"
+  [ "$status" -ne 3 ] || skip "no TOML parser to read uv.lock (Python < 3.11 without tomli)"
   [ "$status" -eq 0 ]
   [ "$output" != 24.1 ]
   rm -f "$d/uv.lock"
   (cd "$d" && with_profile "$RENDER_DIR/optin-pinned.sh" env UV_CACHE_DIR="$BATS_TEST_TMPDIR/uvcache" uv lock >/dev/null 2>&1)
-  run python3 -c 'import sys,tomllib; d=tomllib.load(open(sys.argv[1],"rb")); print([p["version"] for p in d["package"] if p["name"]=="packaging"][0], d["options"]["exclude-newer"])' "$d/uv.lock"
+  run python3 -c "$UVLOCK_PY" "$d/uv.lock" with-cutoff
   echo "$output"
   [ "$output" = "24.1 $UVCUT" ]
 }
