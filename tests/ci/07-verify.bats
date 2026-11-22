@@ -1034,11 +1034,15 @@ esac"
   [[ "$output" == *"NPM_CONFIG_MIN_RELEASE_AGE"* ]]
 }
 
+# The verifier's config reads answer only when --no-plugins comes first:
+# without it Poetry loads a project's .poetry/plugins (MEASURED, 2.5.2), so a
+# read without it is a bug and gets no value back. A bare --version is
+# harden.sh's, which asks from /.
 poetry_age_stub() { # version value [exclude]
   stub_bin poetry "case \"\$*\" in
-  *--version*) echo 'Poetry (version $1)' ;;
-  'config solver.min-release-age') echo '$2' ;;
-  'config solver.min-release-age-exclude') echo '${3:-null}' ;;
+  '--no-plugins --version'|--version) echo 'Poetry (version $1)' ;;
+  '--no-plugins config solver.min-release-age') echo '$2' ;;
+  '--no-plugins config solver.min-release-age-exclude') echo '${3:-null}' ;;
   *) echo STUB ;;
 esac"
 }

@@ -62,6 +62,13 @@ cq() { printf '%s' "$1"; }
 # at main.
 scv_doc() { printf '%s/%s' "${SCV_DOCS_URL:-https://github.com/echennells/supply-chain-hardening/blob/main}" "$1"; }
 
+# scv_at_root <command> [args...]: runs a tool from /, never from the working
+# directory, which may be a checkout nobody reviewed. A tool asked about itself
+# reads files there and in every directory above, and some name code it then
+# runs; the preamble's "no project code" block lists what was measured. Assign
+# variables on the call as with run_bounded: they reach the command.
+scv_at_root() { (cd / && "$@"); }
+
 
 # ======================================================================
 # HOST TOOL DISCOVERY  (ECH-189, generalised)
@@ -184,7 +191,7 @@ if ! have yarn; then
 elif command -v requested >/dev/null 2>&1 && ! requested yarn; then
   row "N/A" - "yarn" "yarn installed but not in the requested ecosystems"
 else
-  yv=$(yarn --version 2>/dev/null | head -1 | tr -d '\r')
+  yv=$(scv_at_root yarn --version 2>/dev/null | head -1 | tr -d '\r')
   # A yarn that cannot name its version (a corepack shim that cannot resolve
   # one, a broken yarnPath) must not be reported as one too old for the gate.
   case "$yv" in [0-9]*) ;; *) yv="" ;; esac
@@ -193,13 +200,13 @@ else
       scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
         "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them" ;;
     *)
-      yout=$(yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
+      yout=$(scv_at_root yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
       v=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | tr -d ' ')
       ywant=$(scv_want_hours)
       ysaid=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | cut -c1-90)
       if [ "$yrc" -ne 0 ] && [ -z "$yv" ]; then
         scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
-          "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` in this directory to see why it printed none"
+          "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` from / to see why it printed none"
       elif [ "$yrc" -ne 0 ]; then
         scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
           "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this"
@@ -220,7 +227,7 @@ else
             fi ;;
         esac
       fi
-      v=$(yarn config get enableScripts 2>/dev/null | head -1 | tr -d '\r' | tr -d ' ')
+      v=$(scv_at_root yarn config get enableScripts 2>/dev/null | head -1 | tr -d '\r' | tr -d ' ')
       if [ "$v" = "false" ]; then
         row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
       else
@@ -689,7 +696,9 @@ scv_our_wrapper() { # $1 = tool name; prints our wrapper path, or returns 1
     # hanging front-runner shim must not hang the whole verify. run_bounded
     # keeps the bound where there is no timeout(1) (stock macOS), where this
     # used to run unbounded, and the variables set on the call reach the tool.
-    COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" run_bounded 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
+    # From /: through a rustup proxy a checkout's rust-toolchain.toml `path =`
+    # picks the cargo that answers --version (MEASURED, rustup 1.29.3).
+    COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$scv__wp" scv_at_root run_bounded 30 "$scv__wt" --version $scv__wa >/dev/null 2>&1 || true
     while IFS= read -r scv__wl; do
       [ -n "$scv__wl" ] || continue
       if [ -f "$scv__wl" ] && grep -q 'supply-chain-harden' "$scv__wl" 2>/dev/null; then
@@ -730,7 +739,7 @@ bun_global_bunfig() {
 # pass-through list of both wrappers, so this reaches the real bun with argv[0]
 # intact, resolves nothing and executes nothing.
 bun_entrypoint_mode() { # $1 = path to the entry point
-  case "$("$1" --help 2>&1 | grep -m1 '^Usage:')" in
+  case "$(scv_at_root "$1" --help 2>&1 | grep -m1 '^Usage:')" in
     'Usage: bunx'*) printf 'bunx\n' ;;
     'Usage: bun'*)  printf 'bun\n' ;;
     *)              printf 'unknown\n' ;;
@@ -767,7 +776,7 @@ bun_scripts_arm() {
 }
 
 if have bun; then
-  bver=$(bun --version 2>/dev/null | head -1 | tr -d '\r')
+  bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bcfg=$(bun_global_bunfig)
   bhint=""
@@ -842,7 +851,7 @@ bun_global_bunfig() {
   fi
 }
 bun_entrypoint_mode() { # $1 = path to the entry point
-  case "$("$1" --help 2>&1 | grep -m1 '^Usage:')" in
+  case "$(scv_at_root "$1" --help 2>&1 | grep -m1 '^Usage:')" in
     'Usage: bunx'*) printf 'bunx\n' ;;
     'Usage: bun'*)  printf 'bun\n' ;;
     *)              printf 'unknown\n' ;;
@@ -899,7 +908,7 @@ bunfig_implements() {
 }
 
 if have bun; then
-  bver=$(bun --version 2>/dev/null | head -1 | tr -d '\r')
+  bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bcfg=$(bun_global_bunfig)
   bhint=""
@@ -956,7 +965,7 @@ fi
 # is the injected --no-install, and the only honest evidence is the argv the
 # deployed wrapper actually produces.
 bun_entrypoint_mode() { # $1 = path to the entry point
-  case "$("$1" --help 2>&1 | grep -m1 '^Usage:')" in
+  case "$(scv_at_root "$1" --help 2>&1 | grep -m1 '^Usage:')" in
     'Usage: bunx'*) printf 'bunx\n' ;;
     'Usage: bun'*)  printf 'bun\n' ;;
     *)              printf 'unknown\n' ;;
@@ -984,7 +993,7 @@ bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
 }
 
 if have bun; then
-  bver=$(bun --version 2>/dev/null | head -1 | tr -d '\r')
+  bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   if ! grep -q 'supply-chain-harden' "$bpath" 2>/dev/null; then
     row GAP PRESENT    "bun runtime auto-install blocked" "bun resolves to an unwrapped binary at $bpath; \`bun run\` downloads and executes missing imports, and the global bunfig is not consulted for \`bun run\` at all"
@@ -995,7 +1004,7 @@ if have bun; then
     # in the other order the row read "bun  does not list that flag", blaming
     # bun's feature set for a broken wrapper.
     row GAP FUNCTIONAL "bun runtime auto-install blocked" "the entry point at $bpath does not run in bun mode (\`bun --help\` did not print bun usage): either the bunx wrapper was written over the bun wrapper through the bunx symlink — MEASURED, \`bun install\` then execs whatever \`install\` is on PATH — or the embedded REAL_BUN is gone and the guard exits 127 (MEASURED: '[supply-chain-hardening] error: real bun not found at ...; refusing to recurse')"
-  elif ! bun --help 2>&1 | grep -q -- '--no-install'; then
+  elif ! scv_at_root bun --help 2>&1 | grep -q -- '--no-install'; then
     row GAP FUNCTIONAL "bun runtime auto-install blocked" "the wrapper at $bpath injects --no-install but bun ${bver:-<version unavailable>} does not list that flag in its own --help — the injection is inert"
   else
     brun=$(bun_wrapper_dispatch bun run app.js)
@@ -1020,7 +1029,7 @@ fi
 # the global bunfig does not apply to it, so minimumReleaseAge / ignoreScripts /
 # frozenLockfile never reach this path and the wrapper is the entire control.
 bun_entrypoint_mode() { # $1 = path to the entry point
-  case "$("$1" --help 2>&1 | grep -m1 '^Usage:')" in
+  case "$(scv_at_root "$1" --help 2>&1 | grep -m1 '^Usage:')" in
     'Usage: bunx'*) printf 'bunx\n' ;;
     'Usage: bun'*)  printf 'bun\n' ;;
     *)              printf 'unknown\n' ;;
@@ -1201,8 +1210,8 @@ deno_wrapper_on_path() {
 # parsing before deno touches a registry.
 deno_flag_status() {   # <real-deno> <subcommand> -> implements|rejects|inconclusive
   local drb="$1" sub="$2" ours ctl ctlrc
-  ours=$("$drb" "$sub" --minimum-dependency-age=P2D 2>&1 </dev/null | head -20)
-  ctl=$("$drb" "$sub" --sch-probe-not-a-real-flag=P2D 2>&1 </dev/null)
+  ours=$(scv_at_root "$drb" "$sub" --minimum-dependency-age=P2D 2>&1 </dev/null | head -20)
+  ctl=$(scv_at_root "$drb" "$sub" --sch-probe-not-a-real-flag=P2D 2>&1 </dev/null)
   ctlrc=$?
   ctl=$(printf '%s\n' "$ctl" | head -20)
   # The control must actually be REFUSED and must name the invented flag. A
@@ -1235,8 +1244,8 @@ deno_flag_status() {   # <real-deno> <subcommand> -> implements|rejects|inconclu
 deno_value_status() {   # <real-deno> <subcommand> <value> -> accepted|rejected|inconclusive
   local drb="$1" sub="$2" val="$3" garbage='sch~not~a~duration' ours ctl ctlrc
   [ -n "$val" ] || { printf 'inconclusive\n'; return 0; }
-  ours=$("$drb" "$sub" "--minimum-dependency-age=$val" 2>&1 </dev/null | head -20)
-  ctl=$("$drb" "$sub" "--minimum-dependency-age=$garbage" 2>&1 </dev/null)
+  ours=$(scv_at_root "$drb" "$sub" "--minimum-dependency-age=$val" 2>&1 </dev/null | head -20)
+  ctl=$(scv_at_root "$drb" "$sub" "--minimum-dependency-age=$garbage" 2>&1 </dev/null)
   ctlrc=$?
   ctl=$(printf '%s\n' "$ctl" | head -20)
   [ "$ctlrc" -ne 0 ] || { printf 'inconclusive\n'; return 0; }
@@ -1260,8 +1269,8 @@ deno_value_status() {   # <real-deno> <subcommand> <value> -> accepted|rejected|
 # Nothing is fetched: no script positional, so both runs die in arg parsing.
 deno_presub_reachable() {   # <real-deno> -> yes|no|inconclusive
   local drb="$1" ours ctl ctlrc
-  ours=$("$drb" --log-level debug run 2>&1 </dev/null | head -20)
-  ctl=$("$drb" --sch-probe-not-a-real-flag debug run 2>&1 </dev/null)
+  ours=$(scv_at_root "$drb" --log-level debug run 2>&1 </dev/null | head -20)
+  ctl=$(scv_at_root "$drb" --sch-probe-not-a-real-flag debug run 2>&1 </dev/null)
   ctlrc=$?
   ctl=$(printf '%s\n' "$ctl" | head -20)
   [ "$ctlrc" -ne 0 ] || { printf 'inconclusive\n'; return 0; }
@@ -1312,11 +1321,11 @@ deno_wrapper_probe() {
   # happily. (An earlier draft claimed the guard would fire. It would not.)
   grep -qF "REAL_DENO='$tmp/real'" "$tmp/deno" 2>/dev/null || { rm -rf "$tmp"; return 1; }
   chmod +x "$tmp/deno" 2>/dev/null
-  printf 'BARE|%s\n' "$( "$tmp/deno" run app.ts 2>/dev/null )"
-  printf 'FLAG|%s\n' "$( "$tmp/deno" -A run app.ts 2>/dev/null )"
-  printf 'SEP|%s\n'  "$( "$tmp/deno" --log-level debug run app.ts 2>/dev/null )"
-  printf 'FMT|%s\n'  "$( "$tmp/deno" fmt 2>/dev/null )"
-  printf 'TASK|%s\n' "$( "$tmp/deno" task build 2>/dev/null )"
+  printf 'BARE|%s\n' "$( scv_at_root "$tmp/deno" run app.ts 2>/dev/null )"
+  printf 'FLAG|%s\n' "$( scv_at_root "$tmp/deno" -A run app.ts 2>/dev/null )"
+  printf 'SEP|%s\n'  "$( scv_at_root "$tmp/deno" --log-level debug run app.ts 2>/dev/null )"
+  printf 'FMT|%s\n'  "$( scv_at_root "$tmp/deno" fmt 2>/dev/null )"
+  printf 'TASK|%s\n' "$( scv_at_root "$tmp/deno" task build 2>/dev/null )"
   rm -rf "$tmp"
 }
 
@@ -1375,7 +1384,7 @@ else
     # unless deno runs, and "deno ran" means rc 0 AND a first line that is
     # actually deno's version banner — not merely non-empty output, which any
     # loader error also produces.
-    dvout=$("$drb" --version 2>&1 </dev/null); dvrc=$?
+    dvout=$(scv_at_root "$drb" --version 2>&1 </dev/null); dvrc=$?
     # Keep the first line only, and drop the calling shell's own
     # "<script>: line N: " prefix so the row quotes the loader's message
     # rather than the verifier's stack frame.
@@ -1393,12 +1402,12 @@ else
     # name the wrapper injects is a hidden alias, still accepted and enforced
     # (MEASURED on 2.9.6 and 2.9.8). Matching only the long name made both deno
     # rows WEAK on every current deno.
-    "$drb" run --help 2>/dev/null </dev/null | grep -qE -- '--(minimum-dependency-age|min-dep-age)' && dhelp=1
+    scv_at_root "$drb" run --help 2>/dev/null </dev/null | grep -qE -- '--(minimum-dependency-age|min-dep-age)' && dhelp=1
     dstat=$(deno_flag_status "$drb" run)
     # Is the separate-word-value bypass actually REACHABLE on this deno?
     # Two signals, and the GAP requires the stronger one: deno's own top-level
     # help table (PARSED-class) and the parser itself (FUNCTIONAL-class).
-    "$drb" --help 2>/dev/null </dev/null | grep -q -- '--log-level' && dloglevel=1
+    scv_at_root "$drb" --help 2>/dev/null </dev/null | grep -q -- '--log-level' && dloglevel=1
     dsepreach=$(deno_presub_reachable "$drb")
     # PER-SUBCOMMAND ACCEPTANCE. The wrapper injects into ten subcommands; deno
     # ERRORS when handed the flag on one that does not take it, so an injection
@@ -1410,7 +1419,7 @@ else
         dsubscope=" of every subcommand the wrapper injects into"
         for dsub in $dsubs; do
           [ "$dsub" = run ] && continue
-          "$drb" "$dsub" --help 2>/dev/null </dev/null | grep -qE -- '--(minimum-dependency-age|min-dep-age)' \
+          scv_at_root "$drb" "$dsub" --help 2>/dev/null </dev/null | grep -qE -- '--(minimum-dependency-age|min-dep-age)' \
             || dbadsubs="$dbadsubs $dsub"
         done
       fi
@@ -1725,7 +1734,7 @@ if have uv; then
   if command -v requested >/dev/null 2>&1 && ! requested uv; then
     row "N/A" - "uv" "uv installed but not in the requested ecosystems"
   else
-    uvver=$(uv --version 2>/dev/null | head -1 | awk '{print $2}')
+    uvver=$(scv_at_root uv --version 2>/dev/null | head -1 | awk '{print $2}')
     [ -n "$uvver" ] || uvver="?"
 
     # ---- probe cwd, and why it is "/" --------------------------------------
@@ -2208,12 +2217,17 @@ fi
 # Scoped like every other shared row. Without it, an action job that hardened
 # only npm on a stock runner (pip 24.0) failed verify on a pip GAP it never
 # asked about.
-if have python3 && python3 -m pip --version >/dev/null 2>&1 \
+if have python3 && scv_at_root python3 -m pip --version >/dev/null 2>&1 \
    && command -v requested >/dev/null 2>&1 && ! requested pip; then
   row "N/A" - "pip native age gate" "python3 -m pip present but pip is not in the requested ecosystems"
-elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
-  pipver=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
-  if ! python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
+elif have python3 && scv_at_root python3 -m pip --version >/dev/null 2>&1; then
+  # From /, every time: `python3 -m` puts the working directory first on
+  # sys.path, so a pip.py or pip/ in a checkout ran for `python3 -m pip
+  # --version` (MEASURED, pip 25.1.1 on Python 3.13.5). pip reads no config from
+  # the working directory, so / reports the same settings. Not -I: that also
+  # drops the user site, where `pip install --user` puts pip.
+  pipver=$(scv_at_root python3 -m pip --version 2>/dev/null | awk '{print $2}')
+  if ! scv_at_root python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
     # Toolchain, not config: no re-run of the hardening teaches pip 24 the flag.
     # As a plain row() it was counted "fixable by re-running the hardening", so
     # --fail-on=config failed every stock-runner job that hardened pip.
@@ -2222,7 +2236,7 @@ elif have python3 && python3 -m pip --version >/dev/null 2>&1; then
   else
     # pip prints `config list` in override-order groups, so the LAST match is
     # the effective value (env beats file). Strip optional surrounding quotes.
-    pipcut=$(python3 -m pip config list 2>/dev/null \
+    pipcut=$(scv_at_root python3 -m pip config list 2>/dev/null \
       | sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" \
       | tail -1)
     case "$pipcut" in
@@ -2293,8 +2307,17 @@ fi
 # poetry refuses to echo a key it does not know, and its readback includes the env
 # var and a repo's poetry.toml, so from 2.4.0 this one reading is the effective value.
 # Scoped to pip: the writers deploy this as part of it.
+#
+# --no-plugins ON EVERY CALL. Poetry 2 loads a project's own plugins from the
+# .poetry/plugins directory beside its pyproject.toml, on any command run there.
+# MEASURED on Poetry 2.5.2: once that directory existed (`poetry install`
+# creates it from [tool.poetry.requires-plugins], and a checkout can simply
+# commit it), the plugin's code ran for `poetry --version` and `poetry config`.
+# With --no-plugins neither ran, and `poetry config` still read the project's
+# poetry.toml (it reported a repo `min-release-age = 9`), so the row keeps
+# asking from the working directory.
 if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; then
-  pov=$(poetry --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  pov=$(poetry --no-plugins --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   powanth=$(scv_want_hours); powant=""
   case "$powanth" in
     ''|*[!0-9]*) ;;
@@ -2306,15 +2329,15 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
     scv_toolchain_gap pip.poetry-age-gate PARSED "poetry publish-age gate" \
       "poetry $pov has no solver.min-release-age (added in 2.4.0), and it reads neither pip.conf nor uv.toml, so a release published minutes ago still resolves"
   else
-    pod=$(poetry config solver.min-release-age 2>/dev/null | tail -1)
-    pox=$(poetry config solver.min-release-age-exclude 2>/dev/null | tail -1)
+    pod=$(poetry --no-plugins config solver.min-release-age 2>/dev/null | tail -1)
+    pox=$(poetry --no-plugins config solver.min-release-age-exclude 2>/dev/null | tail -1)
     # exclude-SOURCE exempts whole package sources. MEASURED on Poetry 2.5.x with
     # a 36500-day gate: ["pypi"] (repo poetry.toml, `poetry config --local`, or
     # POETRY_SOLVER_MIN_RELEASE_AGE_EXCLUDE_SOURCE=pypi) and the PyPI simple URL
     # each installed `six` anyway, while this row printed OK because it never
     # read the key. A bare string ("pypi", not a list) had no effect, and reads
     # back without brackets.
-    poxs=$(poetry config solver.min-release-age-exclude-source 2>/dev/null | tail -1)
+    poxs=$(poetry --no-plugins config solver.min-release-age-exclude-source 2>/dev/null | tail -1)
     poxs_pypi=0; poxs_list=0
     case "$poxs" in
       \[\]|'') ;;
@@ -3472,7 +3495,7 @@ cargo_positive_int() {
 # hang or a false GAP: run_bounded keeps the bound there. (Until it did, the
 # fallback here was an unbounded run, which is exactly a hang.)
 cargo_run_ok() {
-  RUSTUP_AUTO_INSTALL=0 run_bounded 20 "$@" >/dev/null 2>&1
+  RUSTUP_AUTO_INSTALL=0 scv_at_root run_bounded 20 "$@" >/dev/null 2>&1
 }
 
 # The cargo wrapper's sfw_ready test, run for the caller: prints sfw's cache
@@ -3503,11 +3526,11 @@ sfw_cold_cache_for_caller() {
 # fast under its own name.
 cargo_run_ok_as_cargo() { # <delegate> <args...>
   local p="$1"; shift
-  RUSTUP_AUTO_INSTALL=0 run_bounded 20 bash -c 'exec -a cargo "$0" "$@"' "$p" "$@" >/dev/null 2>&1
+  RUSTUP_AUTO_INSTALL=0 scv_at_root run_bounded 20 bash -c 'exec -a cargo "$0" "$@"' "$p" "$@" >/dev/null 2>&1
 }
 
 cargo_delegate_err() { # <delegate>
-  { RUSTUP_AUTO_INSTALL=0 run_bounded 20 "$1" --version; } 2>&1 | head -1
+  { RUSTUP_AUTO_INSTALL=0 scv_at_root run_bounded 20 "$1" --version; } 2>&1 | head -1
 }
 
 # VERSION TIER. cargo-cooldown 0.3.5 (what the role AND the action pin) has MSRV
@@ -3520,7 +3543,7 @@ rustc_below_cooldown_msrv() {
   have rustc || return 1
   # RUSTUP_AUTO_INSTALL=0 for the same reason as the cargo probes above: rustc is
   # a rustup proxy too, and this call was the one left unguarded.
-  v=$(RUSTUP_AUTO_INSTALL=0 rustc --version 2>/dev/null | awk '{print $2}' | head -1)
+  v=$(RUSTUP_AUTO_INSTALL=0 scv_at_root rustc --version 2>/dev/null | awk '{print $2}' | head -1)
   v=${v%%-*}
   CARGO_RUSTC_V="$v"
   case "$v" in ''|*[!0-9.]*) return 1 ;; esac
@@ -4466,7 +4489,7 @@ else
     # reads BUNDLE_COOLDOWN, ~/.bundle/config and gemrc `:cooldown:`, taking the
     # larger. MEASURED: it installs an older version inside the window and
     # refuses an exact pin to a too-new one.
-    bgv=$(gem --version 2>/dev/null | head -1 | tr -d '\r')
+    bgv=$(scv_at_root gem --version 2>/dev/null | head -1 | tr -d '\r')
     if [ -n "$bgv" ] && [ "$(printf '4.1.0\n%s\n' "$bgv" | sort -V | head -1)" = "4.1.0" ]; then
       bgem="RubyGems $bgv applies the same window to \`gem install\`/\`gem update\` (it installs an older version; an exact pin to a newer one is refused)"
     else
@@ -4711,7 +4734,10 @@ maven_probe() {
   MVN_SETTINGS=$(mvn_extract_settings "$MVN_OUT")
   # -X prints the version banner first; only start a second JVM if it did not.
   MVN_VER=$(printf '%s\n' "$MVN_OUT" | sed -n 's/.*Apache Maven \([0-9][0-9.]*\).*/\1/p' | head -1)
-  [ -n "$MVN_VER" ] || MVN_VER=$(mvn -v 2>/dev/null | sed -n 's/.*Apache Maven \([0-9][0-9.]*\).*/\1/p' | head -1)
+  # From /: the mvn launcher walks up from the working directory to a .mvn/ and
+  # puts its jvm.config on the java command line (MEASURED, maven 3.10.0: a
+  # checkout's -javaagent ran for `mvn -v`, two directories down as well).
+  [ -n "$MVN_VER" ] || MVN_VER=$(scv_at_root mvn -v 2>/dev/null | sed -n 's/.*Apache Maven \([0-9][0-9.]*\).*/\1/p' | head -1)
   # Did maven get as far as running at all? A broken JVM breaks the control
   # runs too, so every downstream row must degrade instead of reading their
   # silence as a finding about this host.
@@ -5212,7 +5238,7 @@ gradle_facts() {
     # when a broken init script is failing every real build. Cached so it too
     # runs at most once per verifier run.
     if [ "$GRADLE_VER_DONE" -eq 0 ]; then
-      GRADLE_VER=$(gradle --version 2>/dev/null | sed -n 's/^Gradle \([0-9][0-9.]*\).*/\1/p' | head -1)
+      GRADLE_VER=$(scv_at_root gradle --version 2>/dev/null | sed -n 's/^Gradle \([0-9][0-9.]*\).*/\1/p' | head -1)
       GRADLE_VER_DONE=1
     fi
     gver="$GRADLE_VER"
@@ -5521,7 +5547,7 @@ gradle_facts() {
     # when a broken init script is failing every real build. Cached so it too
     # runs at most once per verifier run.
     if [ "$GRADLE_VER_DONE" -eq 0 ]; then
-      GRADLE_VER=$(gradle --version 2>/dev/null | sed -n 's/^Gradle \([0-9][0-9.]*\).*/\1/p' | head -1)
+      GRADLE_VER=$(scv_at_root gradle --version 2>/dev/null | sed -n 's/^Gradle \([0-9][0-9.]*\).*/\1/p' | head -1)
       GRADLE_VER_DONE=1
     fi
     gver="$GRADLE_VER"
@@ -5668,6 +5694,19 @@ fi
 # turned the fixture control into a false "control failed".
 # DOTNET_NUGET_SIGNATURE_VERIFICATION is deliberately NOT set here: the probe
 # must observe the ambient value.
+#
+# DOTNET IS NEVER STARTED IN THE WORKING DIRECTORY. The dotnet host picks the
+# SDK from the nearest global.json at or above the directory it runs in, and
+# from .NET 10 a global.json "paths" entry can point at an SDK the checkout
+# ships. MEASURED (host 10.0.404): with `"paths": [".dotnet", "$host$"]` and a
+# .dotnet/sdk/99.0.100/dotnet.dll beside it, `dotnet --version` and `dotnet
+# nuget config paths` ran that dll; `--list-sdks` listed it without running it.
+# So the questions about this host are asked from / (nuget_dotnet_root), and
+# the questions about this project name it with --working-directory, which
+# NuGet uses to find its NuGet.Config files while the SDK answering is the one /
+# resolves (MEASURED, 10.0.404: `config paths` and `config get` from / reported
+# the project's file). The restore probes below run in their own scratch project.
+nuget_dotnet_root() { scv_at_root nuget_dotnet "$@"; }
 nuget_dotnet() {
   DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false \
@@ -5746,13 +5785,13 @@ elif ! have dotnet; then
              "nuget signature enforcement" "nuget trusted signers"; do
     row "N/A" - "$ngp" "dotnet not installed"
   done
-elif ! nuget_dotnet --list-sdks 2>/dev/null | grep -q '^[0-9]'; then
+elif ! nuget_dotnet_root --list-sdks 2>/dev/null | grep -q '^[0-9]'; then
   for ngp in "nuget config read by dotnet" "nuget source allowlist" \
              "nuget signature enforcement" "nuget trusted signers"; do
     row "N/A" - "$ngp" "dotnet runtime present but no SDK (dotnet --list-sdks is empty) — nothing on this host restores packages"
   done
 else
-  nsdk=$(nuget_dotnet --version 2>/dev/null | tr -d ' \r'); [ -n "$nsdk" ] || nsdk="unknown"
+  nsdk=$(nuget_dotnet_root --version 2>/dev/null | tr -d ' \r'); [ -n "$nsdk" ] || nsdk="unknown"
   nmaj=$(printf '%s' "$nsdk" | cut -d. -f1)
   case "$nmaj" in ''|*[!0-9]*) nmaj=0 ;; esac
 
@@ -5762,7 +5801,7 @@ else
   # and prints its usage banner to STDOUT, so keep only lines that are real
   # absolute file paths.  The candidate paths below are used ONLY to spot a
   # hardening file stranded outside that set; none is assumed correct.
-  napplied=$(nuget_dotnet nuget config paths 2>/dev/null | while IFS= read -r ngl; do
+  napplied=$(nuget_dotnet_root nuget config paths --working-directory "$PWD" 2>/dev/null | while IFS= read -r ngl; do
     case "$ngl" in (/*) [ -f "$ngl" ] && printf '%s\n' "$ngl" ;; esac
   done)
 
@@ -5795,7 +5834,7 @@ else
   # What the TOOL says the merged value is, and which file won.  Only `require`
   # and `accept` are real NuGet values; anything else (including the
   # "error: Key ... not found." that `config get` prints on stdout) is "not set".
-  nsvm=$(nuget_dotnet nuget config get signatureValidationMode --show-path 2>/dev/null | head -1)
+  nsvm=$(nuget_dotnet_root nuget config get signatureValidationMode --show-path --working-directory "$PWD" 2>/dev/null | head -1)
   nsvm_val=$(printf '%s' "$nsvm" | cut -f1)
   nsvm_src=$(printf '%s' "$nsvm" | sed -n 's/.*file: //p')
   case "$nsvm_val" in require|accept) : ;; *) nsvm_val=""; nsvm_src="" ;; esac
@@ -5848,35 +5887,66 @@ else
   # NuGet's own post-merge resolution for the CURRENT working directory, so a
   # repo-local NuGet.Config that re-adds a feed is visible here.  --format
   # short prints "E <url>" / "D <url>" and exists on every SDK 6..10 (MEASURED).
-  nsrcrc=0
-  nsrc=$(nuget_dotnet nuget list source --format short 2>/dev/null) || nsrcrc=1
+  #
+  # `list source` has no option naming a directory, so where the SDK has
+  # `nuget config` (9.0+) the list is rebuilt from `config get all
+  # --working-directory`, which prints the merged packageSources (a <clear/>
+  # applied and shown as `clear`) and disabledPackageSources. MEASURED on
+  # 10.0.404: that matched `list source --format short` run in the project,
+  # entry for entry. An older SDK is asked from /, and a NuGet.Config at or
+  # above the working directory then goes unjudged, which the row says.
+  nsrcrc=0; nsrcnote=""; nsrcwhere="in $(nuget_clip "$PWD")"
+  if nsrcall=$(nuget_dotnet_root nuget config get all --working-directory "$PWD" 2>/dev/null) \
+     && printf '%s\n' "$nsrcall" | grep -q '^packageSources:'; then
+    nsrc=$(printf '%s\n' "$nsrcall" | awk '
+      function attr(n,   i) {
+        if (match($0, "[ \t]" n "=\"[^\"]*\"")) return substr($0, RSTART + length(n) + 3, RLENGTH - length(n) - 4)
+        return ""
+      }
+      /^[^ \t]/ { sec = $0; sub(/:[ \t\r]*$/, "", sec); next }
+      sec == "packageSources" && $1 == "clear" { n = 0; next }
+      sec == "packageSources" && $1 == "add" { k[++n] = attr("key"); v[n] = attr("value"); next }
+      sec == "disabledPackageSources" && $1 == "add" { if (tolower(attr("value")) == "true") off[attr("key")] = 1 }
+      END { for (i = 1; i <= n; i++) print (off[k[i]] ? "D " : "E ") v[i] }')
+  else
+    nsrc=$(nuget_dotnet_root nuget list source --format short 2>/dev/null) || nsrcrc=1
+    nsrcwhere="from / (this host's config)"
+    ngd=$PWD
+    while [ -n "$ngd" ] && [ "$ngd" != / ]; do
+      for ngn in NuGet.Config nuget.config NuGet.config; do
+        [ -f "$ngd/$ngn" ] && { nsrcnote="$ngd/$ngn"; break 2; }
+      done
+      ngd=${ngd%/*}
+    done
+    [ -n "$nsrcnote" ] && nsrcnote=". $(nuget_clip "$nsrcnote") was not judged: SDK $nsdk cannot be asked about another directory ('dotnet nuget config' needs SDK 9.0+), and run in the project dotnet would start whichever SDK the project's global.json names"
+  fi
   nenabled=$(printf '%s\n' "$nsrc" | sed -n 's/^E //p' | sed 's/[[:space:]]*$//')
   ncount=$(printf '%s\n' "$nenabled" | grep -c '[^[:space:]]')
   nextra=$(printf '%s\n' "$nenabled" | grep '[^[:space:]]' | grep -vx 'https://api\.nuget\.org/v3/index\.json')
   if [ "$nsrcrc" -ne 0 ]; then
     row "WEAK" "PRESENT" "nuget source allowlist" \
-      "'dotnet nuget list source' failed on SDK $nsdk — the effective source list could not be read from the tool"
+      "'dotnet nuget list source' failed on SDK $nsdk — the effective source list could not be read from the tool$nsrcnote"
   elif [ "$ncount" -eq 0 ]; then
     row "WEAK" "PARSED" "nuget source allowlist" \
-      "dotnet resolves zero enabled package sources here — nothing can restore, so this is a broken config rather than a working allowlist"
+      "dotnet resolves zero enabled package sources here — nothing can restore, so this is a broken config rather than a working allowlist$nsrcnote"
   elif [ -n "$nextra" ]; then
     row "GAP" "PARSED" "nuget source allowlist" \
-      "dotnet resolves $ncount enabled source(s) in $(nuget_clip "$(pwd)"); not official nuget.org: $(nuget_clip "$nextra")"
+      "dotnet resolves $ncount enabled source(s) $nsrcwhere; not official nuget.org: $(nuget_clip "$nextra")$nsrcnote"
   elif [ -z "$napplied" ]; then
     # SDK < 8: no `config paths`, so the merged set is unknowable and the state
     # cannot be attributed to anything we deployed.
     row "WEAK" "PARSED" "nuget source allowlist" \
-      "dotnet resolves $ncount enabled source(s) in $(nuget_clip "$(pwd)"), all official nuget.org — but SDK $nsdk cannot be asked which config files it merges, so nothing attributes this state to our allowlist rather than to NuGet's stock default"
+      "dotnet resolves $ncount enabled source(s) $nsrcwhere, all official nuget.org — but SDK $nsdk cannot be asked which config files it merges, so nothing attributes this state to our allowlist rather than to NuGet's stock default$nsrcnote"
   elif [ -z "$ninset" ]; then
     # MEASURED: on a host with nothing deployed, and on the CI host whose config
     # sits at an unread path, this output is byte-identical to the hardened case,
     # because NuGet's stock default IS one enabled nuget.org source.  Reporting
     # OK there is a green row for a protection that does not exist.
     row "WEAK" "PARSED" "nuget source allowlist" \
-      "dotnet resolves $ncount enabled source(s) in $(nuget_clip "$(pwd)"), all official nuget.org — but that is byte-for-byte NuGet's stock default and no config we deployed is in the merged set, so nothing attributes this state to our allowlist"
+      "dotnet resolves $ncount enabled source(s) $nsrcwhere, all official nuget.org — but that is byte-for-byte NuGet's stock default and no config we deployed is in the merged set, so nothing attributes this state to our allowlist$nsrcnote"
   else
     row "OK" "PARSED" "nuget source allowlist" \
-      "dotnet resolves $ncount enabled source(s) in $(nuget_clip "$(pwd)"), all official nuget.org, with our $(nuget_clip "$ninset") in the merged set"
+      "dotnet resolves $ncount enabled source(s) $nsrcwhere, all official nuget.org, with our $(nuget_clip "$ninset") in the merged set$nsrcnote"
   fi
 
 # --- nuget signature enforcement  [FUNCTIONAL] ---
@@ -6020,7 +6090,7 @@ NGEOF
   if [ "$nsigstate" != "enforcing" ]; then
     row "N/A" - "nuget trusted signers" \
       "signature validation is not proven to be enforcing on this host; trusted signers cannot change that outcome"
-  elif ! nuget_dotnet nuget config get all >/dev/null 2>&1; then
+  elif ! nuget_dotnet_root nuget config get all --working-directory "$PWD" >/dev/null 2>&1; then
     row "WEAK" "PRESENT" "nuget trusted signers" \
       "SDK $nsdk cannot report merged trustedSigners ('dotnet nuget config' needs SDK 9.0+)"
   else
@@ -6030,7 +6100,7 @@ NGEOF
     # signer — an EMPTY <trustedSigners /> reported "1 entry" WEAK instead of
     # the GAP.  End the section at the first non-indented line and match the
     # entry keyword as its own field.
-    nts=$(nuget_dotnet nuget config get all 2>/dev/null | awk '
+    nts=$(nuget_dotnet_root nuget config get all --working-directory "$PWD" 2>/dev/null | awk '
       /^trustedSigners:/ { ints=1; next }
       /^[^ \t]/          { ints=0 }
       ints && ($1=="repository" || $1=="author") { n++ }

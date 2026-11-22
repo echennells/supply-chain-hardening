@@ -352,6 +352,98 @@ run_bounded() {
 }
 # <<< run_bounded
 
+# >>> no project code
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them).
+#
+# THE VERIFIER NEVER RUNS CODE A CHECKOUT SUPPLIES. AGENTS.md says to run it
+# from inside a project too, and that may be a repo nobody has reviewed. Tools
+# read files from the working directory and every directory above it, and some
+# of those files name code that the tool then runs, for `--version` as much as
+# for an install. MEASURED, each with a marker file written by the checkout:
+#   yarn 1.22.22 and 4.1.0 to 4.19.0  .yarnrc.yml yarnPath or plugins, from any
+#                                     parent directory (and classic's .yarnrc
+#                                     yarn-path), on `yarn --version`
+#   corepack 0.36.0 (Node 24)         a project .corepack.env that points
+#                                     COREPACK_NPM_REGISTRY at any server, or
+#                                     allows a packageManager URL: the yarn it
+#                                     served ran on `yarn --version`
+#   rustup 1.29.3                     rust-toolchain.toml `path =` (absolute), on
+#                                     `cargo --version` and `rustc --version`
+#   maven 3.10.0                      .mvn/jvm.config (-javaagent), on `mvn -v`
+#   .NET SDK 10.0.404                 global.json sdk "paths": the checkout's own
+#                                     SDK ran on `dotnet --version`
+#   pip 25.1.1 (Python 3.13)          a pip.py or pip/ beside it, on
+#                                     `python3 -m pip --version`
+#   go1.24.10                         a go.mod `toolchain` line: go fetched and
+#                                     ran go1.25.4 for `go env`
+# So each tool is asked about itself from /, and what a project changes is read
+# from its files, or through an option that names the directory (`dotnet nuget
+# config --working-directory`). A tool still runs in the project only where it
+# was measured to read nothing there but settings: npm's `config get`, uv's
+# `--show-settings`, `bundle config get`, `poetry config` and the composer rows'
+# --no-plugins with COMPOSER pointed at a file that cannot exist.
+#
+# COREPACK_ENV_FILE=0 stops corepack loading a project's .corepack.env (MEASURED,
+# corepack 0.36.0: with it, the redirected download went to repo.yarnpkg.com).
+# It is exported for every tool started here, so a corepack shim the verifier
+# runs in the project (npm's, when `corepack enable npm` made one) runs only an
+# official release, whichever version the project's packageManager names.
+#
+# THE SAME HOLDS FOR A DIRECTORY ANOTHER ACCOUNT CAN WRITE. The probes that
+# build throwaway projects used `mktemp -d`, which lands in /tmp, and /tmp is
+# writable by everyone. A file planted in /tmp sits above every one of them.
+# MEASURED: /tmp/.mvn/jvm.config ran in the maven probes, /tmp/rust-toolchain.toml
+# in a cargo --version there, /tmp/Directory.Build.props in the nuget restore
+# probe, a /tmp/package.json workspace root's install scripts in the bun probe
+# (bun 1.3.0), and a /tmp/.yarnrc.yml yarnPath in yarn. The sticky bit stops
+# another account deleting your files, not creating new ones. So the scratch
+# directory comes from a base that only root and this account can write, every
+# directory up to /, and TMPDIR points into it for everything started here. A
+# group-writable directory is accepted, as action/harden.sh accepts one for its
+# env file: the group is a grant somebody made. A base inside the working
+# directory is not, because the checkout's files would sit above the probes.
+# With no such base (HOME and TMPDIR both below /tmp, as in a test harness, and
+# no XDG_RUNTIME_DIR), the probes run under TMPDIR as before and stderr says so.
+export COREPACK_ENV_FILE=0
+scv_private_dir() { # <absolute dir> -> 0 when it and every directory above it are owned by root or us and not world-writable
+  scv__pd=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  scv__me=$(id -u)
+  while :; do
+    scv__pl=$(ls -ldn -- "$scv__pd" 2>/dev/null) || return 1
+    scv__pm=${scv__pl%% *}
+    scv__pu=$(printf '%s\n' "$scv__pl" | awk '{print $3}')
+    case "$scv__pu" in 0|"$scv__me") ;; *) return 1 ;; esac
+    case "$scv__pm" in ????????w*) return 1 ;; esac
+    [ "$scv__pd" = / ] && return 0
+    scv__pd=${scv__pd%/*}; [ -n "$scv__pd" ] || scv__pd=/
+  done
+}
+SCV_SCRATCH=""; SCV_SCRATCH_TRIED=""
+scv__pwdp=$(pwd -P 2>/dev/null)
+scv__cache="${XDG_CACHE_HOME:-${HOME:+$HOME/.cache}}"
+for scv__b in "${TMPDIR:-}" "${RUNNER_TEMP:-}" "${scv__cache:+$scv__cache/supply-chain-hardening}" "${XDG_RUNTIME_DIR:-}"; do
+  case "$scv__b" in /*) ;; *) continue ;; esac
+  if [ "$scv__b" = "${scv__cache:+$scv__cache/supply-chain-hardening}" ] && [ ! -d "$scv__b" ]; then
+    ( umask 077; mkdir -p -- "$scv__b" ) 2>/dev/null || true
+  fi
+  SCV_SCRATCH_TRIED="${SCV_SCRATCH_TRIED:+$SCV_SCRATCH_TRIED, }$scv__b"
+  [ -d "$scv__b" ] && scv_private_dir "$scv__b" || continue
+  scv__bp=$(cd -P -- "$scv__b" && pwd -P) || continue
+  if [ -n "$scv__pwdp" ] && [ "$scv__pwdp" != / ]; then
+    case "$scv__bp/" in "$scv__pwdp"/*) continue ;; esac
+  fi
+  SCV_SCRATCH=$(mktemp -d "$scv__bp/scv.XXXXXX" 2>/dev/null) || { SCV_SCRATCH=""; continue; }
+  break
+done
+if [ -n "$SCV_SCRATCH" ]; then
+  TMPDIR=$SCV_SCRATCH; export TMPDIR
+  trap 'rm -rf "$SCV_SCRATCH"' EXIT
+elif [ "${QUIET:-0}" != 1 ]; then
+  echo "[supply-chain-verify] warning: found no directory for the probes' throwaway projects that only root and $(id -un 2>/dev/null) can write, all the way up (tried: ${SCV_SCRATCH_TRIED:-nothing}), so they run under ${TMPDIR:-/tmp}, where a file another account planted above them can run in them. Point TMPDIR at a directory of your own, outside the project" >&2
+fi
+# <<< no project code
+
 # True when version $1 >= $2 (dotted numeric). GNU sort -V; hosts are Linux.
 # Used as a deterministic, offline backstop for gates that only exist above a
 # known tool version — a version cannot be faked by config echo the way a
@@ -707,7 +799,7 @@ scv_npm_exclude_scope() { # <the list as `npm config get` prints it: comma-separ
   npmdir=${npmjs%/bin/npm-cli.js}
   out=unknown
   if [ -n "$npmjs" ] && [ "$npmdir" != "$npmjs" ] && [ -d "$npmdir/node_modules/@npmcli/arborist/lib" ]; then
-    out=$(node -e '
+    out=$(cd / && node -e '
 const path = require("path");
 const lib = path.join(process.argv[1], "node_modules", "@npmcli", "arborist", "lib");
 let mm;
@@ -907,9 +999,9 @@ fi
 # npq is a protection COMPONENT, not an ecosystem, so "not installed" is a
 # broken promise rather than "nothing to protect" — provided it was promised.
 if have npq-hero; then
-  out=$(npq-hero --version 2>&1)
+  out=$(cd / && npq-hero --version 2>&1)
   if printf '%s' "$out" | grep -qi 'npq suppressed'; then
-    row GAP FUNCTIONAL "npq reputation checks" "npq is installed but SUPPRESSED on Node $(node --version 2>/dev/null); it passes through to npm and exits 0"
+    row GAP FUNCTIONAL "npq reputation checks" "npq is installed but SUPPRESSED on Node $(cd / && node --version 2>/dev/null); it passes through to npm and exits 0"
   else
     row OK FUNCTIONAL "npq reputation checks" "npq responds normally (not suppressed)"
   fi
@@ -964,7 +1056,7 @@ if have sfw; then
     row GAP FUNCTIONAL "Socket Firewall" "sfw's cache is not root-only ($sfw_foreign). sfw runs the cached binary without checking it again, for root too, so whoever can write there chooses what the npm and cargo wrappers run, including under sudo. Re-apply the role: it removes the cache and downloads the binary again"
   elif [ -n "$sfw_cold" ]; then
     row GAP FUNCTIONAL "Socket Firewall" "sfw has no firewall binary cached that this account can run ($sfw_cold), and only root can fetch it, so the npm and cargo wrappers run without sfw and warn - installs work, unfiltered. Re-apply the role, or run  sudo sh -c 'umask 022; sfw true && chmod -R go+rX $sfw_cold'  once"
-  elif sfw_err=$(SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
+  elif sfw_err=$(cd / && SFW_SKIP_UPDATE_CHECK=1 sfw --version 2>&1 >/dev/null); then
     row OK FUNCTIONAL "Socket Firewall" "sfw responds to --version"
   else
     row GAP FUNCTIONAL "Socket Firewall" "sfw is on PATH but does not execute successfully: $(printf '%s' "$sfw_err" | grep -v '^[[:space:]]*$' | tail -n 1)"
@@ -1099,7 +1191,11 @@ wrapper_ran() {
   # Only composer reads those two variables.
   wa=""; case "${w##*/}" in composer) wa="--no-plugins --no-interaction" ;; esac
   # Bounded on every host, timeout(1) or not: see run_bounded.
-  _wr_err=$(COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" run_bounded 30 "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
+  # From /, never the working directory: one of these is cargo, and through a
+  # rustup proxy a checkout's rust-toolchain.toml `path =` names the cargo that
+  # answers (MEASURED, rustup 1.29.3: it ran for `cargo --version`). See "no
+  # project code" above.
+  _wr_err=$(cd / && COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" run_bounded 30 "$w" --version $wa 2>&1 >/dev/null; echo "rc=$?")
   # RAN IS NOT WORKS. The run-probe fires first thing, so a wrapper that then
   # REFUSES this account still records a run. The pip-to-uv wrapper exits 126
   # with a [supply-chain-hardening] error when the only uv it finds belongs to
@@ -1197,8 +1293,10 @@ fi
 # <<< go discovery
 
 if have go; then
-  # `go env` is go's effective config, not our file.
-  v=$(go env GOFLAGS 2>/dev/null)
+  # `go env` is go's effective config, not our file. Asked from /: in a module
+  # whose go.mod has a `toolchain` line, `go env` fetched and ran that toolchain
+  # (MEASURED, go1.24.10 ran go1.25.4), and GOFLAGS comes from no project file.
+  v=$(cd / && go env GOFLAGS 2>/dev/null)
 {% if goflags_mod | length > 0 %}
   # goflags_mod was set, so the role wrote GOFLAGS=-mod={{ goflags_mod }}.
   case "$v" in
@@ -1295,8 +1393,10 @@ if have pip3 || have pip; then
       fi
     fi
   else
-    pipv=$("$PIPBIN" --version 2>/dev/null | awk '{print $2}')
-    pipcl=$("$PIPBIN" config list 2>/dev/null); pipclrc=$?
+    # From /: pip reads no config from the working directory (see "no project
+    # code" above).
+    pipv=$(cd / && "$PIPBIN" --version 2>/dev/null | awk '{print $2}')
+    pipcl=$(cd / && "$PIPBIN" config list 2>/dev/null); pipclrc=$?
     if [ "$pipclrc" -eq 0 ]; then
       # Environment beats a [install] section, which beats [global].
       pipcl=$(printf '%s\n' "$pipcl" | tr -d " '\"\r")
@@ -1346,7 +1446,7 @@ else
     row WEAK PRESENT "python import-path shadowing" "could not create a temp dir to run the probe"
   else
     printf 'import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)),"M"),"w").write("x")\n' > "$pysd/struct.py"
-    pyv=$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)
+    pyv=$(python3 -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)
     # CONTROL first: strip the protection and require the marker. A probe for
     # "nothing happened" is worthless without proof it can observe something.
     rm -f "$pysd/M"

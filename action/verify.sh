@@ -457,6 +457,98 @@ run_bounded() {
 }
 # <<< run_bounded
 
+# >>> no project code
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/07-verify.bats compares them).
+#
+# THE VERIFIER NEVER RUNS CODE A CHECKOUT SUPPLIES. AGENTS.md says to run it
+# from inside a project too, and that may be a repo nobody has reviewed. Tools
+# read files from the working directory and every directory above it, and some
+# of those files name code that the tool then runs, for `--version` as much as
+# for an install. MEASURED, each with a marker file written by the checkout:
+#   yarn 1.22.22 and 4.1.0 to 4.19.0  .yarnrc.yml yarnPath or plugins, from any
+#                                     parent directory (and classic's .yarnrc
+#                                     yarn-path), on `yarn --version`
+#   corepack 0.36.0 (Node 24)         a project .corepack.env that points
+#                                     COREPACK_NPM_REGISTRY at any server, or
+#                                     allows a packageManager URL: the yarn it
+#                                     served ran on `yarn --version`
+#   rustup 1.29.3                     rust-toolchain.toml `path =` (absolute), on
+#                                     `cargo --version` and `rustc --version`
+#   maven 3.10.0                      .mvn/jvm.config (-javaagent), on `mvn -v`
+#   .NET SDK 10.0.404                 global.json sdk "paths": the checkout's own
+#                                     SDK ran on `dotnet --version`
+#   pip 25.1.1 (Python 3.13)          a pip.py or pip/ beside it, on
+#                                     `python3 -m pip --version`
+#   go1.24.10                         a go.mod `toolchain` line: go fetched and
+#                                     ran go1.25.4 for `go env`
+# So each tool is asked about itself from /, and what a project changes is read
+# from its files, or through an option that names the directory (`dotnet nuget
+# config --working-directory`). A tool still runs in the project only where it
+# was measured to read nothing there but settings: npm's `config get`, uv's
+# `--show-settings`, `bundle config get`, `poetry config` and the composer rows'
+# --no-plugins with COMPOSER pointed at a file that cannot exist.
+#
+# COREPACK_ENV_FILE=0 stops corepack loading a project's .corepack.env (MEASURED,
+# corepack 0.36.0: with it, the redirected download went to repo.yarnpkg.com).
+# It is exported for every tool started here, so a corepack shim the verifier
+# runs in the project (npm's, when `corepack enable npm` made one) runs only an
+# official release, whichever version the project's packageManager names.
+#
+# THE SAME HOLDS FOR A DIRECTORY ANOTHER ACCOUNT CAN WRITE. The probes that
+# build throwaway projects used `mktemp -d`, which lands in /tmp, and /tmp is
+# writable by everyone. A file planted in /tmp sits above every one of them.
+# MEASURED: /tmp/.mvn/jvm.config ran in the maven probes, /tmp/rust-toolchain.toml
+# in a cargo --version there, /tmp/Directory.Build.props in the nuget restore
+# probe, a /tmp/package.json workspace root's install scripts in the bun probe
+# (bun 1.3.0), and a /tmp/.yarnrc.yml yarnPath in yarn. The sticky bit stops
+# another account deleting your files, not creating new ones. So the scratch
+# directory comes from a base that only root and this account can write, every
+# directory up to /, and TMPDIR points into it for everything started here. A
+# group-writable directory is accepted, as action/harden.sh accepts one for its
+# env file: the group is a grant somebody made. A base inside the working
+# directory is not, because the checkout's files would sit above the probes.
+# With no such base (HOME and TMPDIR both below /tmp, as in a test harness, and
+# no XDG_RUNTIME_DIR), the probes run under TMPDIR as before and stderr says so.
+export COREPACK_ENV_FILE=0
+scv_private_dir() { # <absolute dir> -> 0 when it and every directory above it are owned by root or us and not world-writable
+  scv__pd=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  scv__me=$(id -u)
+  while :; do
+    scv__pl=$(ls -ldn -- "$scv__pd" 2>/dev/null) || return 1
+    scv__pm=${scv__pl%% *}
+    scv__pu=$(printf '%s\n' "$scv__pl" | awk '{print $3}')
+    case "$scv__pu" in 0|"$scv__me") ;; *) return 1 ;; esac
+    case "$scv__pm" in ????????w*) return 1 ;; esac
+    [ "$scv__pd" = / ] && return 0
+    scv__pd=${scv__pd%/*}; [ -n "$scv__pd" ] || scv__pd=/
+  done
+}
+SCV_SCRATCH=""; SCV_SCRATCH_TRIED=""
+scv__pwdp=$(pwd -P 2>/dev/null)
+scv__cache="${XDG_CACHE_HOME:-${HOME:+$HOME/.cache}}"
+for scv__b in "${TMPDIR:-}" "${RUNNER_TEMP:-}" "${scv__cache:+$scv__cache/supply-chain-hardening}" "${XDG_RUNTIME_DIR:-}"; do
+  case "$scv__b" in /*) ;; *) continue ;; esac
+  if [ "$scv__b" = "${scv__cache:+$scv__cache/supply-chain-hardening}" ] && [ ! -d "$scv__b" ]; then
+    ( umask 077; mkdir -p -- "$scv__b" ) 2>/dev/null || true
+  fi
+  SCV_SCRATCH_TRIED="${SCV_SCRATCH_TRIED:+$SCV_SCRATCH_TRIED, }$scv__b"
+  [ -d "$scv__b" ] && scv_private_dir "$scv__b" || continue
+  scv__bp=$(cd -P -- "$scv__b" && pwd -P) || continue
+  if [ -n "$scv__pwdp" ] && [ "$scv__pwdp" != / ]; then
+    case "$scv__bp/" in "$scv__pwdp"/*) continue ;; esac
+  fi
+  SCV_SCRATCH=$(mktemp -d "$scv__bp/scv.XXXXXX" 2>/dev/null) || { SCV_SCRATCH=""; continue; }
+  break
+done
+if [ -n "$SCV_SCRATCH" ]; then
+  TMPDIR=$SCV_SCRATCH; export TMPDIR
+  trap 'rm -rf "$SCV_SCRATCH"' EXIT
+elif [ "${QUIET:-0}" != 1 ]; then
+  echo "[supply-chain-verify] warning: found no directory for the probes' throwaway projects that only root and $(id -un 2>/dev/null) can write, all the way up (tried: ${SCV_SCRATCH_TRIED:-nothing}), so they run under ${TMPDIR:-/tmp}, where a file another account planted above them can run in them. Point TMPDIR at a directory of your own, outside the project" >&2
+fi
+# <<< no project code
+
 # _neg — the whole of defect #1's fix, in one place.
 #
 #   promised and missing        GAP, classed for --fail-on
@@ -869,7 +961,11 @@ wrapper_ran() {
   # Bounded on every host: without timeout(1) (stock macOS) this ran unbounded,
   # and a tool that hung on --version hung the whole verifier (MEASURED at
   # 6c77f4e: still running when killed after 60 s). See run_bounded.
-  COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" run_bounded 30 "$w" --version $wa >/dev/null 2>&1 || true
+  # From /, never the working directory: one of these is cargo, and through a
+  # rustup proxy a checkout's rust-toolchain.toml `path =` names the cargo that
+  # answers (MEASURED, rustup 1.29.3: it ran for `cargo --version`). See "no
+  # project code" above.
+  (cd / && COMPOSER=/dev/null/composer.json COMPOSER_ALLOW_SUPERUSER=1 RUSTUP_AUTO_INSTALL=0 SCH_WRAPPER_PROBE="$probe" run_bounded 30 "$w" --version $wa) >/dev/null 2>&1 || true
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if [ -f "$line" ] && grep -q "supply-chain-harden" "$line" 2>/dev/null; then
@@ -1018,7 +1114,7 @@ scv_npm_exclude_scope() { # <the list as `npm config get` prints it: comma-separ
   npmdir=${npmjs%/bin/npm-cli.js}
   out=unknown
   if [ -n "$npmjs" ] && [ "$npmdir" != "$npmjs" ] && [ -d "$npmdir/node_modules/@npmcli/arborist/lib" ]; then
-    out=$(node -e '
+    out=$(cd / && node -e '
 const path = require("path");
 const lib = path.join(process.argv[1], "node_modules", "@npmcli", "arborist", "lib");
 let mm;
@@ -1161,7 +1257,10 @@ else
   # emitted a false GAP on any host with PIP_CONFIG_FILE set, which is ordinary
   # corporate CI as well as the config-poisoning attack in arXiv:2607.15143 R10.
   # Strip spaces/quotes/CR so `install.only-binary = ':all:'` normalises.
-  v=$("$pipbin" config list 2>/dev/null | tr -d " '\"\r" | sed -n 's/^install\.only-binary=//p' | tail -1)
+  # From /: pip reads no config from the working directory, and its entry script
+  # puts its own directory, not the working one, on sys.path. Asked from / so
+  # that stays true whatever runs pip here.
+  v=$(cd / && "$pipbin" config list 2>/dev/null | tr -d " '\"\r" | sed -n 's/^install\.only-binary=//p' | tail -1)
   # WEAK, never OK: only-binary refuses an sdist pip RESOLVES from an index or
   # --find-links, not one named by path or URL, which still runs setup.py
   # (MEASURED on pip 22.0.2, 23.0.1, 24.0, 25.1.1 and 26.0.1; README "Known
@@ -1217,7 +1316,10 @@ else
   # with GOTOOLCHAIN=local so a go.mod in the working directory cannot make
   # this lookup switch toolchains: it asks about the installed go.
   gminor=$(cd / && GOTOOLCHAIN=local go version 2>/dev/null | grep -oE 'go1\.[0-9]+' | head -1 | cut -d. -f2)
-  gt=$(env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN -u GOPRIVATE \
+  # From /, like every go call here: in a module whose go.mod has a `toolchain`
+  # line, `go env` with GOTOOLCHAIN unset fetched and ran that toolchain
+  # (MEASURED, go1.24.10 ran go1.25.4). Go reads no settings from a project.
+  gt=$(cd / && env -u GOFLAGS -u GOSUMDB -u GOPROXY -u GOTOOLCHAIN -u GOPRIVATE \
            -u GONOPROXY -u GOINSECURE -u GONOSUMDB go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')
   if [ -n "$gminor" ] && [ "$gminor" -lt 21 ]; then
     na_absent "go settings persisted" \
@@ -1225,7 +1327,7 @@ else
   elif [ "$gt" = "local" ]; then
     row OK FUNCTIONAL "go settings persisted" "GOTOOLCHAIN=local survives with the env layer stripped (go env -w)"
   else
-    live=$(go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')
+    live=$(cd / && go env GOTOOLCHAIN 2>/dev/null | tr -d '\r')
     if [ "$live" = "local" ]; then
       row WEAK PRESENT "go settings persisted" \
         "GOTOOLCHAIN=local is set in this environment but NOT persisted via go env -w — it will not survive a step that does not inherit the env layer"
