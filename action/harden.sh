@@ -1162,6 +1162,13 @@ harden_npm() {
   write_env NPM_CONFIG_SAVE_EXACT      true
   write_env NPM_CONFIG_FUND            false
   write_env NPM_CONFIG_UPDATE_NOTIFIER false
+  # NPM_CONFIG_MIN_RELEASE_AGE stays exported, unlike pnpm's variable (see
+  # harden_pnpm), although it also outranks a project's own .npmrc in both
+  # directions. The files below are not always read: actions/setup-node with
+  # registry-url writes its own .npmrc under RUNNER_TEMP and exports
+  # NPM_CONFIG_USERCONFIG at it (src/authutil.ts, CHECKED 2026-11-22), so npm
+  # skips ~/.npmrc, and a setup-node npm reads its prefix's etc/npmrc, not
+  # /etc/npmrc. In that setup the env var is the only age gate npm sees.
   write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
 
   local content
@@ -1305,7 +1312,12 @@ harden_pnpm() {
   #   - pnpm_config_minimum_release_age would set the window exactly, in both
   #     directions, so a project that chose a longer one (14 days is common
   #     advice) would silently get the action's shorter one. config.yaml above
-  #     still gives the action's window to a project that sets none.
+  #     still gives the action's window to a project that sets none, and
+  #     nothing redirects it: with NPM_CONFIG_USERCONFIG pointed elsewhere, as
+  #     actions/setup-node does for registry-url, pnpm 11.28.13 and 12.21.0
+  #     still refused a 14-hour-old release (ERR_PNPM_NO_MATURE_MATCHING_VERSION;
+  #     MEASURED 2026-11-22, with a gate-0 control that installed it). npm is
+  #     different; see NPM_CONFIG_MIN_RELEASE_AGE in harden_npm.
   #   - pnpm_config_minimum_release_age_exclude would wipe the project's own
   #     list, and a monorepo exempting its own freshly published packages would
   #     fail with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION and no knob here.
