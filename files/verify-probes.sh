@@ -647,12 +647,14 @@ $yfiles}"
             && yadd yodd "the project sets npmPreapprovedPackages, which yarn $yeff does not know: in a project's file that stops every yarn command"
         else
           ypall=""; ypnamed=""
+          # (pattern) with its opening parenthesis: bash 3.2, which macOS
+          # runs, ends the $( ) at a bare pattern's ")" (a syntax error there).
           ypaf=$(printf '%s\n' "$ypa" | while IFS='	' read -r ypsrc ype; do
             case "$(scv_yarn_preapproved_scope "$ype")" in
-              all)      printf 'G\t%s\t%s\tevery package\n' "$ypsrc" "$ype" ;;
-              unscoped) printf 'G\t%s\t%s\tevery unscoped package\n' "$ypsrc" "$ype" ;;
-              scoped)   printf 'G\t%s\t%s\tevery scoped package\n' "$ypsrc" "$ype" ;;
-              *)        printf 'W\t%s\t%s\n' "$ypsrc" "$ype" ;;
+              (all)      printf 'G\t%s\t%s\tevery package\n' "$ypsrc" "$ype" ;;
+              (unscoped) printf 'G\t%s\t%s\tevery unscoped package\n' "$ypsrc" "$ype" ;;
+              (scoped)   printf 'G\t%s\t%s\tevery scoped package\n' "$ypsrc" "$ype" ;;
+              (*)        printf 'W\t%s\t%s\n' "$ypsrc" "$ype" ;;
             esac
           done)
           ypall=$(printf '%s\n' "$ypaf" | awk -F'\t' '$1 == "G" { print "npmPreapprovedPackages in " $2 " lists \047" $3 "\047, which exempts " $4 " from the age gate" }' | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g')
