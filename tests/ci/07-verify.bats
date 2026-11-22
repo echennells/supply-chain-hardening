@@ -2454,3 +2454,50 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
     [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: the maven probes under $ww/sub did not apply the planted jvm.config: $(markers)"; return 1; }
   fi
 }
+
+# dotnet_nuget_stub <config get all output>: an SDK 10 dotnet that logs where
+# it runs and answers the nuget questions the way 10.0.404 does (MEASURED).
+dotnet_nuget_stub() {
+  printf '%s\n' "$1" > "$BATS_TEST_TMPDIR/getall"
+  stub_bin dotnet 'echo "$PWD :: $*" >> "'"$BATS_TEST_TMPDIR"'/dotnet-calls"
+case "$*" in
+  --list-sdks) echo "10.0.404 [/usr/share/dotnet/sdk]" ;;
+  --version) echo 10.0.404 ;;
+  "nuget config paths --working-directory "*) echo "'"$TEST_HOME"'/.nuget/NuGet/NuGet.Config" ;;
+  "nuget config get signatureValidationMode --show-path --working-directory "*) printf "require\tfile: %s\n" "'"$TEST_HOME"'/.nuget/NuGet/NuGet.Config" ;;
+  "nuget config get all --working-directory "*) cat "'"$BATS_TEST_TMPDIR"'/getall" ;;
+  *) echo "STUB: $*"; exit 1 ;;
+esac'
+}
+
+@test "nuget: dotnet is never started in the project (a global.json there picks the SDK); the source list comes from config get all --working-directory" {
+  harden ECOSYSTEMS=nuget -- --emit=plain >/dev/null
+  [ -f "$TEST_HOME/.nuget/NuGet/NuGet.Config" ] || skip "harden.sh wrote no NuGet.Config here"
+  local tab=$'\t' d="$PNT/nproj"
+  mkdir -p "$d/sub"
+  printf '{"sdk":{"version":"99.0.100","paths":[".dotnet","$host$"]}}\n' > "$d/global.json"
+  # MEASURED (10.0.404): the project's entries come first; the hardened user
+  # file's <clear/> is printed after them and does not drop them.
+  dotnet_nuget_stub "packageSources:
+${tab}add key=\"extra\" value=\"https://extra.invalid/v3/index.json\"
+${tab}add key=\"off\" value=\"https://off.invalid/v3/index.json\"
+${tab}clear
+${tab}add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\"
+
+disabledPackageSources:
+${tab}add key=\"off\" value=\"true\"
+"
+  rm -f "$BATS_TEST_TMPDIR/dotnet-calls"
+  run verify_in "$d/sub" --emit=plain
+  [[ "$(grep 'nuget source allowlist' <<<"$output")" == GAP*"2 enabled source(s) in $d/sub; not official nuget.org: https://extra.invalid/v3/index.json"* ]] || { grep nuget <<<"$output"; return 1; }
+  [ -s "$BATS_TEST_TMPDIR/dotnet-calls" ]
+  ! grep -q -e "^$d" -e "^$BATS_TEST_TMPDIR/nproj" "$BATS_TEST_TMPDIR/dotnet-calls" || { cat "$BATS_TEST_TMPDIR/dotnet-calls"; return 1; }
+  grep -q -- "--working-directory $d/sub" "$BATS_TEST_TMPDIR/dotnet-calls"
+  # A project file that clears: only what it adds is in effect.
+  dotnet_nuget_stub "packageSources:
+${tab}clear
+${tab}add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\"
+"
+  run verify_in "$d/sub" --emit=plain
+  [[ "$(grep 'nuget source allowlist' <<<"$output")" == OK*"1 enabled source(s) in $d/sub, all official nuget.org"* ]] || { grep nuget <<<"$output"; return 1; }
+}
