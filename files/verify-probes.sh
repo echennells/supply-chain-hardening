@@ -504,7 +504,8 @@ else
       elif [ "$pnupper" = 1 ] && [ -n "${PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE:-}" ]; then pnexvar="PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE=${PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE}"; fi
     fi
     pngap=""; pnweak=""; pnmask=""; pnodd=""; pnfine=""; pnerr=""; pnkeys=0
-    for pnsrc in $pnws $pnrc; do
+    for pnsrc in "$pnws" "$pnrc"; do
+      [ -n "$pnsrc" ] || continue
       case "$pnsrc" in
         */pnpm-workspace.yaml)
           pnout=$(scv_pnpm_ws_read "$pnsrc"); pnka=minimumReleaseAge; pnke=minimumReleaseAgeExclude ;;
@@ -621,7 +622,7 @@ else
         "pnpm $pnpv in $PWD: ${pnfine:-$pnempty}${pnfine:+$pnnone} ($pnhow)"
     else
       row "N/A" - "pnpm repo config override" \
-        "$(printf '%s' "$pnws $pnrc" | sed 's/^ //; s/ $//; s/ / and /') sets neither minimumReleaseAge nor minimumReleaseAgeExclude"
+        "${pnws}${pnws:+${pnrc:+ and }}${pnrc} sets neither minimumReleaseAge nor minimumReleaseAgeExclude"
     fi
   fi
 fi

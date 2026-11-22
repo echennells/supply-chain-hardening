@@ -1962,7 +1962,7 @@ minimumReleaseAge: 0   # off")
   done
 }
 
-@test "pnpm repo config override: N/A with no workspace file, with no age keys, from /, and on a pnpm with no age gate" {
+@test "pnpm repo config override: N/A with no workspace file, with no age keys, from /, and on a pnpm with no age gate; a path with a space" {
   pnpm_stub 11.28.13
   harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
   local r
@@ -1970,7 +1970,12 @@ minimumReleaseAge: 0   # off")
   run verify_in "$PNP/packages/a" --emit=plain
   [[ "$(pn_row)" == "N/A"*"no pnpm-workspace.yaml at or above $PNP/packages/a"* ]] || { pn_row; return 1; }
   r=$(pn_verdict "packages: ['packages/*']")
-  [[ "$r" == "N/A"*"sets neither minimumReleaseAge nor minimumReleaseAgeExclude"* ]] || { echo "$r"; return 1; }
+  [[ "$r" == "N/A"*"$PNP/pnpm-workspace.yaml sets neither minimumReleaseAge nor minimumReleaseAgeExclude"* ]] || { echo "$r"; return 1; }
+  # A path with a space in it is one path.
+  PNP="$BATS_TEST_TMPDIR/my proj"
+  r=$(pn_verdict 'minimumReleaseAge: 0')
+  [[ "$r" == GAP*"minimumReleaseAge 0 in $PNP/pnpm-workspace.yaml switches the age gate off"* ]] || { echo "$r"; return 1; }
+  PNP="$BATS_TEST_TMPDIR/proj"
   run verify_in / --emit=plain
   [[ "$(pn_row)" == "N/A"*"ran from /"* ]] || { pn_row; return 1; }
   pnpm_stub 10.15.1
