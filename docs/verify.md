@@ -100,7 +100,7 @@ writes:
 | yarn 1.22.22, 4.1.0 to 4.19.0 | a `.yarnrc.yml` `yarnPath` or `plugins:` in any directory above (and classic's `.yarnrc` `yarn-path`), on `yarn --version` and `yarn config get` | asked from `/`; the `yarn repo config override` row reads the files |
 | corepack 0.36.0 (Node 24) | a project `.corepack.env` pointing `COREPACK_NPM_REGISTRY` at any server, or allowing a `packageManager` URL: the yarn it served ran on `yarn --version` | `COREPACK_ENV_FILE=0` for everything the verifier starts |
 | pnpm 10.34.9, 11.0.0, 11.28.13 | `.pnpmfile.cjs` and `configDependencies`, on `pnpm config get` | asked from `/`; the `pnpm repo config override` row reads the file |
-| rustup 1.29.3 | a `rust-toolchain.toml` `path =` (absolute), on `cargo --version` and `rustc --version`, even for the proxy called by its full path | asked from `/` |
+| rustup 1.29.3 | a `rust-toolchain.toml` `path =`, on `cargo --version` and `rustc --version`, even for the proxy called by its full path (the path has to be absolute, which a CI checkout's predictable location allows) | asked from `/` |
 | maven 3.10.0 | `.mvn/jvm.config` in any directory above (a `-javaagent`), on `mvn -v` | asked from `/` |
 | .NET SDK 10.0.404 | a `global.json` sdk `"paths"` entry: the checkout's own SDK ran on `dotnet --version` and `dotnet nuget config paths` | dotnet runs from `/`; NuGet is told the project with `--working-directory` |
 | pip 25.1.1 (Python 3.13) | a `pip.py` or `pip/` beside it, on `python3 -m pip --version` | asked from `/`; pip reads no settings from the working directory |
