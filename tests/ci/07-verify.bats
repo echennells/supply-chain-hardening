@@ -2458,8 +2458,13 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
   rm -f "$log"
   run npc_verify "$PNT" TMPDIR="$ww/sub" RUNNER_TEMP="$SCV_PRIV"
   [ -s "$log" ] || { echo "no tool was logged"; echo "$output"; return 1; }
-  tmps=$(cut -f3 "$log" | sort -u)
+  # Every tool started with a TMPDIR got the private scratch dir (a probe that
+  # runs a tool under env -i passes none, and that tool's working directory is
+  # one of the probe's own, under the same scratch dir), and none ran anywhere
+  # below the world-writable directory.
+  tmps=$(cut -f3 "$log" | grep -v '^$' | sort -u)
   [[ "$tmps" == "$SCV_PRIV/scv."* ]] && [ "$(printf '%s\n' "$tmps" | grep -vc "^$SCV_PRIV/scv\.")" -eq 0 ] || { echo "TMPDIR seen by tools: $tmps"; return 1; }
+  ! cut -f1 "$log" | grep -q "^$ww" || { echo "started below $ww:"; grep "^$ww" "$log"; return 1; }
   [ -z "$(ls -d "$SCV_PRIV"/scv.* 2>/dev/null)" ] || { echo "scratch left behind: $(ls -d "$SCV_PRIV"/scv.*)"; return 1; }
   [ -z "$(markers)" ] || { echo "a planted file ran: $(markers)"; return 1; }
   [[ "$output" != *"found no directory for the probes"* ]]
