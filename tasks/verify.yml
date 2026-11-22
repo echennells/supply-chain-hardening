@@ -110,8 +110,10 @@
   when: not ansible_check_mode
 
 - name: Verify which protections are actually in effect
-  # Read-only: nothing here installs, fetches, or writes outside a temporary
-  # directory it removes again. rc 1 means gaps were found, which is
+  # Read-only: nothing here installs, fetches, or writes outside a scratch
+  # directory it removes again (under ~/.cache/supply-chain-hardening unless
+  # TMPDIR or RUNNER_TEMP is a private one: the "no project code" block in
+  # templates/verify.sh.j2). rc 1 means gaps were found, which is
   # information rather than a task failure, so it is captured instead of
   # raised.
   #

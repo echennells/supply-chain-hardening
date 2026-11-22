@@ -2124,7 +2124,8 @@ y_project() { # <.yarnrc.yml content>, verified from a package below it
   printf '{"name":"p","version":"1.0.0","private":true}\n' > "$(YNP)/package.json"
   [ -z "${1:-}" ] || printf '%s\n' "$1" > "$(YNP)/.yarnrc.yml"
 }
-y_row() { grep -E 'yarn repo config override' <<<"$output"; }
+# The row itself, not the host rows that point at it.
+y_row() { grep -E '^[A-Z/]+ +[A-Z-]+ +yarn repo config override ' <<<"$output"; }
 y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_row; }
 
 @test "yarn repo config override: a project 0 or enableScripts true is a GAP, a shorter window or named exemptions WEAK, a longer one OK" {
@@ -2154,9 +2155,9 @@ y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_
   rm -f "$PNT/.yarnrc.yml"
   [[ "$(y_row)" == OK*"npmMinimalAgeGate 4320 in $(YNP)/.yarnrc.yml"* ]] || { y_row; return 1; }
   # A YARN_* variable outranks every file, so it hides the project's 0 here.
-  y_project 'npmMinimalAgeGate: 0'
-  run verify_in "$(YNP)/packages/a" --emit=plain YARN_NPM_MINIMAL_AGE_GATE=2880
-  [[ "$(y_row)" == WEAK*"YARN_NPM_MINIMAL_AGE_GATE=2880 in this environment outranks it"* ]] || { y_row; return 1; }
+  echo 'export YARN_NPM_MINIMAL_AGE_GATE=2880' >> "$ENV_FILE"
+  r=$(y_verdict 'npmMinimalAgeGate: 0')
+  [[ "$r" == WEAK*"YARN_NPM_MINIMAL_AGE_GATE=2880 in this environment outranks it"*"an env variable is what hides the project's weaker setting"* ]] || { echo "$r"; return 1; }
 }
 
 @test "yarn repo config override: values read the way each yarn reads them (4.10 leading integer, 4.11+ durations, below 4.10 refused)" {
@@ -2367,7 +2368,7 @@ markers() { ls "$BATS_TEST_TMPDIR/markers" 2>/dev/null | tr '\n' ' '; }
   [ -z "$(markers)" ] || { echo "the verifier ran: $(markers)"; echo "$output"; return 1; }
   # It still reported what the checkout changes, from the files.
   [[ "$output" == *"yarn repo config override"*"the checkout's own yarn"* ]] || { echo "$output" | grep yarn; return 1; }
-  [[ "$output" == *"pnpm repo config override"* ]]
+  if command -v pnpm >/dev/null 2>&1; then [[ "$output" == *"pnpm repo config override"* ]]; fi
 }
 
 # The tools a verifier might start. Each gets a logging shim first on PATH that
@@ -2401,7 +2402,8 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
   [ -s "$log" ] || { echo "no tool was logged"; echo "$output"; return 1; }
   # In the project (either spelling of its path): only npm (and the node it
   # runs), `uv ... --show-settings`, bundle/bundler config (and their ruby),
-  # `poetry --no-plugins`, and python3 -I (the YAML readers, the hook scan).
+  # `poetry --no-plugins`, composer with --no-plugins (and its php), and
+  # python3 -I (the YAML readers, the hook scan).
   bad=$(awk -F'\t' -v p1="$d" -v p2="$BATS_TEST_TMPDIR/trap" '
     $1 == p1 || index($1, p1 "/") == 1 || $1 == p2 || index($1, p2 "/") == 1 {
       if ($2 == "npm") next
@@ -2410,6 +2412,8 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
       if ($2 == "bundle" || $2 == "bundler") next
       if ($2 == "ruby" && $4 ~ /(\/bundler?( |$)|Bundler\.settings)/) next
       if ($2 == "poetry" && $4 ~ /^--no-plugins( |$)/) next
+      if ($2 == "composer" && $4 ~ /--no-plugins/) next
+      if ($2 == "php" && $4 ~ /composer/ && $4 ~ /--no-plugins/) next
       if ($2 ~ /^python/ && $4 ~ /^-I( |$)/) next
       print
     }' "$log")
