@@ -19,6 +19,30 @@
     - sch_uv_env_cutoff | length == 0
   tags: [shell]
 
+# NPM_CONFIG_ALLOW_GIT=none is version-gated (sch_npm_allow_git_env in
+# defaults/main.yml: npm 11.2.0 to 11.8.x warn about it on every command).
+# npm.yml has asked for the version on a full run. This file renders on every
+# run, so a run scoped away from npm (--tags pnpm) asks the same npm itself, in
+# the same order as npm.yml, rather than flip the variable on a host whose npm
+# warns about it.
+- name: Find the npm version NPM_CONFIG_ALLOW_GIT is gated on (when npm.yml did not run)
+  ansible.builtin.shell:
+    cmd: |
+      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
+               "$HOME"/.nvm/versions/node/*/bin/npm \
+               "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
+               "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm \
+               "$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null)"; do
+        if [ -n "$p" ] && [ -x "$p" ]; then exec "$p" --version; fi
+      done
+    executable: /bin/bash
+  register: sch_env_npm_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: npm_version_check.stdout is not defined
+  tags: [shell]
+
 - name: Deploy system-wide supply chain env vars
   become: true
   ansible.builtin.template:
@@ -47,6 +71,8 @@
       - "NPM_CONFIG_FUND={{ npm_fund | lower }}"
       - "NPM_CONFIG_UPDATE_NOTIFIER={{ npm_update_notifier | lower }}"
       - "NPM_CONFIG_MIN_RELEASE_AGE={{ npm_minimum_release_age_days }}"
+      # Empty below npm 11.9.0 (see above), so the reject() below drops it.
+      - "NPM_CONFIG_ALLOW_GIT={{ 'none' if sch_npm_allow_git_env | bool else '' }}"
       - "pnpm_config_minimum_release_age={{ pnpm_minimum_release_age_minutes }}"
       # A JSON array, never empty: "[]" for no exclusions (see defaults/main.yml).
       - "pnpm_config_minimum_release_age_exclude={{ sch_pnpm_exclude_json }}"

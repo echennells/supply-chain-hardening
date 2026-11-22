@@ -231,6 +231,403 @@ else
 fi
 
 # ======================================================================
+# pnpm
+# ======================================================================
+
+# --- pnpm repo config override  [PRESENT] ---
+# A project's pnpm-workspace.yaml outranks the global config.yaml both surfaces
+# write, at or below its directory (MEASURED on pnpm 10.34.9, 11.0.0, 11.28.13
+# and 12.21.0, with a typescript nightly 16.6 hours old against a 2880-minute
+# host window): `minimumReleaseAge: 0` and `600` resolved it, `99999` refused
+# it, and `minimumReleaseAgeExclude: ['*']` resolved it, with or without a
+# '!typescript' after it. On pnpm 10 and 11, `null`, `-1`, `true` and `false`
+# switched the gate off too; pnpm 12 ignores `null` and refuses the other three
+# with ERR_PNPM_INVALID_SETTING, so nothing installs there. A non-numeric string
+# such as '1d' installed nothing on any of them (refused, an "Invalid time
+# value" crash on 11.28.13, ERR_PNPM_INVALID_SETTING on 12). A quoted number is
+# read as the number.
+#
+# pnpm 11+ reads pnpm_config_minimum_release_age and _exclude from the
+# environment, and they outrank the workspace file (MEASURED, same versions;
+# the upper-case names only from 11.0.6). The role exports both on a host; the
+# action exports neither, so in CI the workspace file is in effect. When one is
+# set in THIS environment it hides a weaker workspace value here, and the row
+# says so rather than OK: a systemd unit, a container CMD or any shell that did
+# not log in has no /etc/profile.d and uses the project's value. pnpm 10 reads
+# neither variable, and a project .npmrc `minimum-release-age` outranks the
+# host as well there (MEASURED, 10.34.9), so on pnpm 10 that file is read too.
+#
+# READ FROM THE FILE: PNPM IS NOT RUN IN THE PROJECT. MEASURED on pnpm 10.34.9,
+# 11.0.0 and 11.28.13: `pnpm config get` run in a project loads its
+# .pnpmfile.cjs, .pnpmfile.mjs or the file a `pnpmfile:` key names (top-level
+# code and the updateConfig hook both ran), fetches its configDependencies from
+# the registry (11.28.13 waited out a 45 s bound), and pnpm 10 tried to install
+# the pnpm a package.json `packageManager` names. `--ignore-pnpmfile` is not an
+# option of `config get`. pnpm 12.21.0 did none of that, but the row has to
+# work on 11. So the values come from parsing the file, with PyYAML where
+# python3 has it (YAML 1.2 booleans, as pnpm reads them) and otherwise with a
+# reader that follows plain top-level keys and refuses anything fancier:
+# PRESENT evidence. pnpm itself is asked only from /, for its version and, with
+# no recorded window, for the host's own value.
+scv_pnpm_ws_py='
+import re, sys
+try:
+    import yaml
+except Exception:
+    sys.exit(3)
+class L(yaml.SafeLoader):
+    pass
+L.yaml_implicit_resolvers = {k: [(t, r) for (t, r) in v if t != "tag:yaml.org,2002:bool"]
+                             for k, v in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+L.add_implicit_resolver("tag:yaml.org,2002:bool",
+                        re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+def clean(s):
+    return re.sub(r"[\x00-\x1f\x7f]", "?", str(s))[:200]
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        loader = L(f)
+        try:
+            node = loader.get_single_node()
+            # PyYAML keeps the last of a repeated key; pnpm may refuse the file.
+            if isinstance(node, yaml.MappingNode):
+                ks = [k.value for k, _ in node.value if isinstance(k, yaml.ScalarNode)]
+                for name in ("minimumReleaseAge", "minimumReleaseAgeExclude", "minimumReleaseAgeStrict"):
+                    if ks.count(name) > 1:
+                        print("error\t" + name + " twice")
+                        sys.exit(0)
+            d = loader.construct_document(node) if node is not None else None
+        finally:
+            loader.dispose()
+except Exception as e:
+    m = str(e).strip().splitlines()
+    print("error\t" + clean(m[0] if m else type(e).__name__))
+    sys.exit(0)
+if d is None:
+    d = {}
+if not isinstance(d, dict):
+    print("error\tthe top level is not a mapping")
+    sys.exit(0)
+def scalar(v):
+    if v is None:
+        return "null\t"
+    if isinstance(v, bool):
+        return "bool\t" + ("true" if v else "false")
+    if isinstance(v, int):
+        return "int\t%d" % v
+    if isinstance(v, float):
+        return "float\t" + clean(repr(v))
+    if isinstance(v, str):
+        s = v.strip()
+        if s == "":
+            return "empty\t"
+        return ("int\t" + s) if re.fullmatch(r"-?[0-9]+", s) else ("str\t" + clean(v))
+    return "other\t" + type(v).__name__
+if "minimumReleaseAge" in d:
+    print("age\t" + scalar(d["minimumReleaseAge"]))
+if "minimumReleaseAgeStrict" in d:
+    print("strict\t" + scalar(d["minimumReleaseAgeStrict"]))
+if "minimumReleaseAgeExclude" in d:
+    v = d["minimumReleaseAgeExclude"]
+    if v is None:
+        print("excl\tnull\t")
+    elif isinstance(v, list) and all(isinstance(i, (str, int, float)) and not isinstance(i, bool) for i in v):
+        print("excl\tlist\t%d" % len(v))
+        for i in v:
+            print("item\t" + clean(i))
+    else:
+        print("excl\tother\t" + type(v).__name__)
+'
+# The fallback reader: top-level keys at column 0 only, a plain or quoted
+# scalar for minimumReleaseAge, a one-line [..] or a block of "- item" lines
+# for minimumReleaseAgeExclude. A flow-mapping document, a merge key (<<), a
+# complex key (?), a repeated key, an anchor, alias, tag or block scalar is
+# "error", never a guess.
+scv_pnpm_ws_awk='
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+function bad(why) { if (!err) err = why }
+# value text after the colon -> "Q<inner>" (quoted), "U<text>" (plain), or "" + bad()
+function val(s,   q, rest, i) {
+  s = trim(s)
+  q = substr(s, 1, 1)
+  if (q == "\"" || q == "\047") {
+    rest = substr(s, 2); i = index(rest, q)
+    if (i == 0) { bad("an unterminated quoted value"); return "" }
+    if (trim(substr(rest, i + 1)) !~ /^(#.*)?$/) { bad("text after a quoted value"); return "" }
+    return "Q" substr(rest, 1, i - 1)
+  }
+  sub(/[ \t]+#.*$/, "", s); s = trim(s)
+  if (s ~ /^[&*!|>{%@`]/) { bad("an anchor, alias, tag, block scalar or flow mapping"); return "" }
+  return "U" s
+}
+function kind(v,   t) {
+  t = substr(v, 2)
+  if (substr(v, 1, 1) == "Q") return (t ~ /^[ \t]*$/) ? "empty\t" : (t ~ /^-?[0-9]+$/) ? "int\t" t : "str\t" t
+  if (t ~ /^-?[0-9]+$/) return "int\t" t
+  if (t ~ /^(true|True|TRUE|false|False|FALSE)$/) return "bool\t" tolower(t)
+  if (t ~ /^(null|Null|NULL|~)?$/) return "null\t"
+  if (t ~ /^[-+]?[0-9]*\.[0-9]+$/) return "float\t" t
+  return "str\t" t
+}
+{ line[NR] = $0 }
+END {
+  for (n = 1; n <= NR; n++) {
+    l = line[n]
+    if (l ~ /^[ \t]*(#.*)?$/ || l ~ /^%/ || l ~ /^---[ \t]*$/) continue
+    if (!seen_content && l ~ /^[{[]/) bad("a flow-style document")
+    seen_content = 1
+    if (l ~ /^(<<|\?)/) bad("a merge or complex key")
+    if (l ~ /^[^ \t#][^:]*:[ \t]*[[{]/ && l !~ /[]}][ \t]*(#.*)?$/) bad("a [..] or {..} value over several lines")
+    k = ""
+    if (l ~ /^("minimumReleaseAge"|\047minimumReleaseAge\047|minimumReleaseAge)[ \t]*:([ \t]|$)/) k = "age"
+    if (l ~ /^("minimumReleaseAgeStrict"|\047minimumReleaseAgeStrict\047|minimumReleaseAgeStrict)[ \t]*:([ \t]|$)/) k = "strict"
+    if (k != "") {
+      if (cnt_[k]++) bad("a key twice")
+      v = l; sub(/^[^:]*:/, "", v); v = trim(v)
+      if (v == "" || v ~ /^#/) {
+        for (m = n + 1; m <= NR && line[m] ~ /^[ \t]*(#.*)?$/; m++) ;
+        if (m <= NR && line[m] ~ /^[ \t]/) { bad("a value on the following lines"); continue }
+        sc[k] = "null\t"
+      } else { v = val(v); if (v != "") sc[k] = kind(v) }
+    }
+    if (l ~ /^("minimumReleaseAgeExclude"|\047minimumReleaseAgeExclude\047|minimumReleaseAgeExclude)[ \t]*:([ \t]|$)/) {
+      if (excn++) bad("minimumReleaseAgeExclude twice")
+      v = l; sub(/^[^:]*:/, "", v); v = trim(v); sub(/[ \t]+#.*$/, "", v)
+      ni = 0
+      if (v ~ /^\[/) {
+        if (v !~ /\]$/) { bad("a [..] list over several lines"); continue }
+        body = substr(v, 2, length(v) - 2)
+        if (body ~ /[][{}]/) { bad("a nested list or mapping"); continue }
+        if (trim(body) != "") {
+          cnt = split(body, parts, ",")
+          for (p = 1; p <= cnt; p++) {
+            it = val(parts[p]); if (it == "") break
+            if (substr(it, 1, 1) == "U" && substr(it, 2) ~ /["\047]/) { bad("a quote inside a list item"); break }
+            items[++ni] = substr(it, 2)
+          }
+        }
+        excl = "list"
+      } else if (v == "" ) {
+        for (m = n + 1; m <= NR; m++) {
+          t = line[m]
+          if (t ~ /^[ \t]*(#.*)?$/) continue
+          if (t ~ /^[ \t]*-([ \t]|$)/) {
+            sub(/^[ \t]*-/, "", t)
+            if (trim(t) ~ /^-([ \t]|$)/) { bad("a nested list"); break }
+            it = val(t); if (it == "") break
+            items[++ni] = substr(it, 2); continue
+          }
+          if (t ~ /^[ \t]/) { bad("an exclude item this reader does not follow"); break }
+          break
+        }
+        excl = (ni > 0) ? "list" : "null"
+      } else if (v ~ /^(null|Null|NULL|~)$/) {
+        excl = "null"
+      } else { bad("a minimumReleaseAgeExclude that is not a list") }
+    }
+  }
+  if (err) { print "error\t" err; exit }
+  if (sc["age"] != "") print "age\t" sc["age"]
+  if (sc["strict"] != "") print "strict\t" sc["strict"]
+  if (excl == "null") print "excl\tnull\t"
+  else if (excl == "list") { print "excl\tlist\t" ni; for (p = 1; p <= ni; p++) print "item\t" items[p] }
+}
+'
+# scv_pnpm_ws_read <pnpm-workspace.yaml>: "by<TAB>reader" first, then
+# "age<TAB>kind<TAB>value", "excl<TAB>kind<TAB>count" and one "item<TAB>name"
+# per exclude entry, or "error<TAB>why".
+scv_pnpm_ws_read() {
+  local out rc
+  out=$(run_bounded 20 python3 -I -c "$scv_pnpm_ws_py" "$1" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ]; then printf 'by\tPyYAML\n%s\n' "$out"; return 0; fi
+  printf 'by\ta plain-key reader (python3 has no PyYAML here)\n'
+  awk "$scv_pnpm_ws_awk" "$1" 2>/dev/null
+}
+# scv_pnpm_npmrc_read <.npmrc>: the same lines, for pnpm 10's kebab keys.
+scv_pnpm_npmrc_read() {
+  awk -F= '
+    { k = $0; sub(/=.*/, "", k); gsub(/^[ \t]+|[ \t\r]+$/, "", k); v = substr($0, index($0, "=") + 1); gsub(/^[ \t"\047]+|[ \t\r"\047]+$/, "", v) }
+    k == "minimum-release-age" { age = v; has = 1 }
+    k == "minimum-release-age-exclude[]" || k == "minimum-release-age-exclude" { n = split(v, p, ","); for (i = 1; i <= n; i++) if (p[i] != "") items[++ni] = p[i]; hx = 1 }
+    END {
+      if (has) { if (age ~ /^-?[0-9]+$/) print "age\tint\t" age; else if (age ~ /^(true|false)$/) print "age\tbool\t" age; else if (age == "" || age == "null") print "age\tnull\t"; else print "age\tstr\t" age }
+      if (hx) { print "excl\tlist\t" ni; for (i = 1; i <= ni; i++) print "item\t" items[i] }
+    }' "$1" 2>/dev/null
+}
+
+if ! have pnpm || { command -v requested >/dev/null 2>&1 && ! requested pnpm; }; then
+  :   # the preamble's pnpm row already says which
+else
+  pnpv=$(cd / && pnpm --version 2>/dev/null | head -1 | tr -d '\r')
+  case "$pnpv" in [0-9]*.[0-9]*) ;; *) pnpv="" ;; esac
+  pnmaj=${pnpv%%.*}; pnrest=${pnpv#*.}; pnmin=${pnrest%%.*}; pnrest=${pnrest#*.}; pnpat=${pnrest%%[!0-9]*}
+  pnws=""; pnd=$PWD
+  while [ -n "$pnd" ] && [ "$pnd" != / ]; do
+    if [ -f "$pnd/pnpm-workspace.yaml" ]; then pnws="$pnd/pnpm-workspace.yaml"; break; fi
+    pnd=${pnd%/*}
+  done
+  pnrc=""
+  if [ "${pnmaj:-0}" = 10 ]; then
+    for pnd in "$PWD" "${pnws%/*}"; do
+      [ -n "$pnd" ] && [ -f "$pnd/.npmrc" ] && [ "$pnd" != "$HOME" ] && grep -qE '^[[:space:]]*minimum-release-age' "$pnd/.npmrc" 2>/dev/null \
+        && { pnrc="$pnd/.npmrc"; break; }
+    done
+  fi
+  if [ "$PWD" = / ]; then
+    row "N/A" - "pnpm repo config override" \
+      "the verifier ran from /, where no project's pnpm-workspace.yaml applies - run it from a project to check that project's pnpm settings"
+  elif [ -z "$pnpv" ]; then
+    row WEAK PRESENT "pnpm repo config override" \
+      "pnpm did not report a version from /, so whether ${pnws:-a pnpm-workspace.yaml at or above $PWD} can override the host's age gate was not judged"
+  elif [ "$pnmaj" -lt 10 ] 2>/dev/null || { [ "$pnmaj" = 10 ] && [ "${pnmin:-0}" -lt 16 ] 2>/dev/null; }; then
+    row "N/A" - "pnpm repo config override" "pnpm $pnpv has no minimumReleaseAge (pnpm 10.16.0), so a project cannot lower a gate it does not have"
+  elif [ -z "$pnws" ] && [ -z "$pnrc" ]; then
+    row "N/A" - "pnpm repo config override" "no pnpm-workspace.yaml at or above $PWD"
+  else
+    # The window promised here, in minutes; without a record, the host's own
+    # value as pnpm reports it from / with the variables set aside.
+    pnwh=$(scv_want_hours); pnwant=""; pnwhat=""
+    case "$pnwh" in
+      ''|*[!0-9]*)
+        pnhost=$(cd / && env -u pnpm_config_minimum_release_age -u PNPM_CONFIG_MINIMUM_RELEASE_AGE \
+                 pnpm config get minimumReleaseAge 2>/dev/null | head -1 | tr -d '\r ')
+        case "$pnhost" in ''|*[!0-9]*|0) ;; *) pnwant=$pnhost; pnwhat="the host's own ${pnhost} minutes" ;; esac ;;
+      *) pnwant=$((pnwh * 60)); pnwhat="the ${pnwh}h (${pnwant} minutes) promised here" ;;
+    esac
+    # Which variables this pnpm reads and this environment sets.
+    pnagevar=""; pnexvar=""
+    if [ "$pnmaj" -ge 11 ]; then
+      pnupper=0
+      { [ "$pnmaj" -gt 11 ] || [ "${pnmin:-0}" -gt 0 ] || [ "${pnpat:-0}" -ge 6 ]; } 2>/dev/null && pnupper=1
+      if [ -n "${pnpm_config_minimum_release_age:-}" ]; then pnagevar="pnpm_config_minimum_release_age=${pnpm_config_minimum_release_age}"
+      elif [ "$pnupper" = 1 ] && [ -n "${PNPM_CONFIG_MINIMUM_RELEASE_AGE:-}" ]; then pnagevar="PNPM_CONFIG_MINIMUM_RELEASE_AGE=${PNPM_CONFIG_MINIMUM_RELEASE_AGE}"; fi
+      if [ -n "${pnpm_config_minimum_release_age_exclude:-}" ]; then pnexvar="pnpm_config_minimum_release_age_exclude=${pnpm_config_minimum_release_age_exclude}"
+      elif [ "$pnupper" = 1 ] && [ -n "${PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE:-}" ]; then pnexvar="PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE=${PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE}"; fi
+    fi
+    pngap=""; pnweak=""; pnmask=""; pnodd=""; pnfine=""; pnerr=""; pnkeys=0
+    for pnsrc in "$pnws" "$pnrc"; do
+      [ -n "$pnsrc" ] || continue
+      case "$pnsrc" in
+        */pnpm-workspace.yaml)
+          pnout=$(scv_pnpm_ws_read "$pnsrc"); pnka=minimumReleaseAge; pnke=minimumReleaseAgeExclude ;;
+        *)
+          pnout=$(printf 'by\ta key=value reader\n'; scv_pnpm_npmrc_read "$pnsrc"); pnka=minimum-release-age; pnke=minimum-release-age-exclude ;;
+      esac
+      pnby=$(printf '%s\n' "$pnout" | sed -n '1s/^by	//p')
+      pnline=$(printf '%s\n' "$pnout" | grep '^error' | head -1)
+      if [ -n "$pnline" ]; then
+        pnerr="${pnerr:+$pnerr; }$pnsrc could not be read by $pnby: ${pnline#error	}"
+        continue
+      fi
+      pnline=$(printf '%s\n' "$pnout" | grep '^age' | head -1)
+      if [ -n "$pnline" ]; then
+        pnkeys=$((pnkeys + 1))
+        pnk=$(printf '%s' "$pnline" | cut -f2); pnv=$(printf '%s' "$pnline" | cut -f3-)
+        pnf=""; pnsev=""
+        case "$pnk" in
+          int|float)
+            if [ "$pnk" = float ] && [ "$pnmaj" -ge 12 ]; then
+              pnodd="${pnodd:+$pnodd; }$pnsrc sets $pnka $pnv, which pnpm $pnpv refuses (ERR_PNPM_INVALID_SETTING), so nothing installs here; pnpm 10 and 11 read it as a window of $pnv minutes"
+            elif awk -v x="$pnv" 'BEGIN { exit !(x + 0 <= 0) }'; then
+              if awk -v x="$pnv" 'BEGIN { exit !(x + 0 < 0) }' && [ "$pnmaj" -ge 12 ]; then
+                pnodd="${pnodd:+$pnodd; }$pnsrc sets $pnka $pnv, which pnpm $pnpv refuses (ERR_PNPM_INVALID_SETTING), so nothing installs here; pnpm 10 and 11 read it as no gate"
+              else
+                pnf="$pnka $pnv in $pnsrc switches the age gate off (a release published minutes ago installs)"; pnsev=GAP
+              fi
+            elif [ -n "$pnwant" ] && awk -v x="$pnv" -v w="$pnwant" 'BEGIN { exit !(x + 0 < w + 0) }'; then
+              pnf="$pnka $pnv in $pnsrc is below $pnwhat"; pnsev=WEAK
+            else
+              pnfine="${pnfine:+$pnfine; }$pnka $pnv in $pnsrc${pnwant:+ is at least $pnwhat}"
+            fi ;;
+          null|bool|empty)
+            pnshow=${pnv:-null}; [ "$pnk" = empty ] && pnshow="''"
+            if [ "$pnmaj" -ge 12 ] && [ "$pnk" = null ]; then
+              pnfine="${pnfine:+$pnfine; }$pnka null in $pnsrc, which pnpm $pnpv ignores (pnpm 10 and 11 read it as no gate)"
+            elif [ "$pnmaj" -ge 12 ]; then
+              pnodd="${pnodd:+$pnodd; }$pnsrc sets $pnka $pnshow, which pnpm $pnpv refuses (ERR_PNPM_INVALID_SETTING), so nothing installs here; pnpm 10 and 11 read it as no gate"
+            else
+              pnf="$pnka $pnshow in $pnsrc switches the age gate off on pnpm $pnpv"; pnsev=GAP
+            fi ;;
+          *)
+            if [ "$pnmaj" -ge 12 ]; then
+              pnodd="${pnodd:+$pnodd; }$pnsrc sets $pnka '$pnv', which is not a whole number of minutes; pnpm $pnpv refuses it (ERR_PNPM_INVALID_SETTING), so nothing installs here"
+            else
+              pnodd="${pnodd:+$pnodd; }$pnsrc sets $pnka '$pnv', which is not a whole number of minutes, and what pnpm 10 and 11 do with such a value varies: 11.28.13 switched the gate off for 'yes' and failed every install for '1d'"
+            fi ;;
+        esac
+        if [ -n "$pnf" ]; then
+          if [ -n "$pnagevar" ]; then pnmask="${pnmask:+$pnmask; }$pnf, but $pnagevar in this environment outranks it"
+          elif [ "$pnsev" = GAP ]; then pngap="${pngap:+$pngap; }$pnf"
+          else pnweak="${pnweak:+$pnweak; }$pnf"; fi
+        fi
+      fi
+      # minimumReleaseAgeStrict: false lets a release younger than the window
+      # install when nothing older satisfies the range (an exact pin, a package
+      # with no older release): MEASURED on pnpm 11.0.0, 11.28.13 and 12.21.0
+      # with an exact pin of a 16.6-hour-old nightly; 10.34.9 still refused it.
+      # Only a weakening when the host's own setting is strict.
+      pnline=$(printf '%s\n' "$pnout" | grep '^strict' | head -1)
+      if [ -n "$pnline" ] && [ "$pnmaj" -ge 11 ]; then
+        pnkeys=$((pnkeys + 1))
+        case "$(printf '%s' "$pnline" | cut -f2-)" in
+          "bool	false")
+            pnhs=$(cd / && pnpm config get minimumReleaseAgeStrict 2>/dev/null | head -1 | tr -d '\r ')
+            if [ "$pnhs" = true ]; then
+              pnweak="${pnweak:+$pnweak; }minimumReleaseAgeStrict false in $pnsrc lets a release younger than the window install whenever nothing older satisfies the range (an exact pin, a new package); the host's is true"
+            fi ;;
+        esac
+      fi
+      pnline=$(printf '%s\n' "$pnout" | grep '^excl' | head -1)
+      if [ -n "$pnline" ]; then
+        pnkeys=$((pnkeys + 1))
+        pnk=$(printf '%s' "$pnline" | cut -f2)
+        pnitems=$(printf '%s\n' "$pnout" | sed -n 's/^item	//p')
+        pnf=""; pnsev=""
+        if [ "$pnk" = other ]; then
+          pnodd="${pnodd:+$pnodd; }$pnsrc sets $pnke to something other than a list of names"
+        elif [ -n "$pnitems" ]; then
+          pnlist=$(printf '%s\n' "$pnitems" | head -10 | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+          [ "$(printf '%s\n' "$pnitems" | wc -l)" -gt 10 ] && pnlist="$pnlist, ..."
+          pnall=$(printf '%s\n' "$pnitems" | grep -xE '[*]+' | head -1)
+          if [ -n "$pnall" ]; then
+            pnf="$pnke in $pnsrc lists '$pnall', which exempts every package from the age gate"; pnsev=GAP
+          else
+            pnf="$pnke in $pnsrc exempts $pnlist from the age gate"; pnsev=WEAK
+          fi
+        fi
+        if [ -n "$pnf" ]; then
+          if [ -n "$pnexvar" ]; then pnmask="${pnmask:+$pnmask; }$pnf, but $pnexvar in this environment replaces that list"
+          elif [ "$pnsev" = GAP ]; then pngap="${pngap:+$pngap; }$pnf"
+          else pnweak="${pnweak:+$pnweak; }$pnf"; fi
+        fi
+      fi
+    done
+    pnhow="read from the file, since pnpm 10 and 11 run a project's pnpmfile even for \`pnpm config get\`"
+    pnctx="A context without the variable (a systemd unit, a container CMD, any shell that did not log in) uses the project's value"
+    if [ -n "$pngap" ]; then
+      row GAP PRESENT "pnpm repo config override" \
+        "pnpm $pnpv in $PWD: $pngap${pnweak:+; $pnweak}${pnmask:+; and hidden in this shell: $pnmask}. The project's file outranks the host config here ($pnhow)"
+    elif [ -n "$pnweak" ]; then
+      row WEAK PRESENT "pnpm repo config override" \
+        "pnpm $pnpv in $PWD: $pnweak${pnmask:+; and hidden in this shell: $pnmask}. The project's file outranks the host config here ($pnhow)"
+    elif [ -n "$pnmask" ]; then
+      row WEAK PRESENT "pnpm repo config override" \
+        "pnpm $pnpv in $PWD: $pnmask, so pnpm uses the variable's value in this shell: an env variable is what hides the project's weaker setting. $pnctx ($pnhow)"
+    elif [ -n "$pnerr" ] || [ -n "$pnodd" ]; then
+      row WEAK PRESENT "pnpm repo config override" \
+        "pnpm $pnpv in $PWD: ${pnerr}${pnerr:+${pnodd:+; }}${pnodd}. Whether it lowers the host's age gate was not judged"
+    elif [ "$pnkeys" -gt 0 ]; then
+      pnempty="the age-gate keys it sets are no weaker than the host's"
+      pnnone=" - no age-gate setting weaker than the host's"
+      row OK PRESENT "pnpm repo config override" \
+        "pnpm $pnpv in $PWD: ${pnfine:-$pnempty}${pnfine:+$pnnone} ($pnhow)"
+    else
+      row "N/A" - "pnpm repo config override" \
+        "${pnws}${pnws:+${pnrc:+ and }}${pnrc} sets neither minimumReleaseAge nor minimumReleaseAgeExclude"
+    fi
+  fi
+fi
+
+# ======================================================================
 # bun
 # ======================================================================
 

@@ -157,6 +157,16 @@ npm_audit: true
 npm_save_exact: true
 npm_fund: false
 npm_update_notifier: false
+# Whether the env layer exports NPM_CONFIG_ALLOW_GIT=none (allow-git=none is in
+# the npmrc files either way). Derived, not a knob: true unless the npm found at
+# apply time is older than 11.9.0, the first npm that reads allow-git. npm
+# 11.2.0 to 11.8.x print `npm warn Unknown env config "allow-git"` on every
+# command when it is set, and earlier npm ignores it (MEASURED on 10.9.8,
+# 11.1.0, 11.2.0, 11.8.0, 11.9.0, 11.10.0, 11.21.3, 12.2.3). With no npm found
+# it is true, as the npmrc files are written ahead of npm. The version comes
+# from tasks/npm.yml, or from tasks/shell_env.yml on a run scoped away from it.
+sch_npm_found_version: "{{ (npm_version_check.stdout | default(sch_env_npm_version.stdout | default(''))) | trim }}"
+sch_npm_allow_git_env: "{{ not ((sch_npm_found_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')) and (sch_npm_found_version is version('11.9.0', '<'))) }}"
 
 # pip/python settings
 pip_only_binary: true

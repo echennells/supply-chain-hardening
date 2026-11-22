@@ -134,6 +134,9 @@ Other traps:
 - **Composer:** use `"allow-plugins": {}`. The literal `false` crashes every command on
   some versions, including Ubuntu 22.04's.
 - **Composer scripts:** no config key blocks them. Without the wrapper they still run.
+- **npm `allow-git=none`** (npm 11.9.0+): under `actions/setup-node` with `registry-url`, npm
+  reads neither `~/.npmrc` nor `/etc/npmrc`, so also set `NPM_CONFIG_ALLOW_GIT=none`. Not on
+  npm 11.2.0 to 11.8.x, which warn about it on every command.
 - **Config paths:** ask the tool rather than guessing. `npm config get globalconfig`
   (`/etc/npmrc` is only read by Debian and Ubuntu's apt npm) and
   `composer config --global home`.

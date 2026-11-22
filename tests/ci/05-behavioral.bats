@@ -84,6 +84,80 @@ JSON
   [ "$output" = "4" ]
 }
 
+# --- npm: git dependencies under setup-node's redirect ----------------------
+#
+# actions/setup-node with registry-url writes its own .npmrc under RUNNER_TEMP
+# and exports NPM_CONFIG_USERCONFIG at it (src/authutil.ts), so npm never reads
+# the ~/.npmrc harden.sh writes, and its npm reads its prefix's etc/npmrc, not
+# /etc/npmrc. allow-git=none was in the files only, so in that setup a git
+# dependency installed (MEASURED on npm 11.19.1). Offline: the dependency is a
+# git+file:// repository made here.
+
+# Prints the git+file URL of a one-commit package repository.
+npm_git_fixture() {
+  local src="$BATS_TEST_TMPDIR/gitdep-src" bare="$BATS_TEST_TMPDIR/gitdep.git"
+  mkdir -p "$src"
+  printf '{"name":"gitdep","version":"1.0.0"}\n' > "$src/package.json"
+  git -C "$src" init -q
+  git -C "$src" add -A
+  git -C "$src" -c user.email=t@t -c user.name=t commit -qm init
+  git clone -q --bare "$src" "$bare"
+  printf 'git+file://%s' "$bare"
+}
+
+# npm_install_git_dep <url> [env...]: a fresh project depending on <url>,
+# installed in a later "step" (GITHUB_ENV applied, setup-node's .npmrc in
+# force). Sets status/output; the dependency is installed iff
+# $BATS_TEST_TMPDIR/proj/node_modules/gitdep exists.
+npm_install_git_dep() {
+  local url="$1"; shift
+  local proj="$BATS_TEST_TMPDIR/proj" rt="$BATS_TEST_TMPDIR/rt" kv
+  rm -rf "$proj"; mkdir -p "$proj" "$rt"
+  printf '{"name":"p","version":"1.0.0","private":true,"dependencies":{"gitdep":"%s"}}\n' "$url" > "$proj/package.json"
+  # What setup-node writes for registry-url (src/authutil.ts).
+  printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://registry.npmjs.org/\n' > "$rt/.npmrc"
+  local -a envs=(PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_USERCONFIG="$rt/.npmrc" NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX)
+  while IFS= read -r kv; do [ -n "$kv" ] && envs+=("$kv"); done < "$TEST_TMP/ghenv"
+  run env -i "${envs[@]}" "$@" npm install --prefix "$proj" --no-audit --no-fund
+}
+
+# npm_ge <version>: the npm on PATH is at least <version>. awk, not sort -V,
+# which the macOS runners' sort may lack.
+npm_ge() {
+  awk -v a="$(npm --version 2>/dev/null)" -v b="$1" 'BEGIN { split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
+    exit 0 }'
+}
+
+@test "npm: under setup-node's NPM_CONFIG_USERCONFIG, a git dependency is refused (allow-git=none from the env layer)" {
+  have npm || skip "npm not installed"
+  have git || skip "git not installed"
+  npm_ge 11.9.0 || skip "npm $(npm --version) predates allow-git (11.9.0)"
+  local url; url=$(npm_git_fixture)
+  harden ECOSYSTEMS=npm GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv" \
+         GITHUB_OUTPUT="$TEST_TMP/ghout" GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum" >/dev/null
+  npm_install_git_dep "$url"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *EALLOWGIT* ]] || { echo "refused, but not by allow-git:"; echo "$output"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/proj/node_modules/gitdep" ]
+}
+
+@test "npm: FIXTURE CONTROL - the same redirect installs the git dependency without the variable" {
+  # Without NPM_CONFIG_ALLOW_GIT the files are all that is left, and under the
+  # redirect npm reads none of them: this is the bug, and it shows the fixture
+  # installs when nothing refuses it. npm 12 refuses git dependencies by
+  # default (MEASURED, 12.2.3), so there the control allows them explicitly.
+  have npm || skip "npm not installed"
+  have git || skip "git not installed"
+  local url; url=$(npm_git_fixture)
+  harden ECOSYSTEMS=npm GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv" \
+         GITHUB_OUTPUT="$TEST_TMP/ghout" GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum" >/dev/null
+  filter_file "$TEST_TMP/ghenv" grep -v '^NPM_CONFIG_ALLOW_GIT='
+  if npm_ge 12.0.0; then npm_install_git_dep "$url" NPM_CONFIG_ALLOW_GIT=all; else npm_install_git_dep "$url"; fi
+  [ "$status" -eq 0 ] || { echo "the fixture did not install: $output"; return 1; }
+  [ -e "$BATS_TEST_TMPDIR/proj/node_modules/gitdep/package.json" ]
+}
+
 # --- uv: sdist execution ---------------------------------------------------
 
 @test "uv: accepts the rendered uv.toml rather than erroring on it" {

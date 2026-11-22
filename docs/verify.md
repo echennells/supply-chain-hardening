@@ -91,8 +91,14 @@ was loaded by both. That is the same code the project's own `yarn install` runs,
 CI job that installs anyway, verifying runs nothing new. On a checkout you have not
 reviewed, though, the check runs that repo's code. The verifier does not skip
 `yarnPath`: it would then grade a different yarn from the one the install uses.
-Composer is read with `--no-plugins` instead. To check the host alone, run the
-verifier from a directory outside any checkout.
+Composer is read with `--no-plugins` instead. pnpm is not run in a checkout at all:
+in a project, pnpm 10 and 11 run its `.pnpmfile.cjs` (or the file a `pnpmfile:` key
+names) and fetch its `configDependencies` for any command, `pnpm config get` included
+(MEASURED on 10.34.9, 11.0.0 and 11.28.13). So the pnpm rows ask pnpm from `/`, and the
+`pnpm repo config override` row reads the project's `pnpm-workspace.yaml` itself, with
+PyYAML where `python3` has it and otherwise a reader that refuses YAML it does not
+follow; its evidence is `PRESENT`. To check the host alone, run the verifier from a
+directory outside any checkout.
 
 ## Related
 

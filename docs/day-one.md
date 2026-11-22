@@ -67,6 +67,32 @@ environment, which the role's env layer sets. It compares each named
 package's `latest` with what was installed, so a transitive dependency that
 the gate held back is not reported. It does not explain an `ETARGET`.
 
+## npm: `EALLOWGIT` on a git dependency
+
+```
+npm error code EALLOWGIT
+npm error Fetching packages of type "git" have been disabled
+npm error Refusing to fetch "gitdep@git+file:///fx/gitdep.git"
+```
+
+That is `allow-git=none` (npm 11.9.0 and later), in the npmrc files and, as
+`NPM_CONFIG_ALLOW_GIT=none`, in the env layer. It refuses direct and
+transitive git dependencies, `npm ci` from a lockfile included. A project's
+own `.npmrc` `allow-git=all` does not lift it while the variable is set,
+which on GitHub Actions is every step after the action, so a CI job whose
+git dependencies installed before now fails here. npm 12 refuses git
+dependencies by default anyway.
+
+For a git dependency you have vetted, allow it on that one command:
+
+```
+npm install --allow-git=root    # git dependencies of this project, not of its dependencies
+npm install --allow-git=all     # git dependencies anywhere in the tree
+```
+
+The flag outranks the variable (MEASURED on npm 11.19.1, 2026-11-22); the
+next command is refused again.
+
 ## uv: `uv sync` in your own project fails with "marked as `--no-build`"
 
 ```

@@ -356,8 +356,8 @@ runtime behavior.
 
 ### Silent-ignore on older versions
 
-`allow-git = "none"` is silently inert on npm < 11 (enforcement landed in
-npm 11). `audit.block-insecure` requires composer ≥ 2.9; older composer
+`allow-git = "none"` is silently inert on npm < 11.9.0 (enforcement landed in
+npm 11.9.0; MEASURED, 11.8.0 installs a git dependency with it set). `audit.block-insecure` requires composer ≥ 2.9; older composer
 ignores it. `saveTextLockfile` requires bun ≥ 1.2.
 
 **Principle**: pair file-content tests with behavioral tests. Behavioral

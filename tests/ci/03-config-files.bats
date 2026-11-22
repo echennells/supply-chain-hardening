@@ -30,6 +30,41 @@ setup() { common_setup; }
   assert_file_lacks "$ENV_FILE" "NPM_CONFIG_MINIMUM_RELEASE_AGE"
 }
 
+@test "npm: allow-git=none is exported where npm reads it, and not where npm warns about it" {
+  # actions/setup-node with registry-url points NPM_CONFIG_USERCONFIG at its own
+  # .npmrc, so npm skips the ~/.npmrc above and allow-git needs the env form.
+  # npm reads it from 11.9.0; npm 11.2.0 to 11.8.x print `npm warn Unknown env
+  # config "allow-git"` on every command when it is set, and older npm ignores
+  # it (MEASURED). The npmrc keeps the key on every version.
+  local v
+  for v in 11.9.0 12.2.3 11.8.0 11.2.0 10.9.8; do
+    rm -rf "$TEST_HOME"; mkdir -p "$TEST_HOME"
+    stub_bin npm "case \"\$*\" in --version) echo $v ;; *) echo STUB ;; esac"
+    run harden ECOSYSTEMS=npm GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv-$v" \
+               GITHUB_OUTPUT="$TEST_TMP/ghout-$v" GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum-$v"
+    [ "$status" -eq 0 ] || { echo "npm $v: harden rc=$status"; echo "$output"; return 1; }
+    assert_file_contains "$TEST_HOME/.npmrc" "^allow-git=none$"
+    case "$v" in
+      11.9.0|12.2.3)
+        assert_file_contains "$ENV_FILE" "^export NPM_CONFIG_ALLOW_GIT=none$"
+        assert_file_contains "$TEST_TMP/ghenv-$v" "^NPM_CONFIG_ALLOW_GIT=none$" ;;
+      *)
+        assert_file_lacks "$ENV_FILE" "ALLOW_GIT"
+        assert_file_lacks "$TEST_TMP/ghenv-$v" "ALLOW_GIT"
+        [[ "$output" == *"npm $v predates it (npm 11.9.0)"* ]] || { echo "npm $v: no note that allow-git is not in effect"; echo "$output"; return 1; } ;;
+    esac
+  done
+}
+
+@test "npm: with no npm version to read, allow-git=none is exported, as the age gate assumes a current npm" {
+  # Hardening ahead of setup-node: the files are written for the npm that
+  # arrives later, and the variable with them.
+  stub_bin npm 'echo "npm: not a version"'
+  run harden ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$ENV_FILE" "^export NPM_CONFIG_ALLOW_GIT=none$"
+}
+
 @test "pnpm: blanket script block by default, no build allowlist" {
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
