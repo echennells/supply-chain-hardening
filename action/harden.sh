@@ -1052,7 +1052,13 @@ detect_version() {
     return 0
   fi
   local out
-  out=$($cmd 2>&1 || true)
+  # From /, never the working directory. The action runs this step in the job's
+  # checkout, and tools read files there and in every directory above it that
+  # name code they then run, for --version too. MEASURED: a .yarnrc.yml yarnPath
+  # (yarn 1.22.22, 4.1.0-4.19.0), .mvn/jvm.config (maven 3.10.0), a global.json
+  # sdk "paths" entry (.NET 10.0.404) and Poetry 2.5.2's .poetry/plugins all ran
+  # for --version. This reports the host's tool, which is what gets configured.
+  out=$(cd / && $cmd 2>&1 || true)
   echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
 }
 
@@ -1670,10 +1676,12 @@ harden_composer() {
   # ~/.config/composer is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
   # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
-  local composer_home="" composer_cwd
-  if command -v composer >/dev/null 2>&1 && composer_cwd=$(mktemp -d 2>/dev/null); then
-    composer_home=$(cd "$composer_cwd" && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
-    rmdir "$composer_cwd" 2>/dev/null || true
+  # From /: not the checkout, and not a mktemp dir under /tmp, where composer
+  # will use a composer.json from a parent directory (its documented
+  # use-parent-dir setting) and another account can plant one.
+  local composer_home=""
+  if command -v composer >/dev/null 2>&1; then
+    composer_home=$(cd / && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
   fi
   case "$composer_home" in
     /*)
@@ -2408,7 +2416,9 @@ EOF
   # hardening step that installs nothing. It also filled the disk of the macos-15
   # runner, one toolchain per test HOME. stderr is dropped so rustup's "toolchain
   # 1.85.0 is not installed" cannot be read back as cargo's version.
-  set_tool_version "cargo" "$(RUSTUP_AUTO_INSTALL=0 cargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+  # From /: through a rustup proxy a checkout's rust-toolchain.toml `path =`
+  # picks the cargo that answers (MEASURED, rustup 1.29.3). See detect_version.
+  set_tool_version "cargo" "$(cd / && RUSTUP_AUTO_INSTALL=0 cargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
 
   # ---- optional cargo-cooldown backend ----
   #
@@ -2424,7 +2434,9 @@ EOF
       # it used to go to /dev/null, which hid cargo's own explanation
       # ("cargo-cooldown 0.4.2 requires rustc 1.97") of why the gate was absent.
       local cc_err cc_rc=0
-      cc_err=$(cargo install --locked "cargo-cooldown@${CARGO_COOLDOWN_VERSION}" 2>&1 >/dev/null) || cc_rc=$?
+      # From /, so neither the checkout's .cargo/config.toml (a rustc-wrapper)
+      # nor its rust-toolchain.toml takes part in building the gate itself.
+      cc_err=$(cd / && cargo install --locked "cargo-cooldown@${CARGO_COOLDOWN_VERSION}" 2>&1 >/dev/null) || cc_rc=$?
       if [[ "$cc_rc" -eq 0 ]]; then
         cooldown_bin="$cargo_home/bin"
         log "cargo-cooldown ${CARGO_COOLDOWN_VERSION} installed at $cooldown_bin"
@@ -3101,19 +3113,19 @@ harden_go() {
       "GOINSECURE=" \
       "GONOSUMDB="
     do
-      go env -w "$gokey" 2>/dev/null || failed+="${gokey%%=*} "
+      (cd / && go env -w "$gokey") 2>/dev/null || failed+="${gokey%%=*} "
     done
     # A runner hardened by an earlier version keeps GOFLAGS=-mod=readonly in its
     # go env file (self-hosted runners persist it). Remove exactly that value so
     # the host converges; any other GOFLAGS is the owner's and is left alone.
-    if [[ "$(env -u GOFLAGS go env GOFLAGS 2>/dev/null)" == "-mod=readonly" ]]; then
-      go env -u GOFLAGS 2>/dev/null \
-        && log "go: removed GOFLAGS=-mod=readonly left in $(go env GOENV 2>/dev/null) by an earlier version (it made go ignore vendor/)"
+    if [[ "$(cd / && env -u GOFLAGS go env GOFLAGS 2>/dev/null)" == "-mod=readonly" ]]; then
+      (cd / && go env -u GOFLAGS) 2>/dev/null \
+        && log "go: removed GOFLAGS=-mod=readonly left in $(cd / && go env GOENV 2>/dev/null) by an earlier version (it made go ignore vendor/)"
     fi
     if [[ -n "$failed" ]]; then
       warn "go env -w rejected: ${failed% } — those settings rely on the env layer only on this host"
     else
-      log "go: persisted to $(go env GOENV 2>/dev/null || echo "$HOME/.config/go/env") — survives without env propagation"
+      log "go: persisted to $(cd / && go env GOENV 2>/dev/null || echo "$HOME/.config/go/env") — survives without env propagation"
     fi
   else
     log "go not installed — env layer written, go env -w skipped"
@@ -3139,7 +3151,7 @@ harden_go() {
 # correct if the feature is backported or the version string is unusual.
 bundler_implements_cooldown() {
   command -v ruby >/dev/null 2>&1 || return 1
-  ruby -e 'require "bundler"; exit(Bundler::Settings::NUMBER_KEYS.include?("cooldown") ? 0 : 1)' \
+  (cd / && ruby -e 'require "bundler"; exit(Bundler::Settings::NUMBER_KEYS.include?("cooldown") ? 0 : 1)') \
     >/dev/null 2>&1
 }
 
@@ -3674,7 +3686,7 @@ install_sfw_and_wrap() {
   fi
 
   local node_major
-  node_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+  node_major=$(cd / && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
   if [[ "$node_major" -lt 20 ]]; then
     warn "sfw requires Node >= 20 (host has $node_major); skipping"
     end_section
@@ -3697,7 +3709,7 @@ install_sfw_and_wrap() {
   # to everyone but root.
   local npm_bin
   npm_bin=$(command -v npm)
-  $SUDO sh -c 'umask 022; exec "$@"' sh "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}" >/dev/null 2>&1 || {
+  (cd / && $SUDO sh -c 'umask 022; exec "$@"' sh "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}") >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
@@ -3740,9 +3752,9 @@ install_sfw_and_wrap() {
   # umask 022 for the root warm: sudo applies the union of the caller's umask
   # and its own, and a 077 caller would leave the binary in a 0700 directory
   # that the user check below (and every other account) cannot reach.
-  sfw_out=$(run_bounded 180 $SUDO sh -c 'umask 022; exec "$@"' sh "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  sfw_out=$(cd / && run_bounded 180 $SUDO sh -c 'umask 022; exec "$@"' sh "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   if [[ "$sfw_rc" -eq 0 ]]; then
-    sfw_out=$(SFW_SKIP_UPDATE_CHECK=1 run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+    sfw_out=$(cd / && SFW_SKIP_UPDATE_CHECK=1 run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   fi
   if [[ "$sfw_rc" -ne 0 ]]; then
     $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
