@@ -172,8 +172,8 @@ What passes:
 The trade-off this replaced was "in CI the verifier runs the same yarn `yarn
 install` will run next, so it runs nothing new". It fails on its own terms: the
 verifier is also what an agent runs on a checkout before deciding whether to
-build it at all, and running the project's yarn to read its age gate executes
-the code the gate exists to keep out.
+build it at all, and running the project's yarn to read the host's age gate runs
+that checkout's code before anyone has decided to trust it.
 
 ### Things that are in scope but are not protections
 

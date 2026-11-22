@@ -2226,7 +2226,8 @@ y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_
   printf 'require("fs").writeFileSync("%s", "x")\n' "$BATS_TEST_TMPDIR/markers/yarnpath-ran" > "$(YNP)/evil.cjs"
   rm -f "$BATS_TEST_TMPDIR/yarn-calls"
   run verify_in "$(YNP)/packages/a" --emit=plain
-  [[ "$(y_row)" == WEAK*"npmMinimalAgeGate 600"* ]] || { y_row; return 1; }
+  # A yarnPath with no version string: its values are not judged, only named.
+  [[ "$(y_row)" == WEAK*"names yarnPath $(YNP)/evil.cjs, the checkout's own yarn"*"the project sets npmMinimalAgeGate, not judged"* ]] || { y_row; return 1; }
   [ -s "$BATS_TEST_TMPDIR/yarn-calls" ]
   ! grep -q -e "^$PNT/yproj" -e "^$BATS_TEST_TMPDIR/yproj" "$BATS_TEST_TMPDIR/yarn-calls" || { cat "$BATS_TEST_TMPDIR/yarn-calls"; return 1; }
   [ ! -e "$BATS_TEST_TMPDIR/markers/yarnpath-ran" ]
