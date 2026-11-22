@@ -186,6 +186,221 @@ discover poetry  "$HOME/.local/bin" "${POETRY_HOME:-$HOME/.local/share/pypoetry}
 # Yarn 1.x (classic) never reads .yarnrc.yml: `yarn config get` answers
 # "undefined" for both keys with exit 0 (MEASURED, 1.22.22), so it is
 # recognised by its version first.
+#
+# ASKED FROM /, NEVER FROM $PWD. Yarn reads a .yarnrc.yml in the working
+# directory and in every directory above it, and from those files it runs code:
+# a `yarnPath` file IS the yarn that answers, and every `plugins:` entry is
+# loaded first, for `yarn --version` and `yarn config get` alike (MEASURED on
+# 4.1.0, 4.9.4, 4.10.3, 4.11.0 and 4.19.0; classic 1.22.22 runs a .yarnrc.yml
+# yarnPath and a .yarnrc yarn-path the same way, from a parent directory too).
+# Through a corepack shim a checkout also picks, and with a .corepack.env
+# redirects, the yarn corepack downloads (MEASURED, corepack 0.36.0). These rows
+# asked from the working directory, so running the verifier inside a checkout,
+# as AGENTS.md says to, ran that checkout's code. From / they report the host's
+# yarn and ~/.yarnrc.yml; what the project's files change, and which yarn runs
+# in the project, is the "yarn repo config override" row below, which reads the
+# files instead of running yarn.
+
+# --- yarn repo config override  [PRESENT] ---
+# What a checkout changes for yarn, read from its files. MEASURED on 4.10.3,
+# 4.11.0 and 4.19.0 (`yarn config get` in throwaway projects, and installs of a
+# release 19 hours old against a 2880-minute ~/.yarnrc.yml):
+#   - every .yarnrc.yml from the working directory up to / is read, the nearest
+#     winning, ~/.yarnrc.yml below them all and YARN_* variables above them all;
+#     YARN_RC_FILENAME renames the project files, not the home one
+#   - values are strings (`!!str 25` is 25, a repeated key keeps the last), and
+#     `${VAR:-x}` is expanded from the environment of the yarn that reads it
+#   - npmMinimalAgeGate on 4.10.x is the value's leading integer ("2d" is 2,
+#     "48h" 48, "1.5" 1; "abc", true and null NaN); 4.11+ reads minutes or a
+#     number with s, m, h, d or w ("3600s" is 60, "1.5d" 2160) and refuses
+#     anything else (-1, "2 days", "P2D", true, null, '') with "Couldn't parse",
+#     which stops every yarn command there; below 4.10 a project file holding the
+#     key stops every command ("Unrecognized or legacy configuration settings")
+#   - 0 installed the 19-hour-old release; enableScripts takes true/false/1/0
+#     and refuses "yes" the same way
+#   - npmPreapprovedPackages exempts a name glob or name@version: "*" matched
+#     typescript but no scoped name, "@*/*" every scoped name, "**" every name;
+#     "name@*" matched nothing in a prerelease
+# yarnPath and plugins name code the checkout supplies, which runs on every yarn
+# command there, `yarn install` included; this row does not run it, and grades
+# the yarn that runs by the version string inside the yarnPath file (the bundles
+# carry `name:"@yarnpkg/cli",version:"X"`, MEASURED 4.1.0 to 4.19.0) or by the
+# packageManager corepack would download, a statement by the checkout itself.
+scv_yarn_rc_py='
+import re, sys
+try:
+    import yaml
+except Exception:
+    sys.exit(3)
+def clean(s):
+    return re.sub(r"[\x00-\x1f\x7f]", "?", str(s))[:300]
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = yaml.load(f, Loader=yaml.BaseLoader)
+except Exception as e:
+    m = str(e).strip().splitlines()
+    print("error\t" + clean(m[0] if m else type(e).__name__))
+    sys.exit(0)
+if d is None:
+    d = {}
+if not isinstance(d, dict):
+    print("error\tthe top level is not a mapping")
+    sys.exit(0)
+for k in ("yarnPath", "npmMinimalAgeGate", "enableScripts"):
+    if k in d:
+        v = d[k]
+        print(("k\t%s\t%s" % (k, clean(v))) if isinstance(v, str) else ("t\t%s\t%s" % (k, type(v).__name__)))
+if "npmPreapprovedPackages" in d:
+    v = d["npmPreapprovedPackages"]
+    if isinstance(v, str):
+        v = [v]
+    if isinstance(v, list):
+        print("k\tnpmPreapprovedPackages\t%d" % len(v))
+        for i in v:
+            print(("l\tnpmPreapprovedPackages\t" + clean(i)) if isinstance(i, str) else "t\tnpmPreapprovedPackages\titem")
+    else:
+        print("t\tnpmPreapprovedPackages\t" + type(v).__name__)
+if "plugins" in d:
+    v = d["plugins"]
+    if isinstance(v, list):
+        for i in v:
+            p = i.get("path") if isinstance(i, dict) else i
+            print("p\t" + (clean(p) if isinstance(p, str) else "?"))
+    elif v != "":
+        print("t\tplugins\t" + type(v).__name__)
+'
+# The fallback reader: top-level keys at column 0, a plain or quoted scalar, a
+# one-line [..] or a block of "- item" lines, and plugin entries as "- path: x"
+# or "- x". A flow-mapping document, a merge or complex key, an anchor, alias,
+# tag or block scalar is "error", never a guess.
+scv_yarn_rc_awk='
+function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+function bad(why) { if (!err) err = why }
+function val(s,   q, rest, i) {
+  s = trim(s); q = substr(s, 1, 1)
+  if (q == "\"" || q == "\047") {
+    rest = substr(s, 2); i = index(rest, q)
+    if (i == 0) { bad("an unterminated quoted value"); return "\001" }
+    if (trim(substr(rest, i + 1)) !~ /^(#.*)?$/) { bad("text after a quoted value"); return "\001" }
+    return substr(rest, 1, i - 1)
+  }
+  sub(/[ \t]+#.*$/, "", s); s = trim(s)
+  if (s ~ /^[&*!|>{%@`]/) { bad("an anchor, alias, tag, block scalar or flow mapping"); return "\001" }
+  return s
+}
+{ line[NR] = $0 }
+END {
+  for (n = 1; n <= NR; n++) {
+    l = line[n]
+    if (l ~ /^[ \t]*(#.*)?$/ || l ~ /^%/ || l ~ /^---[ \t]*$/) continue
+    if (!seen && l ~ /^[{[]/) bad("a flow-style document")
+    seen = 1
+    if (l ~ /^(<<|\?)/) bad("a merge or complex key")
+    if (l ~ /^[ \t]/) continue
+    k = l; sub(/[ \t]*:.*$/, "", k); gsub(/^["\047]|["\047]$/, "", k)
+    if (k !~ /^(yarnPath|npmMinimalAgeGate|enableScripts|npmPreapprovedPackages|plugins)$/) continue
+    if (cnt[k]++) delete_items = 1
+    v = l; sub(/^[^:]*:/, "", v); v = trim(v)
+    if (k == "npmPreapprovedPackages" || k == "plugins") {
+      if (k == "npmPreapprovedPackages") ni = 0; else np = 0
+      if (v ~ /^\[/) {
+        if (v !~ /\][ \t]*(#.*)?$/) { bad("a [..] list over several lines"); continue }
+        sub(/\][ \t]*(#.*)?$/, "", v); v = substr(v, 2)
+        if (v ~ /[][{}]/) { bad("a nested list or mapping"); continue }
+        if (trim(v) != "") {
+          c = split(v, parts, ",")
+          for (p = 1; p <= c; p++) { it = val(parts[p]); if (it == "\001") break; if (k == "plugins") pl[++np] = it; else items[++ni] = it }
+        }
+      } else if (v == "" || v ~ /^#/) {
+        for (m = n + 1; m <= NR; m++) {
+          t = line[m]
+          if (t ~ /^[ \t]*(#.*)?$/) continue
+          if (t !~ /^[ \t]/ && t !~ /^-([ \t]|$)/) break
+          if (t ~ /^[ \t]*-([ \t]|$)/) {
+            sub(/^[ \t]*-[ \t]*/, "", t)
+            if (k == "plugins") {
+              if (t ~ /^path[ \t]*:/) { sub(/^path[ \t]*:/, "", t); pl[++np] = val(t) }
+              else if (t ~ /^[A-Za-z]+[ \t]*:/) pend = 1
+              else pl[++np] = val(t)
+            } else { it = val(t); if (it == "\001") break; items[++ni] = it }
+            continue
+          }
+          if (k == "plugins" && t ~ /^[ \t]+path[ \t]*:/) { sub(/^[ \t]+path[ \t]*:/, "", t); pl[++np] = val(t); pend = 0; continue }
+          if (k == "plugins" && t ~ /^[ \t]+[A-Za-z]+[ \t]*:/) continue
+          bad("an entry this reader does not follow"); break
+        }
+        if (pend) { pl[++np] = "?"; pend = 0 }
+      } else if (k == "npmPreapprovedPackages") { it = val(v); if (it != "\001") items[++ni] = it }
+      else bad("a plugins value that is not a list")
+      if (k == "npmPreapprovedPackages") has_items = 1
+      continue
+    }
+    if (v == "" || v ~ /^#/) {
+      for (m = n + 1; m <= NR && line[m] ~ /^[ \t]*(#.*)?$/; m++) ;
+      if (m <= NR && line[m] ~ /^[ \t]/) { bad("a value on the following lines"); continue }
+      sc[k] = ""
+    } else { v = val(v); if (v != "\001") sc[k] = v }
+    has[k] = 1
+  }
+  if (err) { print "error\t" err; exit }
+  for (k in has) print "k\t" k "\t" sc[k]
+  if (has_items) { print "k\tnpmPreapprovedPackages\t" ni; for (p = 1; p <= ni; p++) print "l\tnpmPreapprovedPackages\t" items[p] }
+  for (p = 1; p <= np; p++) print "p\t" pl[p]
+}
+'
+# scv_yarn_rc_read <file>: "by<TAB>reader" first, then "k<TAB>key<TAB>value",
+# "l<TAB>npmPreapprovedPackages<TAB>entry", "p<TAB>plugin path",
+# "t<TAB>key<TAB>type" for a value that is not a string, or "error<TAB>why".
+scv_yarn_rc_read() {
+  local out rc
+  out=$(run_bounded 20 python3 -I -c "$scv_yarn_rc_py" "$1" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ]; then printf 'by\tPyYAML\n%s\n' "$out"; return 0; fi
+  printf 'by\ta plain-key reader (python3 has no PyYAML here)\n'
+  awk "$scv_yarn_rc_awk" "$1" 2>/dev/null
+}
+# The yarn version a bundle names, without running it; empty when it names none.
+scv_yarn_file_version() { # <yarn bundle>
+  local v
+  v=$(grep -aoE 'name:"@yarnpkg/cli",version:"[0-9][^"]*"' "$1" 2>/dev/null | head -1 | sed 's/.*version:"//; s/"$//')
+  [ -n "$v" ] || v=$(grep -aoE '"installationMethod":"[^"]*","version":"1\.[0-9][^"]*"' "$1" 2>/dev/null | head -1 | sed 's/.*"version":"//; s/"$//')
+  [ -n "$v" ] || v=$(printf '%s\n' "${1##*/}" | sed -n 's/^yarn-\([0-9][0-9]*\.[0-9][0-9.]*[^/]*\)\.c\{0,1\}js$/\1/p')
+  printf '%s' "$v"
+}
+# 0 when version $1 >= $2 (dotted; a pre-release suffix counts as its number).
+scv_yarn_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) { x[i] += 0; y[i] += 0; if (x[i] != y[i]) exit !(x[i] > y[i]) }
+    exit 0 }'
+}
+# How broad is one npmPreapprovedPackages entry? Prints "all", "unscoped",
+# "scoped" or "named". Made-up names stand in for "any package": a glob that
+# matches them exempts arbitrary packages, not a named few. Shell globs stand in
+# for yarn's matcher, so only the part a "/" cannot cross is compared.
+scv_yarn_preapproved_scope() { # <entry>
+  local e s m a b
+  e=$1
+  case "$e" in ?*@*) printf 'named\n'; return ;; esac
+  case "$e" in
+    *'**'*) printf 'all\n'; return ;;
+    @*/*)
+      s=${e#@}; m=${s#*/}; s=${s%%/*}
+      case "$m" in */*) printf 'named\n'; return ;; esac
+      for a in zz9-sch-sentinel q7x-sch-sentinel m3k-sch-sentinel e5w-sch-sentinel; do
+        case "$a" in $s)
+          for b in zz9-sch-sentinel q7x-sch-sentinel m3k-sch-sentinel e5w-sch-sentinel; do
+            case "$b" in $m) printf 'scoped\n'; return ;; esac
+          done ;;
+        esac
+      done ;;
+    */*) ;;
+    *)
+      for a in zz9-sch-sentinel q7x-sch-sentinel m3k-sch-sentinel e5w-sch-sentinel; do
+        case "$a" in $e) printf 'unscoped\n'; return ;; esac
+      done ;;
+  esac
+  printf 'named\n'
+}
+
 if ! have yarn; then
   row "N/A" - "yarn" "yarn not installed"
 elif command -v requested >/dev/null 2>&1 && ! requested yarn; then
@@ -195,10 +410,74 @@ else
   # A yarn that cannot name its version (a corepack shim that cannot resolve
   # one, a broken yarnPath) must not be reported as one too old for the gate.
   case "$yv" in [0-9]*) ;; *) yv="" ;; esac
+  yshim=0; yhostclassic=0
+  case "$(readlink -f "$(command -v yarn)" 2>/dev/null)" in */corepack/*) yshim=1 ;; esac
+  case "$yv" in 1.*) yhostclassic=1 ;; esac
+
+  # ---- which yarn runs in $PWD, and the project's .yarnrc.yml files ---------
+  yrcname=${YARN_RC_FILENAME:-.yarnrc.yml}
+  yfiles=""; yclassic=""; ypm=""; ypmsrc=""
+  if [ "$PWD" != / ]; then
+    yd=$PWD
+    while [ -n "$yd" ] && [ "$yd" != / ]; do
+      if [ "$yd" != "$HOME" ]; then
+        [ -f "$yd/$yrcname" ] && yfiles="$yd/$yrcname${yfiles:+
+$yfiles}"
+        [ -z "$yclassic" ] && [ -f "$yd/.yarnrc" ] && grep -qE '^[[:space:]]*"?yarn-path"?[[:space:]]' "$yd/.yarnrc" 2>/dev/null && yclassic="$yd/.yarnrc"
+      fi
+      if [ -z "$ypmsrc" ] && [ -f "$yd/package.json" ]; then
+        ypmsrc="$yd/package.json"
+        ypm=$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ypmsrc" 2>/dev/null | head -1)
+      fi
+      yd=${yd%/*}
+    done
+  fi
+  # Read each file once, farthest first, so a nearer file's value replaces it.
+  yread=""
+  if [ -n "$yfiles" ]; then
+    yread=$(printf '%s\n' "$yfiles" | while IFS= read -r yf; do
+      scv_yarn_rc_read "$yf" | YF=$yf awk '{ print ENVIRON["YF"] "\t" $0 }'
+    done)
+  fi
+  # The project's yarnPath (the nearest file that names one) and its version.
+  ypath=""; ypathsrc=""; ypathv=""; ypathkey=yarnPath
+  ypline=$(printf '%s\n' "$yread" | awk -F'\t' '$2 == "k" && $3 == "yarnPath"' | tail -1)
+  if [ -n "$ypline" ]; then
+    ypathsrc=$(printf '%s' "$ypline" | cut -f1); ypath=$(printf '%s' "$ypline" | cut -f4-)
+    case "$ypath" in /*) ;; ?*) ypath="${ypathsrc%/*}/${ypath#./}" ;; esac
+  elif [ -n "$yclassic" ] && [ "$yhostclassic" = 1 ]; then
+    ypathsrc=$yclassic; ypathkey=yarn-path
+    ypath=$(sed -n 's/^[[:space:]]*"\{0,1\}yarn-path"\{0,1\}[[:space:]][[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$yclassic" | tail -1)
+    case "$ypath" in /*) ;; ?*) ypath="${yclassic%/*}/${ypath#./}" ;; esac
+  fi
+  [ -n "$ypath" ] && [ -f "$ypath" ] && ypathv=$(scv_yarn_file_version "$ypath")
+  # The yarn that runs here: a yarnPath first (corepack's yarn also defers to
+  # it), then the packageManager a corepack shim downloads, then the host's.
+  yeff="$yv"; yeffwhy=""
+  if [ -n "$ypath" ]; then
+    yeff="$ypathv"
+    yeffwhy="the checkout's own yarn, $ypath${ypathv:+ (yarn $ypathv by its version string)}, named by $ypathkey in $ypathsrc"
+  elif [ "$yshim" = 1 ]; then
+    case "$ypm" in
+      yarn@[0-9]*)
+        yeff=${ypm#yarn@}; yeff=${yeff%%+*}
+        yeffwhy="yarn $yeff, which corepack downloads because packageManager in $ypmsrc names it" ;;
+    esac
+  fi
+
+  # ---- the host's yarn, asked from / ----------------------------------------
+  ywhere=""
+  [ -n "$yeffwhy" ] && ywhere=". In $PWD that is not the yarn that runs: $yeffwhy (see yarn repo config override)"
+  yhostgate=""
   case "$yv" in
     1.*)
-      scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
-        "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them" ;;
+      if [ -n "$yeffwhy" ]; then
+        row "N/A" - "yarn hardening" \
+          "this host's yarn, $yv, is classic and ignores .yarnrc.yml$ywhere"
+      else
+        scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
+          "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them"
+      fi ;;
     *)
       yout=$(scv_at_root yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
       v=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | tr -d ' ')
@@ -206,35 +485,209 @@ else
       ysaid=$(printf '%s\n' "$yout" | head -1 | tr -d '\r' | cut -c1-90)
       if [ "$yrc" -ne 0 ] && [ -z "$yv" ]; then
         scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
-          "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` from / to see why it printed none"
+          "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` from / to see why it printed none$ywhere"
       elif [ "$yrc" -ne 0 ]; then
         scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
-          "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this"
+          "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this$ywhere"
       else
         yv="${yv:-(version unknown)}"
         case "$v" in
           ''|undefined|null)
-            row GAP PARSED "yarn age gate" "yarn $yv reports no npmMinimalAgeGate value, so no age gate is in effect" ;;
+            row GAP PARSED "yarn age gate" "yarn $yv reports no npmMinimalAgeGate value, so no age gate is in effect$ywhere" ;;
           *[!0-9]*)
-            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate='$v', which is not a whole number of minutes, so the gate cannot be confirmed" ;;
+            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate='$v', which is not a whole number of minutes, so the gate cannot be confirmed$ywhere" ;;
           0)
-            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=0, which disables the gate" ;;
+            row GAP PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=0, which disables the gate$ywhere" ;;
           *)
+            yhostgate=$v
             if [ -n "$ywant" ] && [ "$v" -lt "$((ywant * 60))" ] 2>/dev/null; then
-              row WEAK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes, below the ${ywant}h promised here. Yarn 4.10.x reads a duration string such as \"2d\" as 2 minutes; write integer minutes"
+              row WEAK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes, below the ${ywant}h promised here. Yarn 4.10.x reads a duration string such as \"2d\" as 2 minutes; write integer minutes$ywhere"
             else
-              row OK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes"
+              row OK PARSED "yarn age gate" "yarn $yv reports npmMinimalAgeGate=$v minutes$ywhere"
             fi ;;
         esac
       fi
       v=$(scv_at_root yarn config get enableScripts 2>/dev/null | head -1 | tr -d '\r' | tr -d ' ')
       if [ "$v" = "false" ]; then
-        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false"
+        row OK PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=false$ywhere"
       else
-        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}"
+        row GAP PARSED "yarn lifecycle scripts blocked" "yarn reports enableScripts=${v:-<unset>}$ywhere"
       fi
       ;;
   esac
+
+  # ---- yarn repo config override --------------------------------------------
+  if [ "$PWD" = / ]; then
+    row "N/A" - "yarn repo config override" \
+      "the verifier ran from /, where no project's .yarnrc.yml applies - run it from a project to check that project's yarn settings"
+  elif [ -z "$yfiles" ] && [ -z "$yeffwhy" ]; then
+    row "N/A" - "yarn repo config override" "no $yrcname at or above $PWD, and the yarn that runs there is this host's"
+  else
+    ygap=""; yweak=""; yodd=""; yfine=""; ymask=""; yerr=""; ykeys=0
+    yadd() { # list item
+      eval "$1=\"\${$1:+\$$1; }\$2\""
+    }
+    # Which yarn are the values judged against?
+    ymaj=""; ymin=""
+    case "$yeff" in [0-9]*.[0-9]*) ymaj=${yeff%%.*}; ymin=${yeff#*.}; ymin=${ymin%%[!0-9]*} ;; esac
+    ygate=0; ydur=0
+    if [ -n "$ymaj" ]; then
+      scv_yarn_ge "$yeff" 4.10.0 && ygate=1
+      scv_yarn_ge "$yeff" 4.11.0 && ydur=1
+    fi
+    # The code the checkout supplies.
+    if [ -n "$ypath" ]; then
+      ykeys=$((ykeys + 1))
+      ycode="$ypathsrc names $ypathkey $ypath, the checkout's own yarn, which runs on every yarn command here, \`yarn install\` included, and which this verifier did not run"
+      if [ ! -f "$ypath" ]; then
+        yadd yodd "$ypathsrc names $ypathkey $ypath, which does not exist, so every yarn command here fails"
+      elif [ -z "$ymaj" ]; then
+        yadd yweak "$ycode; its version could not be read from the file, so whether it has an age gate was not judged"
+      elif [ "$ymaj" = 1 ]; then
+        yadd ygap "$ycode; by its version string it is yarn $yeff, classic, which ignores .yarnrc.yml: no age gate and no enableScripts here"
+      elif [ "$ygate" = 0 ]; then
+        yadd ygap "$ycode; by its version string it is yarn $yeff, which has no npmMinimalAgeGate (Yarn 4.10.0), so nothing here is age-gated"
+      else
+        yadd yweak "$ycode; by its version string it is yarn $yeff, which has npmMinimalAgeGate"
+      fi
+    elif [ -n "$yeffwhy" ]; then
+      ykeys=$((ykeys + 1))
+      if [ -z "$ymaj" ]; then
+        yadd yweak "$yeffwhy, a version this row cannot read"
+      elif [ "$ymaj" = 1 ]; then
+        yadd ygap "$yeffwhy: classic, which ignores .yarnrc.yml, so there is no age gate and no enableScripts here"
+      elif [ "$ygate" = 0 ]; then
+        yadd ygap "$yeffwhy: it has no npmMinimalAgeGate (Yarn 4.10.0), so nothing here is age-gated"
+      else
+        yfine="${yfine:+$yfine; }$yeffwhy, an official release that has npmMinimalAgeGate"
+      fi
+    fi
+    yplug=$(printf '%s\n' "$yread" | awk -F'\t' '$2 == "p" { print $3 }' | sort -u | head -10 | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+    if [ -n "$yplug" ] && [ "$ymaj" != 1 ]; then
+      ykeys=$((ykeys + 1))
+      yadd yweak "the project's $yrcname loads plugins ($yplug), the checkout's own code, on every yarn command here, \`yarn install\` included; this verifier did not run them"
+    fi
+    yerrs=$(printf '%s\n' "$yread" | awk -F'\t' '$2 == "error" { print $1 " could not be read by the reader: " $3 }' | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g')
+    [ -n "$yerrs" ] && yerr=$yerrs
+    yby=$(printf '%s\n' "$yread" | awk -F'\t' '$2 == "by" { print $3; exit }')
+    # The settings, nearest file winning; ~/.yarnrc.yml too when the yarn that
+    # runs here is not the one the host rows asked.
+    if [ -n "$ymaj" ] && [ "$ymaj" != 1 ]; then
+      yhomeread=""
+      [ -n "$yeffwhy" ] && [ -f "$HOME/.yarnrc.yml" ] && yhomeread=$(scv_yarn_rc_read "$HOME/.yarnrc.yml" | YF=$HOME/.yarnrc.yml awk '{ print ENVIRON["YF"] "\t" $0 }')
+      yall=$(printf '%s\n%s\n' "$yhomeread" "$yread")
+      ywanth=$(scv_want_hours); ywantm=""; ywantwhat=""
+      case "$ywanth" in
+        ''|*[!0-9]*) [ -n "$yhostgate" ] && { ywantm=$yhostgate; ywantwhat="the host's own $yhostgate minutes"; } ;;
+        *) ywantm=$((ywanth * 60)); ywantwhat="the ${ywanth}h ($ywantm minutes) promised here" ;;
+      esac
+      for yk in npmMinimalAgeGate enableScripts; do
+        yl=$(printf '%s\n' "$yall" | awk -F'\t' -v k="$yk" '($2 == "k" || $2 == "t") && $3 == k' | tail -1)
+        [ -n "$yl" ] || continue
+        ysrc=$(printf '%s' "$yl" | cut -f1); ykind=$(printf '%s' "$yl" | cut -f2); yval=$(printf '%s' "$yl" | cut -f4-)
+        ykeys=$((ykeys + 1))
+        yenv=""
+        case "$yk" in
+          npmMinimalAgeGate) [ -n "${YARN_NPM_MINIMAL_AGE_GATE:-}" ] && yenv="YARN_NPM_MINIMAL_AGE_GATE=$YARN_NPM_MINIMAL_AGE_GATE" ;;
+          enableScripts) [ -n "${YARN_ENABLE_SCRIPTS:-}" ] && yenv="YARN_ENABLE_SCRIPTS=$YARN_ENABLE_SCRIPTS" ;;
+        esac
+        yf=""; ysev=""
+        if [ "$ykind" = t ]; then
+          yadd yodd "$ysrc sets $yk to a $yval, not a value yarn reads"; continue
+        fi
+        case "$yval" in
+          *'${'*) yadd yodd "$ysrc sets $yk '$yval', which yarn expands from the environment of whatever runs it, so its value was not judged"; continue ;;
+        esac
+        if [ "$yk" = enableScripts ]; then
+          case "$yval" in
+            true|1) yf="enableScripts $yval in $ysrc re-enables dependency install scripts"; ysev=GAP ;;
+            false|0) yfine="${yfine:+$yfine; }enableScripts $yval in $ysrc" ;;
+            *) yadd yodd "$ysrc sets enableScripts '$yval', which yarn refuses (\"Couldn't parse\"), so every yarn command here fails" ;;
+          esac
+        elif [ "$ygate" = 0 ]; then
+          # ~/.yarnrc.yml: ignored without a word (MEASURED, 4.1.0 and 4.9.4); the
+          # missing gate is already said above.
+          [ "$ysrc" = "$HOME/.yarnrc.yml" ] || yadd yodd "$ysrc sets npmMinimalAgeGate, which yarn $yeff does not know: in a project's file that stops every yarn command (\"Unrecognized or legacy configuration settings\")"
+          continue
+        else
+          ymin_v=""
+          if [ "$ydur" = 1 ]; then
+            ymin_v=$(printf '%s' "$yval" | awk '
+              /^[0-9]+(\.[0-9]+)?$/ { print $0 + 0; exit }
+              /^[0-9]+(\.[0-9]+)?[smhdw]$/ { u = substr($0, length($0)); n = substr($0, 1, length($0) - 1) + 0
+                print (u == "s" ? n / 60 : u == "m" ? n : u == "h" ? n * 60 : u == "d" ? n * 1440 : n * 10080); exit }')
+            [ -n "$ymin_v" ] || { yadd yodd "$ysrc sets npmMinimalAgeGate '$yval', which yarn $yeff refuses (\"Couldn't parse ... as a duration\"), so every yarn command here fails"; continue; }
+          else
+            ymin_v=$(printf '%s' "$yval" | sed -n 's/^[[:space:]]*\([-+]\{0,1\}[0-9][0-9]*\).*/\1/p')
+            ymin_v=${ymin_v#+}
+            case "$yval" in 0[xX]*) ymin_v="" ;; esac
+            [ -n "$ymin_v" ] || { yadd yodd "$ysrc sets npmMinimalAgeGate '$yval', which yarn $yeff reads as NaN, and what it then admits was not measured"; continue; }
+          fi
+          yshow="$yval"; [ "$yshow" != "$ymin_v" ] && yshow="'$yval' ($ymin_v minutes on yarn $yeff)"
+          if awk -v x="$ymin_v" 'BEGIN { exit !(x <= 0) }'; then
+            yf="npmMinimalAgeGate $yshow in $ysrc switches the age gate off (a release published minutes ago installs)"; ysev=GAP
+          elif [ -n "$ywantm" ] && awk -v x="$ymin_v" -v w="$ywantm" 'BEGIN { exit !(x < w) }'; then
+            yf="npmMinimalAgeGate $yshow in $ysrc is below $ywantwhat"; ysev=WEAK
+          else
+            yfine="${yfine:+$yfine; }npmMinimalAgeGate $yshow in $ysrc${ywantm:+ is at least $ywantwhat}"
+          fi
+        fi
+        if [ -n "$yf" ]; then
+          if [ -n "$yenv" ]; then yadd ymask "$yf, but $yenv in this environment outranks it"
+          elif [ "$ysev" = GAP ]; then yadd ygap "$yf"
+          else yadd yweak "$yf"; fi
+        fi
+      done
+      # npmPreapprovedPackages: every file that sets it, nearest last.
+      ypa=$(printf '%s\n' "$yall" | awk -F'\t' '$2 == "l" && $3 == "npmPreapprovedPackages" { print $1 "\t" $4 }')
+      if [ -n "$ypa" ]; then
+        ykeys=$((ykeys + 1))
+        if [ "$ygate" = 0 ]; then
+          printf '%s\n' "$ypa" | cut -f1 | grep -qvxF "$HOME/.yarnrc.yml" \
+            && yadd yodd "the project sets npmPreapprovedPackages, which yarn $yeff does not know: in a project's file that stops every yarn command"
+        else
+          ypall=""; ypnamed=""
+          ypaf=$(printf '%s\n' "$ypa" | while IFS='	' read -r ypsrc ype; do
+            case "$(scv_yarn_preapproved_scope "$ype")" in
+              all)      printf 'G\t%s\t%s\tevery package\n' "$ypsrc" "$ype" ;;
+              unscoped) printf 'G\t%s\t%s\tevery unscoped package\n' "$ypsrc" "$ype" ;;
+              scoped)   printf 'G\t%s\t%s\tevery scoped package\n' "$ypsrc" "$ype" ;;
+              *)        printf 'W\t%s\t%s\n' "$ypsrc" "$ype" ;;
+            esac
+          done)
+          ypall=$(printf '%s\n' "$ypaf" | awk -F'\t' '$1 == "G" { print "npmPreapprovedPackages in " $2 " lists \047" $3 "\047, which exempts " $4 " from the age gate" }' | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g')
+          ypnamed=$(printf '%s\n' "$ypaf" | awk -F'\t' '$1 == "W" { print $3 }' | head -10 | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+          [ -n "$ypall" ] && yadd ygap "$ypall"
+          [ -n "$ypnamed" ] && yadd yweak "npmPreapprovedPackages exempts $ypnamed from the age gate"
+        fi
+      fi
+    elif [ -z "$ymaj" ]; then
+      yset=$(printf '%s\n' "$yread" | awk -F'\t' '($2 == "k" || $2 == "l") && $3 ~ /^(npmMinimalAgeGate|enableScripts|npmPreapprovedPackages)$/ { print $3 }' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+      [ -n "$yset" ] && yadd yodd "the project sets $yset, not judged because the version of the yarn that runs here is unknown"
+    fi
+    yhow="read from the files: yarn runs a checkout's yarnPath and plugins even for \`yarn --version\`${yby:+; values by $yby}"
+    yhead="yarn ${yeff:-(version unknown)} in $PWD"
+    if [ -n "$ygap" ]; then
+      row GAP PRESENT "yarn repo config override" "$yhead: $ygap${yweak:+; $yweak}${ymask:+; and hidden in this shell: $ymask}${yodd:+; $yodd}. The project's files outrank ~/.yarnrc.yml here ($yhow)"
+    elif [ -n "$yweak" ]; then
+      row WEAK PRESENT "yarn repo config override" "$yhead: $yweak${ymask:+; and hidden in this shell: $ymask}${yodd:+; $yodd}. The project's files outrank ~/.yarnrc.yml here ($yhow)"
+    elif [ -n "$ymask" ]; then
+      row WEAK PRESENT "yarn repo config override" "$yhead: $ymask, so yarn uses the variable's value in this shell: an env variable is what hides the project's weaker setting. A context without it (a systemd unit, a container CMD, any shell that did not log in) uses the project's value ($yhow)"
+    elif [ -n "$yerr" ] || [ -n "$yodd" ]; then
+      row WEAK PRESENT "yarn repo config override" "$yhead: ${yerr}${yerr:+${yodd:+; }}${yodd}. Whether it lowers the host's yarn settings was not judged"
+    # Defaults in variables: an apostrophe inside "${x:-...}" is a quote to bash.
+    elif [ "$ykeys" -gt 0 ] && [ -n "$yeffwhy" ]; then
+      yempty="nothing weaker than the host's"
+      row WEAK PRESENT "yarn repo config override" "$yhead: ${yfine:-$yempty}. Nothing found is weaker than the host's, but the yarn that runs here is not the host's and was not asked, so these values come from the files alone ($yhow)"
+    elif [ "$ykeys" -gt 0 ]; then
+      yempty="nothing the project sets is weaker than the host's"
+      row OK PRESENT "yarn repo config override" "$yhead: ${yfine:-$yempty} - no yarn setting weaker than the host's ($yhow)"
+    elif [ "$ymaj" = 1 ]; then
+      row "N/A" - "yarn repo config override" "the yarn that runs in $PWD is classic $yeff, which reads no .yarnrc.yml setting but yarnPath, and the project names none (see yarn hardening)"
+    else
+      row "N/A" - "yarn repo config override" "$(printf '%s\n' "$yfiles" | awk 'NR > 1 { printf " and " } { printf "%s", $0 }') sets no yarnPath, plugins, npmMinimalAgeGate, enableScripts or npmPreapprovedPackages"
+    fi
+  fi
 fi
 
 # ======================================================================
