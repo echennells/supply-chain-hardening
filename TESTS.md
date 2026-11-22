@@ -1,14 +1,14 @@
 # Tests
 
-600 container tests verify the supply chain hardening works (`make test`), plus 351 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+605 container tests verify the supply chain hardening works (`make test`), plus 362 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
 | File | Tests | What it covers |
 |---|---|---|
 | 01-config-files.bats | 52 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
-| 02-env-vars.bats | 22 | System-wide env vars in /etc/profile.d/ and /etc/environment; GOFLAGS is not written by default, and COMPOSER_ALLOW_SUPERUSER is set only inside the composer wrapper, not host-wide |
-| 03-npm.bats | 6 | npm ignore-scripts behavioral test + config readback |
+| 02-env-vars.bats | 23 | System-wide env vars in /etc/profile.d/ and /etc/environment; GOFLAGS is not written by default, and COMPOSER_ALLOW_SUPERUSER is set only inside the composer wrapper, not host-wide; NPM_CONFIG_ALLOW_GIT=none is in both exactly when the npm the role found is 11.9.0 or newer |
+| 03-npm.bats | 8 | npm ignore-scripts behavioral test + config readback; allow-git=none refuses a git dependency (npm 11.9.0+), and with the user config redirected (as setup-node's registry-url does) and a project .npmrc allow-git=all, the env layer's NPM_CONFIG_ALLOW_GIT still refuses a git+file dependency with EALLOWGIT, with a FIXTURE CONTROL that installs it without the variable |
 | 04-python.bats | 9 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check); `supply-chain-allow-build` lifts only no-build, refuses non-uv commands, and its build report lists what built, never a refusal |
 | 05-go.bats | 8 | Go env vars verified via `go env`; a vendored module builds offline from `vendor/` under the hardened env, with a FIXTURE CONTROL that `-mod=readonly` (which the role no longer writes) does not |
 | 06-js-ecosystem.bats | 8 | pnpm, yarn, bun config verification; Yarn never reads /etc/yarnrc.yml, so `sudo yarn` coverage is root's own ~/.yarnrc.yml |
@@ -57,7 +57,7 @@
 | 49-age-gate-refresh.bats | 10 | The rolling uv/pip cutoff refresher, driven directly (the image runs no systemd): deployed root-owned with no timer; advances every stale cutoff, changing only that line and keeping owner and mode; a second run rewrites nothing; a duplicated line is reported, not rewritten; every rewrite is logged; root also advances root's own files; the verifier reads stale as a freeze and refreshed as OK; `--sfw` runs sfw's update check as root (skip variable cleared, umask 022) and keeps going when it fails |
 | 50-preflight-gnu-date.bats | 4 | The GNU date preflight probes the CONTROLLER, where the rolling uv/pip cutoff lookup runs, not the target: a non-GNU target is not refused, a non-GNU controller fails at preflight with the fix instead of a bare lookup error at render, and pinning the cutoff skips the probe |
 | 51-verifier-composer-plugin-safety.bats | 3 | The verifier's composer probes run none of a hostile checkout's plugins or scripts, and every one is non-interactive, root-safe and reads a version with no project; a FIXTURE CONTROL shows the same command without those protections does run the plugin |
-| 52-env-layer-overrides.bats | 19 | The env variables that outrank a project's own config, through the shipped templates rendered and sourced like a login shell: no `UV_EXCLUDE_NEWER` by default; with `uv_exclude_newer_env` on, the same instant `uv.toml` gets (rolling or pinned), never empty, a span or a bare date, and advanced by the refresh timer; a repo `uv.toml` / `pyproject [tool.uv]` `exclude-newer` in 2099 resolves at the env cutoff for `uv pip compile` and `uv lock` (FIXTURE CONTROL without it), a repo `exclude-newer-package` still loosens its package, `uv run` / `uv tool run` work; pnpm 11+ resolves past a workspace `minimumReleaseAge: 0` or exclude list only without `pnpm_config_*` (`npm_config_*` does nothing), a workspace `ignoreScripts: false` still runs because that is not exported, and why: `pnpm_config_ignore_scripts=true` silently skips an approved build; pnpm 10 is untouched; `/etc/environment` carries the pnpm pair; the verifier's uv and pnpm rows with and without the variables (network tests skip offline) |
+| 52-env-layer-overrides.bats | 21 | The env variables that outrank a project's own config, through the shipped templates rendered and sourced like a login shell: no `UV_EXCLUDE_NEWER` by default; with `uv_exclude_newer_env` on, the same instant `uv.toml` gets (rolling or pinned), never empty, a span or a bare date, and advanced by the refresh timer; a repo `uv.toml` / `pyproject [tool.uv]` `exclude-newer` in 2099 resolves at the env cutoff for `uv pip compile` and `uv lock` (FIXTURE CONTROL without it), a repo `exclude-newer-package` still loosens its package, `uv run` / `uv tool run` work; pnpm 11+ resolves past a workspace `minimumReleaseAge: 0` or exclude list only without `pnpm_config_*` (`npm_config_*` does nothing), a workspace `ignoreScripts: false` still runs because that is not exported, and why: `pnpm_config_ignore_scripts=true` silently skips an approved build; pnpm 10 is untouched; `/etc/environment` carries the pnpm pair; the verifier's uv and pnpm repo config override rows with and without the variables, and run from a project the verifier never runs its pnpmfile (FIXTURE CONTROL: pnpm 10 and 11 do for `pnpm config get`); NPM_CONFIG_ALLOW_GIT rendered for npm 10.9.8, 11.2.0, 11.8.0 (absent), 11.9.0, 12.2.3 and no npm (present), and for a run scoped away from npm.yml (network tests skip offline) |
 
 ## Adversarial tests
 
@@ -120,7 +120,7 @@ The fixtures (fake npm packages with scripts, Python sdists with setup.py) are c
 ## Running tests
 
 ```bash
-make test          # build container + run all 600 tests
+make test          # build container + run all 605 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```
@@ -152,4 +152,6 @@ These are scenarios the test suite does **not** cover. They're tracked here so a
 ## Issues found by testing
 
 1. **uv.toml config syntax error** — `require-hashes` was at the top level instead of under `[pip]`. uv silently rejected the entire config, disabling all uv hardening. Found during manual testing on n8n server.
-2. **npm allow-git=none doesn't block on npm 10.x** — config is accepted but only enforced in npm 11+. The role deploys the key universally; older npm reads it but doesn't act on it. `tests/bats/03-npm.bats` has both a file-content check (always runs) and a behavioral check (skips on npm <11) — the behavioral check distinguishes "npm refused before network" (enforcement working) from "npm tried DNS for the bogus git URL" (key silently ignored).
+2. **npm allow-git=none doesn't block before npm 11.9.0** — config is accepted but only enforced from npm 11.9.0 (MEASURED: 11.8.0 installs a git dependency with it set, and 11.2.0 to 11.8.x warn `Unknown ... config "allow-git"`). The role deploys the key to the npmrc files universally; older npm reads it but doesn't act on it. `tests/bats/03-npm.bats` has both a file-content check (always runs) and a behavioral check (skips below 11.9.0) — the behavioral check distinguishes "npm refused before network" (enforcement working) from "npm tried DNS for the bogus git URL" (key silently ignored).
+3. **allow-git=none was not applied under setup-node's registry-url** — the key was in the npmrc files only, and `actions/setup-node` points `NPM_CONFIG_USERCONFIG` at its own `.npmrc`, so npm skipped `~/.npmrc` and installed a git dependency (MEASURED on npm 11.19.1 with harden.sh's files in place). Both surfaces now export `NPM_CONFIG_ALLOW_GIT=none` for npm 11.9.0+; `tests/ci/05-behavioral.bats` reproduces the redirect, with a FIXTURE CONTROL that is the bug.
+4. **The role's verifier ran a checkout's pnpmfile** — its pnpm rows asked `pnpm config get` from the working directory, and in a project pnpm 10 and 11 load `.pnpmfile.cjs` / `.pnpmfile.mjs` and fetch `configDependencies` for that command too (MEASURED on 10.34.9, 11.0.0 and 11.28.13). They ask from `/` now, and the `pnpm repo config override` row reads `pnpm-workspace.yaml` itself (`tests/bats/52-env-layer-overrides.bats`, `tests/ci/07-verify.bats`).
