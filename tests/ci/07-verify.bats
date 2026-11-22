@@ -1941,7 +1941,8 @@ configDependencies:
   # The stub was run (the row asked it something) ...
   [ -s "$BATS_TEST_TMPDIR/pnpm-calls" ]
   # ... and never from the project or below it.
-  ! grep -q "^$PNP" "$BATS_TEST_TMPDIR/pnpm-calls" || { cat "$BATS_TEST_TMPDIR/pnpm-calls"; return 1; }
+  # Both spellings of the project path: physical (PNP) and, on macOS, the /var one.
+  ! grep -q -e "^$PNP" -e "^$BATS_TEST_TMPDIR/proj" "$BATS_TEST_TMPDIR/pnpm-calls" || { cat "$BATS_TEST_TMPDIR/pnpm-calls"; return 1; }
   [ ! -e "$BATS_TEST_TMPDIR/pnpmfile-ran" ]
 }
 
