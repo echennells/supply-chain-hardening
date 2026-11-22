@@ -2283,6 +2283,25 @@ y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_
   [[ "$r" == GAP*"npmMinimalAgeGate 0 in $save/my dir/yproj/.yarnrc.yml switches the age gate off"* ]] || { echo "$r"; return 1; }
 }
 
+# mvn_trap <dir> <marker>: a <dir>/.mvn/jvm.config that writes <marker> when the
+# JVM maven starts reads it. A -javaagent where a JDK can build one (MEASURED on
+# maven 3.10.0); otherwise a 3 MB heap and -XX:OnOutOfMemoryError, which fired on
+# temurin 17 but not on every JDK.
+mvn_trap() {
+  local d=$1 m=$2
+  mkdir -p "$d/.mvn" "$d/.mvnagent"
+  if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+    printf 'public class A { public static void premain(String a) throws Exception { java.nio.file.Files.write(java.nio.file.Paths.get(a), "ran".getBytes()); } }\n' > "$d/.mvnagent/A.java"
+    ( cd "$d/.mvnagent" && javac A.java && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1
+  fi
+  if [ -f "$d/.mvnagent/agent.jar" ]; then
+    printf -- '-javaagent:%s/.mvnagent/agent.jar=%s\n' "$d" "$m" > "$d/.mvn/jvm.config"
+  else
+    printf '#!/bin/sh\necho ran > "%s"\n' "$m" > "$d/.mvnagent/oom"; chmod +x "$d/.mvnagent/oom"
+    printf -- '-Xmx3m -XX:OnOutOfMemoryError=%s/.mvnagent/oom\n' "$d" > "$d/.mvn/jvm.config"
+  fi
+}
+
 # trap_checkout <dir>: a checkout carrying every vector found to run code (and
 # a few measured not to, as insurance). Each trap writes its own marker in
 # $BATS_TEST_TMPDIR/markers if anything executes it.
@@ -2307,8 +2326,8 @@ trap_checkout() {
   tsh "$d/tc/bin/cargo" rustup-path-cargo; tsh "$d/tc/bin/rustc" rustup-path-rustc
   printf '[toolchain]\npath = "%s/tc"\n' "$d" > "$d/rust-toolchain.toml"
   tsh "$d/tc/wrap" cargo-rustc-wrapper; printf '[build]\nrustc-wrapper = "%s/tc/wrap"\n' "$d" > "$d/.cargo/config.toml"
-  # maven: jvm.config goes on the java command line; out of heap, the JVM runs a command
-  tsh "$d/tc/oom" maven-jvm-config; printf -- '-Xmx3m -XX:OnOutOfMemoryError=%s/tc/oom\n' "$d" > "$d/.mvn/jvm.config"
+  # maven: jvm.config goes on the java command line
+  mvn_trap "$d" "$mk/maven-jvm-config"
   # gradle: a settings script and daemon jvmargs (insurance: --version reads neither)
   printf 'new File("%s/gradle-settings").text = "ran"\n' "$mk" > "$d/settings.gradle"
   tsh "$d/tc/oom-gradle" gradle-jvmargs; printf 'org.gradle.jvmargs=-Xmx3m -XX:OnOutOfMemoryError=%s/tc/oom-gradle\n' "$d" > "$d/gradle.properties"
@@ -2380,7 +2399,7 @@ npc_shims() { # <shim dir> <log>
   for t in $npc_tools; do
     real=$(PATH="$TEST_BIN:$PATH" command -v "$t" 2>/dev/null) || continue
     case "$real" in /*) ;; *) continue ;; esac
-    printf '#!/bin/sh\nprintf "%%s\\t%%s\\t%%s\\t%%s\\n" "$PWD" "%s" "${TMPDIR:-}" "$*" >> "%s"\nexec "%s" "$@"\n' "$t" "$2" "$real" > "$1/$t"
+    printf '#!/bin/sh\nprintf "%%s\\t%%s\\t%%s\\t%%s\\n" "$PWD" "%s" "${TMPDIR:-}" "$(printf "%%s" "$*" | tr "\\n\\t" "  ")" >> "%s"\nexec "%s" "$@"\n' "$t" "$2" "$real" > "$1/$t"
     chmod +x "$1/$t"
   done
 }
@@ -2428,8 +2447,7 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
   local ww="$BATS_TEST_TMPDIR/ww" log="$BATS_TEST_TMPDIR/tool-calls" mk="$BATS_TEST_TMPDIR/markers" tmps
   mkdir -p "$ww/sub" "$ww/h" "$ww/tc/bin" "$ww/.mvn" "$mk"; chmod 1777 "$ww"
   # What another account could leave in /tmp, above every mktemp directory.
-  printf '#!/bin/sh\necho ran > "%s/tmp-maven-jvm-config"\n' "$mk" > "$ww/tc/oom"; chmod +x "$ww/tc/oom"
-  printf -- '-Xmx3m -XX:OnOutOfMemoryError=%s/tc/oom\n' "$ww" > "$ww/.mvn/jvm.config"
+  mvn_trap "$ww" "$mk/tmp-maven-jvm-config"
   printf '#!/bin/sh\necho ran > "%s/tmp-rustup-path"\necho cargo 9.9.9\n' "$mk" > "$ww/tc/bin/cargo"; chmod +x "$ww/tc/bin/cargo"
   printf '[toolchain]\npath = "%s/tc"\n' "$ww" > "$ww/rust-toolchain.toml"
   printf '<Project InitialTargets="T"><Target Name="T"><Exec Command="echo ran > %s/tmp-dotnet-props" /></Target></Project>\n' "$mk" > "$ww/Directory.Build.props"
