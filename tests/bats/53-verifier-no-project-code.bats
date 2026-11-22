@@ -121,7 +121,9 @@ trap_checkout() { # <dir>
     printf '#!/bin/sh\nprintf "%%s\\n" "${TMPDIR:-}" >> "%s"\nexec "%s" "$@"\n' "$log" "$real" > "$shims/$t"; chmod +x "$shims/$t"
   done
   run env PATH="$shims:$PATH" TMPDIR="$ww/sub" bash -c 'cd / && exec "$1"' _ "$VERIFY"
-  tmps=$(sort -u "$log")
+  # A probe that starts a tool under env -i passes no TMPDIR; that tool runs in
+  # one of the probe's own directories, under the same scratch dir.
+  tmps=$(grep -v '^$' "$log" | sort -u)
   echo "TMPDIR seen: $tmps"
   [ -n "$tmps" ]
   [ "$(printf '%s\n' "$tmps" | grep -vc "^$HOME/.cache/supply-chain-hardening/scv\.")" -eq 0 ]
