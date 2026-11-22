@@ -6343,11 +6343,16 @@ else
   #
   # `list source` has no option naming a directory, so where the SDK has
   # `nuget config` (9.0+) the list is rebuilt from `config get all
-  # --working-directory`, which prints the merged packageSources (a <clear/>
-  # applied and shown as `clear`) and disabledPackageSources. MEASURED on
-  # 10.0.404: that matched `list source --format short` run in the project,
-  # entry for entry. An older SDK is asked from /, and a NuGet.Config at or
-  # above the working directory then goes unjudged, which the row says.
+  # --working-directory`. It prints the merged packageSources highest-priority
+  # file first; a file's <clear/> shows as `clear` above that file's entries and
+  # has already dropped every lower-priority file's, so every `add` printed is in
+  # effect and `clear` is skipped; then disabledPackageSources. MEASURED on
+  # 10.0.404: entry for entry what `list source --format short` printed in the
+  # project, for a project file adding sources over the hardened user file (whose
+  # own <clear/> is printed after them and does not drop them), a project file
+  # that clears, and a parent that clears under a child that adds. An older SDK
+  # is asked from /, and a NuGet.Config at or above the working directory then
+  # goes unjudged, which the row says.
   nsrcrc=0; nsrcnote=""; nsrcwhere="in $(nuget_clip "$PWD")"
   if nsrcall=$(nuget_dotnet_root nuget config get all --working-directory "$PWD" 2>/dev/null) \
      && printf '%s\n' "$nsrcall" | grep -q '^packageSources:'; then
@@ -6357,7 +6362,6 @@ else
         return ""
       }
       /^[^ \t]/ { sec = $0; sub(/:[ \t\r]*$/, "", sec); next }
-      sec == "packageSources" && $1 == "clear" { n = 0; next }
       sec == "packageSources" && $1 == "add" { k[++n] = attr("key"); v[n] = attr("value"); next }
       sec == "disabledPackageSources" && $1 == "add" { if (tolower(attr("value")) == "true") off[attr("key")] = 1 }
       END { for (i = 1; i <= n; i++) print (off[k[i]] ? "D " : "E ") v[i] }')
