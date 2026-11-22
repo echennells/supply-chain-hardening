@@ -33,7 +33,7 @@ setup() { common_setup; }
 }
 
 @test "the env layer matches the role's exactly" {
-  # 18 variables on both sides today. This is the layer most likely to drift
+  # 25 variables on both sides today. This is the layer most likely to drift
   # unnoticed, because an env var that is never set looks identical to one
   # that is set correctly unless you go looking.
   harden -- --emit=plain >/dev/null

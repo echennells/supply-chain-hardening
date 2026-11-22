@@ -1162,6 +1162,13 @@ harden_npm() {
   write_env NPM_CONFIG_SAVE_EXACT      true
   write_env NPM_CONFIG_FUND            false
   write_env NPM_CONFIG_UPDATE_NOTIFIER false
+  # NPM_CONFIG_MIN_RELEASE_AGE stays exported, unlike pnpm's variable (see
+  # harden_pnpm), although it also outranks a project's own .npmrc in both
+  # directions. The files below are not always read: actions/setup-node with
+  # registry-url writes its own .npmrc under RUNNER_TEMP and exports
+  # NPM_CONFIG_USERCONFIG at it (src/authutil.ts, CHECKED 2026-11-22), so npm
+  # skips ~/.npmrc, and a setup-node npm reads its prefix's etc/npmrc, not
+  # /etc/npmrc. In that setup the env var is the only age gate npm sees.
   write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
 
   local content
@@ -1295,6 +1302,30 @@ harden_pnpm() {
       echo "ignore-scripts=true"
     fi
   } > "$HOME/.config/pnpm/rc"
+
+  # NO pnpm_config_* VARIABLES ARE EXPORTED HERE, although the role exports two.
+  # pnpm 11+ reads pnpm_config_* from the environment, and that outranks a
+  # project's pnpm-workspace.yaml, which outranks the config.yaml above
+  # (MEASURED on 11.0.0, 11.0.9, 11.28.13 and 12.21.0). On a host the repository
+  # may be one someone cloned, so the role's values win over its workspace file.
+  # In CI the repository is the project being built, so its own choices stand:
+  #   - pnpm_config_minimum_release_age would set the window exactly, in both
+  #     directions, so a project that chose a longer one (14 days is common
+  #     advice) would silently get the action's shorter one. config.yaml above
+  #     still gives the action's window to a project that sets none, and
+  #     nothing redirects it: with NPM_CONFIG_USERCONFIG pointed elsewhere, as
+  #     actions/setup-node does for registry-url, pnpm 11.28.13 and 12.21.0
+  #     still refused a 14-hour-old release (ERR_PNPM_NO_MATURE_MATCHING_VERSION;
+  #     MEASURED 2026-11-22, with a gate-0 control that installed it). npm is
+  #     different; see NPM_CONFIG_MIN_RELEASE_AGE in harden_npm.
+  #   - pnpm_config_minimum_release_age_exclude would wipe the project's own
+  #     list, and a monorepo exempting its own freshly published packages would
+  #     fail with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION and no knob here.
+  #   - pnpm_config_ignore_scripts is exported by neither: true silently skips
+  #     the builds a project approves with its own ignoreScripts: false +
+  #     allowBuilds, and false would override a project's own ignoreScripts: true.
+  # A workspace minimumReleaseAge: 0 is the project's call. verify.sh has no
+  # row for a project's pnpm-workspace.yaml yet, unlike uv and composer.
 
   HARDENED+=("pnpm")
   local pnpm_version
@@ -1473,6 +1504,16 @@ EOF
 harden_uv() {
   section "uv"
   write_env UV_LINK_MODE copy
+  # UV_EXCLUDE_NEWER IS DELIBERATELY NOT EXPORTED, although it would outrank a
+  # repository's own exclude-newer (the role exports it only when
+  # uv_exclude_newer_env is set). It also outranks a project that pins an
+  # earlier exclude-newer so that its uv.lock checks clean everywhere, and uv
+  # records the cutoff in uv.lock. MEASURED (pyproject pinning 2024-05-01, host
+  # cutoff 2024-10-01): on uv 0.8.17, 0.11.16 and 0.12.7 that project's
+  # `uv sync --locked` fails with it set and passes without it; on 0.13.9 a
+  # lockfile written with it set fails `--locked` wherever it is not. A CI job
+  # is where `--locked` runs. Projects with no exclude-newer of their own
+  # behaved the same either way. See docs/limitations.md.
 
   # WHERE THE USER-LEVEL uv.toml LIVES — resolved from uv's environment, never
   # hardcoded. uv's user config is $XDG_CONFIG_HOME/uv/uv.toml and falls back

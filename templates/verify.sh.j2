@@ -875,12 +875,28 @@ if have pnpm; then
   # no pnpm equivalent of the npm_implements() discriminator (pnpm has no
   # documented way to ask "do you know this key"). Reporting OK here would
   # repeat the npm false positive, so a good-looking value caps out at WEAK.
+  #
+  # `pnpm config get` answers for the directory it runs in, so from a project
+  # this already includes the project's pnpm-workspace.yaml, and on pnpm 11+
+  # the pnpm_config_minimum_release_age the role exports, which outranks it
+  # (MEASURED on 11.0.0 to 12.21.0: a workspace minimumReleaseAge: 0 reads 0
+  # without the variable and the variable's value with it; pnpm 10 reads the
+  # workspace value either way). Only a PAM session has that variable, so when
+  # it is set, ask again without it and name a workspace value it is hiding.
   v=$(pnpm config get minimum-release-age 2>/dev/null | tr -d '\r' | tr -d ' ')
+  pmask=""
+  if [ -n "${pnpm_config_minimum_release_age:-}${PNPM_CONFIG_MINIMUM_RELEASE_AGE:-}" ]; then
+    v0=$(env -u pnpm_config_minimum_release_age -u PNPM_CONFIG_MINIMUM_RELEASE_AGE \
+         pnpm config get minimum-release-age 2>/dev/null | tr -d '\r' | tr -d ' ')
+    if [ "$v0" != "$v" ]; then
+      pmask=" Without pnpm_config_minimum_release_age, which comes from this login environment, pnpm reports ${v0:-nothing} in $PWD, and that is what a systemd unit or a container CMD gets here"
+    fi
+  fi
   case "$v" in
     ''|undefined|null) row GAP  PRESENT "pnpm age gate" "pnpm did not report minimum-release-age back" ;;
     *[!0-9]*)          row GAP  PARSED  "pnpm age gate" "pnpm reports non-numeric minimum-release-age='$v'" ;;
     0)                 row GAP  PARSED  "pnpm age gate" "minimum-release-age=0 disables the gate" ;;
-    *)                 row WEAK PRESENT "pnpm age gate" "pnpm echoes minimum-release-age=$v, but pnpm echoes unimplemented keys too — not proof of enforcement" ;;
+    *)                 row WEAK PRESENT "pnpm age gate" "pnpm echoes minimum-release-age=$v, but pnpm echoes unimplemented keys too — not proof of enforcement.$pmask" ;;
   esac
 else
   row "N/A" - "pnpm" "pnpm not installed"

@@ -32,6 +32,19 @@ setup() {
   [[ "$output" == *"variables reached this step"* ]]
 }
 
+@test "the env-layer record names a variable that did not arrive" {
+  # One variable missing out of several is named, not reported as "NONE of".
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  grep -q '^export NPM_CONFIG_MIN_RELEASE_AGE=' "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK"*"env layer propagation"*"all "*" variables present in this step's environment"* ]]
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
+    bash -c "set -a; source '$ENV_FILE'; set +a; unset NPM_CONFIG_MIN_RELEASE_AGE
+             HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain"
+  [[ "$output" == *"GAP"*"env layer propagation"*"missing: NPM_CONFIG_MIN_RELEASE_AGE"* ]]
+}
+
 @test "names the env file in the diagnosis so the fix is obvious" {
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify -- --emit=plain
