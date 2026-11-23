@@ -196,7 +196,7 @@ PY
     p=$(type -P "$t" 2>/dev/null) || continue
     case "$p" in /*) ln -s "$p" "$min/$t" ;; esac
   done
-  run --separate-stderr env -i PATH="$min" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" "$BASH" "$VERIFY_SH" --emit=plain --json
+  run --separate-stderr env -i PATH="$min" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain --json
   printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/e.json"
   run check_json "$BATS_TEST_TMPDIR/e.json"
   echo "$output"

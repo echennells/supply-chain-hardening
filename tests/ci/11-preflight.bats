@@ -32,7 +32,7 @@ base_path() {
 preflight() {
   base_path
   env -i PATH="${TEST_BIN}:${BASE_PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
-    ${PF_ENV[@]+"${PF_ENV[@]}"} "$BASH" "$HARDEN_SH" --preflight "$@"
+    ${PF_ENV[@]+"${PF_ENV[@]}"} bash "$HARDEN_SH" --preflight "$@"
 }
 
 # Snapshot: every path under the home and the scratch directory, with size and
