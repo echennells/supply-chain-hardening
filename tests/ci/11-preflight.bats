@@ -172,17 +172,25 @@ sudo_rs_stub() {
   [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not written by this project"* ]]
 }
 
-@test "preflight: run as root under sudo is a STOP" {
+@test "preflight: run as root under sudo, with root's HOME, is a STOP" {
   # The role refuses it because per-user config would land in root's home. This
   # host's own uid decides which branch runs, so a stub id that says 0.
   [ "$(id -u)" -ne 0 ] || skip "running as root already"
   stub_bin id 'case "$*" in -u) echo 0 ;; -un) echo root ;; *) exec /usr/bin/id "$@" ;; esac'
   stub_bin ansible-playbook 'echo "ansible-playbook [core 2.21.6]"'
-  PF_ENV=(SUDO_USER=alice)
+  PF_ENV=(SUDO_USER=alice HOME=/root)
   run preflight
-  PF_ENV=()
   [[ "$output" == *"STOP  running as root under sudo from 'alice'"* ]]
   [ "$status" -eq 1 ]
+  # The role's guard is about HOME: with the user's own HOME kept (sudo -E) it
+  # is not refused, and neither is a root login.
+  PF_ENV=(SUDO_USER=alice)
+  run preflight
+  [[ "$output" != *"STOP  running as root"* ]]
+  PF_ENV=(HOME=/root)
+  run preflight
+  PF_ENV=()
+  [[ "$output" == *"running as root: the role hardens root's own home"* ]]
 }
 
 @test "preflight=REPO prints the repo's --suggest output too" {

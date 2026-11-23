@@ -777,7 +777,9 @@ preflight_report() {
   echo "Who would run the play (as this user, without sudo or --become):"
   _pf_line "user $me (uid $uid), HOME=${HOME:-<unset>}"
   if [ "$uid" -eq 0 ]; then
-    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != root ]; then
+    # The role's guard (tasks/preflight.yml): HOME is root's and the account
+    # that started this is not root.
+    if [ "${HOME:-}" = /root ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != root ]; then
       _pf_stop "running as root under sudo from '$SUDO_USER': the role refuses that, because per-user config would land in root's home. Run ansible-playbook as $SUDO_USER, and the role escalates by itself where root is needed."
     elif [ "${HOME:-}" != /root ]; then
       _pf_note "running as root with HOME=${HOME:-<unset>}; per-user config lands there."
@@ -921,7 +923,8 @@ _pf_below() { [ -n "$1" ] && ! version_ge "$1" "$2"; }
 _pf_version() {
   local t="$1" r d
   case "$t" in
-    node|deno|bun|uv|go) detect_version "$t" "$t --version" ;;
+    node|deno|bun|uv) detect_version "$t" "$t --version" ;;
+    go) detect_version go "go version" ;;
     python3) detect_version python3 "python3 -V" ;;
     # A rustup proxy would otherwise download the toolchain to answer.
     rustc|cargo) RUSTUP_AUTO_INSTALL=0 detect_version "$t" "$t --version" ;;
