@@ -315,7 +315,9 @@ suggest_scripted_deps() {
 # These readers are deliberately simple: a line or a table at a time, with the
 # value printed as it is written. A value they cannot read is reported as not
 # read, never as absent.
-_sg_clean() { LC_ALL=C tr -cd '[:print:]\n' | cut -c1-160; }
+# Octal, not a character class: BusyBox tr has none, and keeps only the class's
+# own letters (MEASURED, BusyBox 1.37.0).
+_sg_clean() { LC_ALL=C tr -cd '\12\40-\176' | cut -c1-160; }
 
 # _sg_ini <file> <key>... -> "key=value" per line (.npmrc; `key[]` counts as key)
 _sg_ini() {
