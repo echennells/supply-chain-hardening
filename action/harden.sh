@@ -81,12 +81,21 @@ COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
 # Tool pins this script installs. Kept equal to the role's defaults/main.yml
-# (cargo_cooldown_version, sfw_version); tests/ci/06-role-parity.bats checks.
+# (cargo_cooldown_version, sfw_version, and for the sfw binary
+# sfw_binary_version and sfw_binary_checksums); tests/ci/06-role-parity.bats
+# checks.
 # Unpinned, `cargo install cargo-cooldown` took 0.4.2 (MSRV 1.97): the install
 # FAILED on rust 1.93 with the error discarded, and on rust >= 1.97 every
 # later `cargo build` in an MSRV job died with "requires Cargo 1.97".
 CARGO_COOLDOWN_VERSION="0.3.5"
 SFW_NPM_VERSION="2.0.6"
+# The firewall binary sfw gets here when it cannot fetch its own (see
+# sfw_seed_binary): a floor, where the role's first install is the pin.
+SFW_BINARY_VERSION="v1.16.0"
+SFW_BINARY_SHA256_LINUX_X86_64="1f24d2628aeb3995f1f2651509e37641c7c41d07749ac68594ecb5bb2dd44d8a"
+SFW_BINARY_SHA256_LINUX_ARM64="474cdb684e42d33d4b697dedd7d90c159d71380be0e53c496f0e7097c3617a6c"
+SFW_BINARY_SHA256_MACOS_X86_64="b574931bc2b3c36a9bf07ac07b9c07894f8cd314efc91bc5e4fe1c371b56adca"
+SFW_BINARY_SHA256_MACOS_ARM64="29df049df2ef705a8ce726c6c41fe73a6034f6b1cd0d87f3f15a780d074b6d83"
 # Follows `intel` unless set explicitly. It used to default true on its own, so
 # with the default intel: none every cargo wrapper was rendered to route through
 # an sfw that was never installed: a no-op at runtime, and a GAP in verify,
@@ -3676,6 +3685,121 @@ EOF
 
 # ---- Optional: Socket Firewall + npm wrapper ----
 
+# _sch_realpath <path>: the file <path> names, every symlink followed.
+# `readlink -f`, which macOS has only since 12.3.
+_sch_realpath() {
+  local p="$1" l d n=0
+  while [[ -L "$p" ]]; do
+    n=$((n + 1))
+    [[ "$n" -le 40 ]] || return 1
+    l=$(readlink "$p") || return 1
+    case "$l" in
+      /*) p="$l" ;;
+      *)  p="${p%/*}/$l" ;;
+    esac
+  done
+  d=$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "${d%/}" "${p##*/}"
+}
+
+# sfw_seed_binary <sfw>: puts the pinned firewall binary in that sfw's cache.
+# Prints why not, and returns 1, when it does not.
+#
+# sfw's npm package is a launcher: it asks the GitHub API which binary to
+# download, with no credentials, and that quota (60 calls an hour per IP) is
+# shared by every job on a hosted runner's address. MEASURED 2026-11-23: with
+# api.github.com answering 403, sfw 2.0.6 exits 1 within 0.3 s and this script
+# moved it aside, while the same binary still downloaded from its release URL;
+# and sfw runs over a cache laid out by hand as it lays it out itself
+# (.sfw-cache/<release>/<asset>, with .sfw-cache/latest a symlink to it), its
+# update check due or not. The role does the same for a host's first install
+# (tasks/sfw_seed.yml).
+#
+# Nothing unverified reaches the cache, which sfw runs without checking again,
+# for root too. The download is this account's, in a directory of its own. The
+# account that installed sfw (root, with sudo) copies it into a directory only
+# it can enter, inside sfw's package directory, hashes THAT copy, and renames it
+# into the cache. It refuses a package or cache directory another account could
+# write, and never replaces a binary sfw has cached.
+sfw_seed_binary() {
+  local shim pkg plat asset want url tmp out rc=0 place
+  shim=$(_sch_realpath "$1") || { echo "$1 could not be resolved"; return 1; }
+  pkg=${shim%/*}; pkg=${pkg%/*}
+  if ! grep -Eqs '"name": *"sfw"' "$pkg/package.json"; then
+    echo "$1 is not the sfw npm package"; return 1
+  fi
+  if [[ -e "$pkg/.sfw-cache/latest" ]]; then
+    echo "a binary is already cached"; return 1
+  fi
+  # The platform as sfw sees it (mapPlatform and mapArch in its dist/sfw.mjs):
+  # the Node that runs sfw, which need not match the kernel.
+  plat=$(cd / && node -p 'process.platform + "-" + process.arch' 2>/dev/null) || plat=""
+  case "$plat" in
+    linux-x64)    asset=sfw-free-linux-x86_64; want=$SFW_BINARY_SHA256_LINUX_X86_64 ;;
+    linux-arm64)  asset=sfw-free-linux-arm64;  want=$SFW_BINARY_SHA256_LINUX_ARM64 ;;
+    darwin-x64)   asset=sfw-free-macos-x86_64; want=$SFW_BINARY_SHA256_MACOS_X86_64 ;;
+    darwin-arm64) asset=sfw-free-macos-arm64;  want=$SFW_BINARY_SHA256_MACOS_ARM64 ;;
+    *) echo "no binary is pinned for ${plat:-an unknown platform}"; return 1 ;;
+  esac
+  url="https://github.com/SocketDev/sfw-free/releases/download/${SFW_BINARY_VERSION}/${asset}"
+  tmp=$(mktemp -d) || { echo "no temporary directory for the download"; return 1; }
+  if command -v curl >/dev/null 2>&1; then
+    out=$(cd / && run_bounded 300 curl -fsSL --proto '=https' -o "$tmp/$asset" "$url" 2>&1) || rc=$?
+  elif command -v wget >/dev/null 2>&1; then
+    out=$(cd / && run_bounded 300 wget -q -O "$tmp/$asset" "$url" 2>&1) || rc=$?
+  else
+    rc=127; out="neither curl nor wget is installed"
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    rm -rf -- "$tmp"
+    out=$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)
+    echo "downloading it failed (exit $rc${out:+: $out})"
+    return 1
+  fi
+  # POSIX sh and BSD or GNU tools: macOS has shasum and no sha256sum, and its mv
+  # has no -T. Not inside the $( ) below: bash 3.2 misreads a case pattern there.
+  place='
+    set -f
+    umask 022
+    src=$1 pkg=$2 rel=$3 asset=$4 want=$5
+    cache=$pkg/.sfw-cache
+    no() { echo "$1"; exit 1; }
+    for d in "$pkg" "$cache" "$cache/$rel"; do
+      if [ ! -e "$d" ] && [ ! -L "$d" ]; then continue; fi
+      if [ -L "$d" ] || [ ! -d "$d" ]; then no "$d is not a directory"; fi
+      set -- $(ls -ldn "$d")
+      case "$1" in
+        ?????w*|????????w*) no "$d can be written by other accounts ($1)" ;;
+      esac
+      [ "$3" = "$(id -u)" ] || no "$d belongs to uid $3, and sfw was installed by uid $(id -u)"
+    done
+    stage=$(mktemp -d "$pkg/.sfw-seed.XXXXXX") || no "no temporary directory could be made in $pkg"
+    trap "rm -rf -- \"\$stage\"" 0
+    trap "exit 1" 1 2 15
+    cp "$src" "$stage/$asset" || no "the download could not be copied into $pkg"
+    if command -v sha256sum >/dev/null 2>&1; then
+      have=$(sha256sum < "$stage/$asset")
+    else
+      have=$(shasum -a 256 < "$stage/$asset")
+    fi
+    have=${have%% *}
+    [ "$have" = "$want" ] || no "the download has sha256 ${have:-unknown}, not the pinned $want"
+    if [ -e "$cache/latest" ]; then no "a binary is already cached"; fi
+    chmod 0755 "$stage/$asset" \
+      && mkdir -p "$cache/$rel" && chmod 0755 "$cache" "$cache/$rel" \
+      && mv -f "$stage/$asset" "$cache/$rel/$asset" \
+      && ln -s "$cache/$rel/$asset" "$stage/latest" \
+      && mv -f "$stage/latest" "$cache/latest" \
+      || no "it could not be put in $cache"
+  '
+  out=$(cd / && run_bounded 120 $SUDO sh -c "$place" sh "$tmp/$asset" "$pkg" "$SFW_BINARY_VERSION" "$asset" "$want" 2>&1) || rc=$?
+  rm -rf -- "$tmp"
+  if [[ "$rc" -ne 0 ]]; then
+    echo "${out:-putting it in the cache failed (exit $rc)}" | tail -n 1
+    return 1
+  fi
+}
+
 install_sfw_and_wrap() {
   section "Socket Firewall"
 
@@ -3736,11 +3860,13 @@ install_sfw_and_wrap() {
   #      SFW_SKIP_UPDATE_CHECK=1, so sfw never tries to write the root-owned
   #      cache (see the wrappers below). Only if that works is anything
   #      wrapped.
-  # If either fails, sfw is MOVED ASIDE so `command -v sfw` fails for the cargo
-  # wrapper too, no npm/npx wrapper is deployed, and sfw_installed stays false:
-  # the job runs unfiltered, says so, and builds. The target is whichever
-  # `true` exists: macOS has /usr/bin/true and no /bin/true.
-  local sfw_bin sfw_out sfw_rc true_bin
+  # If the first fails, the pinned binary goes into the cache and it is tried
+  # once more (sfw_seed_binary); a run whose own fetch works downloads nothing
+  # else. If either still fails, sfw is MOVED ASIDE so `command -v sfw` fails
+  # for the cargo wrapper too, no npm/npx wrapper is deployed, and sfw_installed
+  # stays false: the job runs unfiltered, says so, and builds. The target is
+  # whichever `true` exists: macOS has /usr/bin/true and no /bin/true.
+  local sfw_bin sfw_out sfw_rc true_bin sfw_why=""
   sfw_bin=$(command -v sfw 2>/dev/null || true)
   if [[ -z "$sfw_bin" ]]; then
     warn "sfw installed but not on PATH; skipping wrapper deployment"
@@ -3753,12 +3879,21 @@ install_sfw_and_wrap() {
   # and its own, and a 077 caller would leave the binary in a 0700 directory
   # that the user check below (and every other account) cannot reach.
   sfw_out=$(cd / && run_bounded 180 $SUDO sh -c 'umask 022; exec "$@"' sh "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
+  if [[ "$sfw_rc" -ne 0 ]]; then
+    if sfw_why=$(sfw_seed_binary "$sfw_bin"); then
+      log "sfw could not fetch its firewall binary (rc=$sfw_rc: $(printf '%s' "$sfw_out" | grep -v '^[[:space:]]*$' | tail -n 1)); the pinned $SFW_BINARY_VERSION, its SHA-256 checked, is in its cache instead"
+      sfw_rc=0
+      # Without the update check: it is the call that just failed.
+      sfw_out=$(cd / && run_bounded 180 $SUDO sh -c 'umask 022; SFW_SKIP_UPDATE_CHECK=1; export SFW_SKIP_UPDATE_CHECK; exec "$@"' sh "$sfw_bin" "$true_bin" 2>&1) \
+        || { sfw_rc=$?; sfw_why="its SHA-256 matched and it was put in sfw's cache, but it did not run"; }
+    fi
+  fi
   if [[ "$sfw_rc" -eq 0 ]]; then
     sfw_out=$(cd / && SFW_SKIP_UPDATE_CHECK=1 run_bounded 120 "$sfw_bin" "$true_bin" 2>&1) || sfw_rc=$?
   fi
   if [[ "$sfw_rc" -ne 0 ]]; then
     $SUDO mv -f "$sfw_bin" "${sfw_bin}.broken" 2>/dev/null || true
-    warn "sfw could not prepare its firewall binary (rc=$sfw_rc: $(printf '%s' "$sfw_out" | grep -v '^[[:space:]]*$' | tail -n 1)); it was moved aside and NO npm/npx wrapper was deployed, so installs in this job are NOT threat-intel filtered. sfw downloads that binary from the GitHub API on first use; a 403 here is usually the shared runner's unauthenticated rate limit"
+    warn "sfw could not prepare its firewall binary (rc=$sfw_rc: $(printf '%s' "$sfw_out" | grep -v '^[[:space:]]*$' | tail -n 1)); it was moved aside and NO npm/npx wrapper was deployed, so installs in this job are NOT threat-intel filtered. sfw downloads that binary from the GitHub API on first use; a 403 here is usually the shared runner's unauthenticated rate limit${sfw_why:+. The pinned $SFW_BINARY_VERSION was not used instead: $sfw_why}"
     end_section
     return 0
   fi
