@@ -352,7 +352,8 @@
       else
         rc=$?
         mv -f "$P" "$P.broken" 2>/dev/null || true
-        printf 'sfw warm failed (rc=%s): %s\n' "$rc" "$(printf '%s' "$out" | head -1)" >&2
+        # The LAST non-blank line is sfw's own error; a spinner can come first.
+        printf '%s\n' "$(printf '%s' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | tr -cd '[:print:]' | cut -c1-300)" >&2
         echo broken
         exit "$rc"
       fi
@@ -430,7 +431,7 @@
 - name: Record skipped protection — Socket Firewall binary could not be fetched
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ '). sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ ((': ' ~ (sfw_warm.stderr | trim)) if (sfw_warm.stderr | default('', true) | trim | length > 0) else '') ~ '). sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
   when:
     - sfw_warm is defined
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'broken'
