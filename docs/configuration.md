@@ -21,7 +21,7 @@ The role derives each manager's native unit from that single value — npm wants
 duration, uv an absolute RFC 3339 cutoff. Getting any one of those wrong
 silently disables the gate (or, for bun, breaks the whole config file), so do
 not set the derived values individually. The unit trap is spelled out in
-[how-it-works.md](how-it-works.md#system-wide-environment-variables).
+[how-it-works.md](how-it-works.md#setting-values-by-hand).
 
 ## Agent hosts: `agent_host`
 

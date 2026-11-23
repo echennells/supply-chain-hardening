@@ -104,10 +104,11 @@ Remote hosts, one ecosystem at a time, and every tunable: [docs/configuration.md
       - uses: echennells/supply-chain-hardening/action/verify@v2   # 4. prove it held
 ```
 
-The order is the one thing you have to get right. Hardening wraps the binaries that exist *when it runs*; a `setup-*` step afterwards installs an unwrapped one ahead of it on `PATH`, and nothing fails — which is what step 4 is for. Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo` prints the exceptions your project needs before the first build breaks. Full inputs, outputs, adapters and limitations: [action/README.md](action/README.md).
+The order is the one thing you have to get right. Hardening wraps the binaries that exist *when it runs*; a `setup-*` step afterwards installs an unwrapped one ahead of it on `PATH`, and nothing fails — which is what step 4 is for. Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo` prints the exceptions your project needs, for the action and for the role, before the first build breaks, plus any repo-local config that outranks the host's. Full inputs, outputs, adapters and limitations: [action/README.md](action/README.md).
 
 ### Before you apply
 
+- **Run `./action/harden.sh --preflight` first.** It says what applying would meet on this host (Ansible, the files the play stops on, the package managers found) and writes nothing.
 - **Do not run with `sudo ansible-playbook` or global `--become`.** Facts get gathered as root, `HOME` becomes `/root`, and every per-user config lands in the wrong home while the recap reports success. The preflight refuses this.
 - **`N/A — not installed` rows are correct, not failures.** There is nothing to harden yet. Install the manager, re-apply.
 - **A pre-existing `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml` stops the play.** It may be a corporate registry setting. Read it, then pass `-e accept_etc_overwrite=true` if overwriting is what you want.
@@ -133,6 +134,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
 | [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
 | [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |
+| [docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md) | an agent will work on a hardened host: what refusals look like and what it must not do (you give it the file; nothing loads it) |
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
 | [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
 | [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |

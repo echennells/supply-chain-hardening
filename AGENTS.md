@@ -3,11 +3,14 @@
 Instructions for an AI agent that has been given this repo to harden a host or a CI
 pipeline. [README.md](README.md) is the human-facing version. If you're changing this
 repo rather than applying it, start with [docs/design-principles.md](docs/design-principles.md)
-and [TESTS.md](TESTS.md).
+and [TESTS.md](TESTS.md). The agent that later works on a hardened host has its own file:
+[docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md). Nothing loads
+either file for an agent; whoever runs it has to.
 
-**The short version:** run the Ansible role, run the verifier, and report what it
-says. Don't copy settings out of `templates/`, don't upgrade anyone's package managers
-without asking, and don't work around a control to get an install through.
+**The short version:** run the preflight, show the user its output and wait, apply the
+Ansible role, run the verifier, and report what it says. Don't copy settings out of
+`templates/`, don't upgrade anyone's package managers without asking, and don't work
+around a control to get an install through.
 
 ## Pick a path
 
@@ -17,29 +20,46 @@ without asking, and don't work around a control to get an install through.
 | GitHub Actions | The action: [action/README.md](action/README.md) |
 | Other CI | `action/harden.sh`, with worked examples in [action/examples/](action/examples/) |
 | Ansible genuinely can't be used | `action/harden.sh --emit=plain`, below |
+| Neither can run | **Stop and say so.** Don't write values into config files by hand. |
 
-Prefer the role even when copying a few settings looks easier. It detects each tool's
-installed version and writes what that version supports, finds the config paths the
-tool really reads, deploys the wrappers and env layer, and installs the verifier. That
-is what makes every host come out the same.
+Prefer the role even when copying a few settings looks easier: it detects each tool's
+installed version and writes what that version supports, finds the config paths the tool
+really reads, deploys the wrappers and env layer, and installs the verifier.
 
 ## Before you apply
 
-This changes how package managers behave across the whole host, for every project. If
-the user hasn't already agreed to that, tell them first:
+This changes how package managers behave across the whole host, for every project. Run
+the preflight from a checkout of this repo, **show the user its whole output, and wait
+for their OK**:
+
+```bash
+./action/harden.sh --preflight                    # or --preflight=/path/to/repo
+```
+
+It writes nothing. A line starting with `STOP` would end the play before it changes
+anything: an existing `/etc` file, a per-user cargo, maven or nuget config this project
+did not write, the wrong user, no Ansible or one too old. It lists the package managers
+found, and for a repo it adds `--suggest`: the exceptions that repo needs and its own
+config that outranks the host's. `ansible-playbook --check` is not this: it is a dry run
+of the whole play, stops at the first refusal, and runs the role's probes for real.
+
+Tell the user what hardening does, unless they have already agreed to it:
 
 - Releases newer than 48 hours are refused, wherever the tool supports it.
 - Install scripts are blocked, so a package that depends on one fails to build.
 - Source distributions are refused, and `pip` is redirected to `uv` where `uv` exists.
-  Without `uv`, pip's own `only-binary` refuses an sdist from an index but not one named
-  by path or URL.
-- `composer` runs with `--no-plugins`, and with `--no-scripts` except for a script
-  named on the command line (`composer test`); `bundle` runs frozen.
+- `composer` runs with `--no-plugins`, and with `--no-scripts` except for a script named
+  on the command line (`composer test`); `bundle` runs frozen.
 - Several package managers are replaced by wrappers at their current path.
 - There is no single uninstall command.
 
-For a repo headed into CI, `./action/harden.sh --suggest=/path/to/repo` reads its
-manifests and prints the exceptions it needs, before a build breaks.
+**Agent hosts.** If the host's job is running agents in repositories nobody vetted, ask
+the user whether to apply with `-e agent_host=true`. It makes a GAP fail the play, and
+turns on two settings whose breaks name neither this project nor the setting:
+`python_safe_path` (`python script.py` importing a file next to it, and `python -m` of a
+local package, fail) and `uv_exclude_newer_env` (a project that pins its own earlier
+`exclude-newer` fails `uv sync --locked`). Say both when you ask. Details:
+[docs/configuration.md](docs/configuration.md#agent-hosts-agent_host).
 
 ## Apply with Ansible
 
@@ -49,31 +69,22 @@ The role hardens what a host **already has**, so install the package managers fi
 git clone https://github.com/echennells/supply-chain-hardening.git
 cd supply-chain-hardening
 ansible-playbook site.yml --limit localhost    # add -K if sudo needs a password
-supply-chain-verify
+supply-chain-verify --json
 ```
 
-- Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or global
+- Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or a global
   `--become`: per-user config would land in root's home. The preflight refuses this.
-- If the preflight says ansible-core cannot answer the sudo-rs password prompt (Ubuntu
-  26.04 with apt ansible-core 2.20.1 and `-K`), tell the user. The fix is a newer
-  ansible-core for their user (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo
-  for the apply. Don't change their sudoers yourself.
-- If the play stops on an existing `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml`,
-  don't override it yourself. It may be a corporate registry setting.
-  Show it to the user, and pass `-e accept_etc_overwrite=true` only if they agree.
-- The same goes for a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or
-  `~/.nuget/NuGet/NuGet.Config` the role did not write: show it to the user, and pass
-  `-e accept_user_config_overwrite=true` only if they agree.
-- On agent hosts and CI images, add `-e verify_fail_on_gap=true` so a gap fails the play.
-- On an agent host that runs uv inside repositories nobody vetted, offer
-  `-e uv_exclude_newer_env=true`, which stops a repo's own `exclude-newer` from
-  lifting the uv age gate in login shells. Ask first: a project that pins its own
-  `exclude-newer` then fails `uv sync --locked` ([docs/configuration.md](docs/configuration.md)).
+- If the play stops on a file, don't override it yourself. Show the file to the user, and
+  pass `-e accept_etc_overwrite=true` (the `/etc` files) or
+  `-e accept_user_config_overwrite=true` (the per-user ones) only if they agree.
+- On Ubuntu 26.04's sudo-rs the preflight may stop because ansible-core cannot answer its
+  password prompt. The fix is a newer ansible-core for the user
+  (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo for the apply. Don't change
+  their sudoers yourself.
 - If Ansible stops with "could not initialize the preferred locale", run it with
-  `LC_ALL=C.UTF-8`. Over SSH the client's locale is often forwarded and missing on the
-  host; Debian 12 and 13 cloud images hit this.
+  `LC_ALL=C.UTF-8`.
 - To change the window, set `release_age_hours`. Don't set per-tool values.
-- Re-apply after installing or upgrading a package manager. Some settings depend on the
+- Re-apply after installing or upgrading a package manager: some settings depend on the
   version found at apply time, and upgrades can replace wrapped binaries.
 
 Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/configuration.md).
@@ -83,148 +94,76 @@ Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/
 ```bash
 ./action/harden.sh --emit=plain &&
   source "${HARDENING_ENV_FILE:-${RUNNER_TEMP:-$HOME/.cache/supply-chain-hardening}/supply-chain-hardening.env}" &&
-  ./action/verify.sh --emit=plain
+  ./action/verify.sh --emit=plain --json
 ```
 
-Keep the `&&`. If `harden.sh` fails, nothing after it should run, least of all
-the `source`. Outside a CI runner the env file goes in
-`~/.cache/supply-chain-hardening/` (created with mode 0700), never a shared
-directory. `HARDENING_ENV_FILE` moves it, and the `source` line follows. `harden.sh`
-refuses a file that is not yours or that group or others can write, and a path
-through a world-writable directory without the sticky bit, or through a sticky
-one another user owns. It accepts group-writable directories. Run `verify.sh` as
-the same user: it will not read a record another user owns, and fails instead.
-
-This path was built for CI, so it is narrower than the role:
-
-- The env file only reaches shells that source it.
-- It wraps binaries and writes `/etc` with `sudo` where it can.
-- **Nothing refreshes the uv and pip cutoffs.** They are a fixed date, set when
-  `harden.sh` runs. On a host you keep, re-run the three lines above to move
-  them, and re-source the env file in any shell that sourced the old one. The
-  role installs a timer for this.
-- CI only exercises the GitHub path, so treat `plain` as less tested. GitLab and
-  Buildkite shell runners are not tested at all.
-
-## If you copy settings anyway
-
-This is the weakest option. Use it only when neither path above is possible, and say so.
-
-1. **Don't copy from `templates/`.** Nearly all of those files are Jinja, and the
-   version logic lives inside them.
-2. **Check the installed version first.** Below the minimum, these settings are
-   usually ignored with no error.
-3. **Run the verifier afterwards.** Copied settings can't be trusted without it.
-
-| Tool | Setting | 48h value | Needs | Trap |
-|---|---|---|---|---|
-| npm | `min-release-age` | `2` | npm 11.10.0 | Integer days. `48h` fails installs, and `2880` means about 8 years. |
-| pnpm | `minimumReleaseAge` | `2880` | | Minutes. pnpm 11 no longer reads `~/.npmrc` or `/etc/npmrc`. |
-| Yarn | `npmMinimalAgeGate` | `2880` | Yarn 4.10 | Integer minutes. Yarn 4.10 reads `"2d"` as 2 minutes; 4.11+ parses it. Below 4.10 the key is ignored in `~/.yarnrc.yml` and rejected in a project's. |
-| Bun | `minimumReleaseAge` | `172800` | Bun 1.3.0 | Bare integer seconds, which every Bun from 1.3.0 reads. On 1.3.0 to 1.4.3 a quoted value such as `"2d"` makes Bun reject the whole file. |
-| uv | `exclude-newer` | a date | | Absolute RFC 3339 date, so it freezes unless something advances it. A span such as `"48 hours"` needs uv 0.9.17; older uv rejects the whole file. |
-| pip | `uploaded-prior-to` | a date | pip 26.0 | Same, with a literal `Z`. |
-| Deno | `--minimum-dependency-age` | `P2D` | | A flag, not a config key. Deno has no config file for it. |
-| Composer | `config.policy.cooldown.period` | `172800` | Composer 2.11.0 | Seconds. Also set `COMPOSER_POLICY_COOLDOWN_PERIOD`, which outranks a repo. |
-| Bundler | `BUNDLE_COOLDOWN` | `"2"` | Bundler 4.0.13, Ruby 3.2 | Integer days. `0` disables it. |
-| Poetry | `POETRY_SOLVER_MIN_RELEASE_AGE` | `2` | Poetry 2.4.0 | Integer days. Poetry reads neither `pip.conf` nor `uv.toml`. |
-
-Other traps:
-
-- **Composer:** use `"allow-plugins": {}`. The literal `false` crashes every command on
-  some versions, including Ubuntu 22.04's.
-- **Composer scripts:** no config key blocks them. Without the wrapper they still run.
-- **npm `allow-git=none`** (npm 11.9.0+): under `actions/setup-node` with `registry-url`, npm
-  reads neither `~/.npmrc` nor `/etc/npmrc`, so also set `NPM_CONFIG_ALLOW_GIT=none`. Not on
-  npm 11.2.0 to 11.8.x, which warn about it on every command.
-- **Config paths:** ask the tool rather than guessing. `npm config get globalconfig`
-  (`/etc/npmrc` is only read by Debian and Ubuntu's apt npm) and
-  `composer config --global home`.
-- **Readback is not proof:** npm, Composer and Bundler all echo a key they ignore.
+Keep the `&&`: if `harden.sh` fails, nothing after it may run, least of all the `source`.
+Run `verify.sh` as the same user: it refuses a record another user owns. `harden.sh`
+also refuses an env file that is not yours or that others can write
+([action/README.md](action/README.md)). This path is narrower than the role: the env file
+only reaches shells that source it, `/etc` and wrappers are written only where `sudo`
+works, and **nothing refreshes the uv and pip cutoffs**, so on a host you keep, re-run the
+three lines to move them. CI exercises only the GitHub path, so treat `plain` as less
+tested. If neither path can run, stop and tell the user: a person who wants to write the
+settings by hand can read [docs/how-it-works.md](docs/how-it-works.md#setting-values-by-hand).
 
 ## Run the verifier, every time
 
 Writing a file proves nothing. Tools ignore settings without saying so, and that is the
-failure this project exists to catch.
+failure this project exists to catch. Run `supply-chain-verify --json` where the role was
+applied, and `./action/verify.sh --emit=plain --json` anywhere else (it needs no record of
+how the host was hardened; with none, it checks every tool it finds). Read the JSON like
+this, field by field in [docs/verify.md](docs/verify.md#--json):
 
-| Applied with | Run |
-|---|---|
-| The role | `supply-chain-verify` |
-| Anything else | `./action/verify.sh --emit=plain` |
-
-`action/verify.sh` needs no record of how the host was hardened. With none, it checks
-every tool it finds. Then report honestly:
-
-- **Give the user every GAP and WEAK row.** Don't say "hardened" if any remain.
-- **`RESULT: no gaps` is not proof.** A host with nothing installed prints that too.
-  `N/A` means nothing was checked, so look at which rows are actually `OK`.
-- **Weigh the evidence column.** `FUNCTIONAL` was observed, `PARSED` was reported by the
-  tool, and `PRESENT` means a file exists and nothing more.
-- **Run it from the project too.** A repo's own config can override the host's, and
-  the verifier only sees that from inside the repo. That is safe in a repo nobody has
-  reviewed: it asks each tool from `/` and reads the repo's config as files, so none of
-  the repo's code runs (a `yarnPath`, a pnpmfile, a `rust-toolchain.toml` toolchain).
+- **`result.tools_seen` first.** Empty means no package manager was checked, whatever
+  `gaps` says. Compare it with the tools the host is supposed to have.
+- **Every row with `status` `GAP` or `WEAK`, with its `detail`, goes to the user.** Don't
+  say "hardened" if any remain. The exit status is non-zero on any GAP.
+- **`evidence`**: `FUNCTIONAL` was observed, `PARSED` was reported by the tool, `PRESENT`
+  means a file exists and nothing more.
+- **Run it from inside each project too.** A repo's own config can override the host's, and
+  the verifier only sees that from inside the repo. It runs none of the repo's code
+  ([why](docs/verify.md#it-never-runs-code-a-checkout-supplies)).
 
 **Don't run it on a host you suspect is already compromised.** It starts `python3` and
 `pip`, which can fire a malicious startup hook. Inspect that host with tools that don't
 start the interpreter, and tell the user to rebuild.
 
 **A WEAK `python startup hooks` row means stop and show the user.** It lists files that
-run code on every Python start with nothing vouching for them, each with the
-distribution that installed it. Don't start Python on that host again until the user has
-looked: the verifier's own checks already started it once after the warning. An OK row
-of the same name lists hooks the verifier recognised. Show the user that list as well;
-recognising a hook's one line does not vouch for the module it imports.
-
-Details: [docs/verify.md](docs/verify.md).
+run code on every Python start with nothing vouching for them, each with the distribution
+that installed it. Don't start Python on that host again until the user has looked: the
+verifier's own checks already started it once after the warning. An OK row of the same
+name lists hooks the verifier recognised. Show the user that list as well; recognising a
+hook's one line does not vouch for the module it imports.
 
 ## If a tool is too old
 
 A GAP saying a tool doesn't implement a setting means its version is too old.
+**Don't upgrade it on your own**: that can break the user's builds. Tell the user which
+protection is missing and offer the fix
+([npm](docs/npm-cooldown-by-distro.md), [Composer and Bundler](docs/composer-bundler-cooldown-by-distro.md)).
+If they agree, upgrade, re-apply, and run the verifier again.
 
-**Don't upgrade it on your own.** This project never upgrades package managers, because
-that can break the user's builds. Tell the user which protection is missing and offer
-the fix:
+## When an install is refused
 
-- npm: [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md)
-- Composer and Bundler: [docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md)
-
-If they agree, upgrade, re-apply the role, and run the verifier again.
-
-## Installing on a hardened host
-
-If a fresh release is refused or an install script is blocked, the control is working.
-**Stop and tell the user.** Don't get past it with:
-
-- `composer --no-cooldown`, `bundle lock --cooldown 0`, or calling `composer-real`
-- editing `~/.npmrc`, `uv.toml`, `.bundle/config`, `poetry.toml` or the policy in `composer.json`
-- `uv --no-config`, unsetting the env vars, or calling a real binary directly
-
-An agent fails closed. A person can vouch for a specific build they trust, and
-`supply-chain-allow-build` exists for that person. It is not for you to reach for.
-
-Several of these refusals don't name this project (npm `ETARGET`, a native module that
-fails when loaded, Yarn `YN0028`, Bundler frozen mode). [docs/day-one.md](docs/day-one.md)
-explains each one, so you can tell the user what was refused and what their options are.
+A fresh release refused or an install script blocked is the control working.
+**Stop and tell the user.** Don't get past it: don't weaken a gate, don't call a `-real`
+binary or a real binary behind a wrapper, don't unset or override the env layer, don't
+edit a file this project manages, and don't reach for `supply-chain-allow-build`, which
+is for a person. An agent fails closed. [docs/day-one.md](docs/day-one.md) explains each
+refusal, and the escapes a person can use, for the person.
 
 ## What this does not cover
 
 Say so when it matters to the task:
 
 - **It is not a sandbox.** Anything running as the same user can undo it.
-- **`gem install` has no age gate below RubyGems 4.1.0.** From 4.1.0 it reads the `BUNDLE_COOLDOWN` the role writes; no stock distro ships 4.1.0 yet.
-- **`python3 -m venv` can seed a pip that ignores the gate.** Prefer `uv venv --seed` or `uv pip`.
-- **PDM ignores the Python gates**, and the role doesn't set its own.
-- **Container image pulls have no age gate.** Pin digests rather than tags.
-- **A repo can switch off some gates.** The verifier reports the cases it can see.
+- **A repo can switch off some gates.** Run the verifier inside it to see which.
+- **`gem install` has no age gate below RubyGems 4.1.0**, and Python venvs and PDM have
+  their own gaps. Image pulls have no age gate; pin digests rather than tags.
 - **A cloned repo's agent config can run code** with no package manager involved, for
-  example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`.
-- **Headless `claude -p` and Agent SDK runs show no trust prompt.** A repo's
-  `.claude/settings.json` hooks, helpers and `env` block apply anyway, and that `env`
-  overwrites variables exported in the shell. No package-manager variable is on the
-  list a project may not set, so by the docs (not run) it can override this env layer.
-  `--setting-sources user` reads no project settings; `--bare` still applies the
-  project's `env`; turning hooks off takes `--settings '{"disableAllHooks": true}'`.
-  [Claude Code docs](https://code.claude.com/docs/en/permissions#what-runs-before-you-trust-a-folder)
+  example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`. Headless
+  `claude -p` and Agent SDK runs show no trust prompt; see
+  [docs/limitations.md](docs/limitations.md) before using one in a repo you don't know.
 
 The full list: [docs/limitations.md](docs/limitations.md).
