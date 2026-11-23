@@ -791,7 +791,7 @@ preflight_report() {
     else
       _pf_line "sudo asks for a password: run ansible-playbook with -K (or this user has no sudo rights at all)"
     fi
-    sv=$(sudo --version 2>/dev/null | head -1)
+    sv=$(sudo --version 2>/dev/null | head -1) || true
     case "$sv" in sudo-rs*) is_rs=1 ;; esac
   else
     _pf_stop "no sudo on PATH and not root: the role needs root for /etc, /usr/local/bin and /etc/environment."
@@ -800,10 +800,10 @@ preflight_report() {
   echo ""
   echo "Ansible on this machine:"
   if path=$(command -v ansible-playbook 2>/dev/null); then
-    av=$( (cd / && ansible-playbook --version 2>/dev/null) | head -1)
+    av=$( (cd / && ansible-playbook --version 2>/dev/null) | head -1) || true
     case "$av" in
       *"[core "*) ver=${av##*\[core }; ver=${ver%%\]*} ;;
-      *) ver=$(printf '%s\n' "$av" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) ;;
+      *) ver=$(printf '%s\n' "$av" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || true ;;
     esac
     _pf_line "ansible-core ${ver:-<version not read>} ($path)"
     if [ -n "$ver" ]; then
@@ -820,7 +820,7 @@ preflight_report() {
   fi
   # The role's probe is `date -u -d @0`. BSD date (macOS) reads -d as "set the
   # kernel's daylight-saving value", so there the probe is not run at all.
-  f=$(date --version 2>/dev/null | head -1)
+  f=$(date --version 2>/dev/null | head -1) || true
   if [ "${f#*GNU}" != "$f" ]; then
     :
   elif [ "$(uname -s 2>/dev/null)" = Darwin ] \
@@ -876,10 +876,10 @@ preflight_report() {
     ver=$(_pf_version "$f" "$path")
     note=""
     case "$f" in
-      npm) _pf_below "$ver" 11.10.0 && note="; its age gate needs npm 11.10.0" ;;
-      yarn) _pf_below "$ver" 4.10.0 && note="; its age gate needs Yarn 4.10" ;;
-      bun) _pf_below "$ver" 1.3.0 && note="; its age gate needs Bun 1.3.0" ;;
-      rustc) _pf_below "$ver" 1.91.1 && note="; the cargo age gate's backend needs rustc 1.91.1" ;;
+      npm)   if _pf_below "$ver" 11.10.0; then note="; its age gate needs npm 11.10.0"; fi ;;
+      yarn)  if _pf_below "$ver" 4.10.0; then note="; its age gate needs Yarn 4.10"; fi ;;
+      bun)   if _pf_below "$ver" 1.3.0; then note="; its age gate needs Bun 1.3.0"; fi ;;
+      rustc) if _pf_below "$ver" 1.91.1; then note="; the cargo age gate's backend needs rustc 1.91.1"; fi ;;
     esac
     _pf_line "$f ${ver:-(version not read)} ($path)$note"
   done
@@ -891,7 +891,7 @@ preflight_report() {
     echo ""
     echo "What --suggest says for $repo:"
     echo ""
-    suggest_for_repo "$repo" | sed 's/^/  /'
+    suggest_for_repo "$repo" | sed 's/^/  /' || true
     echo ""
   else
     echo ""
@@ -931,7 +931,7 @@ _pf_version() {
       # this project deployed names the real binary in REAL_NPM=.
       r=$2
       if grep -q 'supply-chain-harden' "$r" 2>/dev/null; then
-        d=$(sed -n "s/^REAL_[A-Z]*='\([^']*\)'.*/\1/p" "$r" 2>/dev/null | head -1)
+        d=$(sed -n "s/^REAL_[A-Z]*='\([^']*\)'.*/\1/p" "$r" 2>/dev/null | head -1) || true
         [ -n "$d" ] && r=$d
       fi
       r=$(readlink -f "$r" 2>/dev/null) || return 0
@@ -939,8 +939,9 @@ _pf_version() {
       d=${r%/*}
       while [ -n "$d" ] && [ "$d" != / ]; do
         if [ -f "$d/package.json" ]; then
-          sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1 | grep -qx "$t" \
-            && sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1
+          if [ "$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1)" = "$t" ]; then
+            sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1 || true
+          fi
           return 0
         fi
         d=${d%/*}
