@@ -524,11 +524,10 @@ suggest_overrides() {
     tables=$(sed -n 's/^[[:space:]]*\[\{1,2\}[[:space:]]*\([^]]*\).*/\1/p' "$d/$f" 2>/dev/null | tr -d '"'"'"' \t' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g' | _sg_clean)
     _sg_override "$f" "${l:+$l; }tables: ${tables:-none}" "cargo reads it for every cargo command here, and \`cargo metadata\` (which an IDE runs on folder open) runs a rustc-wrapper it names. ${_sg_open}"
   done
-  for f in "$d/cooldown.toml"; do
-    [ -f "$f" ] || continue
-    l=$(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | head -6 | tr '\n' ';' | sed 's/;$//; s/;/; /g' | _sg_clean)
+  if [ -f "$d/cooldown.toml" ]; then
+    l=$(grep -vE '^[[:space:]]*(#|$)' "$d/cooldown.toml" 2>/dev/null | head -6 | tr '\n' ';' | sed 's/;$//; s/;/; /g' | _sg_clean)
     _sg_override cooldown.toml "${l:-(empty)}" "cargo-cooldown reads it; the wrapper pins the windows, but allow entries in it still exempt crates. Not closed."
-  done
+  fi
   for f in rust-toolchain.toml rust-toolchain; do
     [ -f "$d/$f" ] || continue
     l=$(_sg_toml "$d/$f" toolchain.path | head -1)
