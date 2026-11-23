@@ -2047,7 +2047,7 @@ npc_pick() {
   local -a envs=(); local cwd
   while [ "$1" != -- ]; do envs+=("$1"); shift; done; cwd=$2
   local blk; blk=$(npc_block "$VERIFY_SH")
-  ( cd "$cwd" && env -i PATH="$PATH" "${envs[@]}" bash -c "$blk"$'\n''printf "scratch=%s tmpdir=%s corepack=%s\n" "$SCV_SCRATCH" "$TMPDIR" "$COREPACK_ENV_FILE"' )
+  ( cd "$cwd" && env -i PATH="$PATH" "${envs[@]}" bash -c "$blk"$'\n''printf "scratch=%s tmpdir=%s corepack=%s mktemp=%s\n" "$SCV_SCRATCH" "$TMPDIR" "$COREPACK_ENV_FILE" "$(mktemp -d)"' )
 }
 
 @test "no project code: probe projects go in a scratch dir only root and this account can write, never under /tmp or the checkout" {
@@ -2055,16 +2055,28 @@ npc_pick() {
   # ww stands in for /tmp: world-writable with the sticky bit. HOME="$ww/h" is a
   # home with no private base above it (BATS_TEST_TMPDIR itself is private on
   # macOS, where it is under the per-user TMPDIR).
-  local ww="$BATS_TEST_TMPDIR/ww" out d
+  local ww="$BATS_TEST_TMPDIR/ww" out d dar darp none
   mkdir -p "$ww/sub" "$ww/h" "$SCV_PRIV/home" "$SCV_PRIV/proj/tmp"
   chmod 1777 "$ww"
+  # macOS has a per-user temp dir (getconf DARWIN_USER_TEMP_DIR, 0700 under
+  # root-owned parents), the last candidate there, so a Mac never runs out of
+  # private bases: where this test expects none on Linux, a Mac picks that.
+  dar=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || dar=""
+  if [ -n "$dar" ]; then
+    darp=$(cd -P "$dar" && pwd -P); none="scratch=$darp/scv."
+    out=$(npc_pick TMPDIR="$dar" HOME="$ww/h" -- /)
+    [[ "$out" == "scratch=$darp/scv."*" mktemp=$darp/scv."* ]] || { echo "the stock macOS TMPDIR was not taken: $out"; return 1; }
+  else
+    none="scratch= "
+  fi
   # $HOME and everything above it must be private, or this host cannot run the test.
   out=$(npc_pick HOME="$SCV_PRIV/home" RUNNER_TEMP="$SCV_PRIV" -- /)
   [[ "$out" == "scratch=$SCV_PRIV/scv."* ]] || skip "the real HOME has a directory above it others can write: $out"
   # A world-writable TMPDIR is passed over for RUNNER_TEMP; TMPDIR then points
   # into the scratch dir, COREPACK_ENV_FILE is 0, and the dir is gone at exit.
   out=$(npc_pick TMPDIR="$ww/sub" HOME="$ww/h" RUNNER_TEMP="$SCV_PRIV" -- /)
-  [[ "$out" == "scratch=$SCV_PRIV/scv."*" tmpdir=$SCV_PRIV/scv."*" corepack=0" ]] || { echo "$out"; return 1; }
+  # mktemp names the scratch dir too: Apple's mktemp ignores TMPDIR.
+  [[ "$out" == "scratch=$SCV_PRIV/scv."*" tmpdir=$SCV_PRIV/scv."*" corepack=0 mktemp=$SCV_PRIV/scv."*"/tmp."* ]] || { echo "$out"; return 1; }
   d=${out#scratch=}; d=${d%% *}
   [ ! -e "$d" ]
   # A base inside the working directory is not used: the checkout's files
@@ -2078,16 +2090,22 @@ npc_pick() {
   out=$(npc_pick TMPDIR="$SCV_PRIV/g" -- /)
   [[ "$out" == "scratch=$SCV_PRIV/g/scv."* ]] || { echo "$out"; return 1; }
   out=$(npc_pick TMPDIR="$SCV_PRIV/o" HOME="$ww/h" -- /)
-  [[ "$out" == "scratch= "* ]] || { echo "$out"; return 1; }
+  [[ "$out" == "$none"* ]] || { echo "$out"; return 1; }
   if [ "$(id -u)" != 0 ] && sudo -n chown 65534 "$SCV_PRIV/g" 2>/dev/null; then
     out=$(npc_pick TMPDIR="$SCV_PRIV/g" HOME="$ww/h" -- /)
     sudo -n chown "$(id -u)" "$SCV_PRIV/g"
-    [[ "$out" == "scratch= "* ]] || { echo "$out"; return 1; }
+    [[ "$out" == "$none"* ]] || { echo "$out"; return 1; }
   fi
-  # Nothing private: the probes stay under TMPDIR, and stderr says so.
+  # Nothing private: the probes stay under TMPDIR, and stderr says so. On a Mac
+  # the per-user temp dir is taken instead, without a warning.
   run --separate-stderr npc_pick TMPDIR="$ww/sub" HOME="$ww/h" -- /
-  [[ "$output" == "scratch= tmpdir=$ww/sub corepack=0" ]] || { echo "$output"; return 1; }
-  [[ "$stderr" == *"warning: found no directory for the probes' throwaway projects"*"Point TMPDIR at a directory of your own"* ]] || { echo "$stderr"; return 1; }
+  if [ -n "$dar" ]; then
+    [[ "$output" == "scratch=$darp/scv."* ]] || { echo "$output"; return 1; }
+    [[ "$stderr" != *"found no directory"* ]] || { echo "$stderr"; return 1; }
+  else
+    [[ "$output" == "scratch= tmpdir=$ww/sub corepack=0 mktemp=$ww/sub/tmp."* ]] || { echo "$output"; return 1; }
+    [[ "$stderr" == *"warning: found no directory for the probes' throwaway projects"*"Point TMPDIR at a directory of your own"* ]] || { echo "$stderr"; return 1; }
+  fi
 }
 
 # yarn_rc_stub <version> [gate]: a yarn that answers from / and, like the real
@@ -2454,6 +2472,14 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
   printf '<Project InitialTargets="T"><Target Name="T"><Exec Command="echo ran > %s/tmp-dotnet-props" /></Target></Project>\n' "$mk" > "$ww/Directory.Build.props"
   printf '{"name":"tmproot","private":true,"workspaces":["*"],"scripts":{"preinstall":"echo ran > %s/tmp-bun-root"}}\n' "$mk" > "$ww/package.json"
   printf 'new File("%s/tmp-gradle-settings").text = "ran"\n' "$mk" > "$ww/settings.gradle"
+  # FIXTURE CONTROL: where maven is installed, it applies the planted
+  # jvm.config to a run in any directory below it.
+  if command -v mvn >/dev/null 2>&1; then
+    mkdir -p "$ww/sub/ctl"
+    ( cd "$ww/sub/ctl" && mvn -v ) >/dev/null 2>&1 || true
+    [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: mvn -v below $ww did not apply $ww/.mvn/jvm.config"; return 1; }
+    rm -f "$mk/tmp-maven-jvm-config"
+  fi
   npc_shims "$BATS_TEST_TMPDIR/shims" "$log"
   rm -f "$log"
   run npc_verify "$PNT" TMPDIR="$ww/sub" RUNNER_TEMP="$SCV_PRIV"
@@ -2468,14 +2494,27 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
   [ -z "$(ls -d "$SCV_PRIV"/scv.* 2>/dev/null)" ] || { echo "scratch left behind: $(ls -d "$SCV_PRIV"/scv.*)"; return 1; }
   [ -z "$(markers)" ] || { echo "a planted file ran: $(markers)"; return 1; }
   [[ "$output" != *"found no directory for the probes"* ]]
-  # CONTROL: with no private base the probes run under that TMPDIR and stderr
-  # says so; where maven is installed its probes then run the planted jvm.config.
+  # With TMPDIR and HOME both below the world-writable directory: on a Mac the
+  # per-user temp dir (getconf DARWIN_USER_TEMP_DIR) is still private, so the
+  # probes go there and nothing planted runs. Elsewhere there is no private
+  # base: the probes run under that TMPDIR, stderr says so, and (CONTROL) where
+  # maven is installed its probes then run the planted jvm.config.
   rm -f "$log"
   run npc_verify "$PNT" TMPDIR="$ww/sub" HOME="$ww/h"
-  [[ "$output" == *"warning: found no directory for the probes' throwaway projects"* ]] || { echo "$output" | head -5; return 1; }
-  [ "$(cut -f3 "$log" | sort -u | grep -c "^$ww/sub")" -ge 1 ] || { cut -f3 "$log" | sort -u; return 1; }
-  if command -v mvn >/dev/null 2>&1; then
-    [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: the maven probes under $ww/sub did not apply the planted jvm.config: $(markers)"; return 1; }
+  local dar darp; dar=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || dar=""
+  if [ -n "$dar" ]; then
+    darp=$(cd -P "$dar" && pwd -P)
+    tmps=$(cut -f3 "$log" | grep -v '^$' | sort -u)
+    [ -n "$tmps" ] && [ "$(printf '%s\n' "$tmps" | grep -vc "^$darp/scv\.")" -eq 0 ] || { echo "TMPDIR seen by tools: $tmps"; return 1; }
+    ! cut -f1 "$log" | grep -q "^$ww" || { echo "started below $ww:"; grep "^$ww" "$log"; return 1; }
+    [ -z "$(markers)" ] || { echo "a planted file ran: $(markers)"; return 1; }
+    [[ "$output" != *"found no directory for the probes"* ]]
+  else
+    [[ "$output" == *"warning: found no directory for the probes' throwaway projects"* ]] || { echo "$output" | head -5; return 1; }
+    [ "$(cut -f3 "$log" | sort -u | grep -c "^$ww/sub")" -ge 1 ] || { cut -f3 "$log" | sort -u; return 1; }
+    if command -v mvn >/dev/null 2>&1; then
+      [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: the maven probes under $ww/sub did not apply the planted jvm.config: $(markers)"; return 1; }
+    fi
   fi
 }
 

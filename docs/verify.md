@@ -138,11 +138,14 @@ probes, `/tmp/rust-toolchain.toml` in a `cargo --version` there,
 `/tmp/Directory.Build.props` in the nuget restore probe, and a `/tmp/package.json`
 workspace root's install scripts in the bun probe (bun 1.3.0; 1.4.5 did not). Now
 the scratch directory comes from a base that only root and you can write, all the
-way up to `/` (`TMPDIR`, `RUNNER_TEMP`, `~/.cache/supply-chain-hardening`, then
-`XDG_RUNTIME_DIR`), never one inside the working directory, and `TMPDIR` points
-into it for every tool the verifier starts. With no such base, as when `HOME`
-itself is under `/tmp`, the probes run under `TMPDIR` as before and stderr says
-so; point `TMPDIR` at a directory of your own.
+way up to `/` (`TMPDIR`, `RUNNER_TEMP`, `~/.cache/supply-chain-hardening`, macOS's
+per-user temp dir from `getconf DARWIN_USER_TEMP_DIR`, then `XDG_RUNTIME_DIR`),
+never one inside the working directory. `TMPDIR` points into it for every tool the
+verifier starts, and the probes name it in their `mktemp` template, because
+Apple's `mktemp` with no template uses the per-user temp dir and ignores `TMPDIR`.
+With no such base, as when `HOME` itself is under `/tmp` on Linux, the probes run
+under `TMPDIR` as before and stderr says so; point `TMPDIR` at a directory of your
+own. A Mac always has one.
 
 `action/harden.sh` follows the same rule: the action runs it in the job's
 checkout, and it asks each tool its version from `/`. `harden.sh --suggest`
