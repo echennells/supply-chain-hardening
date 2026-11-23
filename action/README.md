@@ -340,6 +340,35 @@ nothing on npm 9.2.0, 11.19.1 or 12.2.3; adding `--ignore-scripts=false` built i
 `ignore-scripts` stayed `true` for the next install on all three. A `yarn.lock` or
 bun lockfile is told that the action has no per-package allowlist for them.
 
+The same evidence is printed for the Ansible role, as extra vars in JSON (the
+role's `pnpm_built_dependencies` is a list, so `key=value` would hand it a
+string):
+
+```
+With the Ansible role, the same exceptions as extra vars:
+
+      ansible-playbook site.yml --limit localhost -e '{"pnpm_built_dependencies": ["esbuild", "sharp"], "composer_allow_plugins": true}'
+```
+
+`install_cargo_cooldown` has no role counterpart: the role builds cargo-cooldown
+by default (`cargo_cooldown_enforce`).
+
+**Repo-local config that outranks the host's** comes last. A `.npmrc`, `uv.toml`
+or `[tool.uv]`, `bunfig.toml`, `poetry.toml`, `pnpm-workspace.yaml`,
+`.yarnrc.yml`, `.bundle/config`, `composer.json` policy, `.cargo/config.toml`,
+`cooldown.toml` or `rust-toolchain.toml` `path` at the top of the repo can lift a protection the
+host deploys, and neither the action nor the role can stop most of them; each
+line says which one can be outranked and by what. `--suggest` names them before
+you apply anything, because the verifier reports them only when it is run from
+inside the repo. It reads the files as text (a JSON file with an isolated
+`python3 -I -S`), prints only the keys it looked for (for `cooldown.toml` the
+first lines), never a token, follows no symlink, and runs no package manager.
+
+A repo that wants a gate off can spell the key in a way a simple reader does not
+follow: an inline table, an escape, npm's `${VAR?}` inside a key. Those are
+listed as "mentioned in a form this reader does not follow" or "a key written
+with an escape or a variable". Treat either as a finding and open the file.
+
 It reports and changes nothing — no config is written, no tool is installed.
 
 **Where the answer is exact, and where it is a floor.** `package-lock.json`
@@ -453,6 +482,7 @@ Outside GitHub, run the script directly; it takes the same `--emit` targets:
 ./action/verify.sh --emit=gitlab            # exit 1 on any gap
 ./action/verify.sh --strict --quiet         # table suppressed, exit code kept
 ./action/verify.sh --fail-on=config         # report every gap, fail only on the fixable ones
+./action/verify.sh --json                   # one JSON document on stdout instead of the table (docs/verify.md)
 ```
 
 If you set `env-file` or `output-file` on the harden step, **set the matching
@@ -584,6 +614,7 @@ Example consumption:
 - **Doesn't protect a job's OIDC token.** `id-token: write` is granted per job, so anything that executes there can mint a token, which is how TanStack (May 2026) was published from with no npm token stolen. Install in one job and publish from a separate, gated one. `action/verify.sh` prints a WEAK `ci id-token exposure` row when a job holds the permission.
 - **Doesn't audit which secrets a pushed branch can read.** A stolen token with push access can commit a workflow to a throwaway branch, and it runs with every secret the repository can use that isn't scoped to a protected environment. That is how Shai-Hulud exfiltrated them. Keep publish and deploy credentials in an environment with required reviewers or a deployment-branch rule, and prefer OIDC or trusted publishing to stored tokens. An audit here would only limit damage after a token is stolen, and a job's `GITHUB_TOKEN` cannot list secrets anyway.
 - **Doesn't remove sudo.** A later step can use the runner's passwordless sudo to undo what this action configured. Taking sudo away is anti-tamper, which this project leaves out of scope, and it breaks any later `sudo apt-get`. If you want it gone, harden-runner's `disable-sudo-and-containers` input does that (its older `disable-sudo` "will be deprecated in the future", per its action.yml at v2.23.0).
+- **Has no agent host profile.** The Ansible role's `agent_host` makes a GAP fail the play and turns on `python_safe_path` and `uv_exclude_newer_env`. The action sets neither: a CI job runs its own project's code, where a script importing a file next to it and a lockfile the project pinned are the job (`tests/ci/env-parity.py` records why). Its gate is the verify step's `fail-on`.
 - **Doesn't scan your workflow files** the way [zizmor](https://github.com/woodruffw/zizmor) does. That's a static-analysis tool for the workflow YAML itself; this action is a runtime defense against package-manager attacks.
 - **Doesn't install language runtimes.** It assumes Node/Python/Ruby/PHP/etc. are already installed (typically via `actions/setup-node`, `actions/setup-python`, `ruby/setup-ruby`, etc.). The action configures whatever's there.
 - **Doesn't fix existing lockfiles.** If `package-lock.json` already pins to a known-malicious version, the install will still attempt it (and the age gate may reject; lifecycle scripts won't run). Combine with a dependency-audit step for full coverage.

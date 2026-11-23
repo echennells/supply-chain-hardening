@@ -3,6 +3,36 @@
 # Each manager uses different units, so we derive from one source of truth
 release_age_hours: 48
 
+# --- agent host profile -------------------------------------------------------
+# One switch for a host whose job is running agents in repositories nobody
+# vetted. It turns on three settings that are off by default, each of which is
+# the right trade there and the wrong one where people run their own code:
+#
+#   verify_fail_on_gap    a GAP fails the play
+#   python_safe_path      PYTHONSAFEPATH=1: `python script.py` can no longer
+#                         import a file next to it, and `python -m` of a local,
+#                         uninstalled package fails
+#   uv_exclude_newer_env  UV_EXCLUDE_NEWER in login shells: a project that pins
+#                         its own EARLIER exclude-newer fails `uv sync --locked`
+#
+# The last two fail the attribution test (docs/design-principles.md): the error
+# names neither this role nor the setting. That is why they are off by default
+# and why the person who owns the host has to agree before this is turned on.
+#
+# HOW AN EXPLICIT VALUE WINS. Each of the three has `agent_host` as its default
+# below. A role default is the lowest precedence Ansible has, so a value set
+# anywhere else (-e, inventory, host or group vars, play vars) replaces that
+# default and agent_host never reaches it: `-e agent_host=true -e
+# python_safe_path=false` turns on the other two. The end-of-run summary prints
+# the three values and marks one that differs from agent_host as set
+# explicitly (tasks/agent_profile.yml).
+#
+# The GitHub Action has no equivalent: it never exports PYTHONSAFEPATH or
+# UV_EXCLUDE_NEWER, because a CI job runs its own project's code
+# (tests/ci/env-parity.py, ROLE_ONLY). Its verify step's `fail-on` is the
+# gate there.
+agent_host: false
+
 # Derived values (do not override individually — change release_age_hours).
 #
 # Type note: Ansible default Jinja renders all template results as strings.
@@ -236,7 +266,9 @@ python_dont_write_bytecode: true
 #
 # Requires python 3.11+. Below that the variable is inert and the role records
 # the gap in skipped_protections rather than pretending it applied.
-python_safe_path: false
+#
+# On with agent_host (top of this file), unless set explicitly.
+python_safe_path: "{{ agent_host | bool }}"
 
 # uv settings
 uv_no_build: true
@@ -278,7 +310,9 @@ uv_no_build: true
 # command (a span on uv 0.9.16 and older). With uv_exclude_newer pinned to a
 # date or a span, nothing is exported and the end-of-run summary says so.
 # The GitHub Action never exports it: a CI job is where `--locked` runs.
-uv_exclude_newer_env: false
+#
+# On with agent_host (top of this file), unless set explicitly.
+uv_exclude_newer_env: "{{ agent_host | bool }}"
 # Internal: the value exported as UV_EXCLUDE_NEWER, or '' for none. Do not
 # override; set uv_exclude_newer_env. Only an absolute RFC 3339 instant: uv
 # exits 2 on every command for an empty UV_EXCLUDE_NEWER (every version), and
@@ -798,4 +832,7 @@ verify_protections: true       # run /usr/local/bin/supply-chain-verify after ap
 # on where the host is expected to be fully covered and the toolchain is yours
 # to upgrade: CI images, golden images, anything an agent will run untrusted
 # package installs on.
-verify_fail_on_gap: false
+#
+# On with agent_host (top of this file), unless set explicitly. A CI image is
+# not an agent host: set this one alone there.
+verify_fail_on_gap: "{{ agent_host | bool }}"
