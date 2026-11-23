@@ -80,25 +80,76 @@ that list too. To find an interpreter's directories it asks the interpreter with
 `-I -S`, which skips `site` and so runs no hook. None of this shows the host is clean,
 and the checks after it still start Python.
 
-## In a checkout, it runs that project's yarn
+## It never runs code a checkout supplies
 
-The verifier asks each tool from the directory it runs in, because a project's own
-config can override the host's. The action's verify step runs in the job's working
-directory, normally the checkout. For yarn, that means the project's yarn. MEASURED
-(apt yarnpkg 4.1.0): in a directory whose `.yarnrc.yml` sets `yarnPath`, both
-`yarn --version` and `yarn config get` ran the file it names, and a `plugins:` entry
-was loaded by both. That is the same code the project's own `yarn install` runs, so in a
-CI job that installs anyway, verifying runs nothing new. On a checkout you have not
-reviewed, though, the check runs that repo's code. The verifier does not skip
-`yarnPath`: it would then grade a different yarn from the one the install uses.
-Composer is read with `--no-plugins` instead. pnpm is not run in a checkout at all:
-in a project, pnpm 10 and 11 run its `.pnpmfile.cjs` (or the file a `pnpmfile:` key
-names) and fetch its `configDependencies` for any command, `pnpm config get` included
-(MEASURED on 10.34.9, 11.0.0 and 11.28.13). So the pnpm rows ask pnpm from `/`, and the
-`pnpm repo config override` row reads the project's `pnpm-workspace.yaml` itself, with
-PyYAML where `python3` has it and otherwise a reader that refuses YAML it does not
-follow; its evidence is `PRESENT`. To check the host alone, run the verifier from a
-directory outside any checkout.
+Run it from inside a project and it reports what that project's own config
+changes. It does that without running the project's code, so it is safe to run
+in a repo you have not reviewed. The rule: **each tool is asked about itself
+from `/`, and what a project changes is read from its files** (or through an
+option that names the directory, such as `dotnet nuget config
+--working-directory`). A tool still runs in the project only where it was
+measured to read nothing there but settings.
+
+This matters because tools read files from the working directory and every
+directory above it, and several of those files name code that runs on any
+command, `--version` included. MEASURED, each with a marker file the checkout
+writes:
+
+| Tool | What in a checkout runs | Now |
+|---|---|---|
+| yarn 1.22.22, 4.1.0 to 4.19.0 | a `.yarnrc.yml` `yarnPath` or `plugins:` in any directory above (and classic's `.yarnrc` `yarn-path`), on `yarn --version` and `yarn config get` | asked from `/`; the `yarn repo config override` row reads the files |
+| corepack 0.36.0 (Node 24) | a project `.corepack.env` pointing `COREPACK_NPM_REGISTRY` at any server, or allowing a `packageManager` URL: the yarn it served ran on `yarn --version` | `COREPACK_ENV_FILE=0` for everything the verifier starts |
+| pnpm 10.34.9, 11.0.0, 11.28.13 | `.pnpmfile.cjs` and `configDependencies`, on `pnpm config get` | asked from `/`; the `pnpm repo config override` row reads the file |
+| rustup 1.29.3 | a `rust-toolchain.toml` `path =`, on `cargo --version` and `rustc --version`, even for the proxy called by its full path (the path has to be absolute, which a CI checkout's predictable location allows) | asked from `/` |
+| maven 3.10.0 | `.mvn/jvm.config` in any directory above (a `-javaagent`), on `mvn -v` | asked from `/` |
+| .NET SDK 10.0.404 | a `global.json` sdk `"paths"` entry: the checkout's own SDK ran on `dotnet --version` and `dotnet nuget config paths` | dotnet runs from `/`; NuGet is told the project with `--working-directory` |
+| pip 25.1.1 (Python 3.13) | a `pip.py` or `pip/` beside it, on `python3 -m pip --version` | asked from `/`; pip reads no settings from the working directory |
+| go1.24.10 | a `go.mod` `toolchain` line: go fetched and ran go1.25.4 for `go env` | asked from `/` |
+| Poetry 2.5.2 | the project's `.poetry/plugins` (what `poetry install` makes from `[tool.poetry.requires-plugins]`), on `poetry --version` and `poetry config` | `--no-plugins`; still reads the project's `poetry.toml` |
+
+Measured to read only settings in a project, so still asked there: npm 9.2.0,
+10.9.4, 11.19.1 and 12.2.3 (`config get`; `onload-script` is gone, `node-options`
+does not apply to npm itself), uv 0.13.9 (`pip list --show-settings` never
+starts the project's `.venv` interpreter, which a plain `uv pip list` does),
+Bundler 4.1.0 (`config get` and `--version` do not evaluate the `Gemfile`, which
+`bundle check` does), and composer with `--no-plugins` and no project file.
+`gradle --version` (8.14.3, 9.2.1) reads neither `org.gradle.jvmargs` nor
+`org.gradle.java.home`, and deno 2.9.8's `--version` and argument checks read no
+`deno.json`; both are asked from `/` anyway.
+
+**yarn.** The `yarn repo config override` row reads every `.yarnrc.yml` from the
+working directory up to `/` (the nearest winning, as yarn merges them) and judges
+`npmMinimalAgeGate`, `enableScripts` and `npmPreapprovedPackages` the way the yarn
+that runs there reads them: 4.10.x takes a value's leading integer (`"2d"` is 2
+minutes), 4.11+ reads a duration and refuses anything it cannot parse. A
+`yarnPath`, `plugins:`, or classic's `yarn-path` is the checkout's own yarn code,
+which runs on every yarn command there, `yarn install` included; the row says so,
+and grades that yarn by the version string inside the file (below 4.10 it has no
+age gate: `GAP`). Through a corepack shim, a `packageManager: yarn@X` is the yarn
+graded. The values come from PyYAML or a reader that refuses YAML it does not
+follow, so the evidence is `PRESENT`. Where the yarn that runs in the project is
+not the host's, the host rows say so, and a classic host yarn, which hands such a
+project to its `yarnPath`, is `N/A` there rather than a `GAP`.
+
+**Scratch directories.** The probes that build throwaway projects used to run in
+`mktemp -d` under `/tmp`, which every account can write. A file planted there sits
+above all of them, and was read: MEASURED, `/tmp/.mvn/jvm.config` ran in the maven
+probes, `/tmp/rust-toolchain.toml` in a `cargo --version` there,
+`/tmp/Directory.Build.props` in the nuget restore probe, and a `/tmp/package.json`
+workspace root's install scripts in the bun probe (bun 1.3.0; 1.4.5 did not). Now
+the scratch directory comes from a base that only root and you can write, all the
+way up to `/` (`TMPDIR`, `RUNNER_TEMP`, `~/.cache/supply-chain-hardening`, macOS's
+per-user temp dir from `getconf DARWIN_USER_TEMP_DIR`, then `XDG_RUNTIME_DIR`),
+never one inside the working directory. `TMPDIR` points into it for every tool the
+verifier starts, and the probes name it in their `mktemp` template, because
+Apple's `mktemp` with no template uses the per-user temp dir and ignores `TMPDIR`.
+With no such base, as when `HOME` itself is under `/tmp` on Linux, the probes run
+under `TMPDIR` as before and stderr says so; point `TMPDIR` at a directory of your
+own. A Mac always has one.
+
+`action/harden.sh` follows the same rule: the action runs it in the job's
+checkout, and it asks each tool its version from `/`. `harden.sh --suggest`
+only reads files.
 
 ## Related
 

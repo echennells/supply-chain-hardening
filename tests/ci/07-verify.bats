@@ -1034,11 +1034,15 @@ esac"
   [[ "$output" == *"NPM_CONFIG_MIN_RELEASE_AGE"* ]]
 }
 
+# The verifier's config reads answer only when --no-plugins comes first:
+# without it Poetry loads a project's .poetry/plugins (MEASURED, 2.5.2), so a
+# read without it is a bug and gets no value back. A bare --version is
+# harden.sh's, which asks from /.
 poetry_age_stub() { # version value [exclude]
   stub_bin poetry "case \"\$*\" in
-  *--version*) echo 'Poetry (version $1)' ;;
-  'config solver.min-release-age') echo '$2' ;;
-  'config solver.min-release-age-exclude') echo '${3:-null}' ;;
+  '--no-plugins --version'|--version) echo 'Poetry (version $1)' ;;
+  '--no-plugins config solver.min-release-age') echo '$2' ;;
+  '--no-plugins config solver.min-release-age-exclude') echo '${3:-null}' ;;
   *) echo STUB ;;
 esac"
 }
@@ -2010,4 +2014,563 @@ minimumReleaseAge: 0   # off")
   pnpm_stub 11.28.13
   run verify_in "$PNP" --emit=plain
   [[ "$(pn_row)" == "N/A"*"no pnpm-workspace.yaml"* ]] || { pn_row; return 1; }
+}
+
+# ---- no project code ----------------------------------------------------------
+#
+# The verifier is run from inside checkouts nobody reviewed (AGENTS.md says to),
+# so it must not run code a checkout supplies, nor code a directory other
+# accounts can write supplies. See "no project code" in both preambles.
+
+# A private directory: under the real HOME, which is outside /tmp and owned by
+# whoever runs bats. Removed after each test.
+scv_priv() {
+  SCV_PRIV=$(mktemp -d "$HOME/.scv-test.XXXXXX") || return 1
+  SCV_PRIV=$(cd "$SCV_PRIV" && pwd -P)
+}
+teardown() {
+  [ -n "${SCV_PRIV:-}" ] && rm -rf "$SCV_PRIV"
+  return 0
+}
+npc_block() { sed -n '/^# >>> no project code$/,/^# <<< no project code$/p' "$1"; }
+
+@test "no project code: the scratch and corepack block is byte-identical on both surfaces" {
+  local role="${BATS_TEST_DIRNAME}/../../templates/verify.sh.j2"
+  [ -n "$(npc_block "$VERIFY_SH")" ]
+  diff <(npc_block "$role") <(npc_block "$VERIFY_SH")
+}
+
+# npc_pick [VAR=value ...] -- <cwd>: source the block the way the verifier does
+# and print the scratch directory it chose (empty: none), then whether it still
+# exists once that shell has exited.
+npc_pick() {
+  local -a envs=(); local cwd
+  while [ "$1" != -- ]; do envs+=("$1"); shift; done; cwd=$2
+  local blk; blk=$(npc_block "$VERIFY_SH")
+  ( cd "$cwd" && env -i PATH="$PATH" "${envs[@]}" bash -c "$blk"$'\n''printf "scratch=%s tmpdir=%s corepack=%s mktemp=%s\n" "$SCV_SCRATCH" "$TMPDIR" "$COREPACK_ENV_FILE" "$(mktemp -d)"' )
+}
+
+@test "no project code: probe projects go in a scratch dir only root and this account can write, never under /tmp or the checkout" {
+  scv_priv || skip "cannot make a directory under HOME"
+  # ww stands in for /tmp: world-writable with the sticky bit. HOME="$ww/h" is a
+  # home with no private base above it (BATS_TEST_TMPDIR itself is private on
+  # macOS, where it is under the per-user TMPDIR).
+  local ww="$BATS_TEST_TMPDIR/ww" out d dar darp none
+  mkdir -p "$ww/sub" "$ww/h" "$SCV_PRIV/home" "$SCV_PRIV/proj/tmp"
+  chmod 1777 "$ww"
+  # macOS has a per-user temp dir (getconf DARWIN_USER_TEMP_DIR, 0700 under
+  # root-owned parents), the last candidate there, so a Mac never runs out of
+  # private bases: where this test expects none on Linux, a Mac picks that.
+  dar=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || dar=""
+  if [ -n "$dar" ]; then
+    darp=$(cd -P "$dar" && pwd -P); none="scratch=$darp/scv."
+    out=$(npc_pick TMPDIR="$dar" HOME="$ww/h" -- /)
+    [[ "$out" == "scratch=$darp/scv."*" mktemp=$darp/scv."* ]] || { echo "the stock macOS TMPDIR was not taken: $out"; return 1; }
+  else
+    none="scratch= "
+  fi
+  # $HOME and everything above it must be private, or this host cannot run the test.
+  out=$(npc_pick HOME="$SCV_PRIV/home" RUNNER_TEMP="$SCV_PRIV" -- /)
+  [[ "$out" == "scratch=$SCV_PRIV/scv."* ]] || skip "the real HOME has a directory above it others can write: $out"
+  # A world-writable TMPDIR is passed over for RUNNER_TEMP; TMPDIR then points
+  # into the scratch dir, COREPACK_ENV_FILE is 0, and the dir is gone at exit.
+  out=$(npc_pick TMPDIR="$ww/sub" HOME="$ww/h" RUNNER_TEMP="$SCV_PRIV" -- /)
+  # mktemp names the scratch dir too: Apple's mktemp ignores TMPDIR.
+  [[ "$out" == "scratch=$SCV_PRIV/scv."*" tmpdir=$SCV_PRIV/scv."*" corepack=0 mktemp=$SCV_PRIV/scv."*"/tmp."* ]] || { echo "$out"; return 1; }
+  d=${out#scratch=}; d=${d%% *}
+  [ ! -e "$d" ]
+  # A base inside the working directory is not used: the checkout's files
+  # would sit above the probes. The per-user cache is next.
+  out=$(npc_pick TMPDIR="$ww/sub" RUNNER_TEMP="$SCV_PRIV/proj/tmp" HOME="$SCV_PRIV/home" -- "$SCV_PRIV/proj")
+  [[ "$out" == "scratch=$SCV_PRIV/home/.cache/supply-chain-hardening/scv."* ]] || { echo "$out"; return 1; }
+  [ "$(ls -ld "$SCV_PRIV/home/.cache/supply-chain-hardening" | cut -c1-10)" = drwx------ ]
+  # Group-writable is accepted (a grant somebody made); owned by another
+  # account, or world-writable with or without the sticky bit, is not.
+  mkdir -p "$SCV_PRIV/g" "$SCV_PRIV/o"; chmod 0775 "$SCV_PRIV/g"; chmod 0777 "$SCV_PRIV/o"
+  out=$(npc_pick TMPDIR="$SCV_PRIV/g" -- /)
+  [[ "$out" == "scratch=$SCV_PRIV/g/scv."* ]] || { echo "$out"; return 1; }
+  out=$(npc_pick TMPDIR="$SCV_PRIV/o" HOME="$ww/h" -- /)
+  [[ "$out" == "$none"* ]] || { echo "$out"; return 1; }
+  if [ "$(id -u)" != 0 ] && sudo -n chown 65534 "$SCV_PRIV/g" 2>/dev/null; then
+    out=$(npc_pick TMPDIR="$SCV_PRIV/g" HOME="$ww/h" -- /)
+    sudo -n chown "$(id -u)" "$SCV_PRIV/g"
+    [[ "$out" == "$none"* ]] || { echo "$out"; return 1; }
+  fi
+  # The macOS per-user temp dir, stood in for here so every platform runs the
+  # branch: a getconf that answers DARWIN_USER_TEMP_DIR (with the trailing slash
+  # macOS prints) puts the scratch dir there, without a warning.
+  mkdir -p "$SCV_PRIV/darwin" "$BATS_TEST_TMPDIR/fakeconf"
+  printf '#!/bin/sh\n[ "$1" = DARWIN_USER_TEMP_DIR ] && echo "%s/darwin/"\n' "$SCV_PRIV" > "$BATS_TEST_TMPDIR/fakeconf/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/fakeconf/getconf"
+  run --separate-stderr npc_pick PATH="$BATS_TEST_TMPDIR/fakeconf:$PATH" TMPDIR="$ww/sub" HOME="$ww/h" -- /
+  [[ "$output" == "scratch=$SCV_PRIV/darwin/scv."*" mktemp=$SCV_PRIV/darwin/scv."* ]] || { echo "$output"; return 1; }
+  [[ "$stderr" != *"found no directory"* ]] || { echo "$stderr"; return 1; }
+  # Nothing private: the probes stay under TMPDIR, and stderr says so. On a Mac
+  # the per-user temp dir is taken instead, without a warning.
+  run --separate-stderr npc_pick TMPDIR="$ww/sub" HOME="$ww/h" -- /
+  if [ -n "$dar" ]; then
+    [[ "$output" == "scratch=$darp/scv."* ]] || { echo "$output"; return 1; }
+    [[ "$stderr" != *"found no directory"* ]] || { echo "$stderr"; return 1; }
+  else
+    [[ "$output" == "scratch= tmpdir=$ww/sub corepack=0 mktemp=$ww/sub/tmp."* ]] || { echo "$output"; return 1; }
+    [[ "$stderr" == *"warning: found no directory for the probes' throwaway projects"*"Point TMPDIR at a directory of your own"* ]] || { echo "$stderr"; return 1; }
+  fi
+}
+
+# yarn_rc_stub <version> [gate]: a yarn that answers from / and, like the real
+# one, runs a yarnPath it finds in a .yarnrc.yml at or above the directory it is
+# run in (MEASURED on 1.22.22 and 4.1.0 to 4.19.0). Every call is logged with
+# the directory it ran in.
+yarn_rc_stub() {
+  stub_bin yarn 'echo "$PWD :: $*" >> "'"$BATS_TEST_TMPDIR"'/yarn-calls"
+d=$PWD
+while [ -n "$d" ]; do
+  if [ -f "$d/.yarnrc.yml" ]; then
+    p=$(sed -n "s/^yarnPath:[[:space:]]*//p" "$d/.yarnrc.yml" | head -1)
+    if [ -n "$p" ]; then case "$p" in /*) ;; *) p="$d/$p" ;; esac; exec node "$p" "$@"; fi
+  fi
+  [ "$d" = / ] && break; d=${d%/*}; [ -n "$d" ] || d=/
+done
+case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get npmMinimalAgeGate") echo "'"${2:-2880}"'" ;;
+  "config get enableScripts") echo false ;;
+  *) echo STUB ;;
+esac'
+}
+# A yarn release as a project commits it: the version string the bundles carry,
+# and a marker written if anything runs it.
+yarn_release() { # <file> <version>
+  mkdir -p "$(dirname "$1")"
+  printf '#!/usr/bin/env node\n/* yarn */ var y = {name:"@yarnpkg/cli",version:"%s",license:"BSD-2-Clause"};\nrequire("fs").writeFileSync("%s", "ran"); console.log("%s");\n' \
+    "$2" "$BATS_TEST_TMPDIR/markers/yarn-release-ran" "$2" > "$1"
+}
+YNP() { printf '%s' "$PNT/yproj"; }
+y_project() { # <.yarnrc.yml content>, verified from a package below it
+  rm -rf "$(YNP)"; mkdir -p "$(YNP)/packages/a" "$BATS_TEST_TMPDIR/markers"
+  printf '{"name":"p","version":"1.0.0","private":true}\n' > "$(YNP)/package.json"
+  [ -z "${1:-}" ] || printf '%s\n' "$1" > "$(YNP)/.yarnrc.yml"
+}
+# The row itself, not the host rows that point at it.
+y_row() { grep -E '^[A-Z/]+ +[A-Z-]+ +yarn repo config override ' <<<"$output"; }
+y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_row; }
+
+@test "yarn repo config override: a project 0 or enableScripts true is a GAP, a shorter window or named exemptions WEAK, a longer one OK" {
+  yarn_rc_stub 4.19.0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  local r
+  r=$(y_verdict 'npmMinimalAgeGate: 0')
+  [[ "$r" == "GAP    PRESENT     yarn repo config override"*"npmMinimalAgeGate 0 in $(YNP)/.yarnrc.yml switches the age gate off"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict 'enableScripts: true')
+  [[ "$r" == GAP*"enableScripts true in $(YNP)/.yarnrc.yml re-enables dependency install scripts"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict 'npmMinimalAgeGate: 600')
+  [[ "$r" == WEAK*"npmMinimalAgeGate 600 in $(YNP)/.yarnrc.yml is below the 48h (2880 minutes) promised here"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict 'npmMinimalAgeGate: "3d"')
+  [[ "$r" == OK*"'3d' (4320 minutes on yarn 4.19.0)"*"is at least the 48h"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict $'npmPreapprovedPackages:\n  - left-pad\n  - "@myorg/*"')
+  [[ "$r" == WEAK*"npmPreapprovedPackages exempts left-pad, @myorg/* from the age gate"* ]] || { echo "$r"; return 1; }
+  # MEASURED (4.19.0): "*" exempted typescript but no scoped name, "@*/*" every
+  # scoped name, "**" everything.
+  for p in '"*"' '"**"' '"@*/*"' '"?*"'; do
+    r=$(y_verdict "npmPreapprovedPackages: [$p]")
+    [[ "$r" == GAP*"lists '${p//\"/}', which exempts every "*"package"*" from the age gate"* ]] || { echo "$p: $r"; return 1; }
+  done
+  # A nearer file wins; a parent's 0 under a project's 4320 is not a finding.
+  y_project 'npmMinimalAgeGate: 4320'
+  printf 'npmMinimalAgeGate: 0\n' > "$PNT/.yarnrc.yml"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  rm -f "$PNT/.yarnrc.yml"
+  [[ "$(y_row)" == OK*"npmMinimalAgeGate 4320 in $(YNP)/.yarnrc.yml"* ]] || { y_row; return 1; }
+  # A YARN_* variable outranks every file, so it hides the project's 0 here.
+  echo 'export YARN_NPM_MINIMAL_AGE_GATE=2880' >> "$ENV_FILE"
+  r=$(y_verdict 'npmMinimalAgeGate: 0')
+  [[ "$r" == WEAK*"YARN_NPM_MINIMAL_AGE_GATE=2880 in this environment outranks it"*"an env variable is what hides the project's weaker setting"* ]] || { echo "$r"; return 1; }
+}
+
+@test "yarn repo config override: values read the way each yarn reads them (4.10 leading integer, 4.11+ durations, below 4.10 refused)" {
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  local r
+  # MEASURED: 4.10.3 reads "2d" as 2; 4.11.0 as 2880 and refuses "2 days".
+  yarn_rc_stub 4.10.3
+  r=$(y_verdict 'npmMinimalAgeGate: "2d"')
+  [[ "$r" == WEAK*"'2d' (2 minutes on yarn 4.10.3)"*"is below"* ]] || { echo "$r"; return 1; }
+  yarn_rc_stub 4.11.0
+  r=$(y_verdict 'npmMinimalAgeGate: 2d')
+  [[ "$r" == OK*"'2d' (2880 minutes on yarn 4.11.0)"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict 'npmMinimalAgeGate: "2 days"')
+  [[ "$r" == WEAK*"which yarn 4.11.0 refuses"*"so every yarn command here fails"*"was not judged"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict 'npmMinimalAgeGate: ${GATE:-0}')
+  [[ "$r" == WEAK*"which yarn expands from the environment"* ]] || { echo "$r"; return 1; }
+  # Below 4.10 a project file holding the key stops every yarn command.
+  yarn_rc_stub 4.9.4 'Usage Error: no such setting'
+  r=$(y_verdict 'npmMinimalAgeGate: 0')
+  [[ "$r" == WEAK*"which yarn 4.9.4 does not know: in a project's file that stops every yarn command"* ]] || { echo "$r"; return 1; }
+}
+
+@test "yarn repo config override: a yarnPath is the checkout's own yarn, graded by its version string and never run" {
+  yarn_rc_stub 4.19.0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  local r
+  y_project 'yarnPath: .yarn/releases/yarn-4.9.4.cjs'
+  yarn_release "$(YNP)/.yarn/releases/yarn-4.9.4.cjs" 4.9.4
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == GAP*"names yarnPath $(YNP)/.yarn/releases/yarn-4.9.4.cjs, the checkout's own yarn"*"by its version string it is yarn 4.9.4, which has no npmMinimalAgeGate"* ]] || { y_row; return 1; }
+  # The host rows still describe the host, and say which yarn runs here.
+  [[ "$output" == *"OK     PARSED      yarn age gate"*"In $(YNP)/packages/a that is not the yarn that runs: the checkout's own yarn"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/markers/yarn-release-ran" ]
+  # FIXTURE CONTROL: yarn run in the project runs it.
+  ( cd "$(YNP)/packages/a" && PATH="$TEST_BIN:$PATH" yarn --version >/dev/null )
+  [ -e "$BATS_TEST_TMPDIR/markers/yarn-release-ran" ]
+  # A release that has the gate is WEAK, not OK: it is still the checkout's code.
+  y_project 'yarnPath: .yarn/releases/yarn-4.19.0.cjs'
+  yarn_release "$(YNP)/.yarn/releases/yarn-4.19.0.cjs" 4.19.0
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == WEAK*"yarn 4.19.0, which has npmMinimalAgeGate"* ]] || { y_row; return 1; }
+  # No version string: not judged. A missing file: every command fails.
+  y_project 'yarnPath: ./evil.cjs'
+  printf 'console.log(1)\n' > "$(YNP)/evil.cjs"
+  r=$(run verify_in "$(YNP)/packages/a" --emit=plain; y_row)
+  [[ "$r" == WEAK*"its version could not be read from the file, so whether it has an age gate was not judged"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict 'yarnPath: ./gone.cjs')
+  [[ "$r" == WEAK*"which does not exist, so every yarn command here fails"* ]] || { echo "$r"; return 1; }
+  # plugins are the checkout's code too.
+  r=$(y_verdict $'plugins:\n  - path: .yarn/plugins/x.cjs\n    spec: x')
+  [[ "$r" == WEAK*"loads plugins (.yarn/plugins/x.cjs)"* ]] || { echo "$r"; return 1; }
+  # A classic host yarn hands a yarnPath the whole job, so its row is N/A there.
+  yarn_rc_stub 1.22.22
+  y_project 'yarnPath: .yarn/releases/yarn-4.19.0.cjs'
+  yarn_release "$(YNP)/.yarn/releases/yarn-4.19.0.cjs" 4.19.0
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$output" == *"N/A    ABSENT      yarn hardening"*"this host's yarn, 1.22.22, is classic"*"not the yarn that runs"* ]] || { echo "$output" | grep yarn; return 1; }
+  [[ "$(y_row)" == WEAK*"yarn 4.19.0, which has npmMinimalAgeGate"* ]] || { y_row; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/markers/yarn-release-ran" ] || rm -f "$BATS_TEST_TMPDIR/markers/yarn-release-ran"
+}
+
+@test "yarn repo config override: yarn is asked from /, never inside the project" {
+  yarn_rc_stub 4.19.0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  y_project $'yarnPath: ./evil.cjs\nnpmMinimalAgeGate: 600'
+  printf 'require("fs").writeFileSync("%s", "x")\n' "$BATS_TEST_TMPDIR/markers/yarnpath-ran" > "$(YNP)/evil.cjs"
+  rm -f "$BATS_TEST_TMPDIR/yarn-calls"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  # A yarnPath with no version string: its values are not judged, only named.
+  [[ "$(y_row)" == WEAK*"names yarnPath $(YNP)/evil.cjs, the checkout's own yarn"*"the project sets npmMinimalAgeGate, not judged"* ]] || { y_row; return 1; }
+  [ -s "$BATS_TEST_TMPDIR/yarn-calls" ]
+  ! grep -q -e "^$PNT/yproj" -e "^$BATS_TEST_TMPDIR/yproj" "$BATS_TEST_TMPDIR/yarn-calls" || { cat "$BATS_TEST_TMPDIR/yarn-calls"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/markers/yarnpath-ran" ]
+}
+
+@test "yarn repo config override: through a corepack shim the packageManager is the yarn graded" {
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  # A corepack shim is found by where `yarn` resolves: .../corepack/dist/yarn.js.
+  mkdir -p "$BATS_TEST_TMPDIR/cp/corepack/dist"
+  yarn_rc_stub 1.22.22
+  mv "$TEST_BIN/yarn" "$BATS_TEST_TMPDIR/cp/corepack/dist/yarn.js"
+  ln -s "$BATS_TEST_TMPDIR/cp/corepack/dist/yarn.js" "$TEST_BIN/yarn"
+  local r
+  y_project ''
+  printf '{"name":"p","version":"1.0.0","packageManager":"yarn@4.9.4+sha512.abc"}\n' > "$(YNP)/package.json"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == GAP*"yarn 4.9.4, which corepack downloads because packageManager in $(YNP)/package.json names it: it has no npmMinimalAgeGate"* ]] || { y_row; return 1; }
+  [[ "$output" == *"N/A    ABSENT      yarn hardening"*"classic"* ]]
+  printf '{"name":"p","version":"1.0.0","packageManager":"yarn@4.19.0"}\n' > "$(YNP)/package.json"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  # Read from files only: WEAK, not OK, even with nothing weaker found.
+  [[ "$(y_row)" == WEAK*"an official release that has npmMinimalAgeGate"*"was not asked, so these values come from the files alone"* ]] || { y_row; return 1; }
+}
+
+@test "yarn repo config override: without PyYAML the plain-key reader reaches the same verdicts, and refuses YAML it does not follow" {
+  yarn_rc_stub 4.19.0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  local real r y; real=$(command -v python3) || skip "no python3"
+  stub_bin python3 "case \"\$*\" in *'import yaml'*) exit 3 ;; esac; exec '$real' \"\$@\""
+  r=$(y_verdict $'npmMinimalAgeGate: 0   # off\nenableScripts: "true"')
+  [[ "$r" == GAP*"switches the age gate off"*"re-enables dependency install scripts"*"plain-key reader"* ]] || { echo "$r"; return 1; }
+  r=$(y_verdict $'npmPreapprovedPackages:\n  - left-pad   # ours\n  - "@myorg/*"\nplugins:\n  - path: .yarn/plugins/a.cjs\n    spec: "a"')
+  [[ "$r" == WEAK*"loads plugins (.yarn/plugins/a.cjs)"*"exempts left-pad, @myorg/*"* ]] || { echo "$r"; return 1; }
+  for y in '{npmMinimalAgeGate: 0}' $'base: &b 0\nnpmMinimalAgeGate: *b' $'npmMinimalAgeGate: |\n  0'; do
+    r=$(y_verdict "$y")
+    [[ "$r" == WEAK*"could not be read by the reader"*"was not judged"* ]] || { echo "$y: $r"; return 1; }
+  done
+}
+
+@test "yarn repo config override: N/A with no file, with no keys, from /, and a path with a space" {
+  yarn_rc_stub 4.19.0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  local r
+  y_project ''
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == "N/A"*"no .yarnrc.yml at or above $(YNP)/packages/a, and the yarn that runs there is this host's"* ]] || { y_row; return 1; }
+  r=$(y_verdict 'nodeLinker: node-modules')
+  [[ "$r" == "N/A"*"$(YNP)/.yarnrc.yml sets no yarnPath, plugins, npmMinimalAgeGate"* ]] || { echo "$r"; return 1; }
+  run verify_in / --emit=plain
+  [[ "$(y_row)" == "N/A"*"ran from /"* ]] || { y_row; return 1; }
+  local save=$PNT; PNT="$PNT/my dir"; mkdir -p "$PNT"
+  r=$(y_verdict 'npmMinimalAgeGate: 0')
+  PNT=$save
+  [[ "$r" == GAP*"npmMinimalAgeGate 0 in $save/my dir/yproj/.yarnrc.yml switches the age gate off"* ]] || { echo "$r"; return 1; }
+}
+
+# mvn_trap <dir> <marker>: a <dir>/.mvn/jvm.config that writes <marker> when the
+# JVM maven starts reads it. A -javaagent where a JDK can build one (MEASURED on
+# maven 3.10.0), compiled for Java 8 where javac still targets it, so it loads
+# in whichever JVM maven picks; otherwise a 3 MB heap and
+# -XX:OnOutOfMemoryError, which fired on temurin 17 but not on every JDK.
+mvn_trap() {
+  local d=$1 m=$2
+  mkdir -p "$d/.mvn" "$d/.mvnagent"
+  if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+    printf 'public class A { public static void premain(String a) throws Exception { java.nio.file.Files.write(java.nio.file.Paths.get(a), "ran".getBytes()); } }\n' > "$d/.mvnagent/A.java"
+    ( cd "$d/.mvnagent" && { javac --release 8 A.java || javac A.java; } && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1
+  fi
+  if [ -f "$d/.mvnagent/agent.jar" ]; then
+    printf -- '-javaagent:%s/.mvnagent/agent.jar=%s\n' "$d" "$m" > "$d/.mvn/jvm.config"
+  else
+    printf '#!/bin/sh\necho ran > "%s"\n' "$m" > "$d/.mvnagent/oom"; chmod +x "$d/.mvnagent/oom"
+    printf -- '-Xmx3m -XX:OnOutOfMemoryError=%s/.mvnagent/oom\n' "$d" > "$d/.mvn/jvm.config"
+  fi
+}
+
+# trap_checkout <dir>: a checkout carrying every vector found to run code (and
+# a few measured not to, as insurance). Each trap writes its own marker in
+# $BATS_TEST_TMPDIR/markers if anything executes it.
+trap_checkout() {
+  local d=$1 mk="$BATS_TEST_TMPDIR/markers"
+  rm -rf "$d"; mkdir -p "$d/sub" "$mk" "$d/tc/bin" "$d/.mvn" "$d/.cargo" "$d/.venv/bin" "$d/.yarn"
+  tjs() { printf 'require("fs").writeFileSync("%s/%s", "ran"); console.log("9.9.9");\n' "$mk" "$2" > "$1"; }
+  tsh() { printf '#!/bin/sh\necho ran > "%s/%s"\necho 9.9.9\n' "$mk" "$2" > "$1"; chmod +x "$1"; }
+  printf '{"name":"trap","version":"1.0.0","packageManager":"yarn@4.9.4","scripts":{"preinstall":"echo ran > %s/npm-preinstall"}}\n' "$mk" > "$d/package.json"
+  # yarn 1.22.22 and 4.x: yarnPath and plugins from any .yarnrc.yml above; classic's yarn-path
+  tjs "$d/.yarn/evil.cjs" yarn-yarnpath
+  printf 'require("fs").writeFileSync("%s/yarn-plugin", "ran");\nmodule.exports = { name: "p", factory: () => ({}) };\n' "$mk" > "$d/.yarn/plug.cjs"
+  printf 'yarnPath: .yarn/evil.cjs\nplugins:\n  - path: .yarn/plug.cjs\n    spec: plug\n' > "$d/.yarnrc.yml"
+  tjs "$d/.yarn/classic.js" yarn-classic-path; printf 'yarn-path ".yarn/classic.js"\n' > "$d/.yarnrc"
+  # corepack 0.36: a .corepack.env that lets packageManager name any URL
+  printf 'COREPACK_ENABLE_UNSAFE_CUSTOM_URLS=1\nCOREPACK_NPM_REGISTRY=http://127.0.0.1:9\n' > "$d/.corepack.env"
+  # pnpm 10/11: the pnpmfile runs for `pnpm config get`
+  tjs "$d/.pnpmfile.cjs" pnpm-pnpmfile; printf 'packages: ["sub"]\nminimumReleaseAge: 600\n' > "$d/pnpm-workspace.yaml"
+  # npm: onload-script, gone since npm 7 (insurance)
+  tjs "$d/.yarn/npm-onload.js" npm-onload; printf 'onload-script=%s/.yarn/npm-onload.js\n' "$d" > "$d/.npmrc"
+  # rustup: an absolute path= toolchain; cargo: a rustc-wrapper
+  tsh "$d/tc/bin/cargo" rustup-path-cargo; tsh "$d/tc/bin/rustc" rustup-path-rustc
+  printf '[toolchain]\npath = "%s/tc"\n' "$d" > "$d/rust-toolchain.toml"
+  tsh "$d/tc/wrap" cargo-rustc-wrapper; printf '[build]\nrustc-wrapper = "%s/tc/wrap"\n' "$d" > "$d/.cargo/config.toml"
+  # maven: jvm.config goes on the java command line
+  mvn_trap "$d" "$mk/maven-jvm-config"
+  # gradle: a settings script and daemon jvmargs (insurance: --version reads neither)
+  printf 'new File("%s/gradle-settings").text = "ran"\n' "$mk" > "$d/settings.gradle"
+  tsh "$d/tc/oom-gradle" gradle-jvmargs; printf 'org.gradle.jvmargs=-Xmx3m -XX:OnOutOfMemoryError=%s/tc/oom-gradle\n' "$d" > "$d/gradle.properties"
+  # dotnet: global.json naming an SDK the checkout ships; MSBuild's Directory.Build.props
+  mkdir -p "$d/.dotnet/sdk/99.0.100"; tsh "$d/.dotnet/sdk/99.0.100/dotnet.dll" dotnet-sdk
+  printf '{"sdk":{"version":"99.0.100","paths":[".dotnet","$host$"],"rollForward":"disable"}}\n' > "$d/global.json"
+  printf '<Project InitialTargets="T"><Target Name="T"><Exec Command="echo ran > %s/dotnet-props" /></Target></Project>\n' "$mk" > "$d/Directory.Build.props"
+  # python3 -m puts the working directory first on sys.path
+  printf 'open("%s/python-pip-py", "w").write("ran")\n' "$mk" > "$d/pip.py"
+  cp "$d/pip.py" "$d/sub/pip.py"
+  # uv: a .venv whose interpreter is a script (uv runs it to query the venv)
+  tsh "$d/.venv/bin/python" uv-venv-python; ln -s python "$d/.venv/bin/python3"
+  printf 'home = /usr/bin\nversion = 3.12.0\ninclude-system-site-packages = false\n' > "$d/.venv/pyvenv.cfg"
+  printf '[project]\nname = "trap"\nversion = "0.1.0"\n[tool.poetry.requires-plugins]\nevil = { path = "./evil" }\n' > "$d/pyproject.toml"
+  # go: a toolchain line (go1.24 fetched and ran the named toolchain for `go env`)
+  printf 'module trap\n\ngo 1.21\n\ntoolchain go1.999.0\n' > "$d/go.mod"
+  # bundler: a Gemfile is Ruby, evaluated by bundle check/exec/install
+  printf 'File.write("%s/bundler-gemfile", "ran")\nsource "https://rubygems.org"\n' "$mk" > "$d/Gemfile"
+  # composer: a script on every command (insurance: the probes pass --no-plugins and no project)
+  printf '{"name":"t/t","scripts":{"pre-command-run":"echo ran > %s/composer-script"}}\n' "$mk" > "$d/composer.json"
+  # bun: a preload (insurance: read for `bun run`, not --version); deno: an import map
+  tjs "$d/.yarn/bun-preload.js" bun-preload; printf 'preload = ["./.yarn/bun-preload.js"]\n' > "$d/bunfig.toml"
+  printf '{"imports":{"x":"./.yarn/deno.ts"}}\n' > "$d/deno.json"
+}
+markers() { ls "$BATS_TEST_TMPDIR/markers" 2>/dev/null | tr '\n' ' '; }
+
+@test "no project code: run inside a booby-trapped checkout, the verifier sets off none of its traps (FIXTURE CONTROL: they fire when run there)" {
+  yarn_rc_stub 4.19.0
+  harden -- --emit=plain >/dev/null
+  local d="$PNT/trap" mk="$BATS_TEST_TMPDIR/markers" fired=""
+  trap_checkout "$d"
+  # FIXTURE CONTROL, for whatever is installed here: the traps are live.
+  ( cd "$d" && python3 -m pip --version ) >/dev/null 2>&1 || true
+  [ -e "$mk/python-pip-py" ] && fired="$fired python"
+  ( cd "$d/sub" && PATH="$TEST_BIN:$PATH" yarn --version ) >/dev/null 2>&1 || true
+  [ -e "$mk/yarn-yarnpath" ] && fired="$fired yarn"
+  if command -v uv >/dev/null 2>&1; then
+    ( cd "$d" && uv pip list ) >/dev/null 2>&1 || true
+    [ -e "$mk/uv-venv-python" ] || { echo "control: uv pip list did not run the venv's python"; return 1; }
+  fi
+  if command -v mvn >/dev/null 2>&1; then
+    local mo; mo=$( cd "$d/sub" && mvn -v 2>&1 ) || true
+    [ -e "$mk/maven-jvm-config" ] || { echo "control: mvn -v did not apply .mvn/jvm.config ($(cat "$d/.mvn/jvm.config")); it said:"; echo "$mo" | head -8; return 1; }
+  fi
+  case "$(readlink -f "$(command -v cargo 2>/dev/null)" 2>/dev/null)" in
+    */rustup)
+      ( cd "$d" && cargo --version ) >/dev/null 2>&1 || true
+      [ -e "$mk/rustup-path-cargo" ] || { echo "control: cargo --version did not use rust-toolchain.toml"; return 1; } ;;
+  esac
+  if command -v bundle >/dev/null 2>&1; then
+    ( cd "$d" && env -u BUNDLE_APP_CONFIG bundle check ) >/dev/null 2>&1 || true
+    [ -e "$mk/bundler-gemfile" ] || { echo "control: bundle check did not evaluate the Gemfile"; return 1; }
+  fi
+  [[ "$fired" == *python* && "$fired" == *yarn* ]] || { echo "controls fired: $fired / $(markers)"; return 1; }
+  rm -f "$mk"/*
+  run verify_in "$d/sub" --emit=plain
+  [ -z "$(markers)" ] || { echo "the verifier ran: $(markers)"; echo "$output"; return 1; }
+  # It still reported what the checkout changes, from the files.
+  [[ "$output" == *"yarn repo config override"*"the checkout's own yarn"* ]] || { echo "$output" | grep yarn; return 1; }
+  if command -v pnpm >/dev/null 2>&1; then [[ "$output" == *"pnpm repo config override"* ]]; fi
+}
+
+# The tools a verifier might start. Each gets a logging shim first on PATH that
+# records the directory it was started in, then runs the real one.
+npc_tools="yarn pnpm npm npx corepack node python3 python pip pip3 uv poetry go cargo rustc rustup composer php bundle bundler gem ruby mvn gradle java dotnet bun bunx deno npq-hero sfw"
+npc_shims() { # <shim dir> <log>
+  local t real
+  mkdir -p "$1"
+  for t in $npc_tools; do
+    real=$(PATH="$TEST_BIN:$PATH" command -v "$t" 2>/dev/null) || continue
+    case "$real" in /*) ;; *) continue ;; esac
+    printf '#!/bin/sh\nprintf "%%s\\t%%s\\t%%s\\t%%s\\n" "$PWD" "%s" "${TMPDIR:-}" "$(printf "%%s" "$*" | tr "\\n\\t" "  ")" >> "%s"\nexec "%s" "$@"\n' "$t" "$2" "$real" > "$1/$t"
+    chmod +x "$1/$t"
+  done
+}
+npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on PATH
+  local d=$1; shift
+  ( cd "$d" && env -i PATH="$BATS_TEST_TMPDIR/shims:${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+      GRADLE_USER_HOME="${TEST_HOME}/.gradle" HARDENING_OUTPUT_FILE="$OUT_FILE" "$@" \
+      bash -c "set -a; source '$ENV_FILE'; set +a; HARDENING_ENV_FILE='$ENV_FILE' bash '$VERIFY_SH' --emit=plain" )
+}
+
+@test "no project code: no tool starts inside the checkout except the ones measured to read only settings there" {
+  yarn_rc_stub 4.19.0
+  harden -- --emit=plain >/dev/null
+  local d="$PNT/trap" log="$BATS_TEST_TMPDIR/tool-calls" bad
+  trap_checkout "$d"
+  npc_shims "$BATS_TEST_TMPDIR/shims" "$log"
+  rm -f "$log"
+  run npc_verify "$d/sub"
+  [ -s "$log" ] || { echo "no tool was logged"; echo "$output"; return 1; }
+  # In the project (either spelling of its path): only npm (and the node it
+  # runs), `uv ... --show-settings`, bundle/bundler config (and their ruby),
+  # `poetry --no-plugins`, composer with --no-plugins (and its php), and
+  # python3 -I (the YAML readers, the hook scan).
+  bad=$(awk -F'\t' -v p1="$d" -v p2="$BATS_TEST_TMPDIR/trap" '
+    $1 == p1 || index($1, p1 "/") == 1 || $1 == p2 || index($1, p2 "/") == 1 {
+      if ($2 == "npm") next
+      if ($2 == "node" && $4 ~ /(^|\/)npm(-cli\.js)?( |$)/) next
+      if ($2 == "uv" && $4 ~ /--show-settings/) next
+      if ($2 == "bundle" || $2 == "bundler") next
+      if ($2 == "ruby" && $4 ~ /(\/bundler?( |$)|Bundler\.settings)/) next
+      if ($2 == "poetry" && $4 ~ /^--no-plugins( |$)/) next
+      if ($2 == "composer" && $4 ~ /--no-plugins/) next
+      if ($2 == "php" && $4 ~ /composer/ && $4 ~ /--no-plugins/) next
+      if ($2 ~ /^python/ && $4 ~ /^-I( |$)/) next
+      print
+    }' "$log")
+  [ -z "$bad" ] || { echo "started inside the checkout:"; echo "$bad"; return 1; }
+  [ -z "$(markers)" ] || { echo "the verifier ran: $(markers)"; return 1; }
+}
+
+@test "no project code: with a world-writable TMPDIR the probes run under a private base, and files planted above TMPDIR do not run" {
+  yarn_rc_stub 4.19.0
+  harden -- --emit=plain >/dev/null
+  scv_priv || skip "cannot make a directory under HOME"
+  local ww="$BATS_TEST_TMPDIR/ww" log="$BATS_TEST_TMPDIR/tool-calls" mk="$BATS_TEST_TMPDIR/markers" tmps
+  mkdir -p "$ww/sub" "$ww/h" "$ww/tc/bin" "$ww/.mvn" "$mk"; chmod 1777 "$ww"
+  # What another account could leave in /tmp, above every mktemp directory.
+  mvn_trap "$ww" "$mk/tmp-maven-jvm-config"
+  printf '#!/bin/sh\necho ran > "%s/tmp-rustup-path"\necho cargo 9.9.9\n' "$mk" > "$ww/tc/bin/cargo"; chmod +x "$ww/tc/bin/cargo"
+  printf '[toolchain]\npath = "%s/tc"\n' "$ww" > "$ww/rust-toolchain.toml"
+  printf '<Project InitialTargets="T"><Target Name="T"><Exec Command="echo ran > %s/tmp-dotnet-props" /></Target></Project>\n' "$mk" > "$ww/Directory.Build.props"
+  printf '{"name":"tmproot","private":true,"workspaces":["*"],"scripts":{"preinstall":"echo ran > %s/tmp-bun-root"}}\n' "$mk" > "$ww/package.json"
+  printf 'new File("%s/tmp-gradle-settings").text = "ran"\n' "$mk" > "$ww/settings.gradle"
+  # FIXTURE CONTROL: where maven is installed, it applies the planted
+  # jvm.config to a run in any directory below it.
+  if command -v mvn >/dev/null 2>&1; then
+    mkdir -p "$ww/sub/ctl"
+    local mo; mo=$( cd "$ww/sub/ctl" && mvn -v 2>&1 ) || true
+    [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: mvn -v below $ww did not apply $ww/.mvn/jvm.config ($(cat "$ww/.mvn/jvm.config")); it said:"; echo "$mo" | head -8; return 1; }
+    rm -f "$mk/tmp-maven-jvm-config"
+  fi
+  npc_shims "$BATS_TEST_TMPDIR/shims" "$log"
+  rm -f "$log"
+  run npc_verify "$PNT" TMPDIR="$ww/sub" RUNNER_TEMP="$SCV_PRIV"
+  [ -s "$log" ] || { echo "no tool was logged"; echo "$output"; return 1; }
+  # Every tool started with a TMPDIR got the private scratch dir (a probe that
+  # runs a tool under env -i passes none, and that tool's working directory is
+  # one of the probe's own, under the same scratch dir), and none ran anywhere
+  # below the world-writable directory.
+  tmps=$(cut -f3 "$log" | grep -v '^$' | sort -u)
+  [[ "$tmps" == "$SCV_PRIV/scv."* ]] && [ "$(printf '%s\n' "$tmps" | grep -vc "^$SCV_PRIV/scv\.")" -eq 0 ] || { echo "TMPDIR seen by tools: $tmps"; return 1; }
+  ! cut -f1 "$log" | grep -q "^$ww" || { echo "started below $ww:"; grep "^$ww" "$log"; return 1; }
+  [ -z "$(ls -d "$SCV_PRIV"/scv.* 2>/dev/null)" ] || { echo "scratch left behind: $(ls -d "$SCV_PRIV"/scv.*)"; return 1; }
+  [ -z "$(markers)" ] || { echo "a planted file ran: $(markers)"; return 1; }
+  [[ "$output" != *"found no directory for the probes"* ]]
+  # With TMPDIR and HOME both below the world-writable directory: on a Mac the
+  # per-user temp dir (getconf DARWIN_USER_TEMP_DIR) is still private, so the
+  # probes go there and nothing planted runs. Elsewhere there is no private
+  # base: the probes run under that TMPDIR, stderr says so, and (CONTROL) where
+  # maven is installed its probes then run the planted jvm.config.
+  rm -f "$log"
+  run npc_verify "$PNT" TMPDIR="$ww/sub" HOME="$ww/h"
+  local dar darp; dar=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || dar=""
+  if [ -n "$dar" ]; then
+    darp=$(cd -P "$dar" && pwd -P)
+    tmps=$(cut -f3 "$log" | grep -v '^$' | sort -u)
+    [ -n "$tmps" ] && [ "$(printf '%s\n' "$tmps" | grep -vc "^$darp/scv\.")" -eq 0 ] || { echo "TMPDIR seen by tools: $tmps"; return 1; }
+    ! cut -f1 "$log" | grep -q "^$ww" || { echo "started below $ww:"; grep "^$ww" "$log"; return 1; }
+    [ -z "$(markers)" ] || { echo "a planted file ran: $(markers)"; return 1; }
+    [[ "$output" != *"found no directory for the probes"* ]]
+  else
+    [[ "$output" == *"warning: found no directory for the probes' throwaway projects"* ]] || { echo "$output" | head -5; return 1; }
+    [ "$(cut -f3 "$log" | sort -u | grep -c "^$ww/sub")" -ge 1 ] || { cut -f3 "$log" | sort -u; return 1; }
+    if command -v mvn >/dev/null 2>&1; then
+      [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: the maven probes under $ww/sub did not apply the planted jvm.config: $(markers)"; return 1; }
+    fi
+  fi
+}
+
+# dotnet_nuget_stub <config get all output>: an SDK 10 dotnet that logs where
+# it runs and answers the nuget questions the way 10.0.404 does (MEASURED).
+dotnet_nuget_stub() {
+  printf '%s\n' "$1" > "$BATS_TEST_TMPDIR/getall"
+  stub_bin dotnet 'echo "$PWD :: $*" >> "'"$BATS_TEST_TMPDIR"'/dotnet-calls"
+case "$*" in
+  --list-sdks) echo "10.0.404 [/usr/share/dotnet/sdk]" ;;
+  --version) echo 10.0.404 ;;
+  "nuget config paths --working-directory "*) echo "'"$TEST_HOME"'/.nuget/NuGet/NuGet.Config" ;;
+  "nuget config get signatureValidationMode --show-path --working-directory "*) printf "require\tfile: %s\n" "'"$TEST_HOME"'/.nuget/NuGet/NuGet.Config" ;;
+  "nuget config get all --working-directory "*) cat "'"$BATS_TEST_TMPDIR"'/getall" ;;
+  *) echo "STUB: $*"; exit 1 ;;
+esac'
+}
+
+@test "nuget: dotnet is never started in the project (a global.json there picks the SDK); the source list comes from config get all --working-directory" {
+  harden ECOSYSTEMS=nuget -- --emit=plain >/dev/null
+  [ -f "$TEST_HOME/.nuget/NuGet/NuGet.Config" ] || skip "harden.sh wrote no NuGet.Config here"
+  local tab=$'\t' d="$PNT/nproj"
+  mkdir -p "$d/sub"
+  printf '{"sdk":{"version":"99.0.100","paths":[".dotnet","$host$"]}}\n' > "$d/global.json"
+  # MEASURED (10.0.404): the project's entries come first; the hardened user
+  # file's <clear/> is printed after them and does not drop them.
+  dotnet_nuget_stub "packageSources:
+${tab}add key=\"extra\" value=\"https://extra.invalid/v3/index.json\"
+${tab}add key=\"off\" value=\"https://off.invalid/v3/index.json\"
+${tab}clear
+${tab}add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\"
+
+disabledPackageSources:
+${tab}add key=\"off\" value=\"true\"
+"
+  rm -f "$BATS_TEST_TMPDIR/dotnet-calls"
+  run verify_in "$d/sub" --emit=plain
+  [[ "$(grep 'nuget source allowlist' <<<"$output")" == GAP*"2 enabled source(s) in $d/sub; not official nuget.org: https://extra.invalid/v3/index.json"* ]] || { grep nuget <<<"$output"; return 1; }
+  [ -s "$BATS_TEST_TMPDIR/dotnet-calls" ]
+  ! grep -q -e "^$d" -e "^$BATS_TEST_TMPDIR/nproj" "$BATS_TEST_TMPDIR/dotnet-calls" || { cat "$BATS_TEST_TMPDIR/dotnet-calls"; return 1; }
+  grep -q -- "--working-directory $d/sub" "$BATS_TEST_TMPDIR/dotnet-calls"
+  # A project file that clears: only what it adds is in effect.
+  dotnet_nuget_stub "packageSources:
+${tab}clear
+${tab}add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\"
+"
+  run verify_in "$d/sub" --emit=plain
+  [[ "$(grep 'nuget source allowlist' <<<"$output")" == OK*"1 enabled source(s) in $d/sub, all official nuget.org"* ]] || { grep nuget <<<"$output"; return 1; }
 }

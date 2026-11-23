@@ -463,9 +463,13 @@ record of what the job hardened and falls back to checking every installed
 tool.
 
 The verify step runs in the job's working directory, normally the checkout,
-so it asks the project's own yarn: a committed `.yarnrc.yml` `yarnPath` or
-`plugins:` entry runs during the check, as it does during `yarn install`
-([docs/verify.md](../docs/verify.md#in-a-checkout-it-runs-that-projects-yarn)).
+and reports what the project's own config changes without running the
+project's code: each tool is asked from `/`, and the project's files are read
+as files. A committed `.yarnrc.yml` `yarnPath` or `plugins:` entry is reported
+in the `yarn repo config override` row, not run
+([docs/verify.md](../docs/verify.md#it-never-runs-code-a-checkout-supplies)).
+The harden step, which also runs in the checkout, asks each tool its version
+from `/` for the same reason.
 
 The probes themselves live in `files/verify-probes.sh` — the same bytes the
 Ansible role installs as `/usr/local/bin/supply-chain-verify`, so the two

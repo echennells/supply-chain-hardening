@@ -126,6 +126,55 @@ agent host, where "a script imports a file next to it" is closer to the threat
 than to the workflow), and to say plainly in the README what breaks and why —
 so the runtime error is one search away from its cause.
 
+### The verifier test
+
+The verifier is not outside the threat model. It is run exactly where the
+threat lives: AGENTS.md tells agents to run it from inside a project, including
+one they just cloned. So every probe has to pass:
+
+> **Does checking this run anything the thing being checked supplies?**
+
+- **No** → shippable.
+- **Yes** → it is the attack, run by the tool that was supposed to report it.
+
+Tools read files from the working directory and from every directory above it,
+and several of those files name code the tool runs before doing anything else.
+MEASURED, each with a marker the checkout wrote: a `.yarnrc.yml` `yarnPath` or
+plugin ran on `yarn --version` (yarn 1.22.22, 4.1.0 to 4.19.0), a
+`rust-toolchain.toml` `path =` on `cargo --version` (rustup 1.29.3),
+`.mvn/jvm.config` on `mvn -v` (maven 3.10.0), a `global.json` sdk `"paths"` SDK
+on `dotnet --version` (.NET 10.0.404), a `pip.py` on `python3 -m pip --version`,
+a `.pnpmfile.cjs` on `pnpm config get`, Poetry's `.poetry/plugins` on `poetry
+config`, and a `.corepack.env` redirected corepack's download of yarn itself.
+The same goes for a directory other accounts can write: the probes' `mktemp -d`
+landed in `/tmp`, and a `/tmp/.mvn/jvm.config` or `/tmp/Directory.Build.props`
+planted by another account ran in them. This is git's CVE-2022-24765 (a
+repository config in a shared parent directory running commands, answered with
+`safe.directory`) and the reason for VS Code's Workspace Trust and direnv's
+`allow`.
+
+What passes:
+
+- **Ask a tool about itself from `/`.** Version, capability and host-config
+  questions have the same answer there, and nothing above `/` but root's.
+- **Read what a project changes from its files**, or through an option that
+  names the directory (`dotnet nuget config --working-directory`). File reads are
+  `PRESENT` evidence, so those rows say what they could not confirm.
+- **Run a tool inside the project only where it was measured to read nothing
+  there but settings**, and add the flag that switches project code off where
+  one exists (`composer --no-plugins`, `poetry --no-plugins`,
+  `COREPACK_ENV_FILE=0`). npm `config get`, uv `--show-settings` and
+  `bundle config get` were measured to qualify; the measurement has to be
+  repeated when a tool adds a project file.
+- **Build scratch projects under a base nobody else can write**, every directory
+  up to `/`, and never inside the working directory.
+
+The trade-off this replaced was "in CI the verifier runs the same yarn `yarn
+install` will run next, so it runs nothing new". It fails on its own terms: the
+verifier is also what an agent runs on a checkout before deciding whether to
+build it at all, and running the project's yarn to read the host's age gate runs
+that checkout's code before anyone has decided to trust it.
+
 ### Things that are in scope but are not protections
 
 Two large categories are legitimate and should NOT be counted in the
@@ -146,7 +195,7 @@ count is how the role starts believing its own marketing:
 | Shared cargo/npm cache substitution | Requires write access, therefore prior execution. The role also runs at provision time while the poisoning happens between builds — any check it installed would report a coverage window it does not have. |
 | `build.rs` / proc-macro containment | Needs process isolation (seccomp/Landlock, no-egress container, ephemeral builder). No config-level control exists, in any ecosystem. |
 | Repo-local `.cargo/config.toml`, `[alias]`, `rust-toolchain.toml path=` | **In scope as a threat, not closable by this role.** Do NOT reason that "you already chose to build untrusted code" — MEASURED: `cargo metadata` and `cargo tree` execute a repo-local `[build] rustc-wrapper`, and `cargo metadata` is what rust-analyzer and every IDE run on folder open. Cloning and opening is enough; no build required. It stays out because the delivery surface is open (`RUSTC_WRAPPER` as an env var is not in any file; `--config` takes a file path, so a key denylist does not cover it; `rust-toolchain.toml path=` supplies its own cargo and bypasses the wrapper before it can act). A detector over this surface enumerates an open set — the shape that produced the `argv[1]` bug. The honest mitigation is not to open untrusted Rust repos outside a container. |
-| Repo-local config in the other ecosystems (npm `./.npmrc`, uv `./uv.toml` / `pyproject [tool.uv]`, bun `bunfig.toml`, pnpm/yarn) | **In scope as a threat, not closable — the same shape as the cargo row above, generalized.** A project-directory config outranks the `~` and `/etc` files the role deploys, so a hostile repo (or an agent unpacking an archive) weakens hardening without touching what the role wrote. MEASURED (Ubuntu 26.04): a repo `./.npmrc` `ignore-scripts=false` re-runs a dependency postinstall in **non-PAM** contexts — under PAM the `NPM_CONFIG_IGNORE_SCRIPTS` env layer still wins (env > project); a repo `./uv.toml` `no-build=false` re-enables source builds in **every** context, because the role sets no uv variable that outranks project config. uv's env layer is partial (MEASURED uv 0.8.17 to 0.13.9): `UV_EXCLUDE_NEWER` beats a repo's `exclude-newer`, and `UV_NO_BUILD` beats a repo's `no-build = false` for `uv sync`/`lock`/`run` but no `uv pip` command reads it. Decided, both on the attribution test: `UV_NO_BUILD` is not exported (the pip wrapper is not covered, it refuses `supply-chain-allow-build` and leaves no per-command escape, and an empty value breaks every project command); `UV_EXCLUDE_NEWER` is opt-in (`uv_exclude_newer_env`), because it also beats a project's *earlier* pin and uv records the cutoff in `uv.lock`, so that project's `--locked` then fails somewhere else, naming neither (MEASURED uv 0.8.17 to 0.13.9). pnpm 11+'s age gate is in the env layer (`pnpm_config_minimum_release_age` and `_exclude`, which beat `pnpm-workspace.yaml`); `pnpm_config_ignore_scripts` is not, because `true` silently skips the builds a project approved. `UV_CONFIG_FILE` would *replace* config discovery and break legitimate project settings. The mitigation is procedural: do not run package managers inside an untrusted repo, or do it in a container. See README "Limitations". |
+| Repo-local config in the other ecosystems (npm `./.npmrc`, uv `./uv.toml` / `pyproject [tool.uv]`, bun `bunfig.toml`, pnpm/yarn) | **In scope as a threat, not closable — the same shape as the cargo row above, generalized.** A project-directory config outranks the `~` and `/etc` files the role deploys, so a hostile repo (or an agent unpacking an archive) weakens hardening without touching what the role wrote. MEASURED (Ubuntu 26.04): a repo `./.npmrc` `ignore-scripts=false` re-runs a dependency postinstall in **non-PAM** contexts — under PAM the `NPM_CONFIG_IGNORE_SCRIPTS` env layer still wins (env > project); a repo `./uv.toml` `no-build=false` re-enables source builds in **every** context, because the role sets no uv variable that outranks project config. uv's env layer is partial (MEASURED uv 0.8.17 to 0.13.9): `UV_EXCLUDE_NEWER` beats a repo's `exclude-newer`, and `UV_NO_BUILD` beats a repo's `no-build = false` for `uv sync`/`lock`/`run` but no `uv pip` command reads it. Decided, both on the attribution test: `UV_NO_BUILD` is not exported (the pip wrapper is not covered, it refuses `supply-chain-allow-build` and leaves no per-command escape, and an empty value breaks every project command); `UV_EXCLUDE_NEWER` is opt-in (`uv_exclude_newer_env`), because it also beats a project's *earlier* pin and uv records the cutoff in `uv.lock`, so that project's `--locked` then fails somewhere else, naming neither (MEASURED uv 0.8.17 to 0.13.9). pnpm 11+'s age gate is in the env layer (`pnpm_config_minimum_release_age` and `_exclude`, which beat `pnpm-workspace.yaml`); `pnpm_config_ignore_scripts` is not, because `true` silently skips the builds a project approved. `UV_CONFIG_FILE` would *replace* config discovery and break legitimate project settings. The verifier reports the uv, pnpm, yarn, composer, bundler and poetry cases from inside a project, and reads pnpm's and yarn's files instead of running them (see "The verifier test"): yarn runs a checkout's `yarnPath` and plugins for any command. The mitigation is procedural: do not run package managers inside an untrusted repo, or do it in a container. See README "Limitations". |
 | `.pyc` / bytecode artifacts, systemd linger, socket lifetime | Persistence and availability concerns, not admission. |
 
 ### Safe-by-construction overrides (developer mode)
@@ -736,6 +785,9 @@ replace, and leave alone a copy some other installer put there.
 0b. **Attribution test** — when it breaks something legitimate, does the error
     name the control? No → not shippable on by default; make it opt-in or
     profile-scoped and say in the README what breaks.
+0c. **Verifier test** (for a verifier probe) — does checking this run anything
+    the checkout or a shared directory supplies? Yes → ask from `/`, read the
+    file, or measure that the tool reads only settings there.
 
 1. Is there an existing layer in this area? (Axis 1)
 2. Does the tool actually honor this key/var/flag, on every supported version? (Axis 3)

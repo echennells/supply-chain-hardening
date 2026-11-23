@@ -161,7 +161,9 @@ every tool it finds. Then report honestly:
 - **Weigh the evidence column.** `FUNCTIONAL` was observed, `PARSED` was reported by the
   tool, and `PRESENT` means a file exists and nothing more.
 - **Run it from the project too.** A repo's own config can override the host's, and
-  the verifier only sees that from inside the repo.
+  the verifier only sees that from inside the repo. That is safe in a repo nobody has
+  reviewed: it asks each tool from `/` and reads the repo's config as files, so none of
+  the repo's code runs (a `yarnPath`, a pnpmfile, a `rust-toolchain.toml` toolchain).
 
 **Don't run it on a host you suspect is already compromised.** It starts `python3` and
 `pip`, which can fire a malicious startup hook. Inspect that host with tools that don't
