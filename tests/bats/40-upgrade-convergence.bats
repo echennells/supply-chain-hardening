@@ -265,9 +265,10 @@ sfw_teardown() {
   echo "$output" | tail -25
   rm -f /tmp/sfwprior-bin
   [ "$status" -eq 0 ]
+  applied=$output
 
-  # The reset re-downloads the firewall binary from GitHub. When GitHub refuses
-  # it (a known CI flake, HTTP 403), the role says so by name and the play
+  # The reset cache is filled from GitHub again. When GitHub refuses both
+  # downloads, the pinned one and sfw's own, the role says so by name and the play
   # completes. The security half still has to hold: the planted binary is gone
   # and nothing in the cache is writable by another account. Only the "a fresh
   # binary is in place" half needs the download, so skip just that.
@@ -289,6 +290,12 @@ sfw_teardown() {
   t=$(readlink -f "$c/latest")
   [[ "$t" == "$c"/* ]]
   [ "$(stat -c %u "$t")" = 0 ]
+  # The pinned binary, whose digest the role checked, and not the planted one
+  # (sfw's own download where the release URL did not answer and the API did).
+  if [[ "$applied" != *"was not used: downloading it failed"* ]]; then
+    [ "$t" = "$c/$(sfw_pin_version)/sfw-free-$(sfw_pin_key)" ]
+    [ "$(sha256sum < "$t" | cut -d' ' -f1)" = "$(sfw_pin_sum)" ]
+  fi
   run sfw --version
   [[ "$output" != *NOT-THE-REAL-SFW* ]]
   if [ -n "$stray" ]; then
@@ -660,13 +667,19 @@ task_result() { printf '%s\n' "$output" | grep -F -A1 "$1" | tail -n 1; }
 # (changed=1), ending exactly where it began. It now counts as a change only
 # when sfw comes back.
 HOSTS_SAVED=""
-hosts_block_github() {
+hosts_block() { # <host>...
   cp /etc/hosts "$BATS_TEST_TMPDIR/hosts.saved" && HOSTS_SAVED=1
   local h
-  for h in github.com api.github.com objects.githubusercontent.com release-assets.githubusercontent.com codeload.github.com; do
+  for h in "$@"; do
     echo "127.0.0.1 $h" >> /etc/hosts
   done
 }
+# The API sfw asks, and the release URL the role takes its pinned binary from.
+hosts_block_github() {
+  hosts_block github.com api.github.com objects.githubusercontent.com release-assets.githubusercontent.com codeload.github.com
+}
+# What a used-up quota leaves: sfw cannot fetch, the release URL still answers.
+hosts_block_api() { hosts_block api.github.com; }
 hosts_restore() {
   [ -n "$HOSTS_SAVED" ] || return 0
   cat "$BATS_TEST_TMPDIR/hosts.saved" > /etc/hosts; HOSTS_SAVED=""
@@ -689,6 +702,11 @@ hosts_restore() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]] \
     || { echo "the fetch did not fail with GitHub blocked; nothing to test"; return 1; }
+  # With the release URL blocked too, the pinned binary is no way out, and the
+  # record says both.
+  [[ "$output" == *"(exit 1: [sfw] Failed to prepare firewall binary: "*"The pinned $(sfw_pin_version) was not used either: downloading it failed (Request failed: "* ]]
+  [ ! -e "$c/latest" ]
+  [ ! -e "${c%/.sfw-cache}/.sfw-seed" ]
   st=$(task_result "Install Socket Firewall Free via npm"); echo "blocked: install $st"
   [[ "$st" == ok:* ]]
   st=$(task_result "Warm the Socket Firewall binary cache"); echo "blocked: warm $st"
@@ -712,6 +730,257 @@ hosts_restore() {
   [ -e "$c/latest" ]
   run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
   [ -z "$output" ]
+}
+
+# --- the pinned firewall binary ----------------------------------------------
+#
+# sfw asks the GitHub API which binary to download, without credentials.
+# MEASURED 2026-11-23: with that API answering 403, sfw 2.0.6 exits 1 in 0.3 s,
+# the role moved it aside, and npm and cargo ran unfiltered. An sfw that has
+# nothing cached now gets a pinned release from its download URL first, held to
+# its SHA-256 before it can reach the cache (tasks/sfw_seed.yml).
+sfw_pin_version() { sed -n 's/^sfw_binary_version: *"\([^"]*\)".*/\1/p' "$ROLE_DIR/defaults/main.yml"; }
+sfw_pin_key() { (cd / && node -p '({"linux-x64": "linux-x86_64", "linux-arm64": "linux-arm64"})[process.platform + "-" + process.arch] || ""'); }
+sfw_pin_sum() { sed -n "s/^  $(sfw_pin_key): *\"sha256:\([0-9a-f]*\)\".*/\1/p" "$ROLE_DIR/defaults/main.yml"; }
+recap_changed() { printf '%s\n' "$output" | sed -n 's/.* changed=\([0-9]*\) .*/\1/p' | tail -n 1; }
+
+sfw_pin_preconditions() {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to empty sfw's cache and edit /etc/hosts"
+  [ -w /etc/hosts ] || skip "/etc/hosts is not writable here"
+  c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
+  [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
+  pkg=${c%/.sfw-cache}; bin=$(command -v sfw)
+  v=$(sfw_pin_version); sum=$(sfw_pin_sum); [ -n "$v" ] && [ ${#sum} -eq 64 ]
+  sfw_snapshot "$c"
+}
+
+# The release URL is a network dependency too. Only the role's own record that
+# the DOWNLOAD failed (no answer, or a 403, 429 or 5xx) excuses what needs it.
+skip_if_pin_unreachable() {
+  if printf '%s' "$output" | grep -qE 'The pinned v[0-9.]+ was not used either: downloading it failed [(](Request failed: (<urlopen error|HTTP Error (403|429|5[0-9][0-9]))|failed to create temporary content file)'; then
+    skip "the pinned binary could not be downloaded from GitHub's release URL${1:+; $1}"
+  fi
+}
+
+# sfw in place, whole, with nothing cached.
+sfw_cold() {
+  [ ! -e "$bin.broken" ] || mv -f "$bin.broken" "$bin"
+  rm -rf "$c"; hash -r
+}
+
+@test "upgrade: with the GitHub API refused, an sfw with nothing cached runs the pinned binary, and a re-apply changes nothing" {
+  sfw_pin_preconditions
+  id sfwprior >/dev/null 2>&1 || useradd -m -s /bin/bash sfwprior
+  hosts_block_api
+
+  # FIXTURE CONTROL: without the pin this is a failed fetch, and npm and cargo
+  # are left with no sfw.
+  sfw_cold
+  socket_apply -e sfw_binary_pin=false
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"its runtime binary could not be fetched from GitHub (exit 1: [sfw] Failed to prepare firewall binary: Unable to fetch latest release"* ]] \
+    || { echo "the fetch did not fail with the API blocked; nothing to test"; return 1; }
+  [[ "$output" != *"The pinned v"* ]]
+  hash -r; [ -z "$(command -v sfw)" ]
+  [ -e "$bin.broken" ]
+
+  # The same host with it: the retry brings sfw back.
+  socket_apply
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  skip_if_pin_unreachable "the API-refused control failed as it should"
+  [[ "$output" != *"could not be fetched from GitHub ("* ]]
+  [[ "$(task_result "Warm the Socket Firewall binary cache")" == changed:* ]]
+  hash -r; [ "$(command -v sfw)" = "$bin" ]
+  rm -f "$bin.broken"
+  t=$(readlink -f "$c/latest")
+  [ "$t" = "$c/$v/sfw-free-$(sfw_pin_key)" ]
+  [ "$(sha256sum < "$t" | cut -d' ' -f1)" = "$sum" ]
+  # Root's, readable by everyone, writable by nobody else, nothing left behind.
+  [ "$(stat -c '%u:%g %a' "$t")" = "0:0 755" ]
+  [ "$(stat -c '%u:%g %a' "$c")" = "0:0 755" ]
+  [ "$(stat -c '%u:%g %a' "$c/$v")" = "0:0 755" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+  [ ! -e "$pkg/.sfw-seed" ]
+  # The first run made no update check, or it would not have been the pin's.
+  [ ! -e "$c/next-check" ]
+
+  # Another account's npm goes through it: sfw runs its child behind its own CA.
+  PROJ=$(mktemp -d /tmp/sfw-pin.XXXXXX)
+  printf '{"name":"sfw-pin-probe","version":"1.0.0"}\n' > "$PROJ/package.json"
+  mkdir "$PROJ/pkg"; printf '{"name":"sfw-pin-dep","version":"1.0.0"}\n' > "$PROJ/pkg/package.json"
+  printf 'console.log("CA=" + (process.env.NODE_EXTRA_CA_CERTS || "none"))\n' > "$PROJ/env.js"
+  chown -R sfwprior "$PROJ"; chmod 755 "$PROJ"
+  run su - sfwprior -c "cd '$PROJ' && npm install --no-audit --no-fund ./pkg 2>&1 && npm exec --yes -- node ./env.js 2>&1"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CA="*socketFirewall* ]]
+  [[ "$output" != *"[supply-chain-hardening] warning"* ]]
+  [ -e "$PROJ/node_modules/sfw-pin-dep" ]
+  rm -rf -- "$PROJ"
+
+  # Converged: the reset accepts the cache as it is, nothing is downloaded, and
+  # nothing changes. sfw's update check is due here and refused; it keeps what
+  # it has.
+  before=$(stat -c %i "$t")
+  socket_apply
+  [ "$status" -eq 0 ]
+  echo "second apply: changed=$(recap_changed)"
+  [ "$(recap_changed)" = 0 ]
+  [[ "$(task_result "Reset an sfw cache")" == ok:* ]]
+  [[ "$(task_result "Download the pinned firewall binary")" == skipping:* ]]
+  [ "$(readlink -f "$c/latest")" = "$t" ] && [ "$(stat -c %i "$t")" = "$before" ]
+}
+
+@test "upgrade: a download that is not the pinned binary never reaches sfw's cache, and the run says what it was" {
+  sfw_pin_preconditions
+  hosts_block_api
+  sfw_cold
+  zeros=$(printf '0%.0s' $(seq 64))
+  socket_apply -e "{\"sfw_binary_checksums\": {\"$(sfw_pin_key)\": \"sha256:$zeros\"}}"
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  skip_if_pin_unreachable
+  # What it downloaded is the release the shipped pin names, so the digest is
+  # the only thing that kept it out.
+  [[ "$output" == *"its runtime binary could not be fetched from GitHub (exit 1: [sfw] Failed"*"The pinned $v was not used either: the download's sha256 is $sum, not the pinned $zeros. "* ]]
+  [ ! -e "$c/latest" ] && [ ! -L "$c/latest" ]
+  [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ]
+  hash -r; [ -z "$(command -v sfw)" ]
+  [ -e "$bin.broken" ]
+  # Counted as the protection that is missing, as before.
+  [[ "$output" == *"protection(s) were NOT applied"* ]]
+}
+
+@test "upgrade: a binary sfw already has cached is left alone, whatever its version" {
+  sfw_pin_preconditions
+  hosts_block_api
+  # A newer release, as the refresh timer leaves it: the pin is not in the cache.
+  t=$(readlink -f "$c/latest")
+  mv "${t%/*}" "$c/v99.0.0"
+  ln -sfn "$c/v99.0.0/${t##*/}" "$c/latest"
+  t=$c/v99.0.0/${t##*/}
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
+  before=$(stat -c '%i %Y %s' "$t")
+  socket_apply
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  [ "$(recap_changed)" = 0 ]
+  [[ "$(task_result "Download the pinned firewall binary")" == skipping:* ]]
+  [ "$(readlink -f "$c/latest")" = "$t" ]
+  [ "$(stat -c '%i %Y %s' "$t")" = "$before" ]
+  [ ! -e "$c/$v" ]
+  hash -r; [ "$(command -v sfw)" = "$bin" ]
+}
+
+NODE_STUB=""
+node_stub_teardown() {
+  [ -z "$NODE_STUB" ] || rm -f "$NODE_STUB"
+  NODE_STUB=""
+}
+
+@test "upgrade: where the pinned binary cannot be used, sfw is fetched as before and the reason is in the record" {
+  # A platform with no pin, a pin with no digest for this one, a version that is
+  # not a release name, and a package directory another account could write. None
+  # downloads anything. With the API blocked, "as before" is a failed fetch.
+  sfw_pin_preconditions
+  [ ! -e /usr/local/sbin/node ] || skip "/usr/local/sbin/node exists"
+  hosts_block_api
+
+  refused() { # <reason>
+    echo "$output" | grep -E 'Socket Firewall —' | head -3
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"its runtime binary could not be fetched from GitHub (exit 1: [sfw] Failed"*"The pinned "*" was not used either: $1. "* ]] || return 1
+    [[ "$(task_result "Download the pinned firewall binary")" == skipping:* ]] || return 1
+    [ ! -e "$c/latest" ] || return 1
+    [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ] || return 1
+    hash -r; [ -z "$(command -v sfw)" ]
+  }
+
+  sfw_cold
+  NODE_STUB=/usr/local/sbin/node
+  printf '#!/bin/sh\ncase "$*" in *process.platform*) echo linux-riscv64; exit 0 ;; esac\nexec %s "$@"\n' "$(readlink -f "$(command -v node)")" > "$NODE_STUB"
+  chmod 755 "$NODE_STUB"; hash -r
+  socket_apply
+  node_stub_teardown; hash -r
+  refused "no binary is pinned for linux-riscv64"
+
+  sfw_cold
+  socket_apply -e '{"sfw_binary_checksums": {}}'
+  refused "sfw_binary_checksums has no entry for $(sfw_pin_key)"
+
+  sfw_cold
+  socket_apply -e "{\"sfw_binary_checksums\": {\"$(sfw_pin_key)\": \"md5:abc\"}}"
+  refused "sfw_binary_checksums has no sha256 for $(sfw_pin_key)"
+
+  sfw_cold
+  socket_apply -e 'sfw_binary_version=../../../tmp'
+  refused "sfw_binary_version is not a release name: ../../../tmp"
+
+  sfw_cold
+  chmod 0777 "$pkg"
+  socket_apply
+  chmod 0755 "$pkg"
+  refused "$pkg is root 777, and only root may be able to write it"
+}
+
+@test "upgrade: where the pinned binary cannot be used and sfw's own fetch works, that one is in use and the summary says so" {
+  sfw_pin_preconditions
+  sfw_cold
+  socket_apply -e '{"sfw_binary_checksums": {}}'
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  # sfw's own fetch needs the API's quota, which this runner may have used up.
+  if printf '%s' "$output" | grep -qE 'could not be fetched from GitHub [(]exit 1: \[sfw\] Failed to prepare firewall binary: (Unable to fetch latest release|GET https://[^ ]+ failed with (403|429|5[0-9][0-9]))'; then
+    skip "GitHub refused sfw's own download"
+  fi
+  [[ "$output" == *"the pinned firewall binary (sfw_binary_version $v) was not used: sfw_binary_checksums has no entry for $(sfw_pin_key). sfw downloaded its current release itself"* ]]
+  # A setting that was not honoured, not a protection that is missing.
+  [[ "$output" == *"setting(s) were not applied as configured"* ]]
+  [[ "$output" != *"protection(s) were NOT applied"* ]]
+  hash -r; [ "$(command -v sfw)" = "$bin" ]
+  [ -e "$c/latest" ]
+  # sfw made its own update check, as before.
+  [ -e "$c/next-check" ]
+  run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
+  [ -z "$output" ]
+}
+
+@test "upgrade: a pinned binary that does not run is moved aside with sfw, recorded as that, and not counted as a change" {
+  # Another architecture's asset: its digest matches its own pin, so it reaches
+  # the cache, and it cannot run. As a glibc binary on a musl host would.
+  sfw_pin_preconditions
+  [ "$(sfw_pin_key)" = linux-x86_64 ] || skip "stages the arm64 asset on x86_64"
+  [ ! -e /usr/local/sbin/node ] || skip "/usr/local/sbin/node exists"
+  hosts_block_api
+  sfw_cold
+  NODE_STUB=/usr/local/sbin/node
+  printf '#!/bin/sh\ncase "$*" in *process.platform*) echo linux-arm64; exit 0 ;; esac\nexec %s "$@"\n' "$(readlink -f "$(command -v node)")" > "$NODE_STUB"
+  chmod 755 "$NODE_STUB"; hash -r
+  socket_apply
+  node_stub_teardown; hash -r
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  skip_if_pin_unreachable
+  [[ "$output" == *"installed, with the pinned firewall binary $v in its cache, but sfw could not run it (exit "*"sfw was moved aside so npm and cargo keep working, unfiltered"* ]]
+  [[ "$output" != *"could not be fetched from GitHub ("* ]]
+  [ "$(recap_changed)" = 0 ]
+  [ -z "$(command -v sfw)" ]
+  [ -e "$bin.broken" ]
+}
+
+@test "upgrade: a --check run over an sfw with nothing cached downloads no pinned binary" {
+  sfw_pin_preconditions
+  hosts_block_api
+  sfw_cold
+  socket_apply --check
+  echo "$output" | tail -20
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Look for an sfw that has no firewall binary cached"* ]]
+  [ ! -e "$c/$v" ] && [ ! -e "$c/latest" ]
+  [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ]
 }
 
 # --- an sfw under another npm prefix than root's npm uses --------------------
@@ -949,6 +1218,7 @@ cargo_teardown() {
 # bats runs one teardown, so it calls both.
 teardown() {
   hosts_restore
+  node_stub_teardown
   sfw_prefix_teardown
   sfw_shadow_teardown
   sfw_teardown
