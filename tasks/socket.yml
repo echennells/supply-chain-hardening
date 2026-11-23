@@ -278,6 +278,23 @@
   register: sfw_install
   failed_when: false
 
+- name: Include the pinned firewall binary (for an sfw that has none cached)
+  # Before the warm, so that a first install runs the pin and needs no GitHub
+  # API call. Not over a cache the reset did not trust or an sfw root does not
+  # own (the warm's rule), only where root runs a Node it owns, and never in a
+  # --check run.
+  ansible.builtin.include_tasks:
+    file: sfw_seed.yml
+    apply:
+      tags: [socket, npm]
+  when:
+    - sfw_binary_pin | bool
+    - not ansible_check_mode
+    - npm_for_socket.rc == 0
+    - node_major_version.stdout | int >= 20
+    - npm_root_for_socket.rc | default(1) == 0
+    - sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True)
+
 - name: Warm the Socket Firewall binary cache at apply time
   # sfw's npm package is a SHIM: the actual firewall binary is downloaded from
   # GitHub on first invocation, not at npm-install time. Left cold, that
@@ -347,7 +364,12 @@
       # running at the same time it ran out at 120 s four times and at 180 s
       # once (rc=124). Each time a working sfw was moved aside until the next
       # apply. Waiting longer costs only time when GitHub hangs.
-      if out=$(timeout 600 sfw "$true_bin" 2>&1); then
+      #
+      # SFW_SKIP_UPDATE_CHECK=1 only over the pinned binary this run put in the
+      # cache: the update check would move it to whatever is newest at once, so
+      # the host's first install would not be the pin. The refresh timer and the
+      # next apply make that check.
+      if out=$({{ 'SFW_SKIP_UPDATE_CHECK=1 ' if sfw_seeded | default(false) | bool else '' }}timeout 600 sfw "$true_bin" 2>&1); then
         echo ok
       else
         rc=$?
@@ -360,14 +382,16 @@
     executable: /bin/bash
   register: sfw_warm
   # Changed only when it brings back an sfw an earlier apply moved aside (the
-  # install above reinstalled it without counting that as a change). check_mode:
-  # false so a --check run gets a real answer rather than a skipped task and an
-  # undefined register.
+  # install above reinstalled it without counting that as a change), or runs the
+  # pinned binary sfw_seed.yml put in the cache (nor does that count one).
+  # check_mode: false so a --check run gets a real answer rather than a skipped
+  # task and an undefined register.
   changed_when: >-
-    sfw_retry_aside | default(false) | bool
-    and sfw_install is defined and sfw_install is not skipped
-    and sfw_install.rc | default(1) == 0
-    and (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'ok'
+    (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'ok'
+    and (sfw_seeded | default(false) | bool
+         or (sfw_retry_aside | default(false) | bool
+             and sfw_install is defined and sfw_install is not skipped
+             and sfw_install.rc | default(1) == 0))
   check_mode: false
   failed_when: false
   when:
@@ -431,10 +455,34 @@
 - name: Record skipped protection — Socket Firewall binary could not be fetched
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ ((': ' ~ (sfw_warm.stderr | trim)) if (sfw_warm.stderr | default('', true) | trim | length > 0) else '') ~ '). sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
+      {{ (skipped_protections | default([])) + ['Socket Firewall — installed, but its runtime binary could not be fetched from GitHub (exit ' ~ (sfw_warm.rc | default("?") | string) ~ ((': ' ~ (sfw_warm.stderr | trim)) if (sfw_warm.stderr | default('', true) | trim | length > 0) else '') ~ '). ' ~ (('The pinned ' ~ sfw_binary_version ~ ' was not used either: ' ~ sfw_seed_why ~ '. ') if (sfw_seed_why | default('', true) | length > 0) else '') ~ 'sfw is a shim that downloads the firewall on first use; until that succeeds every `sfw <cmd>` exits non-zero. npm calls fall back to npq where available. Re-apply once connectivity is restored.'] }}
   when:
     - sfw_warm is defined
     - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'broken'
+    - not (sfw_seeded | default(false) | bool)
+
+- name: Record skipped protection — the pinned Socket Firewall binary does not run
+  # Nothing was fetched from GitHub by sfw here, and reachability is not the
+  # problem: the pinned file arrived and its SHA-256 matched.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — installed, with the pinned firewall binary ' ~ sfw_binary_version ~ ' in its cache, but sfw could not run it (exit ' ~ (sfw_warm.rc | default("?") | string) ~ ((': ' ~ (sfw_warm.stderr | trim)) if (sfw_warm.stderr | default('', true) | trim | length > 0) else '') ~ '). sfw was moved aside so npm and cargo keep working, unfiltered. npm calls fall back to npq where available.'] }}
+  when:
+    - sfw_warm is defined
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'broken'
+    - sfw_seeded | default(false) | bool
+
+# sfw works, so this is not a missing protection (see sch_apply_notes in
+# tasks/main.yml): the host runs the release sfw fetched, not the pinned one.
+- name: Record that the pinned Socket Firewall binary was not used
+  ansible.builtin.set_fact:
+    sch_apply_notes: >-
+      {{ (sch_apply_notes | default([])) + ['Socket Firewall — the pinned firewall binary (sfw_binary_version ' ~ sfw_binary_version ~ ') was not used: ' ~ sfw_seed_why ~ '. sfw downloaded its current release itself, and that one is in use.'] }}
+  when:
+    - sfw_warm is defined
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'ok'
+    - not (sfw_seeded | default(false) | bool)
+    - sfw_seed_why | default('', true) | length > 0
 
 - name: Record skipped protection — Socket Firewall older than 2.0.6
   vars:

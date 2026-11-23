@@ -1,0 +1,150 @@
+---
+# Put the pinned firewall binary (sfw_binary_version) in sfw's cache when the
+# cache holds none, so that a host's first install does not depend on the GitHub
+# API. socket.yml includes this between the sfw install and the warm. See
+# sfw_binary_pin in defaults/main.yml for why.
+#
+# The layout is sfw's own (2.0.6 dist/sfw.mjs): .sfw-cache/<release>/<asset>,
+# and a symlink .sfw-cache/latest to it, which is all sfw looks at. MEASURED
+# 2026-11-23 with api.github.com answering 403: over a cache laid out like this
+# sfw exits 0, with its update check due, overdue or absent, and `npm install`
+# goes through it; with nothing cached it exits 1.
+#
+# sfw runs whatever `latest` points at without checking it again, for root too,
+# so only a file whose SHA-256 is the pinned one may get there. The download
+# goes into a directory only root can enter, inside sfw's package directory (so
+# the move into the cache is a rename), it is hashed there, and only then moved.
+# Nothing unverified is ever in the cache. An sfw whose directories another
+# account could write is left to the cache reset and the warm.
+#
+# Every failure ends the same way: `latest` is not set, sfw_seed_why says why,
+# and the warm in socket.yml runs as it did before the pin existed.
+#
+# Nothing here counts as a change. The warm reports one when the binary put in
+# place ran; a re-apply that downloads it again and cannot run it ends where it
+# began.
+
+- name: Look for an sfw that has no firewall binary cached
+  become: true
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      no() { echo "why=$1"; exit 0; }
+      ver={{ sfw_binary_version | string | quote }}
+      # The sfw the warm will run: found as root finds it.
+      sfw=$(command -v sfw 2>/dev/null) || exit 0
+      shim=$(readlink -f "$sfw") || exit 0
+      pkg=${shim%/*}; pkg=${pkg%/*}
+      c=$pkg/.sfw-cache
+      # Some other program called sfw, or an sfw older than 2.0.6, which the
+      # warm moves aside: nothing to do.
+      grep -Eqs '^ *"name": *"sfw"' "$pkg/package.json" || exit 0
+      grep -q SFW_SKIP_UPDATE_CHECK "$shim" || exit 0
+      # sfw's own test for a cached binary (findValidCachedReleaseSync). What
+      # sfw would run is never replaced, whatever its version.
+      if [ -e "$c/latest" ]; then exit 0; fi
+      case "$ver" in
+        ''|.*|*[!A-Za-z0-9._-]*) no "sfw_binary_version is not a release name: $ver" ;;
+      esac
+      for d in "$pkg" "$c" "$c/$ver"; do
+        if [ ! -e "$d" ] && [ ! -L "$d" ]; then continue; fi
+        if [ -L "$d" ] || [ ! -d "$d" ]; then no "$d is not a directory"; fi
+        if [ -n "$(find "$d" -prune \( ! -uid 0 -o -perm /022 \) -print)" ]; then
+          no "$d is $(stat -c '%U %a' "$d"), and only root may be able to write it"
+        fi
+      done
+      # The platform as sfw sees it (mapPlatform and mapArch): the Node that
+      # runs sfw, which need not match the kernel.
+      plat=$(cd / && node -p 'process.platform + "-" + process.arch' 2>/dev/null) || plat="an unknown platform"
+      case "$plat" in
+        linux-x64) key=linux-x86_64 ;;
+        linux-arm64) key=linux-arm64 ;;
+        darwin-x64) key=macos-x86_64 ;;
+        darwin-arm64) key=macos-arm64 ;;
+        *) no "no binary is pinned for $plat" ;;
+      esac
+      sum=""
+      case "$key" in
+      {% for k, v in sfw_binary_checksums.items() %}
+        {{ k | string | quote }}) sum={{ v | string | quote }} ;;
+      {% endfor %}
+        *) no "sfw_binary_checksums has no entry for $key" ;;
+      esac
+      printf '%s\n' "$sum" | grep -Eqx 'sha256:[0-9a-f]{64}' \
+        || no "sfw_binary_checksums has no sha256 for $key"
+      # A fixed name, so a run that was killed leaves at most one.
+      s=$pkg/.sfw-seed
+      rm -rf -- "$s"
+      mkdir -m 0700 -- "$s" || no "$s could not be created"
+      printf 'asset=sfw-free-%s\nsum=%s\nstage=%s\n' "$key" "${sum#sha256:}" "$s"
+    executable: /bin/bash
+  register: sfw_seed_probe
+  changed_when: false
+  failed_when: false
+  # It makes the directory the download goes into.
+  when: not ansible_check_mode
+
+- name: Download the pinned firewall binary and put it in sfw's cache
+  when: sfw_seed_probe.stdout | default('') is search('^stage=/', multiline=True)
+  vars:
+    sfw_seed_asset: "{{ sfw_seed_probe.stdout_lines | select('match', 'asset=') | first | regex_replace('^asset=', '') }}"
+    sfw_seed_sum: "{{ sfw_seed_probe.stdout_lines | select('match', 'sum=') | first | regex_replace('^sum=', '') }}"
+    sfw_seed_stage: "{{ sfw_seed_probe.stdout_lines | select('match', 'stage=') | first | regex_replace('^stage=', '') }}"
+  block:
+    - name: Download the pinned firewall binary (no GitHub API call)
+      # No checksum: here on purpose. The next task hashes the file it is about
+      # to move, whatever wrote it, and says what it found.
+      become: true
+      ansible.builtin.get_url:
+        url: "https://github.com/SocketDev/sfw-free/releases/download/{{ sfw_binary_version }}/{{ sfw_seed_asset }}"
+        dest: "{{ sfw_seed_stage }}/{{ sfw_seed_asset }}"
+        tmp_dest: "{{ sfw_seed_stage }}"
+        mode: "0600"
+        # Per connection and per read, not for the 137 MB as a whole.
+        timeout: 60
+      register: sfw_seed_get
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Verify the pinned firewall binary and move it into sfw's cache
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          umask 022
+          no() { echo "why=$1"; exit 0; }
+          s={{ sfw_seed_stage | quote }}
+          trap 'rm -rf -- "$s"' EXIT
+          f=$s/{{ sfw_seed_asset | quote }}
+          want={{ sfw_seed_sum | quote }}
+          msg={{ (([sfw_seed_get.msg | default('no error given', true), sfw_seed_get.response | default('', true)]
+                   | select | join(': ')) | regex_replace('\s+', ' '))[:300] | quote }}
+          c=${s%/*}/.sfw-cache
+          r=$c/{{ sfw_binary_version | string | quote }}
+          if [ ! -f "$f" ] || [ -L "$f" ]; then no "downloading it failed ($msg)"; fi
+          have=$(sha256sum < "$f") || have=""
+          have=${have%% *}
+          [ "$have" = "$want" ] || no "the download's sha256 is ${have:-unknown}, not the pinned $want"
+          # Again, now that the download took its time: never replace one.
+          if [ -e "$c/latest" ]; then no "a binary was cached while it downloaded"; fi
+          chown 0:0 "$f" && chmod 0755 "$f" \
+            && mkdir -p -- "$r" && chmod 0755 "$c" "$r" \
+            && mv -fT -- "$f" "$r/${f##*/}" \
+            && ln -s -- "$r/${f##*/}" "$s/latest" \
+            && mv -fT -- "$s/latest" "$c/latest" \
+            || no "it could not be put in $c"
+          echo seeded
+        executable: /bin/bash
+      register: sfw_seed_place
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+- name: Note whether the pinned firewall binary is in sfw's cache, or why not
+  ansible.builtin.set_fact:
+    sfw_seeded: "{{ 'seeded' in (sfw_seed_place.stdout_lines | default([], true)) }}"
+    sfw_seed_why: >-
+      {{ ((sfw_seed_probe.stdout_lines | default([], true)) + (sfw_seed_place.stdout_lines | default([], true)))
+         | select('match', 'why=') | map('regex_replace', '^why=', '') | list | first
+         | default('looking for a cold sfw cache failed' if sfw_seed_probe.rc | default(1) != 0 else '', true) }}
