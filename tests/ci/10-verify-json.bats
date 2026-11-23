@@ -212,3 +212,21 @@ assert r["ok"] == sum(1 for x in d["rows"] if x["status"] == "OK" and x["protect
 assert len(d["rows"]) > 10, len(d["rows"])     # the probes ran and said N/A
 PY
 }
+
+@test "the checked-in example is a valid document, and docs/verify.md names every field in it" {
+  local ex="${ROOT}/docs/verify-json-example.json" doc="${ROOT}/docs/verify.md"
+  run check_json "$ex"
+  [ "$status" -eq 0 ]
+  python3 - "$ex" "$doc" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+doc = open(sys.argv[2], encoding="utf-8").read()
+keys = list(d) + ["result." + k for k in d["result"]]
+missing = [k for k in keys if k not in ("result", "rows") and "`%s`" % k not in doc]
+assert not missing, missing
+assert "`rows[]`" in doc and "verify-json-example.json" in doc
+# Every row field and every documented status/evidence word is one the doc names.
+words = {x["evidence"] for x in d["rows"]} | {x["status"] for x in d["rows"]}
+assert all("`%s`" % w in doc for w in words), words
+PY
+}
