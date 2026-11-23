@@ -452,9 +452,11 @@ for x in rows:
             continue
         want.append(t)
 assert r["tools_seen"] == want, (r["tools_seen"], want)
-# This image has most of the package managers installed and hardened.
+# Every one of these that is installed was judged. The image has all five; a real
+# host may not (round 4: Ubuntu 22.04 had no pnpm).
 for t in ("npm", "pnpm", "uv", "cargo", "composer"):
-    assert t in r["tools_seen"], (t, r["tools_seen"])
+    if shutil.which(t):
+        assert t in r["tools_seen"], (t, r["tools_seen"])
 assert r["ok"] > 10, r
 assert rc == (1 if r["gaps"] else 0), (rc, r)
 PY
