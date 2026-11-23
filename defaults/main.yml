@@ -755,7 +755,7 @@ sfw_version: "2.0.6"
 # So when sfw is installed and its cache holds no binary, the role downloads
 # this release by that URL, checks its SHA-256, and puts it in sfw's cache, all
 # before sfw first runs (tasks/sfw_seed.yml). It never replaces a binary sfw has
-# cached: the refresh timer, and the next apply, keep updating it. If the pin
+# cached: the refresh timer, and later applies, keep updating it. If the pin
 # cannot be used, sfw downloads its current release itself, as it did before,
 # and the run summary says why.
 #
