@@ -103,10 +103,17 @@ assert_nothing_placed() {
   [ -z "$f" ] || { echo "left behind: $f"; return 1; }
 }
 
+# One statement per condition, each with its own exit: bats runs tests under
+# errexit, which ignores a failing `[ a ] && [ b ]` or `! cmd` that is not last.
 assert_moved_aside() {
-  [ ! -e "$TEST_BIN/sfw" ] && [ -e "$TEST_BIN/sfw.broken" ]
-  assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden"
-  assert_file_contains "$OUT_FILE" "sfw_installed=false"
+  [ ! -e "$TEST_BIN/sfw" ] || { echo "sfw is still on PATH"; return 1; }
+  [ -e "$TEST_BIN/sfw.broken" ] || { echo "no sfw.broken"; return 1; }
+  assert_file_lacks "$TEST_BIN/npm" "supply-chain-harden" || return 1
+  assert_file_contains "$OUT_FILE" "sfw_installed=false" || return 1
+}
+
+assert_no_download() {
+  if grep -E '^(curl|wget) ' "$CALLS"; then echo "it downloaded the pin"; return 1; fi
 }
 
 @test "sfw pin: where sfw's own fetch works, the pinned binary is not downloaded" {
@@ -115,7 +122,7 @@ assert_moved_aside() {
   harden_sfw
   [ "$status" -eq 0 ]
   assert_file_contains "$OUT_FILE" "sfw_installed=true"
-  ! grep -q '^curl ' "$CALLS"
+  assert_no_download
   [ "$(readlink "$CACHE/latest")" = "$CACHE/v9.9.9/sfw-own" ]
   [ ! -e "$CACHE/v1.16.0" ]
   # FIXTURE CONTROL: the same runner with sfw's fetch refused does download it,
@@ -222,7 +229,7 @@ PLATFORMS
     sfw_host "$plat"
     harden_sfw
     [ "$status" -eq 0 ]
-    ! grep -q '^curl ' "$CALLS"
+    assert_no_download
     [[ "$output" == *"The pinned v1.16.0 was not used instead: no binary is pinned for $plat"* ]]
     assert_nothing_placed
     assert_moved_aside
@@ -238,7 +245,7 @@ PLATFORMS
   sudo ln -s "$CACHE/v99.0.0/sfw-newer" "$CACHE/latest"
   harden_sfw
   assert_file_contains "$OUT_FILE" "sfw_installed=true"
-  ! grep -q '^curl ' "$CALLS"
+  assert_no_download
   [ "$(readlink "$CACHE/latest")" = "$CACHE/v99.0.0/sfw-newer" ]
   [ ! -e "$CACHE/v1.16.0" ]
   # One that does not: moved aside, as before, and still not replaced.
@@ -248,7 +255,7 @@ PLATFORMS
   sudo chmod 0755 "$CACHE/v99.0.0/sfw-newer"
   sudo ln -s "$CACHE/v99.0.0/sfw-newer" "$CACHE/latest"
   harden_sfw
-  ! grep -q '^curl ' "$CALLS"
+  assert_no_download
   [[ "$output" == *"rc=3: broken-newer"*"The pinned v1.16.0 was not used instead: a binary is already cached"* ]]
   [ "$(readlink "$CACHE/latest")" = "$CACHE/v99.0.0/sfw-newer" ]
   assert_moved_aside
@@ -302,7 +309,8 @@ path_without() {
   # so the package is this account's, as after an install without root.
   local np
   np=$(path_without sha256sum)
-  [ ! -e "$np/sha256sum" ] && [ -e "$np/shasum" ]
+  [ ! -e "$np/sha256sum" ]
+  [ -e "$np/shasum" ]
   stub_bin sudo '[ "$1" != -n ] || shift; PATH="'"$np"'" exec "$@"'
   sudo chown -R "$(id -u)" "$PKG"
   harden_sfw

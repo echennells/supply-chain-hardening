@@ -751,7 +751,9 @@ sfw_pin_preconditions() {
   c=$(sfw_cache_dir) || skip "sfw not installed or layout not recognised"
   [ -e "$c/latest" ] || skip "sfw cache is cold (offline?)"
   pkg=${c%/.sfw-cache}; bin=$(command -v sfw)
-  v=$(sfw_pin_version); sum=$(sfw_pin_sum); [ -n "$v" ] && [ ${#sum} -eq 64 ]
+  v=$(sfw_pin_version); sum=$(sfw_pin_sum)
+  [ -n "$v" ] || return 1
+  [ ${#sum} -eq 64 ] || return 1
   sfw_snapshot "$c"
 }
 
@@ -809,7 +811,8 @@ sfw_cold() {
   # when it has to).
   local left=$(( $(date -d "$(cat "$c/next-check")" +%s) - $(date +%s) ))
   echo "next update check in ${left}s"
-  [ "$left" -gt 3000 ] && [ "$left" -le 3600 ]
+  [ "$left" -gt 3000 ]
+  [ "$left" -le 3600 ]
   [ "$(stat -c '%u:%g %a' "$c/next-check")" = "0:0 644" ]
   run su - sfwprior -c "sfw true"
   echo "$output"
@@ -840,7 +843,8 @@ sfw_cold() {
   [ "$(recap_changed)" = 0 ]
   [[ "$(task_result "Reset an sfw cache")" == ok:* ]]
   [[ "$(task_result "Download the pinned firewall binary")" == skipping:* ]]
-  [ "$(readlink -f "$c/latest")" = "$t" ] && [ "$(stat -c %i "$t")" = "$before" ]
+  [ "$(readlink -f "$c/latest")" = "$t" ]
+  [ "$(stat -c %i "$t")" = "$before" ]
 }
 
 @test "upgrade: a download that is not the pinned binary never reaches sfw's cache, and the run says what it was" {
@@ -855,7 +859,8 @@ sfw_cold() {
   # What it downloaded is the release the shipped pin names, so the digest is
   # the only thing that kept it out.
   [[ "$output" == *"its runtime binary could not be fetched from GitHub (exit 1: [sfw] Failed"*"The pinned $v was not used either: the download's sha256 is $sum, not the pinned $zeros. "* ]]
-  [ ! -e "$c/latest" ] && [ ! -L "$c/latest" ]
+  [ ! -e "$c/latest" ]
+  [ ! -L "$c/latest" ]
   [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ]
   hash -r; [ -z "$(command -v sfw)" ]
   [ -e "$bin.broken" ]
@@ -991,7 +996,8 @@ node_stub_teardown() {
   echo "$output" | tail -20
   [ "$status" -eq 0 ]
   [[ "$output" != *"Look for an sfw that has no firewall binary cached"* ]]
-  [ ! -e "$c/$v" ] && [ ! -e "$c/latest" ]
+  [ ! -e "$c/$v" ]
+  [ ! -e "$c/latest" ]
   [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ]
 }
 
