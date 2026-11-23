@@ -164,7 +164,7 @@ assert rc == (1 if d["result"]["gaps"] > 0 else 0), (rc, d["result"])
 PY
   # The same rows as the table, in the same order.
   run verify_sourced --emit=plain
-  diff <(grep -E '^(OK|GAP|WEAK|N/A) ' <<<"$output" | awk '{print $1, $2}') \
+  diff <(grep -E '^(OK|GAP|WEAK|N/A) +(FUNCTIONAL|PARSED|PRESENT|ABSENT|BYDESIGN) ' <<<"$output" | awk '{print $1, $2}') \
        <(python3 -c 'import json,sys; [print(r["status"], r["evidence"]) for r in json.load(open(sys.argv[1]))["rows"]]' "$BATS_TEST_TMPDIR/v.json")
 }
 

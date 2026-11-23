@@ -112,16 +112,23 @@ EMIT="${EMIT:-auto}"
 # this only fires when a human or a non-GitHub CI calls the script directly.
 SUGGEST=0
 SUGGEST_PATH="."
+PREFLIGHT=0
+PREFLIGHT_REPO=""
 for _arg in "$@"; do
   case "$_arg" in
     --emit=*) EMIT="${_arg#--emit=}" ;;
     --suggest) SUGGEST=1 ;;
     --suggest=*) SUGGEST=1; SUGGEST_PATH="${_arg#--suggest=}" ;;
+    --preflight) PREFLIGHT=1 ;;
+    --preflight=*) PREFLIGHT=1; PREFLIGHT_REPO="${_arg#--preflight=}" ;;
     --help|-h)
       echo "usage: harden.sh [--emit=auto|github|gitlab|circleci|azure|buildkite|plain]"
       echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs,"
       echo "                                    the same as Ansible extra vars, and any"
       echo "                                    repo-local config that outranks the host's"
+      echo "       harden.sh --preflight[=REPO] say what applying would stop on and which"
+      echo "                                    package managers are here, and with REPO the"
+      echo "                                    --suggest output for it; writes nothing"
       echo "       configuration is read from env: ECOSYSTEMS, RELEASE_AGE_HOURS,"
       echo "       STRICT, INSTALL_SFW, WRITE_ETC, COMPOSER_ALLOW_PLUGINS,"
       echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN"
@@ -130,6 +137,86 @@ for _arg in "$@"; do
     *) echo "[supply-chain-harden] warning: unrecognised argument '$_arg' — ignoring" >&2 ;;
   esac
 done
+
+# ---- helpers the read-only modes share with the run ----
+#
+# --suggest and --preflight run and exit before anything below is written, so
+# the functions they need are defined here, ahead of them. The run uses the same
+# ones: the preflight must judge a file or a version exactly as the apply will.
+
+# Whether a per-user config file this script or the role replaces whole was
+# written by this project. Recognition matches the role's preflight
+# (tasks/preflight.yml, `classify`; tests/ci/11-preflight.bats compares them):
+# either project's marker, or what the role wrote before it had one, is ours;
+# dotnet's own first-run NuGet.Config (nuget.org and nothing else) is stock.
+user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
+  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
+  case "$1" in
+    cargo)
+      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
+        && { echo ours; return 0; } ;;
+    maven)
+      grep -q '<id>central-https</id>' "$2" \
+        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
+        && { echo ours; return 0; } ;;
+    nuget)
+      grep -q 'key="signatureValidationMode" value="require"' "$2" \
+        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
+        && { echo ours; return 0; }
+      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+        echo stock; return 0
+      fi ;;
+  esac
+  echo foreign
+}
+
+# detect_version <key> <command>: returns the version string the command
+# prints (typically major.minor.patch), or empty if the binary isn't
+# installed OR if the version command fails for any reason. Used for
+# version-tiering decisions per ecosystem.
+#
+# Defensive against tools that exit non-zero on --version (some wrappers,
+# uv-redirected pip, broken installs) because `set -e` would otherwise
+# halt the script on a benign "we couldn't detect the version" path.
+detect_version() {
+  local _key="$1"  # unused; documentation hook for the caller's intent
+  local cmd="$2"
+  if ! command -v "${cmd%% *}" >/dev/null 2>&1; then
+    echo ""
+    return 0
+  fi
+  local out
+  # From /, never the working directory. The action runs this step in the job's
+  # checkout, and tools read files there and in every directory above it that
+  # name code they then run, for --version too. MEASURED: a .yarnrc.yml yarnPath
+  # (yarn 1.22.22, 4.1.0-4.19.0), .mvn/jvm.config (maven 3.10.0), a global.json
+  # sdk "paths" entry (.NET 10.0.404) and Poetry 2.5.2's .poetry/plugins all ran
+  # for --version. This reports the host's tool, which is what gets configured.
+  out=$(cd / && $cmd 2>&1 || true)
+  echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
+}
+
+# version_ge <a> <b>: returns 0 if a >= b semver-style, 1 otherwise.
+# Treats missing patch as .0. Used for version-tiering checks.
+version_ge() {
+  local a="$1" b="$2"
+  # read -ra rather than unquoted expansion under IFS=. — the latter is also
+  # subject to globbing, so a version string containing * or ? would expand
+  # against the cwd instead of splitting.
+  local -a a_parts b_parts
+  IFS=. read -ra a_parts <<< "$a"
+  IFS=. read -ra b_parts <<< "$b"
+  # Normalize to 3 components
+  while [[ ${#a_parts[@]} -lt 3 ]]; do a_parts+=("0"); done
+  while [[ ${#b_parts[@]} -lt 3 ]]; do b_parts+=("0"); done
+  for i in 0 1 2; do
+    local av=${a_parts[$i]:-0} bv=${b_parts[$i]:-0}
+    if (( av > bv )); then return 0; fi
+    if (( av < bv )); then return 1; fi
+  done
+  return 0  # equal counts as ge
+}
 
 # ---- --suggest: tell a repo what it needs BEFORE the first failed build ----
 #
@@ -646,8 +733,228 @@ _sg_print_overrides() {
   echo ""
 }
 
+# ---- --preflight: what applying would meet here, before anything is written ----
+#
+# For the agent or person who is about to apply the role (or this script) and
+# owes the host's owner a picture of what will happen first. It answers, before
+# a single task runs: can the play run at all (Ansible present and recent
+# enough, the caller not root, sudo, GNU date), which existing files would stop
+# it, which package managers are here, and, for a repo, what --suggest says.
+#
+# WHY HERE AND NOT IN ANSIBLE. The first thing to know is whether Ansible is
+# there at all, which a play cannot answer. And the role's own preflight is not
+# a preview: it stops at the first refusal, and its /etc check escalates, so a
+# host whose sudo needs a password gets a prompt before anything is reported.
+# `ansible-playbook --check` is not one either: the role's probes really run
+# under it (check_mode: false, by design, so a dry run is accurate), and it
+# stops at the first refusal and prints the whole task stream.
+#
+# The judgement is the role's: the same files and markers as tasks/preflight.yml
+# (tests/ci/11-preflight.bats compares the two), the same user_cfg_class as the
+# apply, and the same ansible-core and GNU-date conditions.
+#
+# WRITES NOTHING. It runs `sudo -n true` (which never prompts) to learn whether
+# sudo needs a password, as the role's preflight does, and tool version
+# commands from /, the ones measured to write nothing; tests/ci/11-preflight.bats
+# snapshots the home and the scratch directory around a run. A version command
+# that writes is not run; the tool is named with its path instead.
+#
+# Exit 0 when nothing above would stop the play, 1 when something would: each
+# such line starts with STOP.
+preflight_report() {
+  local repo="${1:-}" block=0 me uid f cls ver p sv is_rs=0 need_pw=1 av path note
+  me=$(id -un 2>/dev/null || echo "?"); uid=$(id -u)
+  local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'
+  _pf_stop() { block=1; printf '  STOP  %s\n' "$*"; }
+  _pf_note() { printf '  note  %s\n' "$*"; }
+  _pf_line() { printf '        %s\n' "$*"; }
+
+  echo "supply-chain-hardening preflight for ${me}@$(hostname 2>/dev/null || echo this host). It reads; it changes nothing."
+  echo ""
+
+  echo "Who would run the play (as this user, without sudo or --become):"
+  _pf_line "user $me (uid $uid), HOME=${HOME:-<unset>}"
+  if [ "$uid" -eq 0 ]; then
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != root ]; then
+      _pf_stop "running as root under sudo from '$SUDO_USER': the role refuses that, because per-user config would land in root's home. Run ansible-playbook as $SUDO_USER, and the role escalates by itself where root is needed."
+    elif [ "${HOME:-}" != /root ]; then
+      _pf_note "running as root with HOME=${HOME:-<unset>}; per-user config lands there."
+    else
+      _pf_note "running as root: the role hardens root's own home and the system files."
+    fi
+    need_pw=0
+  elif command -v sudo >/dev/null 2>&1; then
+    if sudo -n true >/dev/null 2>&1; then
+      need_pw=0; _pf_line "sudo works without a password"
+    else
+      _pf_line "sudo asks for a password: run ansible-playbook with -K (or this user has no sudo rights at all)"
+    fi
+    sv=$(sudo --version 2>/dev/null | head -1)
+    case "$sv" in sudo-rs*) is_rs=1 ;; esac
+  else
+    _pf_stop "no sudo on PATH and not root: the role needs root for /etc, /usr/local/bin and /etc/environment."
+  fi
+
+  echo ""
+  echo "Ansible on this machine:"
+  if path=$(command -v ansible-playbook 2>/dev/null); then
+    av=$( (cd / && ansible-playbook --version 2>/dev/null) | head -1)
+    case "$av" in
+      *"[core "*) ver=${av##*\[core }; ver=${ver%%\]*} ;;
+      *) ver=$(printf '%s\n' "$av" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) ;;
+    esac
+    _pf_line "ansible-core ${ver:-<version not read>} ($path)"
+    if [ -n "$ver" ]; then
+      version_ge "$ver" 2.14 || _pf_stop "ansible-core $ver is below 2.14, which the role needs."
+      # tasks/preflight.yml: sudo-rs's prompt is not one this ansible-core can
+      # answer, so every task that needs root would time out or hang.
+      if [ "$is_rs" = 1 ] && [ "$need_pw" = 1 ] \
+         && { ! version_ge "$ver" 2.20.11 || { version_ge "$ver" 2.21.0 && ! version_ge "$ver" 2.21.6; }; }; then
+        _pf_stop "this host's sudo is sudo-rs and asks for a password, which ansible-core $ver cannot answer (measured on 2.16 to 2.21.5). Use ansible-core 2.20.11+, 2.21.6+ or 2.22+ for this user (pipx install 'ansible-core>=2.21.6'), or NOPASSWD sudo for the apply."
+      fi
+    fi
+  else
+    _pf_stop "ansible-playbook not found. Install ansible-core >= 2.14 for this user, or use action/harden.sh --emit=plain (narrower, see AGENTS.md)."
+  fi
+  # The role's probe is `date -u -d @0`. BSD date (macOS) reads -d as "set the
+  # kernel's daylight-saving value", so there the probe is not run at all.
+  f=$(date --version 2>/dev/null | head -1)
+  if [ "${f#*GNU}" != "$f" ]; then
+    :
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ] \
+       || [ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" != "1970-01-01T00:00:00Z" ]; then
+    _pf_stop "this machine's date is not GNU date, which the role's rolling uv/pip cutoff needs (macOS: brew install coreutils and put its gnubin first on PATH for this shell, or pin uv_exclude_newer to an instant)."
+  fi
+
+  echo ""
+  echo "Files the play stops on (it did not write them; nothing is changed until they are dealt with):"
+  for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+    [ -f "$f" ] || continue
+    if [ ! -r "$f" ]; then
+      _pf_note "$f: not readable by $me; the role reads it as root and decides."
+    elif grep -qE "$marker" "$f" 2>/dev/null; then
+      _pf_line "$f: written by this project, replaced as before"
+    else
+      _pf_stop "$f: not written by this project, and often a corporate registry. Show it to the owner; only with their agreement, -e accept_etc_overwrite=true replaces it."
+    fi
+  done
+  _pf_user_file() { # <kind> <path>
+    [ -e "$2" ] || return 0
+    cls=$(user_cfg_class "$1" "$2")
+    case "$cls" in
+      ours) _pf_line "$2: written by this project, replaced as before" ;;
+      stock) _pf_note "$2: dotnet's own first-run file; replaced without stopping, after a backup next to it." ;;
+      *) _pf_stop "$2: not written by this project, and often a private registry with credentials. Show it to the owner; only with their agreement, -e accept_user_config_overwrite=true backs it up next to itself and replaces it." ;;
+    esac
+  }
+  _pf_user_file cargo "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+  if command -v mvn >/dev/null 2>&1 || command -v java >/dev/null 2>&1 \
+     || { [ -n "${JAVA_HOME:-}" ] && [ -x "${JAVA_HOME:-}/bin/java" ]; }; then
+    _pf_user_file maven "$HOME/.m2/settings.xml"
+  fi
+  command -v dotnet >/dev/null 2>&1 && _pf_user_file nuget "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+  # Not a stop: as a non-root user the role leaves root's yarn file alone if it
+  # did not write it, and lists it in the run summary (tasks/yarn.yml).
+  if [ "$uid" -ne 0 ]; then
+    if [ "$need_pw" = 0 ] && command -v sudo >/dev/null 2>&1; then
+      if sudo -n sh -c 'test -f /root/.yarnrc.yml' >/dev/null 2>&1 \
+         && ! sudo -n sh -c "grep -qE '$marker' /root/.yarnrc.yml" >/dev/null 2>&1; then
+        _pf_note "/root/.yarnrc.yml: not written by this project; the role leaves it alone and lists it in the run summary."
+      fi
+    else
+      _pf_note "/root/.yarnrc.yml: not read (needs root). If it is not this project's, the role leaves it alone and says so in the run summary."
+    fi
+  fi
+  _pf_line "(action/harden.sh does not stop on the per-user files: it backs each one up next to itself, replaces it and warns. It writes /etc with sudo where it can.)"
+
+  echo ""
+  echo "Package managers here (the role configures what it finds; it installs none of them):"
+  for f in node npm pnpm yarn bun deno uv python3 go rustc cargo composer bundle gem poetry mvn gradle dotnet npq-hero sfw; do
+    path=$(command -v "$f" 2>/dev/null) || continue
+    ver=$(_pf_version "$f" "$path")
+    note=""
+    case "$f" in
+      npm) _pf_below "$ver" 11.10.0 && note="; its age gate needs npm 11.10.0" ;;
+      yarn) _pf_below "$ver" 4.10.0 && note="; its age gate needs Yarn 4.10" ;;
+      bun) _pf_below "$ver" 1.3.0 && note="; its age gate needs Bun 1.3.0" ;;
+      rustc) _pf_below "$ver" 1.91.1 && note="; the cargo age gate's backend needs rustc 1.91.1" ;;
+    esac
+    _pf_line "$f ${ver:-(version not read)} ($path)$note"
+  done
+  if [ -n "$(command -v python3 2>/dev/null)" ]; then
+    _pf_line "(pip: the role redirects pip to uv where uv is present; pip's own age gate needs pip 26)"
+  fi
+
+  if [ -n "$repo" ]; then
+    echo ""
+    echo "What --suggest says for $repo:"
+    echo ""
+    suggest_for_repo "$repo" | sed 's/^/  /'
+    echo ""
+  else
+    echo ""
+    echo "For a repo headed into CI, or whose agents will run on this host, add its path:"
+    echo "  action/harden.sh --preflight=/path/to/repo"
+  fi
+
+  echo ""
+  if [ "$block" = 1 ]; then
+    echo "STOP lines above end the play before it changes anything. Show this to the"
+    echo "person who owns the host and wait for their answer. Nothing was changed here."
+    return 1
+  fi
+  echo "Nothing above would stop the play. Show this to the person who owns the host"
+  echo "and wait for their OK before applying. Nothing was changed here."
+}
+
+# _pf_below <version> <minimum>: 0 when a version was read and is below minimum.
+_pf_below() { [ -n "$1" ] && ! version_ge "$1" "$2"; }
+
+# _pf_version <tool> <path>: a version without writing anything, or nothing.
+# MEASURED in the test image (tests/ci/11-preflight.bats holds the list to it):
+# the commands run here left the home and the scratch directory untouched.
+# Others download (a corepack shim), start a JVM or a first-run setup that
+# writes (gradle, dotnet, mvn's ~/.m2), or were not measured (composer, gem,
+# bundle, npq, sfw): those print nothing and are named with their path only.
+_pf_version() {
+  local t="$1" r d
+  case "$t" in
+    node|deno|bun|uv|go) detect_version "$t" "$t --version" ;;
+    python3) detect_version python3 "python3 -V" ;;
+    # A rustup proxy would otherwise download the toolchain to answer.
+    rustc|cargo) RUSTUP_AUTO_INSTALL=0 detect_version "$t" "$t --version" ;;
+    npm|pnpm|yarn)
+      # From the package itself, not by running it: pnpm and yarn behind corepack
+      # fetch a release to answer, and npm is node startup either way. A wrapper
+      # this project deployed names the real binary in REAL_NPM=.
+      r=$2
+      if grep -q 'supply-chain-harden' "$r" 2>/dev/null; then
+        d=$(sed -n "s/^REAL_[A-Z]*='\([^']*\)'.*/\1/p" "$r" 2>/dev/null | head -1)
+        [ -n "$d" ] && r=$d
+      fi
+      r=$(readlink -f "$r" 2>/dev/null) || return 0
+      case "$r" in */corepack/*|*/corepack.js) return 0 ;; esac
+      d=${r%/*}
+      while [ -n "$d" ] && [ "$d" != / ]; do
+        if [ -f "$d/package.json" ]; then
+          sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1 | grep -qx "$t" \
+            && sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1
+          return 0
+        fi
+        d=${d%/*}
+      done ;;
+    *) : ;;
+  esac
+  return 0
+}
+
 if [ "$SUGGEST" = "1" ]; then
   suggest_for_repo "$SUGGEST_PATH"
+  exit $?
+fi
+
+if [ "$PREFLIGHT" = "1" ]; then
+  preflight_report "$PREFLIGHT_REPO"
   exit $?
 fi
 
@@ -1238,27 +1545,6 @@ can_write() {
 # marker, counts as ours; dotnet's own first-run NuGet.Config (nuget.org and
 # nothing else; MEASURED on SDK 8.0.134 it opens with a UTF-8 BOM) is copied
 # without a warning.
-user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
-  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
-  case "$1" in
-    cargo)
-      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
-        && { echo ours; return 0; } ;;
-    maven)
-      grep -q '<id>central-https</id>' "$2" \
-        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
-        && { echo ours; return 0; } ;;
-    nuget)
-      grep -q 'key="signatureValidationMode" value="require"' "$2" \
-        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
-        && { echo ours; return 0; }
-      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
-           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
-        echo stock; return 0
-      fi ;;
-  esac
-  echo foreign
-}
 keep_user_copy() {
   local kind="$1" path="$2" cls bak
   [[ -e "$path" ]] || return 0
@@ -1338,53 +1624,6 @@ subst_inplace() {
 # parity with the npm/bun/composer wrappers (which interpolate via single-quoted
 # heredocs), not a fix for a reachable vulnerability.
 sed_repl() { printf '%s' "$1" | tr -d '\n\r' | sed 's/[\\&|]/\\&/g'; }
-
-# detect_version <key> <command>: returns the version string the command
-# prints (typically major.minor.patch), or empty if the binary isn't
-# installed OR if the version command fails for any reason. Used for
-# version-tiering decisions per ecosystem.
-#
-# Defensive against tools that exit non-zero on --version (some wrappers,
-# uv-redirected pip, broken installs) because `set -e` would otherwise
-# halt the script on a benign "we couldn't detect the version" path.
-detect_version() {
-  local _key="$1"  # unused; documentation hook for the caller's intent
-  local cmd="$2"
-  if ! command -v "${cmd%% *}" >/dev/null 2>&1; then
-    echo ""
-    return 0
-  fi
-  local out
-  # From /, never the working directory. The action runs this step in the job's
-  # checkout, and tools read files there and in every directory above it that
-  # name code they then run, for --version too. MEASURED: a .yarnrc.yml yarnPath
-  # (yarn 1.22.22, 4.1.0-4.19.0), .mvn/jvm.config (maven 3.10.0), a global.json
-  # sdk "paths" entry (.NET 10.0.404) and Poetry 2.5.2's .poetry/plugins all ran
-  # for --version. This reports the host's tool, which is what gets configured.
-  out=$(cd / && $cmd 2>&1 || true)
-  echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
-}
-
-# version_ge <a> <b>: returns 0 if a >= b semver-style, 1 otherwise.
-# Treats missing patch as .0. Used for version-tiering checks.
-version_ge() {
-  local a="$1" b="$2"
-  # read -ra rather than unquoted expansion under IFS=. — the latter is also
-  # subject to globbing, so a version string containing * or ? would expand
-  # against the cwd instead of splitting.
-  local -a a_parts b_parts
-  IFS=. read -ra a_parts <<< "$a"
-  IFS=. read -ra b_parts <<< "$b"
-  # Normalize to 3 components
-  while [[ ${#a_parts[@]} -lt 3 ]]; do a_parts+=("0"); done
-  while [[ ${#b_parts[@]} -lt 3 ]]; do b_parts+=("0"); done
-  for i in 0 1 2; do
-    local av=${a_parts[$i]:-0} bv=${b_parts[$i]:-0}
-    if (( av > bv )); then return 0; fi
-    if (( av < bv )); then return 1; fi
-  done
-  return 0  # equal counts as ge
-}
 
 # PER-ECOSYSTEM EFFECT, as distinct from per-ecosystem ATTEMPT.
 #
