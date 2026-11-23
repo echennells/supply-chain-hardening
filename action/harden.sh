@@ -119,7 +119,9 @@ for _arg in "$@"; do
     --suggest=*) SUGGEST=1; SUGGEST_PATH="${_arg#--suggest=}" ;;
     --help|-h)
       echo "usage: harden.sh [--emit=auto|github|gitlab|circleci|azure|buildkite|plain]"
-      echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs"
+      echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs,"
+      echo "                                    the same as Ansible extra vars, and any"
+      echo "                                    repo-local config that outranks the host's"
       echo "       configuration is read from env: ECOSYSTEMS, RELEASE_AGE_HOURS,"
       echo "       STRICT, INSTALL_SFW, WRITE_ETC, COMPOSER_ALLOW_PLUGINS,"
       echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN"
@@ -143,9 +145,10 @@ done
 # control?"), and the observed consequence of failing it is not a support
 # ticket — it is the two lines being deleted from the workflow.
 #
-# This mode reads the manifests and prints the `with:` block the repo needs, so
-# the exceptions are chosen at adoption time from evidence rather than
-# reverse-engineered from a stack trace.
+# This mode reads the manifests and prints the `with:` block the repo needs (and
+# the same exceptions as extra vars for the Ansible role), so the exceptions
+# are chosen at adoption time from evidence rather than reverse-engineered from
+# a stack trace. It also lists repo-local config that outranks the host's.
 #
 # It reports; it changes nothing. Run it locally, or as a one-off job.
 #
@@ -208,10 +211,247 @@ suggest_scripted_deps() {
   return 0
 }
 
+# ---- repo-local config that outranks the host's, read as files ----
+#
+# A file in the project directory outranks the ~ and /etc files the role and
+# this script write, so a repository can lift a protection without touching
+# any of them. The role cannot close that, and supply-chain-verify reports it
+# only when it is run from inside the project, after the fact. So --suggest
+# names it before anything is applied. Every finding says what outranks the
+# repo's value, if anything does; the measurements are in docs/limitations.md,
+# "Repo-local configuration can outrank the role's user + system config".
+#
+# FILES ONLY (docs/design-principles.md, "The verifier test"). Nothing in the
+# repo runs, no package manager is started in it, and only the keys named below
+# are printed: a project .npmrc or .bundle/config can hold a token.
+#
+# These readers are deliberately simple: a line or a table at a time, with the
+# value printed as it is written. A value they cannot read is reported as not
+# read, never as absent.
+_sg_clean() { LC_ALL=C tr -cd '[:print:]\n' | cut -c1-160; }
+
+# _sg_ini <file> <key>... -> "key=value" per line (.npmrc; `key[]` counts as key)
+_sg_ini() {
+  local f="$1"; shift
+  awk -v keys="$*" '
+    BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
+    { sub(/\r$/, "") }
+    /^[ \t]*[;#]/ { next }
+    { i = index($0, "="); if (!i) next
+      key = substr($0, 1, i - 1); val = substr($0, i + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+      base = key; sub(/\[\]$/, "", base)
+      if (base in want) print key "=" val }' "$f" 2>/dev/null | _sg_clean
+}
+
+# _sg_toml <file> <dotted.path>... -> "path = value" per line; a table of that
+# name is "path (a table)". Dotted keys and dotted table headers both work.
+_sg_toml() {
+  local f="$1"; shift
+  awk -v paths="$*" '
+    BEGIN { n = split(paths, p, " "); for (i = 1; i <= n; i++) want[p[i]] = 1 }
+    { sub(/\r$/, "") }
+    /^[ \t]*#/ { next }
+    /^[ \t]*\[[^]]*\]+[ \t]*(#.*)?$/ {
+      sec = $0; sub(/^[ \t]*\[+[ \t]*/, "", sec); sub(/[ \t]*\].*$/, "", sec)
+      gsub(/["\047 \t]/, "", sec)
+      if (sec in want) print sec " (a table)"
+      next
+    }
+    { line = $0; sub(/^[ \t]+/, "", line)
+      if (match(line, /^("[^"]*"|\047[^\047]*\047|[A-Za-z0-9_-]+)([ \t]*[.][ \t]*("[^"]*"|[A-Za-z0-9_-]+))*[ \t]*=/)) {
+        key = substr(line, 1, RLENGTH - 1); val = substr(line, RLENGTH + 1)
+        gsub(/["\047 \t]/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+        full = (sec == "" ? key : sec "." key)
+        if (full in want) print full " = " val
+      } }' "$f" 2>/dev/null | _sg_clean
+}
+
+# _sg_yaml <file> <top-level key>... -> "key: value" per line; a list below the
+# key is folded to "key: [a, b]".
+_sg_yaml() {
+  local f="$1"; shift
+  awk -v keys="$*" '
+    function flush() {
+      if (cur == "") return
+      if (items != "") v = "[" items "]"
+      if (v == "") v = "(a value on the lines below that this reader does not follow)"
+      print cur ": " v; cur = ""
+    }
+    BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1; cur = "" }
+    { sub(/\r$/, "") }
+    /^[ \t]*#/ { next }
+    /^[^ \t#-]/ {
+      flush()
+      if (match($0, /^["\047]?[A-Za-z0-9_-]+["\047]?[ \t]*:/)) {
+        key = substr($0, 1, RLENGTH - 1); v = substr($0, RLENGTH + 1)
+        gsub(/["\047 \t]/, "", key); sub(/^[ \t]+/, "", v)
+        if (v ~ /^#/) v = ""; else sub(/[ \t]+#.*$/, "", v)
+        items = ""
+        if (key in want) cur = key
+      }
+      next
+    }
+    cur != "" && /^[ \t]*-[ \t]/ {
+      it = $0; sub(/^[ \t]*-[ \t]+/, "", it); gsub(/["\047]/, "", it); sub(/[ \t]+#.*$/, "", it)
+      items = items (items == "" ? "" : ", ") it; next
+    }
+    END { flush() }' "$f" 2>/dev/null | _sg_clean
+}
+
+# _sg_composer_policy <composer.json> -> "config.policy = <json>" and
+# "config.policy.cooldown.<k> = <json>", or "unreadable: why", or nothing.
+# -I -S: an isolated interpreter that processes no site directory, so neither
+# the working directory nor a .pth file runs anything.
+_sg_composer_policy() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -I -S - "$1" 2>/dev/null <<'PY' | _sg_clean
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+except Exception as e:
+    print("unreadable: " + (str(e).splitlines() or ["?"])[0])
+    sys.exit(0)
+cfg = d.get("config") if isinstance(d, dict) else None
+pol = cfg.get("policy") if isinstance(cfg, dict) else None
+if pol is None:
+    sys.exit(0)
+if not isinstance(pol, dict):
+    print("config.policy = " + json.dumps(pol))
+    sys.exit(0)
+cd = pol.get("cooldown")
+if isinstance(cd, dict):
+    for k in ("period", "block", "ignore"):
+        if k in cd:
+            print("config.policy.cooldown." + k + " = " + json.dumps(cd[k]))
+elif "cooldown" in pol:
+    print("config.policy.cooldown = " + json.dumps(cd))
+PY
+  elif grep -q '"policy"' "$1" 2>/dev/null; then
+    echo "unreadable: no python3 here to read the \"policy\" key with"
+  fi
+}
+
+# What outranks a repo's value, if anything. One place, so the wording and the
+# facts change together.
+_sg_role_env="on a host hardened by the role, the env layer outranks it in login shells and PAM sessions, not in systemd units, a container CMD or a cleaned environment"
+_sg_ci_env="in CI, the steps after the action carry it too"
+_sg_open="Not closed by the role or the action."
+
+# Appends to the caller's `overrides` array: "<file>: <line> — <effect>".
+_sg_override() { overrides+=("$1: $2 — $3"); }
+
+# Every repo-local override this reads, for the repo at $1.
+suggest_overrides() {
+  local d="$1" l f tables
+  local -a hits
+  _sg_hits() { hits=(); while IFS= read -r l; do [ -n "$l" ] && hits+=("$l"); done; }
+
+  if [ -f "$d/.npmrc" ]; then
+    _sg_hits < <(_sg_ini "$d/.npmrc" ignore-scripts min-release-age min-release-age-exclude minimum-release-age allow-git)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        ignore-scripts=*) _sg_override .npmrc "$l" "this project's npm runs install scripts when it is false. NPM_CONFIG_IGNORE_SCRIPTS outranks it: ${_sg_role_env}; ${_sg_ci_env}." ;;
+        min-release-age=*) _sg_override .npmrc "$l" "this project's npm age gate, in days; 0 turns it off. NPM_CONFIG_MIN_RELEASE_AGE outranks it: ${_sg_role_env}; ${_sg_ci_env}." ;;
+        min-release-age-exclude*) _sg_override .npmrc "$l" "these packages skip npm's age gate (npm 11.17+). ${_sg_open}" ;;
+        minimum-release-age=*) _sg_override .npmrc "$l" "pnpm 10's age gate for this project (pnpm 11 does not read .npmrc for this). ${_sg_open}" ;;
+        allow-git=*) _sg_override .npmrc "$l" "whether this project's npm installs git dependencies. NPM_CONFIG_ALLOW_GIT=none outranks it on npm 11.9.0+: ${_sg_role_env}; ${_sg_ci_env}." ;;
+      esac
+    done
+  fi
+
+  # uv reads uv.toml if there is one, else pyproject.toml's [tool.uv].
+  for f in uv.toml pyproject.toml; do
+    [ -f "$d/$f" ] || continue
+    if [ "$f" = uv.toml ]; then
+      _sg_hits < <(_sg_toml "$d/$f" no-build exclude-newer exclude-newer-package pip.no-build pip.exclude-newer)
+    else
+      _sg_hits < <(_sg_toml "$d/$f" tool.uv.no-build tool.uv.exclude-newer tool.uv.exclude-newer-package tool.uv.pip.no-build tool.uv.pip.exclude-newer)
+    fi
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        *exclude-newer-package*) _sg_override "$f" "$l" "loosens uv's cutoff for the packages it names. ${_sg_open}" ;;
+        *exclude-newer*) _sg_override "$f" "$l" "this project's own uv cutoff, instead of the host's. On a role host with uv_exclude_newer_env (agent_host turns it on), UV_EXCLUDE_NEWER outranks it in login shells; otherwise, and in CI, not closed." ;;
+        *no-build*) _sg_override "$f" "$l" "uv's source-build block for this project; false lifts it for every uv command run here. ${_sg_open}" ;;
+      esac
+    done
+    [ "$f" = uv.toml ] && break
+  done
+
+  if [ -f "$d/pnpm-workspace.yaml" ]; then
+    _sg_hits < <(_sg_yaml "$d/pnpm-workspace.yaml" minimumReleaseAge minimumReleaseAgeExclude minimumReleaseAgeStrict ignoreScripts)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        minimumReleaseAgeExclude:*) _sg_override pnpm-workspace.yaml "$l" "these packages skip pnpm's age gate. On pnpm 11+, pnpm_config_minimum_release_age_exclude outranks it: ${_sg_role_env}. On pnpm 10, and in CI, not closed." ;;
+        minimumReleaseAgeStrict:*) _sg_override pnpm-workspace.yaml "$l" "false lets a too-new exact pin install. ${_sg_open}" ;;
+        minimumReleaseAge:*) _sg_override pnpm-workspace.yaml "$l" "this project's pnpm age gate, in minutes. On pnpm 11+, pnpm_config_minimum_release_age outranks it: ${_sg_role_env}. On pnpm 10, and in CI, not closed." ;;
+        ignoreScripts:*) _sg_override pnpm-workspace.yaml "$l" "false runs this project's own lifecycle scripts and the builds it allows. ${_sg_open}" ;;
+      esac
+    done
+  fi
+
+  if [ -f "$d/.yarnrc.yml" ]; then
+    _sg_hits < <(_sg_yaml "$d/.yarnrc.yml" enableScripts npmMinimalAgeGate npmPreapprovedPackages yarnPath plugins)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        enableScripts:*) _sg_override .yarnrc.yml "$l" "true runs install scripts in this project. ${_sg_open}" ;;
+        npmMinimalAgeGate:*) _sg_override .yarnrc.yml "$l" "this project's yarn age gate, in minutes (Yarn 4.10+). ${_sg_open}" ;;
+        npmPreapprovedPackages:*) _sg_override .yarnrc.yml "$l" "these packages skip yarn's age gate. ${_sg_open}" ;;
+        yarnPath:*) _sg_override .yarnrc.yml "$l" "this project's own yarn runs for every yarn command here, and it decides which gates exist. ${_sg_open}" ;;
+        plugins:*) _sg_override .yarnrc.yml "$l" "code loaded into yarn for every command here. ${_sg_open}" ;;
+      esac
+    done
+  fi
+  if [ -f "$d/.yarnrc" ] && grep -qE '^[[:space:]]*yarn-path' "$d/.yarnrc" 2>/dev/null; then
+    _sg_override .yarnrc "$(grep -E '^[[:space:]]*yarn-path' "$d/.yarnrc" 2>/dev/null | head -1 | _sg_clean)" "this project's own yarn 1 runs for every yarn command here. ${_sg_open}"
+  fi
+
+  if [ -f "$d/.bundle/config" ]; then
+    _sg_hits < <(_sg_yaml "$d/.bundle/config" BUNDLE_COOLDOWN BUNDLE_FROZEN)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        BUNDLE_COOLDOWN:*) _sg_override .bundle/config "$l" "Bundler's age gate for this project, in days; it outranks the BUNDLE_COOLDOWN both surfaces export (measured on Bundler 4.0.13 to 4.1.0). ${_sg_open}" ;;
+        BUNDLE_FROZEN:*) _sg_override .bundle/config "$l" "a project setting outranks ~/.bundle/config; false turns frozen mode off here. ${_sg_open}" ;;
+      esac
+    done
+  fi
+
+  if [ -f "$d/composer.json" ]; then
+    _sg_hits < <(_sg_composer_policy "$d/composer.json")
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        unreadable:*) _sg_override composer.json "$l" "config.policy could not be read; look for it in the file." ;;
+        *cooldown.ignore*) _sg_override composer.json "$l" "these packages skip Composer's age gate (\"*\" is every package); it outranks COMPOSER_POLICY_COOLDOWN_PERIOD and _BLOCK (measured on Composer 2.11.1). ${_sg_open}" ;;
+        *cooldown.period*|*cooldown.block*) _sg_override composer.json "$l" "Composer's age gate for this project. COMPOSER_POLICY_COOLDOWN_PERIOD and _BLOCK outrank it (measured on 2.11.1): ${_sg_role_env}; ${_sg_ci_env}." ;;
+        config.policy*) _sg_override composer.json "$l" "false turns Composer's policy off, age gate and advisory blocking included (measured on 2.11.2). Neither surface exports COMPOSER_POLICY, which outranks it. ${_sg_open}" ;;
+      esac
+    done
+  fi
+
+  for f in .cargo/config.toml .cargo/config; do
+    [ -f "$d/$f" ] || continue
+    l=$(_sg_toml "$d/$f" build.rustc-wrapper build.rustc-workspace-wrapper build.rustc | head -3 | tr '\n' ';' | sed 's/;$//')
+    tables=$(sed -n 's/^[[:space:]]*\[\{1,2\}[[:space:]]*\([^]]*\).*/\1/p' "$d/$f" 2>/dev/null | tr -d '"'"'"' \t' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g' | _sg_clean)
+    _sg_override "$f" "${l:+$l; }tables: ${tables:-none}" "cargo reads it for every cargo command here, and \`cargo metadata\` (which an IDE runs on folder open) runs a rustc-wrapper it names. ${_sg_open}"
+  done
+  for f in "$d/cooldown.toml"; do
+    [ -f "$f" ] || continue
+    l=$(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | head -6 | tr '\n' ';' | sed 's/;$//; s/;/; /g' | _sg_clean)
+    _sg_override cooldown.toml "${l:-(empty)}" "cargo-cooldown reads it; the wrapper pins the windows, but allow entries in it still exempt crates. Not closed."
+  done
+  for f in rust-toolchain.toml rust-toolchain; do
+    [ -f "$d/$f" ] || continue
+    l=$(_sg_toml "$d/$f" toolchain.path | head -1)
+    [ -n "$l" ] || continue
+    _sg_override "$f" "$l" "rustup runs the cargo under that path in this project, so the cargo wrapper never sees those commands. ${_sg_open}"
+  done
+}
+
 suggest_for_repo() {
   local dir="${1:-.}"
-  local -a with_lines=() notes=()
-  local found_any=0
+  local -a with_lines=() notes=() overrides=() ansible=()
+  local found_any=0 cargo_note=0
 
   if [ ! -d "$dir" ]; then
     echo "[supply-chain-harden] error: '$dir' is not a directory" >&2
@@ -243,6 +483,7 @@ suggest_for_repo() {
     notes+=("These packages run code at install time: ${scripted}. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing.")
     if [ -f "$dir/pnpm-lock.yaml" ]; then
       with_lines+=("          pnpm_built_dependencies: '$scripted'")
+      ansible+=("pnpm_built_dependencies")
       notes+=("pnpm: allowlisting them restores their build scripts and nothing else. On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
     fi
     if [ -f "$dir/package-lock.json" ]; then
@@ -287,6 +528,7 @@ suggest_for_repo() {
     if [ "$needs_plugins" = "1" ]; then
       found_any=1
       with_lines+=("          composer_allow_plugins: 'true'")
+      ansible+=("composer_allow_plugins")
       notes+=("composer.json declares plugins. The wrapper injects \`--no-plugins\` by default, which silently skips them; \`--no-scripts\` still applies either way.")
     fi
     if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
@@ -299,6 +541,7 @@ suggest_for_repo() {
   if [ -f "$dir/Cargo.toml" ]; then
     found_any=1
     with_lines+=("          install_cargo_cooldown: 'true'")
+    cargo_note=1
     notes+=("Rust detected. Without the cargo-cooldown backend the publish-age gate's config is written but nothing enforces it — you get \`--locked\` only. It compiles from source (minutes on a cold runner), so cache it or accept the cost. cargo is also the one ecosystem where \`build.rs\` runs at compile time with your privileges and cannot be blocked, which is what the age gate is standing in for.")
   fi
 
@@ -308,14 +551,21 @@ suggest_for_repo() {
     notes+=("Python detected. pip is set to \`only-binary=:all:\` — a dependency published only as an sdist will fail to resolve. If that happens, use \`uv pip install\` (it honours no-build with better errors), or drop \`pip\` from \`ecosystems\`. Whether a given dependency has a wheel for this platform cannot be determined without the network, so this is a heads-up rather than a finding.")
   fi
 
+  suggest_overrides "$dir"
+
   # --- output ---
   if [ "$found_any" = "0" ] && [ ${#notes[@]} -eq 0 ]; then
     echo "No exceptions needed. The defaults should work as-is:"
     echo ""
     echo "      - uses: echennells/supply-chain-hardening/action@v2"
     echo ""
+    echo "With the Ansible role, no extra vars are needed either:"
+    echo ""
+    echo "      ansible-playbook site.yml --limit localhost"
+    echo ""
     echo "Still put it after your setup-* steps and before your installs, and add"
     echo "the verify action after your installs."
+    _sg_print_overrides
     return 0
   fi
 
@@ -331,6 +581,37 @@ suggest_for_repo() {
     echo ""
   fi
 
+  # The same evidence for the role. Extra vars in JSON: pnpm_built_dependencies
+  # is a list, and key=value would hand the role a string.
+  local ev=""
+  case " ${ansible[*]:-} " in
+    *" pnpm_built_dependencies "*)
+      local names="" n
+      for n in ${scripted//,/ }; do
+        case "$n" in *[!A-Za-z0-9@/._-]*) continue ;; esac
+        names="${names:+$names, }\"$n\""
+      done
+      [ -n "$names" ] && ev="${ev:+$ev, }\"pnpm_built_dependencies\": [$names]" ;;
+  esac
+  case " ${ansible[*]:-} " in
+    *" composer_allow_plugins "*) ev="${ev:+$ev, }\"composer_allow_plugins\": true" ;;
+  esac
+  if [ -n "$ev" ]; then
+    echo "With the Ansible role, the same exceptions as extra vars:"
+    echo ""
+    echo "      ansible-playbook site.yml --limit localhost -e '{$ev}'"
+  else
+    echo "With the Ansible role, no extra vars are needed:"
+    echo ""
+    echo "      ansible-playbook site.yml --limit localhost"
+  fi
+  if [ "$cargo_note" = "1" ]; then
+    echo ""
+    echo "      (install_cargo_cooldown has no role counterpart to pass: the role"
+    echo "       builds cargo-cooldown by default, cargo_cooldown_enforce=true.)"
+  fi
+  echo ""
+
   if [ ${#notes[@]} -gt 0 ]; then
     echo "Why, and what else to know:"
     echo ""
@@ -339,8 +620,30 @@ suggest_for_repo() {
     echo ""
   fi
 
+  _sg_print_overrides
   echo "Order still matters more than any of the above: setup-* steps first,"
   echo "then this action, then your installs, then the verify action."
+}
+
+# Reads the caller's `overrides` array (bash's dynamic scope) and says what was
+# looked for, so an empty list reads as "looked and found none", not as silence.
+_sg_print_overrides() {
+  local o
+  echo ""
+  if [ ${#overrides[@]} -eq 0 ]; then
+    echo "Repo-local config that outranks the host's: none found at the top of the repo"
+    echo "(.npmrc, uv.toml, pyproject [tool.uv], pnpm-workspace.yaml, .yarnrc.yml, .yarnrc,"
+    echo ".bundle/config, composer.json, .cargo/config.toml, cooldown.toml, rust-toolchain)."
+  else
+    echo "Repo-local config that outranks the host's, as the files are written:"
+    echo ""
+    for o in "${overrides[@]}"; do _sg_note "$o"; done
+    echo ""
+    echo "Only the top of the repo was read, and the files as text: nothing in the repo"
+    echo "ran. After applying, run the verifier from inside the repo; it reports the uv,"
+    echo "pnpm, yarn, composer and bundler ones as rows."
+  fi
+  echo ""
 }
 
 if [ "$SUGGEST" = "1" ]; then

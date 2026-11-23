@@ -340,6 +340,30 @@ nothing on npm 9.2.0, 11.19.1 or 12.2.3; adding `--ignore-scripts=false` built i
 `ignore-scripts` stayed `true` for the next install on all three. A `yarn.lock` or
 bun lockfile is told that the action has no per-package allowlist for them.
 
+The same evidence is printed for the Ansible role, as extra vars in JSON (the
+role's `pnpm_built_dependencies` is a list, so `key=value` would hand it a
+string):
+
+```
+With the Ansible role, the same exceptions as extra vars:
+
+      ansible-playbook site.yml --limit localhost -e '{"pnpm_built_dependencies": ["esbuild", "sharp"], "composer_allow_plugins": true}'
+```
+
+`install_cargo_cooldown` has no role counterpart: the role builds cargo-cooldown
+by default (`cargo_cooldown_enforce`).
+
+**Repo-local config that outranks the host's** comes last. A `.npmrc`, `uv.toml`
+or `[tool.uv]`, `pnpm-workspace.yaml`, `.yarnrc.yml`, `.bundle/config`,
+`composer.json` policy, `.cargo/config.toml`, `cooldown.toml` or
+`rust-toolchain.toml` `path` at the top of the repo can lift a protection the
+host deploys, and neither the action nor the role can stop most of them; each
+line says which one can be outranked and by what. `--suggest` names them before
+you apply anything, because the verifier reports them only when it is run from
+inside the repo. It reads the files as text (a JSON file with an isolated
+`python3 -I -S`), prints only the keys it looked for, never a token, and runs
+no package manager.
+
 It reports and changes nothing — no config is written, no tool is installed.
 
 **Where the answer is exact, and where it is a floor.** `package-lock.json`
