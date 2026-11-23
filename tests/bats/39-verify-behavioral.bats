@@ -420,6 +420,74 @@ STUB
   fi
 }
 
+@test "output: --json's result counts every status, adds up to its rows, and names the tools it judged" {
+  # "gaps": 0 alone reads the same on a host where nothing was checked. The
+  # result therefore counts OK and both kinds of N/A too, and tools_seen names
+  # what at least one OK, WEAK or GAP row judged (docs/verify.md). The rule is
+  # restated here rather than re-run; tests/ci/10-verify-json.bats covers the
+  # shared block itself, an empty host, and the CI surface.
+  local f="$BATS_TEST_TMPDIR/v.json" rc=0
+  "$VERIFY" --json > "$f" 2>/dev/null || rc=$?
+  python3 - "$f" "$rc" <<'PY'
+import json, re, shutil, sys
+d = json.load(open(sys.argv[1])); rc = int(sys.argv[2])
+r, rows = d["result"], d["rows"]
+assert d["surface"] == "role", d["surface"]
+assert re.match(r"^\d{4}-\d{2}-\d{2}$", d["declared_intent_recorded"]), d["declared_intent_recorded"]
+assert d["min_age_hours"] == 48, d["min_age_hours"]
+cnt = lambda st: sum(1 for x in rows if x["status"] == st)
+assert (r["ok"], r["gaps"], r["weaks"]) == (cnt("OK"), cnt("GAP"), cnt("WEAK")), r
+assert r["na_design"] == sum(1 for x in rows if x["status"] == "N/A" and x["evidence"] == "BYDESIGN"), r
+assert r["na_absent"] == sum(1 for x in rows if x["status"] == "N/A" and x["evidence"] != "BYDESIGN"), r
+assert r["gaps"] + r["weaks"] + r["ok"] + r["na_design"] + r["na_absent"] == len(rows)
+want = []
+for x in rows:
+    if x["status"] in ("OK", "WEAK", "GAP"):
+        t = x["protection"].split(" ")[0]
+        t = "sfw" if t == "Socket" else t
+        if t in ("env", "hardening", "ci") or x["protection"].endswith(" coverage") \
+           or x["protection"] == "python startup hooks" or t in want:
+            continue
+        if t in ("npq", "sfw") and not shutil.which({"npq": "npq-hero"}.get(t, t)):
+            continue
+        want.append(t)
+assert r["tools_seen"] == want, (r["tools_seen"], want)
+# Every one of these that is installed was judged. The image has all five; a real
+# host may not (round 4: Ubuntu 22.04 had no pnpm).
+for t in ("npm", "pnpm", "uv", "cargo", "composer"):
+    if shutil.which(t):
+        assert t in r["tools_seen"], (t, r["tools_seen"])
+assert r["ok"] > 10, r
+assert rc == (1 if r["gaps"] else 0), (rc, r)
+PY
+}
+
+@test "output: --json on a host with no package manager in reach has an empty tools_seen" {
+  # The rule an agent applies is "empty tools_seen: nothing was checked". On this
+  # surface npq and sfw are GAP rows when they are missing, and without the
+  # exclusion they were the two "tools seen" on a host that had neither.
+  # A copy of the deployed verifier, because go is looked for at a fixed place
+  # outside PATH and this image has one there.
+  local min="$BATS_TEST_TMPDIR/minbin" v="$BATS_TEST_TMPDIR/verify" f="$BATS_TEST_TMPDIR/e.json" t p
+  mkdir -p "$min" "$BATS_TEST_TMPDIR/emptyhome"
+  for t in bash sh awk basename cat chmod cp cut date dirname env find grep head hostname id ln ls md5sum mkdir mktemp mv od pgrep readlink realpath rm sed sleep sort stat tail tee timeout touch tr uname wc xargs; do
+    p=$(type -P "$t") && ln -s "$p" "$min/$t"
+  done
+  grep -q '/usr/local/go/bin' "$VERIFY"
+  sed 's#/usr/local/go/bin#/nonexistent/go/bin#g' "$VERIFY" > "$v"
+  env -i PATH="$min" HOME="$BATS_TEST_TMPDIR/emptyhome" bash "$v" --json > "$f" 2>/dev/null || true
+  python3 - "$f" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); r = d["result"]
+assert r["tools_seen"] == [], r
+# The promises are still broken promises: both are GAP rows.
+gaps = [x["protection"] for x in d["rows"] if x["status"] == "GAP"]
+assert "npq reputation checks" in gaps and "Socket Firewall" in gaps, gaps
+# The only row that can be OK is the scan that is about the host.
+assert all(x["protection"] == "python startup hooks" for x in d["rows"] if x["status"] == "OK"), d["rows"]
+PY
+}
+
 @test "output: --json exit code agrees with --quiet (the gate is consistent)" {
   run "$VERIFY" --json
   local j=$status

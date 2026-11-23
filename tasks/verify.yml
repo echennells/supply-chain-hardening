@@ -159,7 +159,9 @@
         PRESENT     a file exists and nothing more — not evidence
 
       Re-run `/usr/local/bin/supply-chain-verify` at any time.
-      Set verify_fail_on_gap=false to make this advisory.
+      Set verify_fail_on_gap=false to make this advisory.{% if agent_host | default(false) | bool %}
+      agent_host=true turned it on; -e verify_fail_on_gap=false keeps the
+      rest of the agent host profile.{% endif %}
   when:
     - verify_protections | bool
     - verify_fail_on_gap | bool

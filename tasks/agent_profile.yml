@@ -1,0 +1,39 @@
+---
+# The agent host profile, in the end-of-run summary.
+#
+# agent_host (defaults/main.yml) is the DEFAULT of three settings, so it turns
+# them on unless one was set explicitly, and an explicit value always wins: a
+# role default is the lowest precedence Ansible has. So a setting whose value
+# differs from agent_host was set explicitly, and is marked as such. One that
+# matches it may have been set explicitly too; nothing can tell, and nothing
+# needs to.
+#
+# Said on every run, on and off alike, so a log shows which profile a host got
+# without anyone having to read the inventory. A separate file so that
+# tests/bats/54-agent-host-profile.bats can run it with the role's defaults
+# loaded (include_role tasks_from) and nothing else.
+- name: Report the agent host profile
+  vars:
+    sch_ap_on: "{{ agent_host | bool }}"
+    sch_ap_knobs:
+      - { name: verify_fail_on_gap, value: "{{ verify_fail_on_gap | bool }}" }
+      - { name: python_safe_path, value: "{{ python_safe_path | bool }}" }
+      - { name: uv_exclude_newer_env, value: "{{ uv_exclude_newer_env | bool }}" }
+    sch_ap_effects:
+      verify_fail_on_gap: "a GAP fails the play"
+      python_safe_path: >-
+        PYTHONSAFEPATH=1: `python script.py` cannot import a file next to it and
+        `python -m` of a local package fails, with an error that names neither
+        this role nor the setting
+      uv_exclude_newer_env: >-
+        UV_EXCLUDE_NEWER in login shells: a project that pins its own earlier
+        exclude-newer fails `uv sync --locked`
+    # Folded, so the Jinja blocks leave runs of spaces; the msg collapses them.
+    sch_ap_msg: >-
+      agent host profile: {{ 'on' if sch_ap_on | bool else 'off' }} (agent_host={{ sch_ap_on | bool | lower }}):
+      {% for k in sch_ap_knobs %}{{ k.name }}={{ k.value | bool | lower }}{% if (k.value | bool) != (sch_ap_on | bool) %} (set explicitly){% endif %}{{ ', ' if not loop.last else '.' }}{% endfor %}
+      {% set sch_ap_active = [] %}{% for k in sch_ap_knobs if k.value | bool %}{% set _ = sch_ap_active.append(k.name) %}{% endfor %}
+      {% if sch_ap_active | length > 0 %}In effect: {% for n in sch_ap_active %}{{ n }}: {{ sch_ap_effects[n] }}{{ '; ' if not loop.last else '.' }}{% endfor %}{% endif %}
+      {% if not sch_ap_on | bool %}On a host whose job is running agents in repositories nobody vetted, the owner can turn all three on with -e agent_host=true (docs/configuration.md).{% endif %}
+  ansible.builtin.debug:
+    msg: "{{ sch_ap_msg | regex_replace('\\s+', ' ') | regex_replace(' ([.;:,])', '\\1') | trim }}"
