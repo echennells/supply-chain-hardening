@@ -65,13 +65,18 @@ usage() {
 supply-chain-verify — what is ACTUALLY enforcing in this job
 
 USAGE
-  verify.sh [--strict] [--quiet] [--emit=TARGET] [--fail-on=POLICY]
+  verify.sh [--strict] [--quiet] [--json] [--emit=TARGET] [--fail-on=POLICY]
 
   --strict          also fail on any WEAK row: a protection verified only as
                     PRESENT, or one in effect with a caveat the row states —
                     unproven counts as unprotected.
   --quiet           suppress the table on stdout. The job summary and the exit
                     code are still produced.
+  --json            print the rows and the result as one JSON document on
+                    stdout instead of the table, the same shape as
+                    supply-chain-verify --json (docs/verify.md). Annotations go
+                    to stderr; the job summary, outputs and exit code are
+                    unchanged.
   --emit=TARGET     auto|github|gitlab|circleci|azure|buildkite|plain
   --fail-on=POLICY  any     fail on any gap (default; today's contract)
                     config  fail only on gaps a re-run of harden.sh can close,
@@ -132,6 +137,7 @@ EOF
 
 STRICT=0
 QUIET=0
+JSON=0
 EMIT="${EMIT:-auto}"
 SCV_FAIL_ON="${VERIFY_FAIL_ON:-any}"
 
@@ -139,6 +145,7 @@ for arg in "$@"; do
   case "$arg" in
     --strict) STRICT=1 ;;
     --quiet)  QUIET=1 ;;
+    --json)   JSON=1 ;;
     --emit=*) EMIT="${arg#--emit=}" ;;
     --fail-on=*) SCV_FAIL_ON="${arg#--fail-on=}" ;;
     -h|--help) usage; exit 0 ;;
@@ -181,6 +188,15 @@ PLATFORM="$EMIT"
 [[ "$PLATFORM" == "auto" ]] && PLATFORM=$(detect_platform)
 
 annotate_error() {
+  # With --json, stdout is one JSON document, so the annotation goes to stderr.
+  if [ "$JSON" -eq 1 ]; then
+    case "$PLATFORM" in
+      github) echo "::error::$*" >&2 ;;
+      azure)  echo "##vso[task.logissue type=error]$*" >&2 ;;
+      *)      echo "[supply-chain-verify] error: $*" >&2 ;;
+    esac
+    return 0
+  fi
   case "$PLATFORM" in
     github) echo "::error::$*" ;;
     azure)  echo "##vso[task.logissue type=error]$*" ;;
@@ -1398,6 +1414,92 @@ if [ "$SCV_EXPECT_KNOWN" -eq 1 ]; then
 fi
 _reconcile_classes
 
+# >>> json report
+# BYTE-IDENTICAL in templates/verify-report.sh.j2 and action/verify.sh, from the
+# line above to the matching <<< line (tests/ci/07-verify.bats compares them).
+# The role's copy goes through Jinja, so nothing here may open a Jinja tag: no
+# doubled brace, no brace-percent, and no brace-hash, which is what bash's
+# string-length operator is.
+#
+# --json is the machine contract (ECH-195): one JSON document on stdout, the
+# rows and a result. docs/verify.md documents every field, and
+# docs/verify-json-example.json is a real one. It bypasses the table and
+# --quiet, because a gate wants the data. The exit code is not decided here.
+#
+# THE RESULT MUST NOT READ AS MORE THAN THE ROWS SAY. `"gaps": 0` from a host
+# with nothing installed is the same trap as "RESULT: no gaps" there, and an
+# agent cites it as coverage. So the result counts every status, and the counts
+# add up to the rows:
+#   gaps + weaks + ok + na_design + na_absent = the number of rows
+# tools_seen names each tool that at least one OK, WEAK or GAP row judged. No
+# OK row, or an empty tools_seen, means nothing was checked. All of it is
+# tallied from the rows, so the result cannot disagree with them.
+#
+# A tool is the first word of a judged row's protection: every probe on both
+# surfaces starts its protection with the tool's name. Rows about the run or
+# the host rather than a package manager are left out: "env layer
+# propagation", "hardening run record", "ci id-token exposure", the "<token>
+# coverage" rows that say a promised probe emitted nothing, and "python startup
+# hooks", a scan of /usr and /usr/local site directories that runs wherever a
+# system Python is, package manager or not (it would put python in tools_seen
+# on a host with nothing else to check). "Socket Firewall" is sfw.
+# tests/ci/10-verify-json.bats checks that every protection the three verifier
+# files name falls in one of those.
+#
+# JSON escaping needs only backslash and double quote: row() already turned
+# every control character into a space, so a field holds no newline or tab.
+scv_jesc() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
+scv_json_report() {
+  local scv_t scv_c scv_h scv_ok scv_gap scv_weak scv_nd scv_na scv_first s e p d
+  # '%b' expands the row separators and undoes row()'s doubled backslashes, as
+  # the table does.
+  scv_t=$(printf '%b' "$ROWS" | awk -F'\t' '
+    $1 == "" { next }
+    $1 == "OK" { ok++ }
+    $1 == "GAP" { gap++ }
+    $1 == "WEAK" { weak++ }
+    $1 == "N/A" && $2 == "BYDESIGN" { nd++ }
+    $1 == "N/A" && $2 != "BYDESIGN" { na++ }
+    $1 == "OK" || $1 == "WEAK" || $1 == "GAP" {
+      t = $3; sub(/ .*/, "", t)
+      if (t == "Socket") t = "sfw"
+      if (t == "" || t == "env" || t == "hardening" || t == "ci" || $3 ~ / coverage$/) next
+      if ($3 == "python startup hooks") next
+      if (!(t in seen)) { seen[t] = 1; list = list (list == "" ? "" : ", ") "\"" t "\"" }
+    }
+    END { printf "%d %d %d %d %d|%s\n", ok, gap, weak, nd, na, list }')
+  scv_c=${scv_t%%|*}
+  read -r scv_ok scv_gap scv_weak scv_nd scv_na <<< "$scv_c"
+  # The window this surface promised: the role renders it into its preamble,
+  # the action reads it from harden.sh's run record. Printed bare, so only
+  # digits; anything else is null.
+  scv_h=${SCV_MIN_AGE_HOURS:-}
+  [ -n "$scv_h" ] || scv_h=$(type scv_want_hours >/dev/null 2>&1 && scv_want_hours)
+  case "$scv_h" in ''|*[!0-9]*) scv_h=null ;; esac
+  printf '{\n'
+  printf '  "surface": "%s",\n' "$(scv_jesc "${SCV_SURFACE:-role}")"
+  printf '  "scope": "%s",\n' "$(scv_jesc "$SCV_SCOPE_LABEL")"
+  printf '  "generated": "%s",\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [ -n "${SCV_APPLIED_AT:-}" ]; then
+    printf '  "declared_intent_recorded": "%s",\n' "$(scv_jesc "$SCV_APPLIED_AT")"
+  else
+    printf '  "declared_intent_recorded": null,\n'
+  fi
+  printf '  "min_age_hours": %s,\n' "$scv_h"
+  printf '  "result": { "gaps": %s, "weaks": %s, "na_design": %s, "ok": %s, "na_absent": %s, "tools_seen": [%s] },\n' \
+    "$scv_gap" "$scv_weak" "$scv_nd" "$scv_ok" "$scv_na" "${scv_t#*|}"
+  printf '  "rows": [\n'
+  scv_first=1
+  printf '%b' "$ROWS" | { while IFS=$'\t' read -r s e p d; do
+      [ -n "$s" ] || continue
+      if [ "$scv_first" -eq 1 ]; then scv_first=0; else printf ',\n'; fi
+      printf '    { "status": "%s", "evidence": "%s", "protection": "%s", "detail": "%s" }' \
+        "$(scv_jesc "$s")" "$(scv_jesc "$e")" "$(scv_jesc "$p")" "$(scv_jesc "$d")"
+    done; }
+  printf '\n  ]\n}\n'
+}
+# <<< json report
+
 # ============================================================ report =========
 render() {
   printf "%-6s %-11s %-32s %s\n" "STATUS" "EVIDENCE" "PROTECTION" "DETAIL"
@@ -1412,7 +1514,9 @@ render() {
   done
 }
 
-if [ "$QUIET" -eq 0 ]; then
+if [ "$JSON" -eq 1 ]; then
+  scv_json_report
+elif [ "$QUIET" -eq 0 ]; then
   echo
   echo "supply-chain-hardening — what is ACTUALLY enforcing $SCV_SCOPE_LABEL"
   echo "platform=$PLATFORM"

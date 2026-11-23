@@ -219,7 +219,9 @@ USAGE
   --json     emit the rows and result as JSON instead of the table — the shape
              a CI pre-install gate consumes. The exit code is unchanged
              (non-zero when any protection is a GAP), so `supply-chain-verify
-             --json` doubles as the gate itself
+             --json` doubles as the gate itself. The result counts every
+             status and lists tools_seen: an empty tools_seen means no
+             package manager was checked, whatever "gaps" says
   --quiet    suppress the table; exit code only
 
 EVIDENCE STRENGTH — reported per row, because it is the whole point

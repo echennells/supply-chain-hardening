@@ -420,6 +420,44 @@ STUB
   fi
 }
 
+@test "output: --json's result counts every status, adds up to its rows, and names the tools it judged" {
+  # "gaps": 0 alone reads the same on a host where nothing was checked. The
+  # result therefore counts OK and both kinds of N/A too, and tools_seen names
+  # what at least one OK, WEAK or GAP row judged (docs/verify.md). The rule is
+  # restated here rather than re-run; tests/ci/10-verify-json.bats covers the
+  # shared block itself, an empty host, and the CI surface.
+  local f="$BATS_TEST_TMPDIR/v.json" rc=0
+  "$VERIFY" --json > "$f" 2>/dev/null || rc=$?
+  python3 - "$f" "$rc" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1])); rc = int(sys.argv[2])
+r, rows = d["result"], d["rows"]
+assert d["surface"] == "role", d["surface"]
+assert re.match(r"^\d{4}-\d{2}-\d{2}$", d["declared_intent_recorded"]), d["declared_intent_recorded"]
+assert d["min_age_hours"] == 48, d["min_age_hours"]
+cnt = lambda st: sum(1 for x in rows if x["status"] == st)
+assert (r["ok"], r["gaps"], r["weaks"]) == (cnt("OK"), cnt("GAP"), cnt("WEAK")), r
+assert r["na_design"] == sum(1 for x in rows if x["status"] == "N/A" and x["evidence"] == "BYDESIGN"), r
+assert r["na_absent"] == sum(1 for x in rows if x["status"] == "N/A" and x["evidence"] != "BYDESIGN"), r
+assert r["gaps"] + r["weaks"] + r["ok"] + r["na_design"] + r["na_absent"] == len(rows)
+want = []
+for x in rows:
+    if x["status"] in ("OK", "WEAK", "GAP"):
+        t = x["protection"].split(" ")[0]
+        t = "sfw" if t == "Socket" else t
+        if t in ("env", "hardening", "ci") or x["protection"].endswith(" coverage") \
+           or x["protection"] == "python startup hooks" or t in want:
+            continue
+        want.append(t)
+assert r["tools_seen"] == want, (r["tools_seen"], want)
+# This image has most of the package managers installed and hardened.
+for t in ("npm", "pnpm", "uv", "cargo", "composer"):
+    assert t in r["tools_seen"], (t, r["tools_seen"])
+assert r["ok"] > 10, r
+assert rc == (1 if r["gaps"] else 0), (rc, r)
+PY
+}
+
 @test "output: --json exit code agrees with --quiet (the gate is consistent)" {
   run "$VERIFY" --json
   local j=$status
