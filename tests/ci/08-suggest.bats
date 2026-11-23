@@ -339,6 +339,114 @@ ov() { grep -F "  - $1: " <<<"$output"; }
   ! grep -q $'\x1b' <<<"$output"
 }
 
+# The tools follow every spelling their format allows, and a repository that
+# wants a gate off picks one this reader does not. Each of these was MEASURED to
+# be honoured (action/harden.sh, "repo-local config"). What must never happen is
+# "none found".
+@test "overrides: a spelling the readers do not follow is reported as not read, never as none found" {
+  local n=0 c f body
+  while IFS='|' read -r c f body; do
+    [ -n "$c" ] || continue
+    rm -rf "$FIX"; mkdir -p "$FIX"
+    printf -- "$body" > "$FIX/$f"
+    run suggest
+    [ "$status" -eq 0 ] || { echo "$c: rc $status: $output"; return 1; }
+    [[ "$output" != *"none found at the top of the repo"* ]] || { echo "$c: reported as none found"; return 1; }
+    [ -n "$(ov "$f")" ] || { echo "$c: $f not listed: $output"; return 1; }
+    n=$((n + 1))
+  done <<'CASES'
+toml inline table|pyproject.toml|[tool]\nuv = { no-build = false, exclude-newer = "2099-01-01" }\n
+toml inline at the top|pyproject.toml|tool = { uv = { no-build = false } }\n
+toml inline in uv.toml|uv.toml|pip = { no-build = false }\n
+toml escaped key|pyproject.toml|[tool.uv]\n"exclude\\u002dnewer" = "2099-01-01"\n
+toml escaped table|pyproject.toml|[tool."u\\u0076"]\nno-build-x = 1\n
+toml byte-order mark|uv.toml|\357\273\277no-build = false\n
+bunfig inline table|bunfig.toml|install = { minimumReleaseAge = 0 }\n
+yaml flow document|pnpm-workspace.yaml|{minimumReleaseAge: 0, ignoreScripts: false}\n
+yaml after a document marker|.yarnrc.yml|--- {enableScripts: true}\n
+yaml indented top level|.yarnrc.yml|  enableScripts: true\n  npmMinimalAgeGate: 0\n
+yaml escaped key|.yarnrc.yml|"enable\\x53cripts": true\n
+yaml complex key|.yarnrc.yml|? "enable\\x53cripts"\n: true\n
+yaml tagged key|pnpm-workspace.yaml|!!str minimumReleaseAge: 0\n
+yaml merge|pnpm-workspace.yaml|x: &a\n  ignoreScripts: false\n<<: *a\n
+yaml byte-order mark|.yarnrc.yml|\357\273\277enableScripts: true\n
+yaml lone CR|.yarnrc.yml|# c\renableScripts: true\r
+npmrc quoted key|.npmrc|"ignore-scripts"=false\n
+npmrc escaped key|.npmrc|"ignore\\u002dscripts"=false\n
+npmrc variable in the key|.npmrc|ignore-${NOPE?}scripts=false\n
+npmrc lone CR|.npmrc|# c\rignore-scripts=false\r
+npmrc byte-order mark|.npmrc|\357\273\277ignore-scripts=false\n
+npmrc a second, unread one|.npmrc|ignore-scripts=true\n"ignore\\u002dscripts"=false\n
+yarn 1 quoted key|.yarnrc|"yarn-path" "./x.cjs"\n
+yarn 1 escaped key|.yarnrc|"yarn\\u002dpath" "./x.cjs"\n
+CASES
+  [ "$n" -eq 24 ]
+}
+
+# The other side: what an ordinary repo holds must not be reported as odd, or the
+# line stops meaning anything.
+@test "overrides: comments, tokens and regexes in ordinary files are not reported as unread" {
+  printf '%s\n' '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' 'audit=false' '# ignore-scripts=false' '; min-release-age=0' 'save-exact' > "$FIX/.npmrc"
+  printf '%s\n' 'packages:' '  - "packages/*"' '# ignoreScripts: false' 'catalog:' '  react: ^19.0.0' > "$FIX/pnpm-workspace.yaml"
+  printf '%s\n' '[project]' 'name = "x"' '[tool.coverage.report]' 'exclude_lines = ["if \\.x", "\\.py"]' '[tool.ruff]' 'extend-exclude = ["\\.foo"]' '[tool.uv]' 'dev-dependencies = ["no-build-isolation-x"]' > "$FIX/pyproject.toml"
+  printf '%s\n' 'nodeLinker: node-modules' 'npmScopes:' '  acme:' '    npmRegistryServer: "https://npm.example"' > "$FIX/.yarnrc.yml"
+  printf '%s\r\n' '[install]' 'exact = true' > "$FIX/bunfig.toml"
+  run suggest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"none found at the top of the repo"* ]] || { echo "$output"; return 1; }
+}
+
+@test "overrides: bunfig.toml and poetry.toml" {
+  printf '%s\n' '[install]' 'minimumReleaseAge = 0' 'minimumReleaseAgeExcludes = ["left-pad"]' 'ignoreScripts = false' > "$FIX/bunfig.toml"
+  printf '%s\n' '[solver]' 'min-release-age = 0' 'min-release-age-exclude = ["requests"]' > "$FIX/poetry.toml"
+  run suggest
+  [[ "$(ov bunfig.toml)" == *"install.minimumReleaseAge = 0 — this project's Bun age gate"*"Not closed"* ]]
+  [[ "$(ov bunfig.toml)" == *'install.minimumReleaseAgeExcludes = ["left-pad"] — '* ]]
+  [[ "$(ov bunfig.toml)" == *"install.ignoreScripts = false — "* ]]
+  [[ "$(ov poetry.toml)" == *"solver.min-release-age = 0 — "*"POETRY_SOLVER_MIN_RELEASE_AGE outranks it"* ]]
+  [[ "$(ov poetry.toml)" == *'solver.min-release-age-exclude = ["requests"] — '*"Not closed"* ]]
+}
+
+# What a file says is printed, so a link must not turn this into a way to print
+# some other file: an agent shows this output to people, and a CI job logs it.
+@test "overrides: a symlink is reported and never followed" {
+  local secret="$BATS_TEST_TMPDIR/secret" f
+  mkdir -p "$secret"
+  printf '%s\n' '[default]' 'aws_secret_access_key = LEAKME123' 'ignore-scripts=LEAKME123' 'enableScripts: LEAKME123' 'no-build = "LEAKME123"' 'yarn-path LEAKME123' > "$secret/creds"
+  cp "$secret/creds" "$secret/config"; cp "$secret/creds" "$secret/config.toml"
+  for f in cooldown.toml .npmrc uv.toml pyproject.toml bunfig.toml poetry.toml pnpm-workspace.yaml .yarnrc.yml .yarnrc composer.json rust-toolchain.toml rust-toolchain; do
+    ln -s "$secret/creds" "$FIX/$f"
+  done
+  ln -s "$secret" "$FIX/.cargo"
+  ln -s "$secret" "$FIX/.bundle"
+  run suggest
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"LEAKME123"* ]] || { echo "$output"; return 1; }
+  for f in cooldown.toml .npmrc uv.toml pyproject.toml bunfig.toml poetry.toml pnpm-workspace.yaml .yarnrc.yml .yarnrc composer.json rust-toolchain.toml .cargo/config.toml .bundle/config; do
+    [[ "$(ov "$f")" == *"a symlink to "* ]] || { echo "$f: not reported: $output"; return 1; }
+  done
+}
+
+@test "overrides: a file that cannot be read is said so" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads everything"
+  printf 'ignore-scripts=false\n' > "$FIX/.npmrc"
+  chmod 000 "$FIX/.npmrc"
+  run suggest
+  chmod 600 "$FIX/.npmrc"
+  [[ "$(ov .npmrc)" == *"not readable"* ]]
+}
+
+@test "a package name that no registry package can have is never printed into a command" {
+  echo '{"name":"x"}' > "$FIX/package.json"
+  printf 'lockfileVersion: 9\npackages:\n  esbuild@1.0.0:\n    requiresBuild: true\n  $(touch${IFS}x)@1:\n    requiresBuild: true\n  --ignore-scripts=false@1:\n    requiresBuild: true\n  bad\033]0;t\007name@1:\n    requiresBuild: true\n' > "$FIX/pnpm-lock.yaml"
+  run suggest
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pnpm_built_dependencies: 'esbuild'"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"whose name no registry package can have: 3."* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *'$(touch'* ]]
+  ! grep -q $'\x1b' <<<"$output"
+}
+
 @test "suggest runs nothing in the repo, and no package manager at all" {
   # Every tool a repo's config can name, stubbed first on PATH to record a run.
   # python3 is the one the script may use (an isolated interpreter on a file

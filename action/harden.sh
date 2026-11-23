@@ -313,24 +313,94 @@ suggest_scripted_deps() {
 # are printed: a project .npmrc or .bundle/config can hold a token.
 #
 # These readers are deliberately simple: a line or a table at a time, with the
-# value printed as it is written. A value they cannot read is reported as not
-# read, never as absent.
+# value printed as it is written. The tools follow every spelling their format
+# allows, and a repository that wants a gate off will not choose the plain one.
+# MEASURED, each honoured from the project directory: a quoted key, an escaped
+# one, `ignore-${NOPE?}scripts=false` and a lone CR as the line break (npm
+# 11.19.1); a flow mapping, an escaped key, an indented top level and
+# `--- {key: v}` (pnpm 11.29.0, Yarn 4.18.1); an inline table, a dotted key and
+# an escaped key (uv 0.13.9); a byte-order mark (npm, Yarn, uv). So a key that a
+# file mentions more often than a reader accounted for is reported as not read
+# (_sg_net), never as absent.
+#
+# NO SYMLINK IS FOLLOWED, and what a file says is printed, so this must not be a
+# way to print some other file: MEASURED, a cooldown.toml pointing at a
+# credentials file put its contents in the output, which an agent shows to
+# people and a CI job logs. The link itself is reported.
+#
 # Octal, not a character class: BusyBox tr has none, and keeps only the class's
-# own letters (MEASURED, BusyBox 1.37.0).
-_sg_clean() { LC_ALL=C tr -cd '\12\40-\176' | cut -c1-160; }
+# own letters (MEASURED, BusyBox 1.37.0). At most 20 lines from one reader; the
+# rest of a longer list is then reported as not read. awk reads to the end, so
+# nothing upstream is cut off by a closed pipe.
+_sg_clean() { LC_ALL=C tr -cd '\12\40-\176' | cut -c1-160 | awk 'NR <= 20'; }
+
+# _sg_text <file>: the text as the tools split it into lines. A lone CR is a line
+# break to npm, pnpm and Yarn, a byte-order mark is skipped, and NULs go so that
+# grep treats the rest as text.
+_sg_text() {
+  LC_ALL=C tr '\r' '\n' < "$1" 2>/dev/null | LC_ALL=C tr -d '\000' \
+    | LC_ALL=C sed "1s/^$(printf '\357\273\277')//"
+}
+
+# _sg_have <repo> <path in it>: 0 when there is a file here to read. A symlink,
+# or a directory on the way that is one, is reported and not followed.
+_sg_have() {
+  local p="$1/$2" link=""
+  case "$2" in */*) [ -L "$1/${2%%/*}" ] && link="$1/${2%%/*}" ;; esac
+  [ -L "$p" ] && link=$p
+  if [ -n "$link" ]; then
+    _sg_override "$2" "a symlink to $(readlink "$link" 2>/dev/null | _sg_clean | head -1)" "the tool follows it and this reader does not, because it can point at any file on this machine. Look at what it points to."
+    return 1
+  fi
+  [ -f "$p" ] || return 1
+  if [ ! -r "$p" ]; then
+    _sg_override "$2" "not readable" "its settings were not read."
+    return 1
+  fi
+  return 0
+}
+
+# _sg_net <label> <file> <ini|toml|yaml|yarn1> <key>...: what the readers missed.
+# A key on more non-comment lines than the caller's `hits` account for, or a key
+# spelled so that a text search cannot see it (an escape, npm's ${VAR} in a key,
+# YAML's `? key`), is reported for a person to look at.
+_sg_net() {
+  local label="$1" f="$2" kind="$3" k re n h why="" odd="" cm='^[[:space:]]*#'
+  shift 3
+  if [ "$kind" = ini ]; then cm='^[[:space:]]*[#;]'; fi
+  for k in "$@"; do
+    re="(^|[^A-Za-z0-9_-])${k}([^A-Za-z0-9_-]|\$)"
+    n=$(_sg_text "$f" | { LC_ALL=C grep -vE "$cm" || :; } | { LC_ALL=C grep -cE -- "$re" || :; })
+    h=$(printf '%s\n' ${hits[@]+"${hits[@]}"} | { LC_ALL=C grep -cE -- "$re" || :; })
+    if [ "${n:-0}" -gt "${h:-0}" ]; then why="${why:+$why, }$k"; fi
+  done
+  if [ -n "$why" ]; then
+    _sg_override "$label" "$why" "mentioned in a form this reader does not follow, so a value was not read. The tool may honour it: open the file."
+  fi
+  case "$kind" in
+    ini)   re='^[^=]*(\\|[$][{])' ;;
+    toml)  re='(^|[{,.])[[:space:]]*"[^"]*\\[^"]*"[[:space:]]*[=.]|^[[:space:]]*\[[^"=]*"[^"]*\\[^"]*"[^"=]*\]+[[:space:]]*(#.*)?$' ;;
+    yarn1) re='^[[:space:]]*"[^"]*\\' ;;
+    *)     re='"[^"]*\\[^"]*"[[:space:]]*:|^[[:space:]]*[?]([[:space:]]|$)' ;;
+  esac
+  odd=$(_sg_text "$f" | { LC_ALL=C grep -vE "$cm" || :; } | { LC_ALL=C grep -cE -- "$re" || :; })
+  if [ "${odd:-0}" -gt 0 ]; then
+    _sg_override "$label" "a key written with an escape or a variable" "it can spell any setting, and this reader does not decode it. The tool does: open the file."
+  fi
+}
 
 # _sg_ini <file> <key>... -> "key=value" per line (.npmrc; `key[]` counts as key)
 _sg_ini() {
   local f="$1"; shift
   awk -v keys="$*" '
     BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
-    { sub(/\r$/, "") }
     /^[ \t]*[;#]/ { next }
-    { i = index($0, "="); if (!i) next
-      key = substr($0, 1, i - 1); val = substr($0, i + 1)
+    # A key with no "=" is true.
+    { i = index($0, "="); if (!i) { key = $0; val = "true" } else { key = substr($0, 1, i - 1); val = substr($0, i + 1) }
       gsub(/^[ \t]+|[ \t]+$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+      if (key ~ /^".*"$/ || key ~ /^\047.*\047$/) key = substr(key, 2, length(key) - 2)
       base = key; sub(/\[\]$/, "", base)
-      if (base in want) print key "=" val }' "$f" 2>/dev/null | _sg_clean
+      if (base in want) print key "=" val }' 2>/dev/null < <(_sg_text "$f") | _sg_clean
 }
 
 # _sg_toml <file> <dotted.path>... -> "path = value" per line; a table of that
@@ -339,7 +409,6 @@ _sg_toml() {
   local f="$1"; shift
   awk -v paths="$*" '
     BEGIN { n = split(paths, p, " "); for (i = 1; i <= n; i++) want[p[i]] = 1 }
-    { sub(/\r$/, "") }
     /^[ \t]*#/ { next }
     /^[ \t]*\[[^]]*\]+[ \t]*(#.*)?$/ {
       sec = $0; sub(/^[ \t]*\[+[ \t]*/, "", sec); sub(/[ \t]*\].*$/, "", sec)
@@ -353,7 +422,7 @@ _sg_toml() {
         gsub(/["\047 \t]/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
         full = (sec == "" ? key : sec "." key)
         if (full in want) print full " = " val
-      } }' "$f" 2>/dev/null | _sg_clean
+      } }' 2>/dev/null < <(_sg_text "$f") | _sg_clean
 }
 
 # _sg_yaml <file> <top-level key>... -> "key: value" per line; a list below the
@@ -368,7 +437,6 @@ _sg_yaml() {
       print cur ": " v; cur = ""
     }
     BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1; cur = "" }
-    { sub(/\r$/, "") }
     /^[ \t]*#/ { next }
     /^[^ \t#-]/ {
       flush()
@@ -385,7 +453,7 @@ _sg_yaml() {
       it = $0; sub(/^[ \t]*-[ \t]+/, "", it); gsub(/["\047]/, "", it); sub(/[ \t]+#.*$/, "", it)
       items = items (items == "" ? "" : ", ") it; next
     }
-    END { flush() }' "$f" 2>/dev/null | _sg_clean
+    END { flush() }' 2>/dev/null < <(_sg_text "$f") | _sg_clean
 }
 
 # _sg_composer_policy <composer.json> -> "config.policy = <json>" and
@@ -419,8 +487,8 @@ if isinstance(cd, dict):
 elif "cooldown" in pol:
     print("config.policy.cooldown = " + json.dumps(cd))
 PY
-  elif grep -q '"policy"' "$1" 2>/dev/null; then
-    echo "unreadable: no python3 here to read the \"policy\" key with"
+  elif grep -qE '"policy"|\\u' "$1" 2>/dev/null; then
+    echo "unreadable: no python3 here to read a \"policy\" key with"
   fi
 }
 
@@ -440,7 +508,7 @@ suggest_overrides() {
   d=$(CDPATH="" cd -- "$1" 2>/dev/null && pwd) || return 0
   _sg_hits() { hits=(); while IFS= read -r l; do [ -n "$l" ] && hits+=("$l"); done; }
 
-  if [ -f "$d/.npmrc" ]; then
+  if _sg_have "$d" .npmrc; then
     _sg_hits < <(_sg_ini "$d/.npmrc" ignore-scripts min-release-age min-release-age-exclude minimum-release-age allow-git)
     for l in ${hits[@]+"${hits[@]}"}; do
       case "$l" in
@@ -451,11 +519,12 @@ suggest_overrides() {
         allow-git=*) _sg_override .npmrc "$l" "whether this project's npm installs git dependencies. NPM_CONFIG_ALLOW_GIT=none outranks it on npm 11.9.0+: ${_sg_role_env}; ${_sg_ci_env}." ;;
       esac
     done
+    _sg_net .npmrc "$d/.npmrc" ini ignore-scripts min-release-age min-release-age-exclude minimum-release-age allow-git
   fi
 
   # uv reads uv.toml if there is one, else pyproject.toml's [tool.uv].
   for f in uv.toml pyproject.toml; do
-    [ -f "$d/$f" ] || continue
+    _sg_have "$d" "$f" || continue
     if [ "$f" = uv.toml ]; then
       _sg_hits < <(_sg_toml "$d/$f" no-build exclude-newer exclude-newer-package pip.no-build pip.exclude-newer)
     else
@@ -469,10 +538,34 @@ suggest_overrides() {
         *no-build*) _sg_override "$f" "$l" "uv's source-build block for this project; false lifts it for every uv command run here. ${_sg_open}" ;;
       esac
     done
+    _sg_net "$f" "$d/$f" toml no-build exclude-newer exclude-newer-package
     [ "$f" = uv.toml ] && break
   done
 
-  if [ -f "$d/pnpm-workspace.yaml" ]; then
+  if _sg_have "$d" bunfig.toml; then
+    _sg_hits < <(_sg_toml "$d/bunfig.toml" install.minimumReleaseAge install.minimumReleaseAgeExcludes install.ignoreScripts)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        *minimumReleaseAgeExcludes*) _sg_override bunfig.toml "$l" "these packages skip Bun's age gate (measured on Bun 1.4.5). ${_sg_open}" ;;
+        *minimumReleaseAge*) _sg_override bunfig.toml "$l" "this project's Bun age gate, in seconds; 0 turns it off (measured on Bun 1.4.5). ${_sg_open}" ;;
+        *ignoreScripts*) _sg_override bunfig.toml "$l" "false runs the scripts of every package this project trusts (measured on Bun 1.4.5). ${_sg_open}" ;;
+      esac
+    done
+    _sg_net bunfig.toml "$d/bunfig.toml" toml minimumReleaseAge minimumReleaseAgeExcludes ignoreScripts
+  fi
+
+  if _sg_have "$d" poetry.toml; then
+    _sg_hits < <(_sg_toml "$d/poetry.toml" solver.min-release-age solver.min-release-age-exclude solver.min-release-age-exclude-source)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        *min-release-age-exclude*) _sg_override poetry.toml "$l" "these skip Poetry's age gate; it outranks POETRY_SOLVER_MIN_RELEASE_AGE too. ${_sg_open}" ;;
+        *min-release-age*) _sg_override poetry.toml "$l" "this project's Poetry age gate, in days. POETRY_SOLVER_MIN_RELEASE_AGE outranks it: ${_sg_role_env}; ${_sg_ci_env}." ;;
+      esac
+    done
+    _sg_net poetry.toml "$d/poetry.toml" toml min-release-age min-release-age-exclude min-release-age-exclude-source
+  fi
+
+  if _sg_have "$d" pnpm-workspace.yaml; then
     _sg_hits < <(_sg_yaml "$d/pnpm-workspace.yaml" minimumReleaseAge minimumReleaseAgeExclude minimumReleaseAgeStrict ignoreScripts)
     for l in ${hits[@]+"${hits[@]}"}; do
       case "$l" in
@@ -482,9 +575,10 @@ suggest_overrides() {
         ignoreScripts:*) _sg_override pnpm-workspace.yaml "$l" "false runs this project's own lifecycle scripts and the builds it allows. ${_sg_open}" ;;
       esac
     done
+    _sg_net pnpm-workspace.yaml "$d/pnpm-workspace.yaml" yaml minimumReleaseAge minimumReleaseAgeExclude minimumReleaseAgeStrict ignoreScripts
   fi
 
-  if [ -f "$d/.yarnrc.yml" ]; then
+  if _sg_have "$d" .yarnrc.yml; then
     _sg_hits < <(_sg_yaml "$d/.yarnrc.yml" enableScripts npmMinimalAgeGate npmPreapprovedPackages yarnPath plugins)
     for l in ${hits[@]+"${hits[@]}"}; do
       case "$l" in
@@ -495,12 +589,17 @@ suggest_overrides() {
         plugins:*) _sg_override .yarnrc.yml "$l" "code loaded into yarn for every command here. ${_sg_open}" ;;
       esac
     done
+    _sg_net .yarnrc.yml "$d/.yarnrc.yml" yaml enableScripts npmMinimalAgeGate npmPreapprovedPackages yarnPath plugins
   fi
-  if [ -f "$d/.yarnrc" ] && grep -qE '^[[:space:]]*yarn-path' "$d/.yarnrc" 2>/dev/null; then
-    _sg_override .yarnrc "$(grep -E '^[[:space:]]*yarn-path' "$d/.yarnrc" 2>/dev/null | head -1 | _sg_clean)" "this project's own yarn 1 runs for every yarn command here. ${_sg_open}"
+  if _sg_have "$d" .yarnrc; then
+    _sg_hits < <(_sg_text "$d/.yarnrc" | { LC_ALL=C grep -E '^[[:space:]]*"?yarn-path"?([[:space:]]|$)' || :; } | _sg_clean)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      _sg_override .yarnrc "$l" "this project's own yarn 1 runs for every yarn command here. ${_sg_open}"
+    done
+    _sg_net .yarnrc "$d/.yarnrc" yarn1 yarn-path
   fi
 
-  if [ -f "$d/.bundle/config" ]; then
+  if _sg_have "$d" .bundle/config; then
     _sg_hits < <(_sg_yaml "$d/.bundle/config" BUNDLE_COOLDOWN BUNDLE_FROZEN)
     for l in ${hits[@]+"${hits[@]}"}; do
       case "$l" in
@@ -508,9 +607,10 @@ suggest_overrides() {
         BUNDLE_FROZEN:*) _sg_override .bundle/config "$l" "a project setting outranks ~/.bundle/config; false turns frozen mode off here. ${_sg_open}" ;;
       esac
     done
+    _sg_net .bundle/config "$d/.bundle/config" yaml BUNDLE_COOLDOWN BUNDLE_FROZEN
   fi
 
-  if [ -f "$d/composer.json" ]; then
+  if _sg_have "$d" composer.json; then
     _sg_hits < <(_sg_composer_policy "$d/composer.json")
     for l in ${hits[@]+"${hits[@]}"}; do
       case "$l" in
@@ -523,20 +623,24 @@ suggest_overrides() {
   fi
 
   for f in .cargo/config.toml .cargo/config; do
-    [ -f "$d/$f" ] || continue
-    l=$(_sg_toml "$d/$f" build.rustc-wrapper build.rustc-workspace-wrapper build.rustc | head -3 | tr '\n' ';' | sed 's/;$//')
-    tables=$(sed -n 's/^[[:space:]]*\[\{1,2\}[[:space:]]*\([^]]*\).*/\1/p' "$d/$f" 2>/dev/null | tr -d '"'"'"' \t' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g' | _sg_clean)
+    _sg_have "$d" "$f" || continue
+    _sg_hits < <(_sg_toml "$d/$f" build.rustc-wrapper build.rustc-workspace-wrapper build.rustc)
+    l=$(printf '%s\n' ${hits[@]+"${hits[@]}"} | awk 'NR <= 3 && $0 != ""' | tr '\n' ';' | sed 's/;$//')
+    tables=$(_sg_text "$d/$f" | sed -n 's/^[[:space:]]*\[\{1,2\}[[:space:]]*\([^]]*\).*/\1/p' | tr -d '"'"'"' \t' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g' | _sg_clean)
     _sg_override "$f" "${l:+$l; }tables: ${tables:-none}" "cargo reads it for every cargo command here, and \`cargo metadata\` (which an IDE runs on folder open) runs a rustc-wrapper it names. ${_sg_open}"
+    _sg_net "$f" "$d/$f" toml rustc-wrapper rustc-workspace-wrapper rustc
   done
-  if [ -f "$d/cooldown.toml" ]; then
-    l=$(grep -vE '^[[:space:]]*(#|$)' "$d/cooldown.toml" 2>/dev/null | head -6 | tr '\n' ';' | sed 's/;$//; s/;/; /g' | _sg_clean)
+  if _sg_have "$d" cooldown.toml; then
+    l=$(_sg_text "$d/cooldown.toml" | { grep -vE '^[[:space:]]*(#|$)' || :; } | awk 'NR <= 6' | tr '\n' ';' | sed 's/;$//; s/;/; /g' | _sg_clean)
     _sg_override cooldown.toml "${l:-(empty)}" "cargo-cooldown reads it; the wrapper pins the windows, but allow entries in it still exempt crates. Not closed."
   fi
   for f in rust-toolchain.toml rust-toolchain; do
-    [ -f "$d/$f" ] || continue
-    l=$(_sg_toml "$d/$f" toolchain.path | head -1)
-    [ -n "$l" ] || continue
-    _sg_override "$f" "$l" "rustup runs the cargo under that path in this project, so the cargo wrapper never sees those commands. ${_sg_open}"
+    _sg_have "$d" "$f" || continue
+    _sg_hits < <(_sg_toml "$d/$f" toolchain.path)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      _sg_override "$f" "$l" "rustup runs the cargo under that path in this project, so the cargo wrapper never sees those commands. ${_sg_open}"
+    done
+    _sg_net "$f" "$d/$f" toml path
   done
 }
 
@@ -554,8 +658,20 @@ suggest_for_repo() {
   echo ""
 
   # --- npm/pnpm/yarn/bun: packages whose install runs code ---
-  local scripted
-  scripted=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//') || true
+  # Only names a registry package can have. These are printed into commands a
+  # person or an agent is told to run, and a lockfile is the repo's to write:
+  # MEASURED, a package-lock.json entry named `$(...)`, or one holding a newline
+  # or a terminal escape, came out as it was written. A leading dash would be an
+  # option to npm.
+  local scripted scripted_all odd_names=0
+  local name_re='^(@[A-Za-z0-9._][A-Za-z0-9._-]*/)?[A-Za-z0-9._][A-Za-z0-9._-]*$'
+  scripted_all=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u) || true
+  scripted=$(printf '%s\n' "$scripted_all" | { LC_ALL=C grep -E "$name_re" || :; } | tr '\n' ',' | sed 's/,$//') || true
+  odd_names=$(printf '%s\n' "$scripted_all" | sed '/^$/d' | { LC_ALL=C grep -cvE "$name_re" || :; }) || true
+  if [ "${odd_names:-0}" -gt 0 ]; then
+    found_any=1
+    notes+=("Entries marked as running code at install time whose name no registry package can have: ${odd_names}. They are not printed here. Look at the lockfile before installing from it.")
+  fi
   # THE FIX DEPENDS ON THE PACKAGE MANAGER. pnpm_built_dependencies writes
   # pnpm's config and nothing else. MEASURED (VM#9): a package-lock.json repo
   # with sqlite3 was told to set it, did, and the binding was still missing,
@@ -724,16 +840,19 @@ _sg_print_overrides() {
   echo ""
   if [ ${#overrides[@]} -eq 0 ]; then
     echo "Repo-local config that outranks the host's: none found at the top of the repo"
-    echo "(.npmrc, uv.toml, pyproject [tool.uv], pnpm-workspace.yaml, .yarnrc.yml, .yarnrc,"
-    echo ".bundle/config, composer.json, .cargo/config.toml, cooldown.toml, rust-toolchain)."
+    echo "(.npmrc, uv.toml, pyproject [tool.uv], bunfig.toml, poetry.toml, pnpm-workspace.yaml,"
+    echo ".yarnrc.yml, .yarnrc, .bundle/config, composer.json, .cargo/config.toml, cooldown.toml,"
+    echo "rust-toolchain). Other files can do it too, and were not read: deno.json, NuGet.Config,"
+    echo "Maven's and Gradle's, and anything below the top of the repo."
   else
     echo "Repo-local config that outranks the host's, as the files are written:"
     echo ""
     for o in "${overrides[@]}"; do _sg_note "$o"; done
     echo ""
     echo "Only the top of the repo was read, and the files as text: nothing in the repo"
-    echo "ran. After applying, run the verifier from inside the repo; it reports the uv,"
-    echo "pnpm, yarn, composer and bundler ones as rows."
+    echo "ran. deno.json, NuGet.Config and Maven's and Gradle's files were not read. After"
+    echo "applying, run the verifier from inside the repo; it reports the uv, pnpm, yarn,"
+    echo "composer and bundler ones as rows."
   fi
   echo ""
 }
@@ -785,6 +904,12 @@ preflight_report() {
 
   echo "Who would run the play (as this user, without sudo or --become):"
   _pf_line "user $me (uid $uid), HOME=${HOME:-<unset>}"
+  if [ -z "${HOME:-}" ]; then
+    _pf_stop "HOME is not set, so there is nowhere for per-user config to go and nothing under it was looked at."
+    echo ""
+    echo "Set HOME and run this again. Nothing was changed here."
+    return 1
+  fi
   if [ "$uid" -eq 0 ]; then
     # The role's guard (tasks/preflight.yml): HOME is root's and the account
     # that started this is not root.

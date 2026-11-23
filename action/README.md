@@ -354,15 +354,20 @@ With the Ansible role, the same exceptions as extra vars:
 by default (`cargo_cooldown_enforce`).
 
 **Repo-local config that outranks the host's** comes last. A `.npmrc`, `uv.toml`
-or `[tool.uv]`, `pnpm-workspace.yaml`, `.yarnrc.yml`, `.bundle/config`,
-`composer.json` policy, `.cargo/config.toml`, `cooldown.toml` or
-`rust-toolchain.toml` `path` at the top of the repo can lift a protection the
+or `[tool.uv]`, `bunfig.toml`, `poetry.toml`, `pnpm-workspace.yaml`,
+`.yarnrc.yml`, `.bundle/config`, `composer.json` policy, `.cargo/config.toml`,
+`cooldown.toml` or `rust-toolchain.toml` `path` at the top of the repo can lift a protection the
 host deploys, and neither the action nor the role can stop most of them; each
 line says which one can be outranked and by what. `--suggest` names them before
 you apply anything, because the verifier reports them only when it is run from
 inside the repo. It reads the files as text (a JSON file with an isolated
-`python3 -I -S`), prints only the keys it looked for, never a token, and runs
-no package manager.
+`python3 -I -S`), prints only the keys it looked for (for `cooldown.toml` the
+first lines), never a token, follows no symlink, and runs no package manager.
+
+A repo that wants a gate off can spell the key in a way a simple reader does not
+follow: an inline table, an escape, npm's `${VAR?}` inside a key. Those are
+listed as "mentioned in a form this reader does not follow" or "a key written
+with an escape or a variable". Treat either as a finding and open the file.
 
 It reports and changes nothing — no config is written, no tool is installed.
 

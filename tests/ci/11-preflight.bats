@@ -248,6 +248,14 @@ exit 0"
   [[ "$output" == *"uv.toml: no-build = false"* ]]
 }
 
+@test "preflight: no HOME is a STOP with an explanation, not a crash" {
+  base_path
+  run env -i PATH="${TEST_BIN}:${BASE_PATH}" TMPDIR="$TEST_TMP" bash "$HARDEN_SH" --preflight
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"STOP  HOME is not set"* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *"unbound variable"* ]]
+}
+
 @test "preflight is advertised in --help" {
   run harden -- --help
   [ "$status" -eq 0 ]
