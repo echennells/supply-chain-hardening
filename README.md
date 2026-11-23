@@ -132,7 +132,7 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [AGENTS.md](AGENTS.md) | you're an AI agent applying this, or handing the repo to one |
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
-| [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
+| [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes, the `--json` fields |
 | [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |
 | [docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md) | an agent will work on a hardened host: what refusals look like and what it must not do (you give it the file; nothing loads it) |
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
