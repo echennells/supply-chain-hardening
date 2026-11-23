@@ -485,6 +485,18 @@ Outside GitHub, run the script directly; it takes the same `--emit` targets:
 ./action/verify.sh --json                   # one JSON document on stdout instead of the table (docs/verify.md)
 ```
 
+On GitHub, `quiet: true` is `--quiet`, and the verify step has these outputs:
+
+| Output | Meaning |
+|---|---|
+| `gaps` | Protections found not in effect. `unknown` if the verifier died before writing its outputs. |
+| `gaps_config` | Of those, how many a re-run of the hardening can close. |
+| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, or has no such control. |
+| `weak` | `WEAK` rows, which are not counted as coverage. |
+| `rows` | Rows in the table. 0 means the verifier did not run. |
+| `expectations` | `known` when it read the harden step's record, `unknown` when it checked every installed tool instead. |
+| `strict_failed` | `true` when `strict` turned `WEAK` rows into the failure. |
+
 If you set `env-file` or `output-file` on the harden step, **set the matching
 input on the verify step too**. The verifier cannot find a custom path on its
 own: without `env-file` it looks in the default place, finds nothing, and
@@ -662,7 +674,7 @@ absent tool are inert, so the wide default is the safer starting point.
 
 ```yaml
 - uses: echennells/supply-chain-hardening/action@v2        # floating major — gets fixes
-- uses: echennells/supply-chain-hardening/action@v2.0.0    # exact release
+- uses: echennells/supply-chain-hardening/action@v2.1.0    # exact release
 - uses: echennells/supply-chain-hardening/action@<sha>     # immutable; strongest
 ```
 
@@ -682,7 +694,7 @@ refs at job start, so a release that is not tagged does not exist to consumers,
 no matter what is on `main`:
 
 ```bash
-git tag -a v2.0.0 -m 'v2.0.0' && git push origin v2.0.0
+git tag -a vX.Y.Z -m 'vX.Y.Z' && git push origin vX.Y.Z
 ```
 
 `.github/workflows/release.yml` takes it from there: it checks that `action/` is

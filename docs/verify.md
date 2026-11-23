@@ -156,11 +156,27 @@ minutes), 4.11+ reads a duration and refuses anything it cannot parse. A
 `yarnPath`, `plugins:`, or classic's `yarn-path` is the checkout's own yarn code,
 which runs on every yarn command there, `yarn install` included; the row says so,
 and grades that yarn by the version string inside the file (below 4.10 it has no
-age gate: `GAP`). Through a corepack shim, a `packageManager: yarn@X` is the yarn
-graded. The values come from PyYAML or a reader that refuses YAML it does not
-follow, so the evidence is `PRESENT`. Where the yarn that runs in the project is
+age gate: `GAP`). Through a corepack shim, the yarn graded is the one corepack
+runs: `packageManager` read as JSON, from the nearest `package.json` that has one,
+or else `devEngines`. A version it cannot pin down is `WEAK`. The values come from
+files, so the evidence is `PRESENT`. Where the yarn that runs in the project is
 not the host's, the host rows say so, and a classic host yarn, which hands such a
 project to its `yarnPath`, is `N/A` there rather than a `GAP`.
+
+**pnpm.** The `pnpm repo config override` row reads the `pnpm-workspace.yaml` pnpm
+would use (and, for pnpm 10, a project `.npmrc`) and judges `minimumReleaseAge`,
+`minimumReleaseAgeExclude` and `minimumReleaseAgeStrict`.
+
+**A file it does not follow is "not judged", never "sets nothing".** The files
+belong to the checkout, and the tools accept spellings a simple reader misses:
+MEASURED, an escaped, tagged or aliased key, an indented top level, `--- {key: v}`,
+a byte-order mark and a lone CR are all honoured (pnpm 11.29.0, Yarn 4.18.1; not
+every form on both). With PyYAML these are parsed. Without it, a plain-key reader
+refuses any top-level line it does not follow, and the row is `WEAK`. So is a file
+with a U+0085, U+2028 or U+2029 line separator, which YAML 1.1 and 1.2 read
+differently, a `.yarnrc.yml` marked `# yarn lockfile v1`, which Yarn parses by
+Yarn 1's rules, and an escaped key in a project `.npmrc` or `.yarnrc`. `--strict`
+fails on a `WEAK` row.
 
 **Scratch directories.** The probes that build throwaway projects used to run in
 `mktemp -d` under `/tmp`, which every account can write. A file planted there sits
