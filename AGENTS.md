@@ -4,8 +4,8 @@ Instructions for an AI agent that has been given this repo to harden a host or a
 pipeline. [README.md](README.md) is the human-facing version. If you're changing this
 repo rather than applying it, start with [docs/design-principles.md](docs/design-principles.md)
 and [TESTS.md](TESTS.md). The agent that later works on a hardened host has its own file:
-[docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md). Nothing loads
-either file for an agent; whoever runs it has to.
+[docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md). Nothing loads that
+one for it; whoever runs that agent has to hand it over.
 
 **The short version:** run the preflight, show the user its output and wait, apply the
 Ansible role, run the verifier, and report what it says. Don't copy settings out of
@@ -36,8 +36,9 @@ for their OK**:
 ./action/harden.sh --preflight                    # or --preflight=/path/to/repo
 ```
 
-It writes nothing. A line starting with `STOP` would end the play before it changes
-anything: an existing `/etc` file, a per-user cargo, maven or nuget config this project
+It changes no file and reads none as root (a non-root run makes one passwordless
+`sudo -n true` probe, which sudo logs). A line starting with `STOP` would end the play
+before it changes anything, or keep it from running: an existing `/etc` file, a per-user cargo, maven or nuget config this project
 did not write, the wrong user, no Ansible or one too old. It lists the package managers
 found, and for a repo it adds `--suggest`: the exceptions that repo needs and its own
 config that outranks the host's. `ansible-playbook --check` is not this: it is a dry run
@@ -117,7 +118,8 @@ how the host was hardened; with none, it checks every tool it finds). Read the J
 this, field by field in [docs/verify.md](docs/verify.md#--json):
 
 - **`result.tools_seen` first.** Empty means no package manager was checked, whatever
-  `gaps` says. Compare it with the tools the host is supposed to have.
+  `gaps` says, and `ok` 0 means nothing was verified. Compare it with the tools the host
+  is supposed to have.
 - **Every row with `status` `GAP` or `WEAK`, with its `detail`, goes to the user.** Don't
   say "hardened" if any remain. The exit status is non-zero on any GAP.
 - **`evidence`**: `FUNCTIONAL` was observed, `PARSED` was reported by the tool, `PRESENT`

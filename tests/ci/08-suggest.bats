@@ -271,7 +271,7 @@ ov() { grep -F "  - $1: " <<<"$output"; }
   printf 'no-build = false\npip.exclude-newer = "2099-01-01"\n' > "$FIX/uv.toml"
   run suggest
   [[ "$(ov uv.toml)" == *"no-build = false"* ]]
-  [[ "$(ov uv.toml)" == *'pip.exclude-newer = "2099-01-01"'* ]]
+  [[ "$(ov uv.toml)" == *'pip.exclude-newer = "2099-01-01"'*"was not measured"* ]]
   [ -z "$(ov pyproject.toml)" ]
 }
 
@@ -307,6 +307,15 @@ ov() { grep -F "  - $1: " <<<"$output"; }
   echo '{"name":"t/t","config":' > "$FIX/composer.json"
   run suggest
   [[ "$(ov composer.json)" == *"unreadable: "* ]]
+}
+
+@test "overrides: the interpreter that reads composer.json is started from /, not in the repo" {
+  # A pyenv/asdf/mise python3 is a shim that reads the working directory.
+  stub_bin python3 "pwd >> '$BATS_TEST_TMPDIR/pycwd'; exit 0"
+  echo '{"name":"t/t","config":{"policy":false}}' > "$FIX/composer.json"
+  ( cd "$FIX" && harden -- --suggest=. >/dev/null )
+  [ -s "$BATS_TEST_TMPDIR/pycwd" ]
+  [ "$(sort -u "$BATS_TEST_TMPDIR/pycwd")" = / ]
 }
 
 @test "overrides: cargo's repo-local files, the classic yarn rc, and a toolchain path" {

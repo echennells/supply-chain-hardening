@@ -108,7 +108,7 @@ The order is the one thing you have to get right. Hardening wraps the binaries t
 
 ### Before you apply
 
-- **Run `./action/harden.sh --preflight` first.** It says what applying would meet on this host (Ansible, the files the play stops on, the package managers found) and writes nothing.
+- **Run `./action/harden.sh --preflight` first.** It says what applying would meet on this host (Ansible, the files the play stops on, the package managers found) and changes no file.
 - **Do not run with `sudo ansible-playbook` or global `--become`.** Facts get gathered as root, `HOME` becomes `/root`, and every per-user config lands in the wrong home while the recap reports success. The preflight refuses this.
 - **`N/A — not installed` rows are correct, not failures.** There is nothing to harden yet. Install the manager, re-apply.
 - **A pre-existing `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml` stops the play.** It may be a corporate registry setting. Read it, then pass `-e accept_etc_overwrite=true` if overwriting is what you want.

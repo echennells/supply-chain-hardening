@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # harden.sh --preflight: what applying would meet, before anything is written.
 #
-# Two things matter here. It must write nothing, because the agent running it
+# Two things matter here. It must change nothing, because the agent running it
 # has not asked the host's owner yet, and a preview that changes things is the
 # change. And its judgement of "would stop" must be the apply's: the same files,
 # the same markers, the same classification as tasks/preflight.yml, so a host it
@@ -199,6 +199,20 @@ sudo_rs_stub() {
   stub_bin mvn 'echo "Apache Maven 3.9.9"'
   run preflight
   [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not written by this project"* ]]
+}
+
+@test "preflight: sudo is only asked whether it needs a password, never to read or run anything else" {
+  # Nobody has agreed to anything yet. An earlier version read /root/.yarnrc.yml
+  # through passwordless sudo.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: sudo is not consulted"
+  stub_bin sudo "printf '%s\\n' \"\$*\" >> '$BATS_TEST_TMPDIR/sudo-calls'
+case \"\$1\" in --version) echo 'Sudo version 1.9.15' ;; esac
+exit 0"
+  ansible_at 2.21.6
+  run preflight
+  [ -s "$BATS_TEST_TMPDIR/sudo-calls" ]
+  [ -z "$(grep -vxE -e '-n true|--version' "$BATS_TEST_TMPDIR/sudo-calls")" ] || { cat "$BATS_TEST_TMPDIR/sudo-calls"; return 1; }
+  [[ "$output" == *"/root/.yarnrc.yml: not looked at"* ]]
 }
 
 @test "preflight: run as root under sudo, with root's HOME, is a STOP" {

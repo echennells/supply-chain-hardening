@@ -391,10 +391,12 @@ _sg_yaml() {
 # _sg_composer_policy <composer.json> -> "config.policy = <json>" and
 # "config.policy.cooldown.<k> = <json>", or "unreadable: why", or nothing.
 # -I -S: an isolated interpreter that processes no site directory, so neither
-# the working directory nor a .pth file runs anything.
+# the working directory nor a .pth file runs anything. Started from /, on an
+# absolute path: python3 may be a version manager's shim, which reads files in
+# the working directory to choose what it runs.
 _sg_composer_policy() {
   if command -v python3 >/dev/null 2>&1; then
-    python3 -I -S - "$1" 2>/dev/null <<'PY' | _sg_clean
+    (cd / && python3 -I -S - "$1" 2>/dev/null) <<'PY' | _sg_clean
 import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
@@ -425,7 +427,7 @@ PY
 # What outranks a repo's value, if anything. One place, so the wording and the
 # facts change together.
 _sg_role_env="on a host hardened by the role, the env layer outranks it in login shells and PAM sessions, not in systemd units, a container CMD or a cleaned environment"
-_sg_ci_env="in CI, the steps after the action carry it too"
+_sg_ci_env="in CI, later steps that have the action's env layer carry it too"
 _sg_open="Not closed by the role or the action."
 
 # Appends to the caller's `overrides` array: "<file>: <line> — <effect>".
@@ -433,8 +435,9 @@ _sg_override() { overrides+=("$1: $2 — $3"); }
 
 # Every repo-local override this reads, for the repo at $1.
 suggest_overrides() {
-  local d="$1" l f tables
+  local d l f tables
   local -a hits
+  d=$(CDPATH="" cd -- "$1" 2>/dev/null && pwd) || return 0
   _sg_hits() { hits=(); while IFS= read -r l; do [ -n "$l" ] && hits+=("$l"); done; }
 
   if [ -f "$d/.npmrc" ]; then
@@ -461,6 +464,7 @@ suggest_overrides() {
     for l in ${hits[@]+"${hits[@]}"}; do
       case "$l" in
         *exclude-newer-package*) _sg_override "$f" "$l" "loosens uv's cutoff for the packages it names. ${_sg_open}" ;;
+        *pip.exclude-newer*) _sg_override "$f" "$l" "\`uv pip\`'s own cutoff for this project. Whether UV_EXCLUDE_NEWER outranks this form was not measured; treat it as not closed." ;;
         *exclude-newer*) _sg_override "$f" "$l" "this project's own uv cutoff, instead of the host's. On a role host with uv_exclude_newer_env (agent_host turns it on), UV_EXCLUDE_NEWER outranks it in login shells; otherwise, and in CI, not closed." ;;
         *no-build*) _sg_override "$f" "$l" "uv's source-build block for this project; false lifts it for every uv command run here. ${_sg_open}" ;;
       esac
@@ -754,19 +758,22 @@ _sg_print_overrides() {
 # (tests/ci/11-preflight.bats compares the two), the same user_cfg_class as the
 # apply, and the same ansible-core and GNU-date conditions.
 #
-# WRITES NOTHING. MEASURED in the test image with `find / -newer` over the whole
-# filesystem, as root and as a user with passwordless sudo: no file changed
-# (tests/ci/11-preflight.bats snapshots the home and the scratch directory on
-# every run). `sudo -n true` is run to learn whether sudo needs a password, as
-# the role's preflight does; it never prompts. Versions come from files where a
-# command that prints one writes something (ansible-core, go, npm, pnpm, yarn);
-# otherwise the command runs from / (_pf_version says which). For a tool whose
-# version would be a write, or that was not measured, only its path is printed.
+# IT CHANGES NO FILE, AND NEVER READS ONE AS ROOT. MEASURED in the test image
+# with `find / -newer` over the whole filesystem, as root and as a user with
+# passwordless sudo: nothing moved but the test's own output. The container has
+# no syslog, so that could not show the one trace there is: a non-root caller
+# runs `sudo -n true` once, to learn whether sudo needs a password, as the role's
+# preflight does, and sudo logs it like any other call (MEASURED on Ubuntu 24.04,
+# a journal and auth.log line). It never prompts. Not measured: macOS, sudo-rs.
+# Versions come from files where a command that prints one writes something
+# (ansible-core, go) or downloads (pnpm, yarn), and for npm; otherwise the
+# command runs from / (_pf_version says which). For a tool whose version would be
+# a write, or that was not measured, only its path is printed.
 #
 # Exit 0 when nothing above would stop the play, 1 when something would: each
 # such line starts with STOP.
 preflight_report() {
-  local repo="${1:-}" block=0 me uid f cls ver p sv is_rs=0 need_pw=1 av path note
+  local repo="${1:-}" block=0 me uid f cls ver sv is_rs=0 need_pw=1 path note
   me=$(id -un 2>/dev/null || echo "?"); uid=$(id -u)
   local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'
   _pf_stop() { block=1; printf '  STOP  %s\n' "$*"; }
@@ -798,7 +805,7 @@ preflight_report() {
     sv=$(sudo --version 2>/dev/null | head -1) || true
     case "$sv" in sudo-rs*) is_rs=1 ;; esac
   else
-    _pf_stop "no sudo on PATH and not root: the role needs root for /etc, /usr/local/bin and /etc/environment."
+    _pf_stop "no sudo on PATH and not root: the role needs root for /etc, /usr/local/bin and /etc/environment, and Ansible escalates with sudo unless told otherwise."
   fi
 
   echo ""
@@ -856,17 +863,12 @@ preflight_report() {
     _pf_user_file maven "$HOME/.m2/settings.xml"
   fi
   command -v dotnet >/dev/null 2>&1 && _pf_user_file nuget "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
-  # Not a stop: as a non-root user the role leaves root's yarn file alone if it
-  # did not write it, and lists it in the run summary (tasks/yarn.yml).
+  # Not a stop, and not read: as a non-root user the role leaves root's yarn file
+  # alone if it did not write it, and lists it in the run summary
+  # (tasks/yarn.yml). Finding out needs root, and nobody has agreed to anything
+  # yet, so the preflight never escalates to read a file.
   if [ "$uid" -ne 0 ]; then
-    if [ "$need_pw" = 0 ] && command -v sudo >/dev/null 2>&1; then
-      if sudo -n sh -c 'test -f /root/.yarnrc.yml' >/dev/null 2>&1 \
-         && ! sudo -n sh -c "grep -qE '$marker' /root/.yarnrc.yml" >/dev/null 2>&1; then
-        _pf_note "/root/.yarnrc.yml: not written by this project; the role leaves it alone and lists it in the run summary."
-      fi
-    else
-      _pf_note "/root/.yarnrc.yml: not read (needs root). If it is not this project's, the role leaves it alone and says so in the run summary."
-    fi
+    _pf_note "/root/.yarnrc.yml: not looked at (needs root). If it is there and not this project's, the role leaves it alone and says so in the run summary."
   fi
   _pf_line "(action/harden.sh does not stop on the per-user files: it backs each one up next to itself, replaces it and warns. It writes /etc with sudo where it can.)"
 
