@@ -366,9 +366,9 @@
       # apply. Waiting longer costs only time when GitHub hangs.
       #
       # SFW_SKIP_UPDATE_CHECK=1 only over the pinned binary this run put in the
-      # cache: the update check would move it to whatever is newest at once, so
-      # the host's first install would not be the pin. The refresh timer and the
-      # next apply make that check.
+      # cache: an update check would move it to whatever is newest at once, so
+      # the host's first install would not be the pin. The refresh timer and a
+      # later apply make that check.
       if out=$({{ 'SFW_SKIP_UPDATE_CHECK=1 ' if sfw_seeded | default(false) | bool else '' }}timeout 600 sfw "$true_bin" 2>&1); then
         echo ok
       else

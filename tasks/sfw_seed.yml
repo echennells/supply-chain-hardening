@@ -4,8 +4,9 @@
 # API. socket.yml includes this between the sfw install and the warm. See
 # sfw_binary_pin in defaults/main.yml for why.
 #
-# The layout is sfw's own (2.0.6 dist/sfw.mjs): .sfw-cache/<release>/<asset>,
-# and a symlink .sfw-cache/latest to it, which is all sfw looks at. MEASURED
+# The layout is sfw's own (2.0.6 dist/sfw.mjs): .sfw-cache/<release>/<asset>, a
+# symlink .sfw-cache/latest to it, and next-check, the time of the next update
+# check. `latest` is all sfw looks at to find the binary. MEASURED
 # 2026-11-23 with api.github.com answering 403: over a cache laid out like this
 # sfw exits 0, with its update check due, overdue or absent, and `npm install`
 # goes through it; with nothing cached it exits 1.
@@ -128,9 +129,15 @@
           [ "$have" = "$want" ] || no "the download's sha256 is ${have:-unknown}, not the pinned $want"
           # Again, now that the download took its time: never replace one.
           if [ -e "$c/latest" ]; then no "a binary was cached while it downloaded"; fi
+          # next-check as sfw's own fetch leaves it, an hour ahead. Without one the
+          # check is due at once, and sfw run by hand by another account fails at
+          # once too, because it cannot write it (MEASURED: EACCES, exit 1; with
+          # this, exit 0). The wrappers are not affected either way.
           chown 0:0 "$f" && chmod 0755 "$f" \
             && mkdir -p -- "$r" && chmod 0755 "$c" "$r" \
             && mv -fT -- "$f" "$r/${f##*/}" \
+            && date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%S.000Z > "$s/next-check" \
+            && mv -fT -- "$s/next-check" "$c/next-check" \
             && ln -s -- "$r/${f##*/}" "$s/latest" \
             && mv -fT -- "$s/latest" "$c/latest" \
             || no "it could not be put in $c"

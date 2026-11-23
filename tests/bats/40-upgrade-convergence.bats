@@ -804,8 +804,16 @@ sfw_cold() {
   run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
   [ -z "$output" ]
   [ ! -e "$pkg/.sfw-seed" ]
-  # The first run made no update check, or it would not have been the pin's.
-  [ ! -e "$c/next-check" ]
+  # The next update check is an hour off, as after sfw's own fetch, so sfw run
+  # by hand by another account works too (it cannot write that file, and fails
+  # when it has to).
+  local left=$(( $(date -d "$(cat "$c/next-check")" +%s) - $(date +%s) ))
+  echo "next update check in ${left}s"
+  [ "$left" -gt 3000 ] && [ "$left" -le 3600 ]
+  [ "$(stat -c '%u:%g %a' "$c/next-check")" = "0:0 644" ]
+  run su - sfwprior -c "sfw true"
+  echo "$output"
+  [ "$status" -eq 0 ]
 
   # Another account's npm goes through it: sfw runs its child behind its own CA.
   PROJ=$(mktemp -d /tmp/sfw-pin.XXXXXX)
@@ -824,6 +832,7 @@ sfw_cold() {
   # Converged: the reset accepts the cache as it is, nothing is downloaded, and
   # nothing changes. sfw's update check is due here and refused; it keeps what
   # it has.
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
   before=$(stat -c %i "$t")
   socket_apply
   [ "$status" -eq 0 ]
@@ -957,13 +966,16 @@ node_stub_teardown() {
   hosts_block_api
   sfw_cold
   NODE_STUB=/usr/local/sbin/node
-  printf '#!/bin/sh\ncase "$*" in *process.platform*) echo linux-arm64; exit 0 ;; esac\nexec %s "$@"\n' "$(readlink -f "$(command -v node)")" > "$NODE_STUB"
+  printf '#!/bin/sh\ncase "$*" in *process.platform*) echo linux-arm64; exit 0 ;; */sfw\ */true) echo "skip=${SFW_SKIP_UPDATE_CHECK:-unset}" >> %s ;; esac\nexec %s "$@"\n' "$BATS_TEST_TMPDIR/warm" "$(readlink -f "$(command -v node)")" > "$NODE_STUB"
   chmod 755 "$NODE_STUB"; hash -r
   socket_apply
   node_stub_teardown; hash -r
   echo "$output" | tail -20
   [ "$status" -eq 0 ]
   skip_if_pin_unreachable
+  # The warm over a binary this run put there makes no update check, or what the
+  # host runs first would be whatever is newest.
+  [ "$(cat "$BATS_TEST_TMPDIR/warm")" = "skip=1" ]
   [[ "$output" == *"installed, with the pinned firewall binary $v in its cache, but sfw could not run it (exit "*"sfw was moved aside so npm and cargo keep working, unfiltered"* ]]
   [[ "$output" != *"could not be fetched from GitHub ("* ]]
   [ "$(recap_changed)" = 0 ]
@@ -1144,12 +1156,24 @@ sfw_shadow_teardown() {
   if [[ "$output" == *"its runtime binary could not be fetched from GitHub"* ]]; then
     skip "sfw's binary could not be downloaded from GitHub for the warm; the shadow was moved aside and the summary said so"
   fi
-  [[ "$(task_result "Warm the Socket Firewall binary cache")" == ok:* ]]
+  # The new copy has nothing cached, so this apply puts the pinned binary there
+  # and counts that as its change (or, the release URL refused, sfw downloads
+  # its own, which the warm has never counted).
+  st=$(task_result "Warm the Socket Firewall binary cache")
+  if [[ "$output" == *"(sfw_binary_version "*" was not used: downloading it failed"* ]]; then
+    [[ "$st" == ok:* ]]
+  else
+    [[ "$st" == changed:* ]]
+  fi
   hash -r
   [ "$(command -v sfw)" = "$img" ]
   [ -e "$c/latest" ]
   run find "$c" \( ! -uid 0 -o \( ! -type l -perm /022 \) \) -print
   [ -z "$output" ]
+  # And then there is nothing left to do.
+  socket_apply
+  [ "$status" -eq 0 ]
+  [ "$(recap_changed)" = 0 ]
 }
 
 # ---- cargo: a system-path wrapper that an earlier version left behind ----
