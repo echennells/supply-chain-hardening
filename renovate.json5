@@ -64,6 +64,16 @@
       versioningTemplate: 'semver',
     },
 
+    {
+      customType: 'regex',
+      description: 'sfw-free — the firewall binary sfw runs, pinned GitHub release tag (see its packageRule: digests are NOT auto-updated)',
+      managerFilePatterns: ['defaults/main.yml'],
+      matchStrings: ['(?m)^sfw_binary_version: "(?<currentValue>v[0-9][^"]*)"'],
+      datasourceTemplate: 'github-releases',
+      depNameTemplate: 'SocketDev/sfw-free',
+      versioningTemplate: 'semver',
+    },
+
     // ------------------------------------------------------------- Go modules
     {
       customType: 'regex',
@@ -120,9 +130,9 @@
     {
       customType: 'regex',
       // The sfw npm package is a shim that downloads a firewall binary at
-      // RUNTIME. This pin covers the shim only; the binary it fetches is
-      // outside anything Renovate can see.
-      description: 'sfw (socket-firewall) — npm shim only; the runtime-downloaded binary is unpinned and unmanaged',
+      // RUNTIME. This pin covers the shim only; the binary has its own
+      // (sfw_binary_version, below).
+      description: 'sfw (socket-firewall) — npm shim only; its firewall binary is pinned apart, as sfw_binary_version',
       managerFilePatterns: ['defaults/main.yml'],
       matchStrings: ['(?m)^sfw_version: "(?<currentValue>[0-9][^"]*)"'],
       datasourceTemplate: 'npm',
@@ -204,6 +214,20 @@
       dependencyDashboardApproval: true,
       labels: ['dependencies', 'needs-manual-checksums', 'security'],
       commitMessageTopic: 'cosign (REGENERATE cosign_checksums)',
+    },
+    {
+      // Same hazard as cosign: Renovate can bump sfw_binary_version but not the
+      // four digests, and a mismatch is not an error. tasks/sfw_seed.yml refuses
+      // the file and sfw falls back to its own download, so a version-only PR
+      // turns the pin off and says so only in the run summary. action/harden.sh
+      // mirrors all five values; tests/ci/06-role-parity.bats fails until both
+      // files agree.
+      description: 'sfw-free: manual approval required — sfw_binary_checksums and the SFW_BINARY_* constants in action/harden.sh must be updated in the same commit',
+      matchDatasources: ['github-releases'],
+      matchPackageNames: ['SocketDev/sfw-free'],
+      dependencyDashboardApproval: true,
+      labels: ['dependencies', 'needs-manual-checksums', 'security'],
+      commitMessageTopic: 'sfw-free (UPDATE sfw_binary_checksums and action/harden.sh)',
     },
     {
       description: 'pinact: a major bump needs the /vN module path edited at tasks/github.yml:86 in the same commit — a version-only bump 404s at the Go proxy and the role records it as a skipped protection, silently. Park for a human.',
