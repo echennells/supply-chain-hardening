@@ -340,9 +340,9 @@ ov() { grep -F "  - $1: " <<<"$output"; }
 }
 
 # The tools follow every spelling their format allows, and a repository that
-# wants a gate off picks one this reader does not. Each of these was MEASURED to
-# be honoured (action/harden.sh, "repo-local config"). What must never happen is
-# "none found".
+# wants a gate off picks one this reader does not. Each form was MEASURED to be
+# honoured, most of them on the tool named here (action/harden.sh, "repo-local
+# config"). What must never happen is "none found".
 @test "overrides: a spelling the readers do not follow is reported as not read, never as none found" {
   local n=0 c f body
   while IFS='|' read -r c f body; do
@@ -371,6 +371,8 @@ yaml tagged key|pnpm-workspace.yaml|!!str minimumReleaseAge: 0\n
 yaml merge|pnpm-workspace.yaml|x: &a\n  ignoreScripts: false\n<<: *a\n
 yaml byte-order mark|.yarnrc.yml|\357\273\277enableScripts: true\n
 yaml lone CR|.yarnrc.yml|# c\renableScripts: true\r
+yaml aliased key|.yarnrc.yml|nodeLinker: &k "enable\\x53cripts"\n*k : true\n
+yarn 1 format|.yarnrc.yml|# yarn lockfile v1\n"enable\\u0053cripts" true\n
 npmrc quoted key|.npmrc|"ignore-scripts"=false\n
 npmrc escaped key|.npmrc|"ignore\\u002dscripts"=false\n
 npmrc variable in the key|.npmrc|ignore-${NOPE?}scripts=false\n
@@ -380,7 +382,7 @@ npmrc a second, unread one|.npmrc|ignore-scripts=true\n"ignore\\u002dscripts"=fa
 yarn 1 quoted key|.yarnrc|"yarn-path" "./x.cjs"\n
 yarn 1 escaped key|.yarnrc|"yarn\\u002dpath" "./x.cjs"\n
 CASES
-  [ "$n" -eq 24 ]
+  [ "$n" -eq 26 ]
 }
 
 # The other side: what an ordinary repo holds must not be reported as odd, or the

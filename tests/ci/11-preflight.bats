@@ -128,11 +128,25 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
 
 @test "preflight: an Ansible new enough, and nothing in the way, says so and exits 0" {
   [ "$(id -u)" -ne 0 ] || skip "running as root: a different report"
+  # This machine's own /etc is read too, and GitHub's Ubuntu image ships an
+  # /etc/pip.conf. With a file there that is not this project's, that STOP and no
+  # other is the right answer.
+  local f foreign=0
+  for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$f" || foreign=$((foreign + 1))
+  done
   stub_bin sudo 'case "$1" in --version) echo "Sudo version 1.9.15" ;; -n) shift; [ "$1" = true ] ;; *) exit 1 ;; esac'
   ansible_at 2.21.6
   stub_bin date 'case "$*" in --version) echo "date (GNU coreutils) 9.4" ;; "-u -d @0 "*) echo 1970-01-01T00:00:00Z ;; *) exec /bin/date "$@" ;; esac'
   run preflight
   [[ "$output" == *"ansible-core 2.21.6"* ]]
+  if [ "$foreign" -gt 0 ]; then
+    [ "$(grep -cE '^ +STOP  ' <<<"$output")" -eq "$foreign" ] || { echo "$output"; return 1; }
+    [ "$(grep -cE '^ +STOP  /etc/[^:]*: not written by this project' <<<"$output")" -eq "$foreign" ]
+    [ "$status" -eq 1 ]
+    return 0
+  fi
   [[ "$output" == *"Nothing above would stop the play"* ]]
   [[ "$output" == *"wait for their OK"* ]]
   [ "$status" -eq 0 ]

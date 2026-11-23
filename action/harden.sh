@@ -317,9 +317,12 @@ suggest_scripted_deps() {
 # allows, and a repository that wants a gate off will not choose the plain one.
 # MEASURED, each honoured from the project directory: a quoted key, an escaped
 # one, `ignore-${NOPE?}scripts=false` and a lone CR as the line break (npm
-# 11.19.1); a flow mapping, an escaped key, an indented top level and
-# `--- {key: v}` (pnpm 11.29.0, Yarn 4.18.1); an inline table, a dotted key and
-# an escaped key (uv 0.13.9); a byte-order mark (npm, Yarn, uv). So a key that a
+# 11.19.1); a flow mapping, an escaped, tagged, aliased or `? complex` key, an
+# indented top level, `--- {key: v}` and a lone CR (pnpm 11.29.0, Yarn 4.18.1,
+# not every form on both); Yarn's own yarn 1 format under a `# yarn lockfile v1`
+# line; an inline table, a dotted key and an escaped key or table (uv 0.13.9); an
+# inline table (Bun 1.4.5); a quoted or escaped yarn-path (Yarn 1.22.22); a
+# byte-order mark (npm, pnpm, Yarn, uv). So a key that a
 # file mentions more often than a reader accounted for is reported as not read
 # (_sg_net), never as absent.
 #
@@ -381,7 +384,7 @@ _sg_net() {
     ini)   re='^[^=]*(\\|[$][{])' ;;
     toml)  re='(^|[{,.])[[:space:]]*"[^"]*\\[^"]*"[[:space:]]*[=.]|^[[:space:]]*\[[^"=]*"[^"]*\\[^"]*"[^"=]*\]+[[:space:]]*(#.*)?$' ;;
     yarn1) re='^[[:space:]]*"[^"]*\\' ;;
-    *)     re='"[^"]*\\[^"]*"[[:space:]]*:|^[[:space:]]*[?]([[:space:]]|$)' ;;
+    *)     re='"[^"]*\\[^"]*"[[:space:]]*:|^[[:space:]]*[?]([[:space:]]|$)|^[*]' ;;
   esac
   odd=$(_sg_text "$f" | { LC_ALL=C grep -vE "$cm" || :; } | { LC_ALL=C grep -cE -- "$re" || :; })
   if [ "${odd:-0}" -gt 0 ]; then
@@ -589,6 +592,9 @@ suggest_overrides() {
         plugins:*) _sg_override .yarnrc.yml "$l" "code loaded into yarn for every command here. ${_sg_open}" ;;
       esac
     done
+    if [ "$(_sg_text "$d/.yarnrc.yml" | { LC_ALL=C grep -ciE '^#[[:space:]]+yarn[[:space:]]+lockfile[[:space:]]+v1' || :; })" -gt 0 ]; then
+      _sg_override .yarnrc.yml "marked \"yarn lockfile v1\"" "yarn parses such a file by yarn 1's rules, which this reader does not follow: open the file."
+    fi
     _sg_net .yarnrc.yml "$d/.yarnrc.yml" yaml enableScripts npmMinimalAgeGate npmPreapprovedPackages yarnPath plugins
   fi
   if _sg_have "$d" .yarnrc; then
@@ -843,16 +849,17 @@ _sg_print_overrides() {
     echo "(.npmrc, uv.toml, pyproject [tool.uv], bunfig.toml, poetry.toml, pnpm-workspace.yaml,"
     echo ".yarnrc.yml, .yarnrc, .bundle/config, composer.json, .cargo/config.toml, cooldown.toml,"
     echo "rust-toolchain). Other files can do it too, and were not read: deno.json, NuGet.Config,"
-    echo "Maven's and Gradle's, and anything below the top of the repo."
+    echo "Maven's and Gradle's, package.json's packageManager (corepack and pnpm run the version"
+    echo "it names), and anything below the top of the repo."
   else
     echo "Repo-local config that outranks the host's, as the files are written:"
     echo ""
     for o in "${overrides[@]}"; do _sg_note "$o"; done
     echo ""
     echo "Only the top of the repo was read, and the files as text: nothing in the repo"
-    echo "ran. deno.json, NuGet.Config and Maven's and Gradle's files were not read. After"
-    echo "applying, run the verifier from inside the repo; it reports the uv, pnpm, yarn,"
-    echo "composer and bundler ones as rows."
+    echo "ran. deno.json, NuGet.Config, Maven's and Gradle's files and package.json's"
+    echo "packageManager were not read. After applying, run the verifier from inside the"
+    echo "repo; it reports the uv, pnpm, yarn, composer and bundler ones as rows."
   fi
   echo ""
 }
