@@ -847,25 +847,45 @@ sfw_cold() {
   [ "$(stat -c %i "$t")" = "$before" ]
 }
 
-@test "upgrade: a download that is not the pinned binary never reaches sfw's cache, and the run says what it was" {
+@test "upgrade: a download that is not the pinned binary is refused, and sfw does not get to fetch one itself" {
   sfw_pin_preconditions
-  hosts_block_api
-  sfw_cold
+  # The API is NOT blocked: sfw's own download is what this must not reach. With
+  # the API reachable, the code before this change ended here with sfw's current
+  # release in the cache, run as root.
   zeros=$(printf '0%.0s' $(seq 64))
-  socket_apply -e "{\"sfw_binary_checksums\": {\"$(sfw_pin_key)\": \"sha256:$zeros\"}}"
-  echo "$output" | tail -20
+  bad() { socket_apply -e "{\"sfw_binary_checksums\": {\"$(sfw_pin_key)\": \"sha256:$zeros\"}}"; }
+  refused_now() {
+    echo "$output" | grep -E 'Socket Firewall —|changed=' | cut -c1-300
+    [ "$status" -eq 0 ] || return 1
+    # What it downloaded is the release the shipped pin names, so the digest is
+    # the only thing that kept it out.
+    [[ "$output" == *"Socket Firewall — REFUSED: the pinned firewall binary (sfw_binary_version $v) is not the file its checksum names: the download's sha256 is $sum, not the pinned $zeros. "*"sfw was moved aside"* ]] || return 1
+    [[ "$output" != *"could not be fetched from GitHub ("* ]] || return 1
+    [[ "$output" == *"protection(s) were NOT applied"* ]] || return 1
+    [[ "$(task_result "Warm the Socket Firewall binary cache")" == skipping:* ]] || return 1
+    [ ! -e "$c/latest" ] || return 1
+    [ ! -L "$c/latest" ] || return 1
+    [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ] || return 1
+    hash -r; [ -z "$(command -v sfw)" ] || return 1
+    [ -e "$bin.broken" ]
+  }
+  sfw_cold
+  bad
+  if [[ "$output" == *"was not used"*"downloading it failed"* ]]; then
+    skip "the pinned binary could not be downloaded from GitHub's release URL"
+  fi
+  refused_now
+  # Again: refused again, ending where it began, so nothing changed.
+  bad
+  refused_now
+  [ "$(recap_changed)" = 0 ]
+  # With the right digest the next apply brings sfw back.
+  socket_apply
   [ "$status" -eq 0 ]
-  skip_if_pin_unreachable
-  # What it downloaded is the release the shipped pin names, so the digest is
-  # the only thing that kept it out.
-  [[ "$output" == *"its runtime binary could not be fetched from GitHub (exit 1: [sfw] Failed"*"The pinned $v was not used either: the download's sha256 is $sum, not the pinned $zeros. "* ]]
-  [ ! -e "$c/latest" ]
-  [ ! -L "$c/latest" ]
-  [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ]
-  hash -r; [ -z "$(command -v sfw)" ]
-  [ -e "$bin.broken" ]
-  # Counted as the protection that is missing, as before.
-  [[ "$output" == *"protection(s) were NOT applied"* ]]
+  skip_if_pin_unreachable "the refusals passed"
+  [[ "$output" != *"REFUSED"* ]]
+  hash -r; [ "$(command -v sfw)" = "$bin" ]
+  [ "$(sha256sum < "$(readlink -f "$c/latest")" | cut -d' ' -f1)" = "$sum" ]
 }
 
 @test "upgrade: a binary sfw already has cached is left alone, whatever its version" {
@@ -988,17 +1008,43 @@ node_stub_teardown() {
   [ -e "$bin.broken" ]
 }
 
-@test "upgrade: a --check run over an sfw with nothing cached downloads no pinned binary" {
+@test "upgrade: a --check run over an sfw with nothing cached downloads nothing, and leaves sfw where it is" {
   sfw_pin_preconditions
-  hosts_block_api
-  sfw_cold
+  local how
+  # With the API refused, a --check run used to move sfw aside; with it reachable,
+  # it downloaded sfw's release. Both reported changed=0.
+  for how in refused reachable; do
+    if [ "$how" = refused ]; then hosts_block_api; else hosts_restore; fi
+    sfw_cold
+    socket_apply --check
+    echo "$how:"; echo "$output" | tail -12
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" != *"Look for an sfw that has no firewall binary cached"* ]] || return 1
+    [ ! -e "$c" ] || { find "$c"; return 1; }
+    [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ] || return 1
+    hash -r; [ "$(command -v sfw)" = "$bin" ] || return 1
+    [ ! -e "$bin.broken" ] || return 1
+    [[ "$output" == *"sfw has no firewall binary cached; this --check run downloaded none. A real run would."* ]] || return 1
+    [[ "$output" != *"could not be fetched from GitHub ("* ]] || return 1
+  done
+}
+
+@test "upgrade: a --check run over a cached binary that does not run reports it and moves nothing" {
+  sfw_pin_preconditions
+  t=$(readlink -f "$c/latest")
+  mv "$t" "$t.real"
+  printf '#!/bin/sh\nexit 7\n' > "$t"; chmod 755 "$t"
+  printf '2026-01-01T00:00:00.000Z' > "$c/next-check"
+  before=$(cat "$c/next-check")
   socket_apply --check
-  echo "$output" | tail -20
+  echo "$output" | tail -12
+  mv -f "$t.real" "$t"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"Look for an sfw that has no firewall binary cached"* ]]
-  [ ! -e "$c/$v" ]
-  [ ! -e "$c/latest" ]
-  [ -z "$(find "$pkg" -name 'sfw-free-*' -o -name .sfw-seed)" ]
+  hash -r; [ "$(command -v sfw)" = "$bin" ]
+  [ ! -e "$bin.broken" ]
+  # An update check would have written this, and fetched.
+  [ "$(cat "$c/next-check")" = "$before" ]
+  [[ "$output" == *"could not be fetched from GitHub (exit 7"* ]]
 }
 
 # --- an sfw under another npm prefix than root's npm uses --------------------

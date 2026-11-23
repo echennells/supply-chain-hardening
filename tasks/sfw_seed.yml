@@ -18,8 +18,15 @@
 # Nothing unverified is ever in the cache. An sfw whose directories another
 # account could write is left to the cache reset and the warm.
 #
-# Every failure ends the same way: `latest` is not set, sfw_seed_why says why,
+# A pin that cannot be USED (no network, no pin for this platform, a directory
+# another account could write) leaves `latest` unset and says why in sfw_seed_why,
 # and the warm in socket.yml runs as it did before the pin existed.
+#
+# A download that is not the pinned file is REFUSED (sfw_seed_refused), and that
+# is where it ends: socket.yml moves sfw aside and does not let it fetch a binary
+# itself. sfw would hold its own download to the digest the GitHub API lists, so a
+# release that was replaced together with its digest would be refused here and
+# accepted there, and then run as root.
 #
 # Nothing here counts as a change. The warm reports one when the binary put in
 # place ran; a re-apply that downloads it again and cannot run it ends where it
@@ -126,7 +133,11 @@
           if [ ! -f "$f" ] || [ -L "$f" ]; then no "downloading it failed ($msg)"; fi
           have=$(sha256sum < "$f") || have=""
           have=${have%% *}
-          [ "$have" = "$want" ] || no "the download's sha256 is ${have:-unknown}, not the pinned $want"
+          [ -n "$have" ] || no "its sha256 could not be taken"
+          if [ "$have" != "$want" ]; then
+            echo "refused=the download's sha256 is $have, not the pinned $want"
+            exit 0
+          fi
           # Again, now that the download took its time: never replace one.
           if [ -e "$c/latest" ]; then no "a binary was cached while it downloaded"; fi
           # next-check as sfw's own fetch leaves it, an hour ahead. Without one the
@@ -151,6 +162,9 @@
 - name: Note whether the pinned firewall binary is in sfw's cache, or why not
   ansible.builtin.set_fact:
     sfw_seeded: "{{ 'seeded' in (sfw_seed_place.stdout_lines | default([], true)) }}"
+    sfw_seed_refused: >-
+      {{ (sfw_seed_place.stdout_lines | default([], true)) | select('match', 'refused=')
+         | map('regex_replace', '^refused=', '') | list | first | default('', true) }}
     sfw_seed_why: >-
       {{ ((sfw_seed_probe.stdout_lines | default([], true)) + (sfw_seed_place.stdout_lines | default([], true)))
          | select('match', 'why=') | map('regex_replace', '^why=', '') | list | first

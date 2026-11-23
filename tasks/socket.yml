@@ -295,6 +295,30 @@
     - npm_root_for_socket.rc | default(1) == 0
     - sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True)
 
+- name: Move sfw aside when its pinned firewall binary did not match
+  # sfw has nothing cached here, so left in place it would fetch a binary itself
+  # on root's next npm or cargo call (see sfw_seed.yml). Not run, not warmed. The
+  # next apply reinstalls it and downloads the pin again; that retry counts as no
+  # change, because it ends where it began.
+  become: true
+  ansible.builtin.shell:
+    cmd: P=$(command -v sfw 2>/dev/null) || exit 0; mv -f "$P" "$P.broken"
+    executable: /bin/bash
+  register: sfw_refused_aside
+  changed_when:
+    - sfw_refused_aside.rc == 0
+    - not (sfw_retry_aside | default(false) | bool)
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - sfw_seed_refused | default('', true) | length > 0
+
+- name: Record skipped protection — the pinned Socket Firewall binary was refused
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['Socket Firewall — REFUSED: the pinned firewall binary (sfw_binary_version ' ~ sfw_binary_version ~ ') is not the file its checksum names: ' ~ sfw_seed_refused ~ '. It was not run, and sfw was ' ~ ('moved aside' if sfw_refused_aside.rc | default(1) == 0 else 'NOT moved aside (exit ' ~ (sfw_refused_aside.rc | default('?') | string) ~ '), so do that by hand') ~ ' rather than left to fetch another one, so npm and cargo run unfiltered. A damaged download looks the same: re-apply once. If it happens again and you did not change sfw_binary_version or sfw_binary_checksums, the release may have been replaced; ask before you use it. sfw_binary_pin=false goes back to the download sfw does itself.'] }}
+  when: sfw_seed_refused | default('', true) | length > 0
+
 - name: Warm the Socket Firewall binary cache at apply time
   # sfw's npm package is a SHIM: the actual firewall binary is downloaded from
   # GitHub on first invocation, not at npm-install time. Left cold, that
@@ -352,6 +376,12 @@
         echo old
         exit 0
       fi
+      {% if ansible_check_mode %}
+      # A --check run changes nothing. With nothing cached sfw would download
+      # 137 MB to answer, and one that could not was moved aside (MEASURED with
+      # the API refused: a working sfw was gone and the recap said changed=0).
+      if [ ! -e "$pkg/.sfw-cache/latest" ]; then echo cold; exit 0; fi
+      {% endif %}
       # umask 022: sudo applies the union of the caller's umask and its own, so
       # a caller with umask 077 would leave the downloaded binary in a 0700
       # directory that no other account can reach.
@@ -368,12 +398,12 @@
       # SFW_SKIP_UPDATE_CHECK=1 only over the pinned binary this run put in the
       # cache: an update check would move it to whatever is newest at once, so
       # the host's first install would not be the pin. The refresh timer and a
-      # later apply make that check.
-      if out=$({{ 'SFW_SKIP_UPDATE_CHECK=1 ' if sfw_seeded | default(false) | bool else '' }}timeout 600 sfw "$true_bin" 2>&1); then
+      # later apply make that check. And in a --check run, because it writes.
+      if out=$({{ 'SFW_SKIP_UPDATE_CHECK=1 ' if (sfw_seeded | default(false) | bool or ansible_check_mode) else '' }}timeout 600 sfw "$true_bin" 2>&1); then
         echo ok
       else
         rc=$?
-        mv -f "$P" "$P.broken" 2>/dev/null || true
+        {{ ':' if ansible_check_mode else 'mv -f "$P" "$P.broken" 2>/dev/null || true' }}
         # The LAST non-blank line is sfw's own error; a spinner can come first.
         printf '%s\n' "$(printf '%s' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | tr -cd '[:print:]' | cut -c1-300)" >&2
         echo broken
@@ -401,6 +431,17 @@
     # did not remove (a --check run, or the removal failed), or over an sfw
     # root does not own.
     - sfw_cache_reset.stdout | default('') is not search('^(would-reset|reset-failed|not-root-owned) ', multiline=True)
+    # Nor let it fetch a binary itself after the pinned one was refused.
+    - sfw_seed_refused | default('', true) | length == 0
+
+- name: Record that a --check run left an empty sfw cache alone
+  ansible.builtin.set_fact:
+    sch_apply_notes: >-
+      {{ (sch_apply_notes | default([])) + ['Socket Firewall — sfw has no firewall binary cached; this --check run downloaded none. A real run would.'] }}
+  when:
+    - ansible_check_mode
+    - sfw_warm is defined
+    - (sfw_warm.stdout_lines | default([], true) | last | default('')) == 'cold'
 
 - name: Check that a non-root caller can run the warmed sfw
   # Parity with the action (install_sfw_and_wrap in action/harden.sh): warm as

@@ -218,8 +218,8 @@
     {
       // Same hazard as cosign: Renovate can bump sfw_binary_version but not the
       // four digests, and a mismatch is not an error. tasks/sfw_seed.yml refuses
-      // the file and sfw falls back to its own download, so a version-only PR
-      // turns the pin off and says so only in the run summary. action/harden.sh
+      // the file and socket.yml moves sfw aside, so a version-only PR leaves a
+      // new host with no sfw and says so only in the run summary. action/harden.sh
       // mirrors all five values; tests/ci/06-role-parity.bats fails until both
       // files agree.
       description: 'sfw-free: manual approval required — sfw_binary_checksums and the SFW_BINARY_* constants in action/harden.sh must be updated in the same commit',
