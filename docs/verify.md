@@ -62,6 +62,37 @@ This is a different question from the end-of-run coverage summary, which reports
 which *tasks skipped*. Five of the six failures above happened in tasks that
 completed successfully.
 
+## `--json`
+
+`supply-chain-verify --json` and `action/verify.sh --json` print one JSON
+document on stdout instead of the table. Warnings and annotations go to stderr.
+The exit code is the same as without `--json`. A real one, from the test
+container on Node 22: [verify-json-example.json](verify-json-example.json).
+
+| Field | Meaning |
+|---|---|
+| `surface` | `role` (`supply-chain-verify`) or `ci` (`action/verify.sh`). |
+| `scope` | `on <hostname>` or `in this job`. |
+| `generated` | When this run happened, UTC. |
+| `declared_intent_recorded` | The day the role recorded what this host asked for (the date of the apply), so a GAP can be read against it. `null` on `ci`, which reads the record harden.sh wrote in the same job. |
+| `min_age_hours` | The age window the host or job promised, in hours. `null` when nothing recorded one. |
+| `result.gaps` | Rows whose status is `GAP`: a protection that was asked for and is not in effect. Non-zero means exit 1. |
+| `result.weaks` | Rows whose status is `WEAK`: not counted as coverage. Either only `PRESENT` evidence, or in effect with a caveat the row states. `--strict` fails on these. |
+| `result.ok` | Rows whose status is `OK`: verified at the row's evidence level. |
+| `result.na_design` | `N/A` rows with evidence `BYDESIGN`: this host's configuration (or this job) never asked for it. |
+| `result.na_absent` | The other `N/A` rows: nothing here to check, because the tool is not installed or the project config the row looks for is not here. Evidence `-` on `role`, `ABSENT` on `ci`. |
+| `result.tools_seen` | The tools that at least one `OK`, `WEAK` or `GAP` row judged, in row order: the first word of the row's protection, with `Socket Firewall` as `sfw`. Rows about the run or the host are not tools: `env layer propagation`, `hardening run record`, `ci id-token exposure`, the `<token> coverage` rows, and `python startup hooks`, a scan that runs wherever a system Python is. `npq` and `sfw`, whose absence is itself a `GAP` row on `role`, count only when they are installed. |
+| `rows[]` | One object per table row, in table order: `status` (`OK`, `GAP`, `WEAK`, `N/A`), `evidence` (`FUNCTIONAL`, `PARSED`, `PRESENT`, or `-`, `ABSENT`, `BYDESIGN` on `N/A` rows), `protection`, and `detail` (the full rationale, as `--verbose` prints it). |
+
+The counts are tallied from `rows`, so they always add up:
+`gaps + weaks + ok + na_design + na_absent` is the number of rows.
+
+**Read `tools_seen` before `gaps`.** An empty `tools_seen` means no package
+manager was checked, whatever `gaps` says: a host with nothing installed has
+`"gaps": 0` too. `ok` can be 1 there, from the `python startup hooks` scan. Then
+compare `tools_seen` with the package managers the host or job is supposed to
+have.
+
 ## Don't run it on a host you suspect is compromised
 
 The verifier starts `python3` and `pip`, and a malicious wheel's `.pth` or

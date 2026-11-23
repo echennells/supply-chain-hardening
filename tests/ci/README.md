@@ -35,6 +35,9 @@ silently inert.
 | `03-config-files.bats` | Per-ecosystem config content, asserted **by key name**. |
 | `04-wrappers.bats` | Wrapper deployment and behavior, via stub binaries that get really wrapped. Needs passwordless sudo; skips without it. |
 | `05-behavioral.bats` | The attacks themselves, run for real against whatever package managers are installed. |
+| `08-suggest.bats` | `--suggest`: the `with:` block, the same exceptions as Ansible extra vars, and repo-local config that outranks the host's, read as files (a stub of every tool proves nothing runs, a spelling the readers do not follow is never "none found", and no symlink is followed). |
+| `10-verify-json.bats` | `verify.sh --json` and the role's report fragment: the result's counts add up to the rows, `tools_seen`, the exit code, an empty host, and that every protection name starts with a tool (`protections.py`). |
+| `11-preflight.bats` | `--preflight`: writes nothing, the STOP lines (Ansible, sudo-rs, root, the files the play stops on), and that its markers, file list, classifier and affected ansible-core versions are `tasks/preflight.yml`'s. |
 
 ## Two conventions worth knowing
 

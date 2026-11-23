@@ -104,16 +104,17 @@ Remote hosts, one ecosystem at a time, and every tunable: [docs/configuration.md
       - uses: echennells/supply-chain-hardening/action/verify@v2   # 4. prove it held
 ```
 
-The order is the one thing you have to get right. Hardening wraps the binaries that exist *when it runs*; a `setup-*` step afterwards installs an unwrapped one ahead of it on `PATH`, and nothing fails — which is what step 4 is for. Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo` prints the exceptions your project needs before the first build breaks. Full inputs, outputs, adapters and limitations: [action/README.md](action/README.md).
+The order is the one thing you have to get right. Hardening wraps the binaries that exist *when it runs*; a `setup-*` step afterwards installs an unwrapped one ahead of it on `PATH`, and nothing fails — which is what step 4 is for. Adopting it in an existing repo? `action/harden.sh --suggest=/path/to/repo` prints the exceptions your project needs, for the action and for the role, before the first build breaks, plus any repo-local config that outranks the host's. Full inputs, outputs, adapters and limitations: [action/README.md](action/README.md).
 
 ### Before you apply
 
+- **Run `./action/harden.sh --preflight` first.** It says what applying would meet on this host (Ansible, the files the play stops on, the package managers found) and changes no file.
 - **Do not run with `sudo ansible-playbook` or global `--become`.** Facts get gathered as root, `HOME` becomes `/root`, and every per-user config lands in the wrong home while the recap reports success. The preflight refuses this.
 - **`N/A — not installed` rows are correct, not failures.** There is nothing to harden yet. Install the manager, re-apply.
 - **A pre-existing `/etc/npmrc`, `/etc/pip.conf` or `/etc/uv/uv.toml` stops the play.** It may be a corporate registry setting. Read it, then pass `-e accept_etc_overwrite=true` if overwriting is what you want.
 - **So does a per-user `~/.cargo/config.toml`, `~/.m2/settings.xml` or `~/.nuget/NuGet/NuGet.Config` the role did not write.** The role replaces these whole, so a private registry and its credentials in them would be lost. Read them, then pass `-e accept_user_config_overwrite=true` if replacing them is what you want; each is backed up next to itself first.
 - **Stock distro toolchains often predate the age gates.** npm's `min-release-age` needs npm ≥ 11.10.0 ([docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) has the per-distro fix); Composer's needs ≥ 2.11.0 and Bundler's needs ≥ 4.0.13 ([docs/composer-bundler-cooldown-by-distro.md](docs/composer-bundler-cooldown-by-distro.md)); cargo's gate needs rustc ≥ 1.91.1 and falls back to `--locked` below that (Ubuntu 24.04 ships 1.75). The verifier reports both as a GAP rather than staying quiet.
-- **On agent hosts and CI images, make a GAP fatal:** `-e verify_fail_on_gap=true`. `supply-chain-verify --json` exits non-zero on any GAP, so it drops into a health check directly.
+- **On a host whose job is running agents in repositories nobody vetted, consider `-e agent_host=true`.** It makes a GAP fatal and turns on `python_safe_path` and `uv_exclude_newer_env`, which break `python script.py` importing a sibling file and a project that pins its own earlier uv `exclude-newer`; see [docs/configuration.md](docs/configuration.md#agent-hosts-agent_host). On a CI image, make a GAP fatal on its own: `-e verify_fail_on_gap=true`. `supply-chain-verify --json` exits non-zero on any GAP, so it drops into a health check directly.
 - **Re-apply after toolchain upgrades.** `rustup update`, Deno's installer and a new Node all replace wrapped binaries. The verifier reports the drift; re-applying fixes it.
 
 ## What it is not
@@ -131,8 +132,9 @@ Every known boundary, each one measured on a real host: [docs/limitations.md](do
 | [AGENTS.md](AGENTS.md) | you're an AI agent applying this, or handing the repo to one |
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
-| [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes |
+| [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes, the `--json` fields |
 | [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |
+| [docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md) | an agent will work on a hardened host: what refusals look like and what it must not do (you give it the file; nothing loads it) |
 | [docs/limitations.md](docs/limitations.md) | something isn't covered and you want to know whether that's known — it probably is |
 | [docs/design-principles.md](docs/design-principles.md) | you're adding a protection and need the scope test and the taxonomy of past bugs |
 | [docs/npm-cooldown-by-distro.md](docs/npm-cooldown-by-distro.md) | you need a cooldown-capable npm on Ubuntu or Debian |
