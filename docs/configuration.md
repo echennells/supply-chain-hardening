@@ -45,6 +45,7 @@ not set the derived values individually. The unit trap is spelled out in
 | `cargo_path_wrapper` | `true` | Wrap `cargo` to route resolution through `cargo cooldown` (rustc ≥ 1.91.1) or fall back to `--locked`. |
 | `cargo_socket_firewall` | `true` | Filter cargo downloads through Socket Firewall (needs Node ≥ 20). |
 | `socket_firewall_install` | `true` | Install `sfw` at all. |
+| `sfw_binary_pin` | `true` | Give an sfw that has no firewall binary cached the pinned release (`sfw_binary_version`, one SHA-256 per platform in `sfw_binary_checksums`) before it first runs, downloaded from the release URL and not through the GitHub API, whose unauthenticated quota sfw's own download needs. Never replaces a binary sfw has cached. `false`: sfw downloads its current release itself on first use. Either way the refresh timer moves the host to Socket's current release, or the next apply does where there is no timer. The GitHub Action has the same pin as a floor, used only when sfw's own download fails. See [limitations.md](limitations.md). |
 | `python_safe_path` | `false` | Export `PYTHONSAFEPATH=1` (Python 3.11+). Off because it breaks `python script.py` importing a sibling module — see [limitations.md](limitations.md). |
 | `pnpm_minimum_release_age_exclude` | `[]` | Packages exempt from pnpm's age gate, such as your own. Written to pnpm's config files, and to the `pnpm_config_minimum_release_age_exclude` the env layer exports for pnpm 11+ as a JSON array, in `/etc/profile.d` and `/etc/environment`, which replaces a project's own `minimumReleaseAgeExclude` wherever those are loaded. |
 | `pnpm_built_dependencies` | `[]` | Packages allowed to run build scripts under pnpm 10. Non-empty also writes `ignoreScripts: false` to pnpm 11+'s global `config.yaml` (as the action does), so a project's `allowBuilds` takes effect; that also lets each project's own lifecycle scripts run. Per-user, not system-wide. See [limitations.md](limitations.md). |
@@ -55,7 +56,8 @@ not set the derived values individually. The unit trap is spelled out in
 | `podman_allowed_registries` | docker.io, ghcr.io, quay.io, mcr.microsoft.com, gcr.io | Registry allowlist written into `policy.json`. |
 
 Pinned tool versions (`npq_version`, `sfw_version`, `zizmor_version`,
-`cargo_cooldown_version`, `cosign_version` + checksums, …) are also in
+`cargo_cooldown_version`, `cosign_version` + checksums, `sfw_binary_version` +
+checksums, …) are also in
 `defaults/main.yml`. `sfw_version` must be 2.0.6 or later. A re-apply installs
 it over an installed sfw of any other version, up or down, and replaces one older
 than 2.0.6 (see [limitations.md](limitations.md)). Moving a working sfw needs a
