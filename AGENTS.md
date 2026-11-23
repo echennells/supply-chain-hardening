@@ -36,14 +36,15 @@ for their OK**:
 ./action/harden.sh --preflight                    # or --preflight=/path/to/repo
 ```
 
-It changes no file and reads none as root (a non-root run makes one passwordless
-`sudo -n true` probe, which sudo logs). A line starting with `STOP` would end the play
-before it changes anything, or keep it from running: an existing `/etc` file, a per-user cargo, maven or nuget config this project
-did not write, the wrong user, no Ansible or one too old. It lists the package managers
-found, and for a repo it adds `--suggest`: the exceptions that repo needs and its own
-config that outranks the host's. `ansible-playbook --check` is not this: it is a dry run
-of the whole play that stops at the first refusal, escalates, and runs the role's probes
-for real, which leaves npm logs, uv and node caches and Go telemetry behind.
+It changes no file, and run as a normal user it reads none as root; it makes one
+`sudo -n true` probe, which sudo logs. A line starting with `STOP` would end the play
+before it changes anything, or keep it from running: an existing `/etc` file, a per-user
+cargo, maven or nuget config this project did not write, the wrong user, no Ansible or
+one too old. It lists the package managers found, and for a repo it adds `--suggest`: the
+exceptions that repo needs and its own config that outranks the host's.
+`ansible-playbook --check` is not this: it is a dry run of the whole play that stops at
+the first refusal, escalates, and runs the role's probes for real, which leaves npm logs,
+uv and node caches and Go telemetry behind.
 
 Tell the user what hardening does, unless they have already agreed to it:
 
