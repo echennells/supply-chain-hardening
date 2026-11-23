@@ -11,8 +11,51 @@ setup() {
   fi
 }
 
+# sfw's npm package is a launcher that asks the GitHub API for its firewall
+# binary, unauthenticated: 60 calls an hour per IP, and hosted runners share IPs.
+# MEASURED 2026-11-23: with the quota used up the API answers 403 and sfw 2.0.6
+# exits 1 with "Unable to fetch latest release" within 0.3 s; 10 of 30 sfw smoke
+# jobs that week started on a runner in that state. The role then moves sfw aside
+# and records why, which is what it should do, so the test for a working install
+# has nothing to check. Only that recorded reason skips it: an sfw that is
+# missing for any other reason (EACCES, a timeout, a bad binary, no record at
+# all) is a failure.
+sfw_fetch_refused() { # <log of the apply>
+  [ -f "$1" ] && grep -qE 'its runtime binary could not be fetched from GitHub \(exit 1: \[sfw\] Failed to prepare firewall binary: (Unable to fetch latest release|GET https://[^ ]+ failed with (403|429|5[0-9][0-9]))' "$1"
+}
+
 @test "sfw: binary is installed" {
-  which sfw
+  command -v sfw && return 0
+  if sfw_fetch_refused /var/log/ansible-run.log; then
+    # Moved aside by the role, not simply absent.
+    ls "$(npm prefix -g)"/bin/sfw.broken
+    skip "GitHub refused sfw's firewall binary when the image was built; the role recorded it and moved sfw aside"
+  fi
+  echo "sfw is not on PATH, and the apply did not record a refused download"
+  return 1
+}
+
+@test "sfw: only a recorded refusal excuses a missing sfw" {
+  local p="its runtime binary could not be fetched from GitHub" e="[sfw] Failed to prepare firewall binary:" l
+  while IFS= read -r l; do
+    printf '%s\n' "$l" > "$BATS_TEST_TMPDIR/log"
+    sfw_fetch_refused "$BATS_TEST_TMPDIR/log" || { echo "not excused: $l"; return 1; }
+  done <<EOF
+7. Socket Firewall - installed, but $p (exit 1: $e Unable to fetch latest release and no valid cached release found.). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 1: $e GET https://release-assets.example/x failed with 503). sfw is a shim
+EOF
+  while IFS= read -r l; do
+    printf '%s\n' "$l" > "$BATS_TEST_TMPDIR/log"
+    ! sfw_fetch_refused "$BATS_TEST_TMPDIR/log" || { echo "excused: $l"; return 1; }
+  done <<EOF
+7. Socket Firewall - installed, but $p (exit 1). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 1: $e EACCES: permission denied, mkdir '/x/.sfw-cache'). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 1: $e GET https://release-assets.example/x failed with 404). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 124: downloading latest sfw binary...). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 126: Exec format error). sfw is a shim
+TASK [Record skipped protection - Socket Firewall binary could not be fetched]
+EOF
+  ! sfw_fetch_refused "$BATS_TEST_TMPDIR/nolog"
 }
 
 @test "sfw: can execute without permission errors" {
