@@ -186,6 +186,10 @@ PY
   # The python startup hook scan still reads /usr and /usr/local wherever a
   # system Python is, so its row can be OK (or WEAK) here; it is about the
   # host, not a package manager, and is not in tools_seen.
+  # The verifier also looks in a few fixed places for a tool that is not on PATH
+  # (`discover` in files/verify-probes.sh); all but go's are under HOME, which
+  # is the test's.
+  [ ! -x /usr/local/go/bin/go ] || skip "go is at /usr/local/go/bin here, and the verifier finds it off PATH"
   local min="$BATS_TEST_TMPDIR/minbin" t p
   mkdir -p "$min"
   for t in bash sh awk basename cat chmod cp cut date dirname env find grep head hostname id ln ls mkdir mktemp mv od pgrep readlink realpath rm sed sleep sort stat tail tee timeout touch tr uname wc xargs; do
