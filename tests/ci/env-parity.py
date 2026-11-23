@@ -20,16 +20,16 @@ import sys
 # argued for in writing rather than accumulate by omission.
 ROLE_ONLY = {
     "PYTHONSAFEPATH":
-        "opt-in on the role (python_safe_path, default false) and deliberately "
-        "absent from the action. It fails the attribution test: it breaks "
-        "`python script.py` importing a sibling and `python -m` against a local "
-        "package, at runtime, with an error naming neither the role nor the "
-        "protection. A CI job's whole purpose is running code from a checkout, "
-        "so the trade is wrong there in a way it is not on an agent host. "
-        "Revisit if ECH-183 lands profiles.",
+        "opt-in on the role (python_safe_path, default false, on with the "
+        "agent_host profile) and deliberately absent from the action. It fails "
+        "the attribution test: it breaks `python script.py` importing a sibling "
+        "and `python -m` against a local package, at runtime, with an error "
+        "naming neither the role nor the protection. A CI job's whole purpose is "
+        "running code from a checkout, so the trade is wrong there in a way it "
+        "is not on an agent host, and the action has no agent_host input.",
     "UV_EXCLUDE_NEWER":
-        "opt-in on the role (uv_exclude_newer_env, default false) and never "
-        "exported by the action. It outranks a repository's own exclude-newer, "
+        "opt-in on the role (uv_exclude_newer_env, default false, on with the "
+        "agent_host profile) and never exported by the action. It outranks a repository's own exclude-newer, "
         "and also a project that pins an earlier one so its uv.lock checks "
         "clean on every host. uv records the cutoff in uv.lock: MEASURED on "
         "uv 0.8.17, 0.11.16 and 0.12.7, such a project's `uv sync --locked` "

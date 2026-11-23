@@ -121,14 +121,23 @@ EMIT="${EMIT:-auto}"
 # this only fires when a human or a non-GitHub CI calls the script directly.
 SUGGEST=0
 SUGGEST_PATH="."
+PREFLIGHT=0
+PREFLIGHT_REPO=""
 for _arg in "$@"; do
   case "$_arg" in
     --emit=*) EMIT="${_arg#--emit=}" ;;
     --suggest) SUGGEST=1 ;;
     --suggest=*) SUGGEST=1; SUGGEST_PATH="${_arg#--suggest=}" ;;
+    --preflight) PREFLIGHT=1 ;;
+    --preflight=*) PREFLIGHT=1; PREFLIGHT_REPO="${_arg#--preflight=}" ;;
     --help|-h)
       echo "usage: harden.sh [--emit=auto|github|gitlab|circleci|azure|buildkite|plain]"
-      echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs"
+      echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs,"
+      echo "                                    the same as Ansible extra vars, and any"
+      echo "                                    repo-local config that outranks the host's"
+      echo "       harden.sh --preflight[=REPO] say what applying would stop on and which"
+      echo "                                    package managers are here, and with REPO the"
+      echo "                                    --suggest output for it; writes nothing"
       echo "       configuration is read from env: ECOSYSTEMS, RELEASE_AGE_HOURS,"
       echo "       STRICT, INSTALL_SFW, WRITE_ETC, COMPOSER_ALLOW_PLUGINS,"
       echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN"
@@ -137,6 +146,86 @@ for _arg in "$@"; do
     *) echo "[supply-chain-harden] warning: unrecognised argument '$_arg' — ignoring" >&2 ;;
   esac
 done
+
+# ---- helpers the read-only modes share with the run ----
+#
+# --suggest and --preflight run and exit before anything below is written, so
+# the functions they need are defined here, ahead of them. The run uses the same
+# ones: the preflight must judge a file or a version exactly as the apply will.
+
+# Whether a per-user config file this script or the role replaces whole was
+# written by this project. Recognition matches the role's preflight
+# (tasks/preflight.yml, `classify`; tests/ci/11-preflight.bats compares them):
+# either project's marker, or what the role wrote before it had one, is ours;
+# dotnet's own first-run NuGet.Config (nuget.org and nothing else) is stock.
+user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
+  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
+  case "$1" in
+    cargo)
+      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
+        && { echo ours; return 0; } ;;
+    maven)
+      grep -q '<id>central-https</id>' "$2" \
+        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
+        && { echo ours; return 0; } ;;
+    nuget)
+      grep -q 'key="signatureValidationMode" value="require"' "$2" \
+        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
+        && { echo ours; return 0; }
+      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+        echo stock; return 0
+      fi ;;
+  esac
+  echo foreign
+}
+
+# detect_version <key> <command>: returns the version string the command
+# prints (typically major.minor.patch), or empty if the binary isn't
+# installed OR if the version command fails for any reason. Used for
+# version-tiering decisions per ecosystem.
+#
+# Defensive against tools that exit non-zero on --version (some wrappers,
+# uv-redirected pip, broken installs) because `set -e` would otherwise
+# halt the script on a benign "we couldn't detect the version" path.
+detect_version() {
+  local _key="$1"  # unused; documentation hook for the caller's intent
+  local cmd="$2"
+  if ! command -v "${cmd%% *}" >/dev/null 2>&1; then
+    echo ""
+    return 0
+  fi
+  local out
+  # From /, never the working directory. The action runs this step in the job's
+  # checkout, and tools read files there and in every directory above it that
+  # name code they then run, for --version too. MEASURED: a .yarnrc.yml yarnPath
+  # (yarn 1.22.22, 4.1.0-4.19.0), .mvn/jvm.config (maven 3.10.0), a global.json
+  # sdk "paths" entry (.NET 10.0.404) and Poetry 2.5.2's .poetry/plugins all ran
+  # for --version. This reports the host's tool, which is what gets configured.
+  out=$(cd / && $cmd 2>&1 || true)
+  echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
+}
+
+# version_ge <a> <b>: returns 0 if a >= b semver-style, 1 otherwise.
+# Treats missing patch as .0. Used for version-tiering checks.
+version_ge() {
+  local a="$1" b="$2"
+  # read -ra rather than unquoted expansion under IFS=. — the latter is also
+  # subject to globbing, so a version string containing * or ? would expand
+  # against the cwd instead of splitting.
+  local -a a_parts b_parts
+  IFS=. read -ra a_parts <<< "$a"
+  IFS=. read -ra b_parts <<< "$b"
+  # Normalize to 3 components
+  while [[ ${#a_parts[@]} -lt 3 ]]; do a_parts+=("0"); done
+  while [[ ${#b_parts[@]} -lt 3 ]]; do b_parts+=("0"); done
+  for i in 0 1 2; do
+    local av=${a_parts[$i]:-0} bv=${b_parts[$i]:-0}
+    if (( av > bv )); then return 0; fi
+    if (( av < bv )); then return 1; fi
+  done
+  return 0  # equal counts as ge
+}
 
 # ---- --suggest: tell a repo what it needs BEFORE the first failed build ----
 #
@@ -152,9 +241,10 @@ done
 # control?"), and the observed consequence of failing it is not a support
 # ticket — it is the two lines being deleted from the workflow.
 #
-# This mode reads the manifests and prints the `with:` block the repo needs, so
-# the exceptions are chosen at adoption time from evidence rather than
-# reverse-engineered from a stack trace.
+# This mode reads the manifests and prints the `with:` block the repo needs (and
+# the same exceptions as extra vars for the Ansible role), so the exceptions
+# are chosen at adoption time from evidence rather than reverse-engineered from
+# a stack trace. It also lists repo-local config that outranks the host's.
 #
 # It reports; it changes nothing. Run it locally, or as a one-off job.
 #
@@ -217,10 +307,362 @@ suggest_scripted_deps() {
   return 0
 }
 
+# ---- repo-local config that outranks the host's, read as files ----
+#
+# A file in the project directory outranks the ~ and /etc files the role and
+# this script write, so a repository can lift a protection without touching
+# any of them. The role cannot close that, and supply-chain-verify reports it
+# only when it is run from inside the project, after the fact. So --suggest
+# names it before anything is applied. Every finding says what outranks the
+# repo's value, if anything does; the measurements are in docs/limitations.md,
+# "Repo-local configuration can outrank the role's user + system config".
+#
+# FILES ONLY (docs/design-principles.md, "The verifier test"). Nothing in the
+# repo runs, no package manager is started in it, and only the keys named below
+# are printed: a project .npmrc or .bundle/config can hold a token.
+#
+# These readers are deliberately simple: a line or a table at a time, with the
+# value printed as it is written. The tools follow every spelling their format
+# allows, and a repository that wants a gate off will not choose the plain one.
+# MEASURED, each honoured from the project directory: a quoted key, an escaped
+# one, `ignore-${NOPE?}scripts=false` and a lone CR as the line break (npm
+# 11.19.1); a flow mapping, an escaped, tagged, aliased or `? complex` key, an
+# indented top level, `--- {key: v}` and a lone CR (pnpm 11.29.0, Yarn 4.18.1,
+# not every form on both); Yarn's own yarn 1 format under a `# yarn lockfile v1`
+# line; an inline table, a dotted key and an escaped key or table (uv 0.13.9); an
+# inline table (Bun 1.4.5); a quoted or escaped yarn-path (Yarn 1.22.22); a
+# byte-order mark (npm, pnpm, Yarn, uv). So a key that a
+# file mentions more often than a reader accounted for is reported as not read
+# (_sg_net), never as absent.
+#
+# NO SYMLINK IS FOLLOWED, and what a file says is printed, so this must not be a
+# way to print some other file: MEASURED, a cooldown.toml pointing at a
+# credentials file put its contents in the output, which an agent shows to
+# people and a CI job logs. The link itself is reported.
+#
+# Octal, not a character class: BusyBox tr has none, and keeps only the class's
+# own letters (MEASURED, BusyBox 1.37.0). At most 20 lines from one reader; the
+# rest of a longer list is then reported as not read. awk reads to the end, so
+# nothing upstream is cut off by a closed pipe.
+_sg_clean() { LC_ALL=C tr -cd '\12\40-\176' | cut -c1-160 | awk 'NR <= 20'; }
+
+# _sg_text <file>: the text as the tools split it into lines. A lone CR is a line
+# break to npm, pnpm and Yarn, a byte-order mark is skipped, and NULs go so that
+# grep treats the rest as text.
+_sg_text() {
+  LC_ALL=C tr '\r' '\n' < "$1" 2>/dev/null | LC_ALL=C tr -d '\000' \
+    | LC_ALL=C sed "1s/^$(printf '\357\273\277')//"
+}
+
+# _sg_have <repo> <path in it>: 0 when there is a file here to read. A symlink,
+# or a directory on the way that is one, is reported and not followed.
+_sg_have() {
+  local p="$1/$2" link=""
+  case "$2" in */*) [ -L "$1/${2%%/*}" ] && link="$1/${2%%/*}" ;; esac
+  [ -L "$p" ] && link=$p
+  if [ -n "$link" ]; then
+    _sg_override "$2" "a symlink to $(readlink "$link" 2>/dev/null | _sg_clean | head -1)" "the tool follows it and this reader does not, because it can point at any file on this machine. Look at what it points to."
+    return 1
+  fi
+  [ -f "$p" ] || return 1
+  if [ ! -r "$p" ]; then
+    _sg_override "$2" "not readable" "its settings were not read."
+    return 1
+  fi
+  return 0
+}
+
+# _sg_net <label> <file> <ini|toml|yaml|yarn1> <key>...: what the readers missed.
+# A key on more non-comment lines than the caller's `hits` account for, or a key
+# spelled so that a text search cannot see it (an escape, npm's ${VAR} in a key,
+# YAML's `? key`), is reported for a person to look at.
+_sg_net() {
+  local label="$1" f="$2" kind="$3" k re n h why="" odd="" cm='^[[:space:]]*#'
+  shift 3
+  if [ "$kind" = ini ]; then cm='^[[:space:]]*[#;]'; fi
+  for k in "$@"; do
+    re="(^|[^A-Za-z0-9_-])${k}([^A-Za-z0-9_-]|\$)"
+    n=$(_sg_text "$f" | { LC_ALL=C grep -vE "$cm" || :; } | { LC_ALL=C grep -cE -- "$re" || :; })
+    h=$(printf '%s\n' ${hits[@]+"${hits[@]}"} | { LC_ALL=C grep -cE -- "$re" || :; })
+    if [ "${n:-0}" -gt "${h:-0}" ]; then why="${why:+$why, }$k"; fi
+  done
+  if [ -n "$why" ]; then
+    _sg_override "$label" "$why" "mentioned in a form this reader does not follow, so a value was not read. The tool may honour it: open the file."
+  fi
+  case "$kind" in
+    ini)   re='^[^=]*(\\|[$][{])' ;;
+    toml)  re='(^|[{,.])[[:space:]]*"[^"]*\\[^"]*"[[:space:]]*[=.]|^[[:space:]]*\[[^"=]*"[^"]*\\[^"]*"[^"=]*\]+[[:space:]]*(#.*)?$' ;;
+    yarn1) re='^[[:space:]]*"[^"]*\\' ;;
+    *)     re='"[^"]*\\[^"]*"[[:space:]]*:|^[[:space:]]*[?]([[:space:]]|$)|^[*]' ;;
+  esac
+  odd=$(_sg_text "$f" | { LC_ALL=C grep -vE "$cm" || :; } | { LC_ALL=C grep -cE -- "$re" || :; })
+  if [ "${odd:-0}" -gt 0 ]; then
+    _sg_override "$label" "a key written with an escape or a variable" "it can spell any setting, and this reader does not decode it. The tool does: open the file."
+  fi
+}
+
+# _sg_ini <file> <key>... -> "key=value" per line (.npmrc; `key[]` counts as key)
+_sg_ini() {
+  local f="$1"; shift
+  awk -v keys="$*" '
+    BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
+    /^[ \t]*[;#]/ { next }
+    # A key with no "=" is true.
+    { i = index($0, "="); if (!i) { key = $0; val = "true" } else { key = substr($0, 1, i - 1); val = substr($0, i + 1) }
+      gsub(/^[ \t]+|[ \t]+$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+      if (key ~ /^".*"$/ || key ~ /^\047.*\047$/) key = substr(key, 2, length(key) - 2)
+      base = key; sub(/\[\]$/, "", base)
+      if (base in want) print key "=" val }' 2>/dev/null < <(_sg_text "$f") | _sg_clean
+}
+
+# _sg_toml <file> <dotted.path>... -> "path = value" per line; a table of that
+# name is "path (a table)". Dotted keys and dotted table headers both work.
+_sg_toml() {
+  local f="$1"; shift
+  awk -v paths="$*" '
+    BEGIN { n = split(paths, p, " "); for (i = 1; i <= n; i++) want[p[i]] = 1 }
+    /^[ \t]*#/ { next }
+    /^[ \t]*\[[^]]*\]+[ \t]*(#.*)?$/ {
+      sec = $0; sub(/^[ \t]*\[+[ \t]*/, "", sec); sub(/[ \t]*\].*$/, "", sec)
+      gsub(/["\047 \t]/, "", sec)
+      if (sec in want) print sec " (a table)"
+      next
+    }
+    { line = $0; sub(/^[ \t]+/, "", line)
+      if (match(line, /^("[^"]*"|\047[^\047]*\047|[A-Za-z0-9_-]+)([ \t]*[.][ \t]*("[^"]*"|[A-Za-z0-9_-]+))*[ \t]*=/)) {
+        key = substr(line, 1, RLENGTH - 1); val = substr(line, RLENGTH + 1)
+        gsub(/["\047 \t]/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+        full = (sec == "" ? key : sec "." key)
+        if (full in want) print full " = " val
+      } }' 2>/dev/null < <(_sg_text "$f") | _sg_clean
+}
+
+# _sg_yaml <file> <top-level key>... -> "key: value" per line; a list below the
+# key is folded to "key: [a, b]".
+_sg_yaml() {
+  local f="$1"; shift
+  awk -v keys="$*" '
+    function flush() {
+      if (cur == "") return
+      if (items != "") v = "[" items "]"
+      if (v == "") v = "(a value on the lines below that this reader does not follow)"
+      print cur ": " v; cur = ""
+    }
+    BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1; cur = "" }
+    /^[ \t]*#/ { next }
+    /^[^ \t#-]/ {
+      flush()
+      if (match($0, /^["\047]?[A-Za-z0-9_-]+["\047]?[ \t]*:/)) {
+        key = substr($0, 1, RLENGTH - 1); v = substr($0, RLENGTH + 1)
+        gsub(/["\047 \t]/, "", key); sub(/^[ \t]+/, "", v)
+        if (v ~ /^#/) v = ""; else sub(/[ \t]+#.*$/, "", v)
+        items = ""
+        if (key in want) cur = key
+      }
+      next
+    }
+    cur != "" && /^[ \t]*-[ \t]/ {
+      it = $0; sub(/^[ \t]*-[ \t]+/, "", it); gsub(/["\047]/, "", it); sub(/[ \t]+#.*$/, "", it)
+      items = items (items == "" ? "" : ", ") it; next
+    }
+    END { flush() }' 2>/dev/null < <(_sg_text "$f") | _sg_clean
+}
+
+# _sg_composer_policy <composer.json> -> "config.policy = <json>" and
+# "config.policy.cooldown.<k> = <json>", or "unreadable: why", or nothing.
+# -I -S: an isolated interpreter that processes no site directory, so neither
+# the working directory nor a .pth file runs anything. Started from /, on an
+# absolute path: python3 may be a version manager's shim, which reads files in
+# the working directory to choose what it runs.
+_sg_composer_policy() {
+  if command -v python3 >/dev/null 2>&1; then
+    (cd / && python3 -I -S - "$1" 2>/dev/null) <<'PY' | _sg_clean
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+except Exception as e:
+    print("unreadable: " + (str(e).splitlines() or ["?"])[0])
+    sys.exit(0)
+cfg = d.get("config") if isinstance(d, dict) else None
+pol = cfg.get("policy") if isinstance(cfg, dict) else None
+if pol is None:
+    sys.exit(0)
+if not isinstance(pol, dict):
+    print("config.policy = " + json.dumps(pol))
+    sys.exit(0)
+cd = pol.get("cooldown")
+if isinstance(cd, dict):
+    for k in ("period", "block", "ignore"):
+        if k in cd:
+            print("config.policy.cooldown." + k + " = " + json.dumps(cd[k]))
+elif "cooldown" in pol:
+    print("config.policy.cooldown = " + json.dumps(cd))
+PY
+  elif grep -qE '"policy"|\\u' "$1" 2>/dev/null; then
+    echo "unreadable: no python3 here to read a \"policy\" key with"
+  fi
+}
+
+# What outranks a repo's value, if anything. One place, so the wording and the
+# facts change together.
+_sg_role_env="on a host hardened by the role, the env layer outranks it in login shells and PAM sessions, not in systemd units, a container CMD or a cleaned environment"
+_sg_ci_env="in CI, later steps that have the action's env layer carry it too"
+_sg_open="Not closed by the role or the action."
+
+# Appends to the caller's `overrides` array: "<file>: <line> — <effect>".
+_sg_override() { overrides+=("$1: $2 — $3"); }
+
+# Every repo-local override this reads, for the repo at $1.
+suggest_overrides() {
+  local d l f tables
+  local -a hits
+  d=$(CDPATH="" cd -- "$1" 2>/dev/null && pwd) || return 0
+  _sg_hits() { hits=(); while IFS= read -r l; do [ -n "$l" ] && hits+=("$l"); done; }
+
+  if _sg_have "$d" .npmrc; then
+    _sg_hits < <(_sg_ini "$d/.npmrc" ignore-scripts min-release-age min-release-age-exclude minimum-release-age allow-git)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        ignore-scripts=*) _sg_override .npmrc "$l" "this project's npm runs install scripts when it is false. NPM_CONFIG_IGNORE_SCRIPTS outranks it: ${_sg_role_env}; ${_sg_ci_env}." ;;
+        min-release-age=*) _sg_override .npmrc "$l" "this project's npm age gate, in days; 0 turns it off. NPM_CONFIG_MIN_RELEASE_AGE outranks it: ${_sg_role_env}; ${_sg_ci_env}." ;;
+        min-release-age-exclude*) _sg_override .npmrc "$l" "these packages skip npm's age gate (npm 11.17+). ${_sg_open}" ;;
+        minimum-release-age=*) _sg_override .npmrc "$l" "pnpm 10's age gate for this project (pnpm 11 does not read .npmrc for this). ${_sg_open}" ;;
+        allow-git=*) _sg_override .npmrc "$l" "whether this project's npm installs git dependencies. NPM_CONFIG_ALLOW_GIT=none outranks it on npm 11.9.0+: ${_sg_role_env}; ${_sg_ci_env}." ;;
+      esac
+    done
+    _sg_net .npmrc "$d/.npmrc" ini ignore-scripts min-release-age min-release-age-exclude minimum-release-age allow-git
+  fi
+
+  # uv reads uv.toml if there is one, else pyproject.toml's [tool.uv].
+  for f in uv.toml pyproject.toml; do
+    _sg_have "$d" "$f" || continue
+    if [ "$f" = uv.toml ]; then
+      _sg_hits < <(_sg_toml "$d/$f" no-build exclude-newer exclude-newer-package pip.no-build pip.exclude-newer)
+    else
+      _sg_hits < <(_sg_toml "$d/$f" tool.uv.no-build tool.uv.exclude-newer tool.uv.exclude-newer-package tool.uv.pip.no-build tool.uv.pip.exclude-newer)
+    fi
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        *exclude-newer-package*) _sg_override "$f" "$l" "loosens uv's cutoff for the packages it names. ${_sg_open}" ;;
+        *pip.exclude-newer*) _sg_override "$f" "$l" "\`uv pip\`'s own cutoff for this project. Whether UV_EXCLUDE_NEWER outranks this form was not measured; treat it as not closed." ;;
+        *exclude-newer*) _sg_override "$f" "$l" "this project's own uv cutoff, instead of the host's. On a role host with uv_exclude_newer_env (agent_host turns it on), UV_EXCLUDE_NEWER outranks it in login shells; otherwise, and in CI, not closed." ;;
+        *no-build*) _sg_override "$f" "$l" "uv's source-build block for this project; false lifts it for every uv command run here. ${_sg_open}" ;;
+      esac
+    done
+    _sg_net "$f" "$d/$f" toml no-build exclude-newer exclude-newer-package
+    [ "$f" = uv.toml ] && break
+  done
+
+  if _sg_have "$d" bunfig.toml; then
+    _sg_hits < <(_sg_toml "$d/bunfig.toml" install.minimumReleaseAge install.minimumReleaseAgeExcludes install.ignoreScripts)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        *minimumReleaseAgeExcludes*) _sg_override bunfig.toml "$l" "these packages skip Bun's age gate (measured on Bun 1.4.5). ${_sg_open}" ;;
+        *minimumReleaseAge*) _sg_override bunfig.toml "$l" "this project's Bun age gate, in seconds; 0 turns it off (measured on Bun 1.4.5). ${_sg_open}" ;;
+        *ignoreScripts*) _sg_override bunfig.toml "$l" "false runs the scripts of every package this project trusts (measured on Bun 1.4.5). ${_sg_open}" ;;
+      esac
+    done
+    _sg_net bunfig.toml "$d/bunfig.toml" toml minimumReleaseAge minimumReleaseAgeExcludes ignoreScripts
+  fi
+
+  if _sg_have "$d" poetry.toml; then
+    _sg_hits < <(_sg_toml "$d/poetry.toml" solver.min-release-age solver.min-release-age-exclude solver.min-release-age-exclude-source)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        *min-release-age-exclude*) _sg_override poetry.toml "$l" "these skip Poetry's age gate; it outranks POETRY_SOLVER_MIN_RELEASE_AGE too. ${_sg_open}" ;;
+        *min-release-age*) _sg_override poetry.toml "$l" "this project's Poetry age gate, in days. POETRY_SOLVER_MIN_RELEASE_AGE outranks it: ${_sg_role_env}; ${_sg_ci_env}." ;;
+      esac
+    done
+    _sg_net poetry.toml "$d/poetry.toml" toml min-release-age min-release-age-exclude min-release-age-exclude-source
+  fi
+
+  if _sg_have "$d" pnpm-workspace.yaml; then
+    _sg_hits < <(_sg_yaml "$d/pnpm-workspace.yaml" minimumReleaseAge minimumReleaseAgeExclude minimumReleaseAgeStrict ignoreScripts)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        minimumReleaseAgeExclude:*) _sg_override pnpm-workspace.yaml "$l" "these packages skip pnpm's age gate. On pnpm 11+, pnpm_config_minimum_release_age_exclude outranks it: ${_sg_role_env}. On pnpm 10, and in CI, not closed." ;;
+        minimumReleaseAgeStrict:*) _sg_override pnpm-workspace.yaml "$l" "false lets a too-new exact pin install. ${_sg_open}" ;;
+        minimumReleaseAge:*) _sg_override pnpm-workspace.yaml "$l" "this project's pnpm age gate, in minutes. On pnpm 11+, pnpm_config_minimum_release_age outranks it: ${_sg_role_env}. On pnpm 10, and in CI, not closed." ;;
+        ignoreScripts:*) _sg_override pnpm-workspace.yaml "$l" "false runs this project's own lifecycle scripts and the builds it allows. ${_sg_open}" ;;
+      esac
+    done
+    _sg_net pnpm-workspace.yaml "$d/pnpm-workspace.yaml" yaml minimumReleaseAge minimumReleaseAgeExclude minimumReleaseAgeStrict ignoreScripts
+  fi
+
+  if _sg_have "$d" .yarnrc.yml; then
+    _sg_hits < <(_sg_yaml "$d/.yarnrc.yml" enableScripts npmMinimalAgeGate npmPreapprovedPackages yarnPath plugins)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        enableScripts:*) _sg_override .yarnrc.yml "$l" "true runs install scripts in this project. ${_sg_open}" ;;
+        npmMinimalAgeGate:*) _sg_override .yarnrc.yml "$l" "this project's yarn age gate, in minutes (Yarn 4.10+). ${_sg_open}" ;;
+        npmPreapprovedPackages:*) _sg_override .yarnrc.yml "$l" "these packages skip yarn's age gate. ${_sg_open}" ;;
+        yarnPath:*) _sg_override .yarnrc.yml "$l" "this project's own yarn runs for every yarn command here, and it decides which gates exist. ${_sg_open}" ;;
+        plugins:*) _sg_override .yarnrc.yml "$l" "code loaded into yarn for every command here. ${_sg_open}" ;;
+      esac
+    done
+    if [ "$(_sg_text "$d/.yarnrc.yml" | { LC_ALL=C grep -ciE '^#[[:space:]]+yarn[[:space:]]+lockfile[[:space:]]+v1' || :; })" -gt 0 ]; then
+      _sg_override .yarnrc.yml "marked \"yarn lockfile v1\"" "yarn parses such a file by yarn 1's rules, which this reader does not follow: open the file."
+    fi
+    _sg_net .yarnrc.yml "$d/.yarnrc.yml" yaml enableScripts npmMinimalAgeGate npmPreapprovedPackages yarnPath plugins
+  fi
+  if _sg_have "$d" .yarnrc; then
+    _sg_hits < <(_sg_text "$d/.yarnrc" | { LC_ALL=C grep -E '^[[:space:]]*"?yarn-path"?([[:space:]]|$)' || :; } | _sg_clean)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      _sg_override .yarnrc "$l" "this project's own yarn 1 runs for every yarn command here. ${_sg_open}"
+    done
+    _sg_net .yarnrc "$d/.yarnrc" yarn1 yarn-path
+  fi
+
+  if _sg_have "$d" .bundle/config; then
+    _sg_hits < <(_sg_yaml "$d/.bundle/config" BUNDLE_COOLDOWN BUNDLE_FROZEN)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        BUNDLE_COOLDOWN:*) _sg_override .bundle/config "$l" "Bundler's age gate for this project, in days; it outranks the BUNDLE_COOLDOWN both surfaces export (measured on Bundler 4.0.13 to 4.1.0). ${_sg_open}" ;;
+        BUNDLE_FROZEN:*) _sg_override .bundle/config "$l" "a project setting outranks ~/.bundle/config; false turns frozen mode off here. ${_sg_open}" ;;
+      esac
+    done
+    _sg_net .bundle/config "$d/.bundle/config" yaml BUNDLE_COOLDOWN BUNDLE_FROZEN
+  fi
+
+  if _sg_have "$d" composer.json; then
+    _sg_hits < <(_sg_composer_policy "$d/composer.json")
+    for l in ${hits[@]+"${hits[@]}"}; do
+      case "$l" in
+        unreadable:*) _sg_override composer.json "$l" "config.policy could not be read; look for it in the file." ;;
+        *cooldown.ignore*) _sg_override composer.json "$l" "these packages skip Composer's age gate (\"*\" is every package); it outranks COMPOSER_POLICY_COOLDOWN_PERIOD and _BLOCK (measured on Composer 2.11.1). ${_sg_open}" ;;
+        *cooldown.period*|*cooldown.block*) _sg_override composer.json "$l" "Composer's age gate for this project. COMPOSER_POLICY_COOLDOWN_PERIOD and _BLOCK outrank it (measured on 2.11.1): ${_sg_role_env}; ${_sg_ci_env}." ;;
+        config.policy*) _sg_override composer.json "$l" "false turns Composer's policy off, age gate and advisory blocking included (measured on 2.11.2). Neither surface exports COMPOSER_POLICY, which outranks it. ${_sg_open}" ;;
+      esac
+    done
+  fi
+
+  for f in .cargo/config.toml .cargo/config; do
+    _sg_have "$d" "$f" || continue
+    _sg_hits < <(_sg_toml "$d/$f" build.rustc-wrapper build.rustc-workspace-wrapper build.rustc)
+    l=$(printf '%s\n' ${hits[@]+"${hits[@]}"} | awk 'NR <= 3 && $0 != ""' | tr '\n' ';' | sed 's/;$//')
+    tables=$(_sg_text "$d/$f" | sed -n 's/^[[:space:]]*\[\{1,2\}[[:space:]]*\([^]]*\).*/\1/p' | tr -d '"'"'"' \t' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g' | _sg_clean)
+    _sg_override "$f" "${l:+$l; }tables: ${tables:-none}" "cargo reads it for every cargo command here, and \`cargo metadata\` (which an IDE runs on folder open) runs a rustc-wrapper it names. ${_sg_open}"
+    _sg_net "$f" "$d/$f" toml rustc-wrapper rustc-workspace-wrapper rustc
+  done
+  if _sg_have "$d" cooldown.toml; then
+    l=$(_sg_text "$d/cooldown.toml" | { grep -vE '^[[:space:]]*(#|$)' || :; } | awk 'NR <= 6' | tr '\n' ';' | sed 's/;$//; s/;/; /g' | _sg_clean)
+    _sg_override cooldown.toml "${l:-(empty)}" "cargo-cooldown reads it; the wrapper pins the windows, but allow entries in it still exempt crates. Not closed."
+  fi
+  for f in rust-toolchain.toml rust-toolchain; do
+    _sg_have "$d" "$f" || continue
+    _sg_hits < <(_sg_toml "$d/$f" toolchain.path)
+    for l in ${hits[@]+"${hits[@]}"}; do
+      _sg_override "$f" "$l" "rustup runs the cargo under that path in this project, so the cargo wrapper never sees those commands. ${_sg_open}"
+    done
+    _sg_net "$f" "$d/$f" toml path
+  done
+}
+
 suggest_for_repo() {
   local dir="${1:-.}"
-  local -a with_lines=() notes=()
-  local found_any=0
+  local -a with_lines=() notes=() overrides=() ansible=()
+  local found_any=0 cargo_note=0
 
   if [ ! -d "$dir" ]; then
     echo "[supply-chain-harden] error: '$dir' is not a directory" >&2
@@ -231,8 +673,20 @@ suggest_for_repo() {
   echo ""
 
   # --- npm/pnpm/yarn/bun: packages whose install runs code ---
-  local scripted
-  scripted=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//') || true
+  # Only names a registry package can have. These are printed into commands a
+  # person or an agent is told to run, and a lockfile is the repo's to write:
+  # MEASURED, a package-lock.json entry named `$(...)`, or one holding a newline
+  # or a terminal escape, came out as it was written. A leading dash would be an
+  # option to npm.
+  local scripted scripted_all odd_names=0
+  local name_re='^(@[A-Za-z0-9._][A-Za-z0-9._-]*/)?[A-Za-z0-9._][A-Za-z0-9._-]*$'
+  scripted_all=$(suggest_scripted_deps "$dir" | sed '/^$/d' | sort -u) || true
+  scripted=$(printf '%s\n' "$scripted_all" | { LC_ALL=C grep -E "$name_re" || :; } | tr '\n' ',' | sed 's/,$//') || true
+  odd_names=$(printf '%s\n' "$scripted_all" | sed '/^$/d' | { LC_ALL=C grep -cvE "$name_re" || :; }) || true
+  if [ "${odd_names:-0}" -gt 0 ]; then
+    found_any=1
+    notes+=("Entries marked as running code at install time whose name no registry package can have: ${odd_names}. They are not printed here. Look at the lockfile before installing from it.")
+  fi
   # THE FIX DEPENDS ON THE PACKAGE MANAGER. pnpm_built_dependencies writes
   # pnpm's config and nothing else. MEASURED (VM#9): a package-lock.json repo
   # with sqlite3 was told to set it, did, and the binding was still missing,
@@ -252,6 +706,7 @@ suggest_for_repo() {
     notes+=("These packages run code at install time: ${scripted}. \`ignore-scripts\` blocks that by default, which for native modules means the install 'succeeds' and the binding is missing.")
     if [ -f "$dir/pnpm-lock.yaml" ]; then
       with_lines+=("          pnpm_built_dependencies: '$scripted'")
+      ansible+=("pnpm_built_dependencies")
       notes+=("pnpm: allowlisting them restores their build scripts and nothing else. On pnpm 11+ that input cannot allowlist anything: pnpm 11 has no global build allowlist. Also list these as \`allowBuilds\` in the project's pnpm-workspace.yaml.")
     fi
     if [ -f "$dir/package-lock.json" ]; then
@@ -296,6 +751,7 @@ suggest_for_repo() {
     if [ "$needs_plugins" = "1" ]; then
       found_any=1
       with_lines+=("          composer_allow_plugins: 'true'")
+      ansible+=("composer_allow_plugins")
       notes+=("composer.json declares plugins. The wrapper injects \`--no-plugins\` by default, which silently skips them; \`--no-scripts\` still applies either way.")
     fi
     if grep -q '"scripts"' "$dir/composer.json" 2>/dev/null; then
@@ -308,6 +764,7 @@ suggest_for_repo() {
   if [ -f "$dir/Cargo.toml" ]; then
     found_any=1
     with_lines+=("          install_cargo_cooldown: 'true'")
+    cargo_note=1
     notes+=("Rust detected. Without the cargo-cooldown backend the publish-age gate's config is written but nothing enforces it — you get \`--locked\` only. It compiles from source (minutes on a cold runner), so cache it or accept the cost. cargo is also the one ecosystem where \`build.rs\` runs at compile time with your privileges and cannot be blocked, which is what the age gate is standing in for.")
   fi
 
@@ -317,14 +774,21 @@ suggest_for_repo() {
     notes+=("Python detected. pip is set to \`only-binary=:all:\` — a dependency published only as an sdist will fail to resolve. If that happens, use \`uv pip install\` (it honours no-build with better errors), or drop \`pip\` from \`ecosystems\`. Whether a given dependency has a wheel for this platform cannot be determined without the network, so this is a heads-up rather than a finding.")
   fi
 
+  suggest_overrides "$dir"
+
   # --- output ---
   if [ "$found_any" = "0" ] && [ ${#notes[@]} -eq 0 ]; then
     echo "No exceptions needed. The defaults should work as-is:"
     echo ""
     echo "      - uses: echennells/supply-chain-hardening/action@v2"
     echo ""
+    echo "With the Ansible role, no extra vars are needed either:"
+    echo ""
+    echo "      ansible-playbook site.yml --limit localhost"
+    echo ""
     echo "Still put it after your setup-* steps and before your installs, and add"
     echo "the verify action after your installs."
+    _sg_print_overrides
     return 0
   fi
 
@@ -340,6 +804,37 @@ suggest_for_repo() {
     echo ""
   fi
 
+  # The same evidence for the role. Extra vars in JSON: pnpm_built_dependencies
+  # is a list, and key=value would hand the role a string.
+  local ev=""
+  case " ${ansible[*]:-} " in
+    *" pnpm_built_dependencies "*)
+      local names="" n
+      for n in ${scripted//,/ }; do
+        case "$n" in *[!A-Za-z0-9@/._-]*) continue ;; esac
+        names="${names:+$names, }\"$n\""
+      done
+      [ -n "$names" ] && ev="${ev:+$ev, }\"pnpm_built_dependencies\": [$names]" ;;
+  esac
+  case " ${ansible[*]:-} " in
+    *" composer_allow_plugins "*) ev="${ev:+$ev, }\"composer_allow_plugins\": true" ;;
+  esac
+  if [ -n "$ev" ]; then
+    echo "With the Ansible role, the same exceptions as extra vars:"
+    echo ""
+    echo "      ansible-playbook site.yml --limit localhost -e '{$ev}'"
+  else
+    echo "With the Ansible role, no extra vars are needed:"
+    echo ""
+    echo "      ansible-playbook site.yml --limit localhost"
+  fi
+  if [ "$cargo_note" = "1" ]; then
+    echo ""
+    echo "      (install_cargo_cooldown has no role counterpart to pass: the role"
+    echo "       builds cargo-cooldown by default, cargo_cooldown_enforce=true.)"
+  fi
+  echo ""
+
   if [ ${#notes[@]} -gt 0 ]; then
     echo "Why, and what else to know:"
     echo ""
@@ -348,12 +843,302 @@ suggest_for_repo() {
     echo ""
   fi
 
+  _sg_print_overrides
   echo "Order still matters more than any of the above: setup-* steps first,"
   echo "then this action, then your installs, then the verify action."
 }
 
+# Reads the caller's `overrides` array (bash's dynamic scope) and says what was
+# looked for, so an empty list reads as "looked and found none", not as silence.
+_sg_print_overrides() {
+  local o
+  echo ""
+  if [ ${#overrides[@]} -eq 0 ]; then
+    echo "Repo-local config that outranks the host's: none found at the top of the repo"
+    echo "(.npmrc, uv.toml, pyproject [tool.uv], bunfig.toml, poetry.toml, pnpm-workspace.yaml,"
+    echo ".yarnrc.yml, .yarnrc, .bundle/config, composer.json, .cargo/config.toml, cooldown.toml,"
+    echo "rust-toolchain). Other files can do it too, and were not read: deno.json, NuGet.Config,"
+    echo "Maven's and Gradle's, package.json's packageManager (corepack and pnpm run the version"
+    echo "it names), and anything below the top of the repo."
+  else
+    echo "Repo-local config that outranks the host's, as the files are written:"
+    echo ""
+    for o in "${overrides[@]}"; do _sg_note "$o"; done
+    echo ""
+    echo "Only the top of the repo was read, and the files as text: nothing in the repo"
+    echo "ran. deno.json, NuGet.Config, Maven's and Gradle's files and package.json's"
+    echo "packageManager were not read. After applying, run the verifier from inside the"
+    echo "repo; it reports the uv, pnpm, yarn, composer and bundler ones as rows."
+  fi
+  echo ""
+}
+
+# ---- --preflight: what applying would meet here, before anything is written ----
+#
+# For the agent or person who is about to apply the role (or this script) and
+# owes the host's owner a picture of what will happen first. It answers, before
+# a single task runs: can the play run at all (Ansible present and recent
+# enough, the caller not root, sudo, GNU date), which existing files would stop
+# it, which package managers are here, and, for a repo, what --suggest says.
+#
+# WHY HERE AND NOT IN ANSIBLE. The first thing to know is whether Ansible is
+# there at all, which a play cannot answer. And the role's own preflight is not
+# a preview: it stops at the first refusal, and its /etc check escalates, so a
+# host whose sudo needs a password gets a prompt before anything is reported.
+# `ansible-playbook --check` is not one either: the role's probes really run
+# under it (check_mode: false, by design, so a dry run is accurate), and it
+# stops at the first refusal and prints the whole task stream.
+#
+# The judgement is the role's: the same files and markers as tasks/preflight.yml
+# (tests/ci/11-preflight.bats compares the two), the same user_cfg_class as the
+# apply, and the same ansible-core and GNU-date conditions.
+#
+# IT CHANGES NO FILE, AND NEVER READS ONE AS ROOT. MEASURED in the test image
+# with `find / -newer` over the whole filesystem, as root and as a user with
+# passwordless sudo: nothing moved but the test's own output. The container has
+# no syslog, so that could not show the one trace there is: a non-root caller
+# runs `sudo -n true` once, to learn whether sudo needs a password, as the role's
+# preflight does, and sudo logs it like any other call (MEASURED on Ubuntu 24.04,
+# a journal and auth.log line). It never prompts. Not measured: macOS, sudo-rs.
+# Versions come from files where a command that prints one writes something
+# (ansible-core, go) or downloads (pnpm, yarn), and for npm; otherwise the
+# command runs from / (_pf_version says which). For a tool whose version would be
+# a write, or that was not measured, only its path is printed.
+#
+# Exit 0 when nothing above would stop the play, 1 when something would: each
+# such line starts with STOP.
+preflight_report() {
+  local repo="${1:-}" block=0 me uid f cls ver sv is_rs=0 need_pw=1 path note
+  me=$(id -un 2>/dev/null || echo "?"); uid=$(id -u)
+  local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'
+  _pf_stop() { block=1; printf '  STOP  %s\n' "$*"; }
+  _pf_note() { printf '  note  %s\n' "$*"; }
+  _pf_line() { printf '        %s\n' "$*"; }
+
+  echo "supply-chain-hardening preflight for ${me}@$(hostname 2>/dev/null || echo this host). It reads; it changes nothing."
+  echo ""
+
+  echo "Who would run the play (as this user, without sudo or --become):"
+  _pf_line "user $me (uid $uid), HOME=${HOME:-<unset>}"
+  if [ -z "${HOME:-}" ]; then
+    _pf_stop "HOME is not set, so there is nowhere for per-user config to go and nothing under it was looked at."
+    echo ""
+    echo "Set HOME and run this again. Nothing was changed here."
+    return 1
+  fi
+  if [ "$uid" -eq 0 ]; then
+    # The role's guard (tasks/preflight.yml): HOME is root's and the account
+    # that started this is not root.
+    if [ "${HOME:-}" = /root ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != root ]; then
+      _pf_stop "running as root under sudo from '$SUDO_USER': the role refuses that, because per-user config would land in root's home. Run ansible-playbook as $SUDO_USER, and the role escalates by itself where root is needed."
+    elif [ "${HOME:-}" != /root ]; then
+      _pf_note "running as root with HOME=${HOME:-<unset>}; per-user config lands there."
+    else
+      _pf_note "running as root: the role hardens root's own home and the system files."
+    fi
+    need_pw=0
+  elif command -v sudo >/dev/null 2>&1; then
+    if sudo -n true >/dev/null 2>&1; then
+      need_pw=0; _pf_line "sudo works without a password"
+    else
+      _pf_line "sudo asks for a password: run ansible-playbook with -K (or this user has no sudo rights at all)"
+    fi
+    sv=$(sudo --version 2>/dev/null | head -1) || true
+    case "$sv" in sudo-rs*) is_rs=1 ;; esac
+  else
+    _pf_stop "no sudo on PATH and not root: the role needs root for /etc, /usr/local/bin and /etc/environment, and Ansible escalates with sudo unless told otherwise."
+  fi
+
+  echo ""
+  echo "Ansible on this machine:"
+  if path=$(command -v ansible-playbook 2>/dev/null); then
+    ver=$(_pf_ansible_version "$path")
+    _pf_line "ansible-core ${ver:-(version not read)} ($path)"
+    [ -n "$ver" ] || _pf_note "its version could not be read without starting it; the role needs ansible-core >= 2.14, and on sudo-rs with a password prompt 2.20.11+, 2.21.6+ or 2.22+."
+    if [ -n "$ver" ]; then
+      version_ge "$ver" 2.14 || _pf_stop "ansible-core $ver is below 2.14, the role's documented minimum (README.md)."
+      # tasks/preflight.yml: sudo-rs's prompt is not one this ansible-core can
+      # answer, so every task that needs root would time out or hang.
+      if [ "$is_rs" = 1 ] && [ "$need_pw" = 1 ] \
+         && { ! version_ge "$ver" 2.20.11 || { version_ge "$ver" 2.21.0 && ! version_ge "$ver" 2.21.6; }; }; then
+        _pf_stop "this host's sudo is sudo-rs and asks for a password, which ansible-core $ver cannot answer (measured on 2.16 to 2.21.5). Use ansible-core 2.20.11+, 2.21.6+ or 2.22+ for this user (pipx install 'ansible-core>=2.21.6'), or NOPASSWD sudo for the apply."
+      fi
+    fi
+  else
+    _pf_stop "ansible-playbook not found. Install ansible-core >= 2.14 for this user, or use action/harden.sh --emit=plain (narrower, see AGENTS.md)."
+  fi
+  # The role's probe is `date -u -d @0`. BSD date (macOS) reads -d as "set the
+  # kernel's daylight-saving value", so there the probe is not run at all.
+  f=$(date --version 2>/dev/null | head -1) || true
+  if [ "${f#*GNU}" != "$f" ]; then
+    :
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ] \
+       || [ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" != "1970-01-01T00:00:00Z" ]; then
+    _pf_stop "this machine's date is not GNU date, which the role's rolling uv/pip cutoff needs (macOS: brew install coreutils and put its gnubin first on PATH for this shell, or pin uv_exclude_newer to an instant)."
+  fi
+
+  echo ""
+  echo "Files the play stops on (it did not write them; nothing is changed until they are dealt with):"
+  for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+    [ -f "$f" ] || continue
+    if [ ! -r "$f" ]; then
+      _pf_note "$f: not readable by $me; the role reads it as root and decides."
+    elif grep -qE "$marker" "$f" 2>/dev/null; then
+      _pf_line "$f: written by this project, replaced as before"
+    else
+      _pf_stop "$f: not written by this project, and often a corporate registry. Show it to the owner; only with their agreement, -e accept_etc_overwrite=true replaces it."
+    fi
+  done
+  _pf_user_file() { # <kind> <path>
+    [ -e "$2" ] || return 0
+    cls=$(user_cfg_class "$1" "$2")
+    case "$cls" in
+      ours) _pf_line "$2: written by this project, replaced as before" ;;
+      stock) _pf_note "$2: dotnet's own first-run file; replaced without stopping, after a backup next to it." ;;
+      *) _pf_stop "$2: not written by this project, and often a private registry with credentials. Show it to the owner; only with their agreement, -e accept_user_config_overwrite=true backs it up next to itself and replaces it." ;;
+    esac
+  }
+  _pf_user_file cargo "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+  if command -v mvn >/dev/null 2>&1 || command -v java >/dev/null 2>&1 \
+     || { [ -n "${JAVA_HOME:-}" ] && [ -x "${JAVA_HOME:-}/bin/java" ]; }; then
+    _pf_user_file maven "$HOME/.m2/settings.xml"
+  fi
+  command -v dotnet >/dev/null 2>&1 && _pf_user_file nuget "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
+  # Not a stop, and not read: as a non-root user the role leaves root's yarn file
+  # alone if it did not write it, and lists it in the run summary
+  # (tasks/yarn.yml). Finding out needs root, and nobody has agreed to anything
+  # yet, so the preflight never escalates to read a file.
+  if [ "$uid" -ne 0 ]; then
+    _pf_note "/root/.yarnrc.yml: not looked at (needs root). If it is there and not this project's, the role leaves it alone and says so in the run summary."
+  fi
+  _pf_line "(action/harden.sh does not stop on the per-user files: it backs each one up next to itself, replaces it and warns. It writes /etc with sudo where it can.)"
+
+  echo ""
+  echo "Package managers here (the role configures what it finds; it installs none of them):"
+  for f in node npm pnpm yarn bun deno uv python3 go rustc cargo composer bundle gem poetry mvn gradle dotnet npq-hero sfw; do
+    path=$(command -v "$f" 2>/dev/null) || continue
+    ver=$(_pf_version "$f" "$path")
+    note=""
+    case "$f" in
+      npm)   if _pf_below "$ver" 11.10.0; then note="; its age gate needs npm 11.10.0"; fi ;;
+      yarn)  if _pf_below "$ver" 4.10.0; then note="; its age gate needs Yarn 4.10"; fi ;;
+      bun)   if _pf_below "$ver" 1.3.0; then note="; its age gate needs Bun 1.3.0"; fi ;;
+      rustc) if _pf_below "$ver" 1.91.1; then note="; the cargo age gate's backend needs rustc 1.91.1"; fi ;;
+    esac
+    _pf_line "$f ${ver:-(version not read)} ($path)$note"
+  done
+  if [ -n "$(command -v python3 2>/dev/null)" ]; then
+    _pf_line "(pip: the role redirects pip to uv where uv is present; pip's own age gate needs pip 26)"
+  fi
+
+  if [ -n "$repo" ]; then
+    echo ""
+    echo "What --suggest says for $repo:"
+    echo ""
+    suggest_for_repo "$repo" | sed 's/^/  /' || true
+    echo ""
+  else
+    echo ""
+    echo "For a repo headed into CI, or whose agents will run on this host, add its path:"
+    echo "  action/harden.sh --preflight=/path/to/repo"
+  fi
+
+  echo ""
+  if [ "$block" = 1 ]; then
+    echo "STOP lines above end the play before it changes anything. Show this to the"
+    echo "person who owns the host and wait for their answer. Nothing was changed here."
+    return 1
+  fi
+  echo "Nothing above would stop the play. Show this to the person who owns the host"
+  echo "and wait for their OK before applying. Nothing was changed here."
+}
+
+# _pf_ansible_version <ansible-playbook>: ansible-core's version, from its own
+# package files. Not `ansible-playbook --version`: that creates ~/.ansible
+# (MEASURED, ansible-core 2.16.3, find -newer over the filesystem). Empty when
+# the package is not where the script's interpreter puts it.
+_pf_ansible_version() {
+  local r py pre d
+  r=$(readlink -f "$1" 2>/dev/null) || return 0
+  py=$(head -1 "$r" 2>/dev/null | sed -e 's/^#![[:space:]]*//' -e 's/[[:space:]].*//') || true
+  # `#!/usr/bin/env python3`: which python3 that is here.
+  case "$py" in */env) py=$(command -v python3 2>/dev/null) || true ;; esac
+  # The interpreter's own lib directories; for the system's python, also where
+  # pip and pip --user put packages. A launcher that names neither (a shell
+  # wrapper) says nothing about which ansible it starts.
+  case "$py" in
+    /*/bin/*)
+      pre=${py%/bin/*}
+      case "$pre" in
+        /usr|/usr/local) set -- "$pre"/lib/python3*/dist-packages /usr/lib/python3/dist-packages \
+            /usr/local/lib/python3*/dist-packages "${HOME:-/nonexistent}"/.local/lib/python3*/site-packages ;;
+        *) set -- "$pre"/lib/python3*/site-packages "$pre"/lib/python3*/dist-packages ;;
+      esac ;;
+    *) return 0 ;;
+  esac
+  for d in "$@"; do
+    [ -f "$d/ansible/release.py" ] || continue
+    sed -n "s/^__version__[[:space:]]*=[[:space:]]*['\"]\([0-9][^'\"]*\)['\"].*/\1/p" "$d/ansible/release.py" 2>/dev/null | head -1
+    return 0
+  done
+  return 0
+}
+
+# _pf_below <version> <minimum>: 0 when a version was read and is below minimum.
+_pf_below() { [ -n "$1" ] && ! version_ge "$1" "$2"; }
+
+# _pf_version <tool> <path>: a version without writing anything, or nothing.
+# The commands run here wrote nothing in the measurement above. Others download
+# (a corepack shim), write a telemetry file (go, read from GOROOT instead), or
+# start a JVM or a first-run setup that was not measured (gradle, mvn, dotnet,
+# composer, gem, bundle, poetry, npq, sfw): those print nothing and are named
+# with their path only.
+_pf_version() {
+  local t="$1" r d
+  case "$t" in
+    node|deno|bun|uv) detect_version "$t" "$t --version" ;;
+    # Go writes telemetry counters under ~/.config/go for every `go` command,
+    # `go version` included (MEASURED, go1.24.2), so GOROOT's VERSION file is
+    # read instead.
+    go)
+      r=$(readlink -f "$2" 2>/dev/null) || return 0
+      sed -n 's/^go\([0-9][0-9.]*\).*/\1/p' "${r%/bin/*}/VERSION" 2>/dev/null | head -1 || true ;;
+    python3) detect_version python3 "python3 -V" ;;
+    # A rustup proxy would otherwise download the toolchain to answer.
+    rustc|cargo) RUSTUP_AUTO_INSTALL=0 detect_version "$t" "$t --version" ;;
+    npm|pnpm|yarn)
+      # From the package itself, not by running it: pnpm and yarn behind corepack
+      # fetch a release to answer, and npm is node startup either way. A wrapper
+      # this project deployed names the real binary in REAL_NPM=.
+      r=$2
+      if grep -q 'supply-chain-harden' "$r" 2>/dev/null; then
+        d=$(sed -n "s/^REAL_[A-Z]*='\([^']*\)'.*/\1/p" "$r" 2>/dev/null | head -1) || true
+        [ -n "$d" ] && r=$d
+      fi
+      r=$(readlink -f "$r" 2>/dev/null) || return 0
+      case "$r" in */corepack/*|*/corepack.js) return 0 ;; esac
+      d=${r%/*}
+      while [ -n "$d" ] && [ "$d" != / ]; do
+        if [ -f "$d/package.json" ]; then
+          if [ "$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1)" = "$t" ]; then
+            sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][^"]*\)".*/\1/p' "$d/package.json" 2>/dev/null | head -1 || true
+          fi
+          return 0
+        fi
+        d=${d%/*}
+      done ;;
+    *) : ;;
+  esac
+  return 0
+}
+
 if [ "$SUGGEST" = "1" ]; then
   suggest_for_repo "$SUGGEST_PATH"
+  exit $?
+fi
+
+if [ "$PREFLIGHT" = "1" ]; then
+  preflight_report "$PREFLIGHT_REPO"
   exit $?
 fi
 
@@ -944,27 +1729,6 @@ can_write() {
 # marker, counts as ours; dotnet's own first-run NuGet.Config (nuget.org and
 # nothing else; MEASURED on SDK 8.0.134 it opens with a UTF-8 BOM) is copied
 # without a warning.
-user_cfg_class() { # $1 kind, $2 path -> ours | stock | foreign
-  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
-  case "$1" in
-    cargo)
-      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
-        && { echo ours; return 0; } ;;
-    maven)
-      grep -q '<id>central-https</id>' "$2" \
-        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
-        && { echo ours; return 0; } ;;
-    nuget)
-      grep -q 'key="signatureValidationMode" value="require"' "$2" \
-        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
-        && { echo ours; return 0; }
-      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
-           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
-        echo stock; return 0
-      fi ;;
-  esac
-  echo foreign
-}
 keep_user_copy() {
   local kind="$1" path="$2" cls bak
   [[ -e "$path" ]] || return 0
@@ -1044,53 +1808,6 @@ subst_inplace() {
 # parity with the npm/bun/composer wrappers (which interpolate via single-quoted
 # heredocs), not a fix for a reachable vulnerability.
 sed_repl() { printf '%s' "$1" | tr -d '\n\r' | sed 's/[\\&|]/\\&/g'; }
-
-# detect_version <key> <command>: returns the version string the command
-# prints (typically major.minor.patch), or empty if the binary isn't
-# installed OR if the version command fails for any reason. Used for
-# version-tiering decisions per ecosystem.
-#
-# Defensive against tools that exit non-zero on --version (some wrappers,
-# uv-redirected pip, broken installs) because `set -e` would otherwise
-# halt the script on a benign "we couldn't detect the version" path.
-detect_version() {
-  local _key="$1"  # unused; documentation hook for the caller's intent
-  local cmd="$2"
-  if ! command -v "${cmd%% *}" >/dev/null 2>&1; then
-    echo ""
-    return 0
-  fi
-  local out
-  # From /, never the working directory. The action runs this step in the job's
-  # checkout, and tools read files there and in every directory above it that
-  # name code they then run, for --version too. MEASURED: a .yarnrc.yml yarnPath
-  # (yarn 1.22.22, 4.1.0-4.19.0), .mvn/jvm.config (maven 3.10.0), a global.json
-  # sdk "paths" entry (.NET 10.0.404) and Poetry 2.5.2's .poetry/plugins all ran
-  # for --version. This reports the host's tool, which is what gets configured.
-  out=$(cd / && $cmd 2>&1 || true)
-  echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
-}
-
-# version_ge <a> <b>: returns 0 if a >= b semver-style, 1 otherwise.
-# Treats missing patch as .0. Used for version-tiering checks.
-version_ge() {
-  local a="$1" b="$2"
-  # read -ra rather than unquoted expansion under IFS=. — the latter is also
-  # subject to globbing, so a version string containing * or ? would expand
-  # against the cwd instead of splitting.
-  local -a a_parts b_parts
-  IFS=. read -ra a_parts <<< "$a"
-  IFS=. read -ra b_parts <<< "$b"
-  # Normalize to 3 components
-  while [[ ${#a_parts[@]} -lt 3 ]]; do a_parts+=("0"); done
-  while [[ ${#b_parts[@]} -lt 3 ]]; do b_parts+=("0"); done
-  for i in 0 1 2; do
-    local av=${a_parts[$i]:-0} bv=${b_parts[$i]:-0}
-    if (( av > bv )); then return 0; fi
-    if (( av < bv )); then return 1; fi
-  done
-  return 0  # equal counts as ge
-}
 
 # PER-ECOSYSTEM EFFECT, as distinct from per-ecosystem ATTEMPT.
 #

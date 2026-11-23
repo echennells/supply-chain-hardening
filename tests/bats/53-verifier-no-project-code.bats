@@ -100,9 +100,14 @@ trap_checkout() { # <dir>
   run bash -c 'cd "$1" && exec "$2" --verbose' _ "$d/sub" "$VERIFY"
   echo "$output" | grep -E "repo config override|yarn" | cut -c1-220
   [ -z "$(markers)" ] || { echo "the verifier ran: $(markers)" >&2; return 1; }
-  # It still reported what the checkout changes, from the files.
-  echo "$output" | grep "yarn repo config override" | grep -q "the checkout's own yarn"
-  echo "$output" | grep -q "pnpm repo config override"
+  # It still reported what the checkout changes, from the files, for the tools
+  # that are installed (VM round 4: Ubuntu 22.04 had neither).
+  if command -v yarn >/dev/null 2>&1; then
+    echo "$output" | grep "yarn repo config override" | grep -q "the checkout's own yarn"
+  fi
+  if command -v pnpm >/dev/null 2>&1; then
+    echo "$output" | grep -q "pnpm repo config override"
+  fi
 }
 
 @test "verifier with a world-writable TMPDIR: probe projects go under a private base, and files planted above TMPDIR do not run" {
