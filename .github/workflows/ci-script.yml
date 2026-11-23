@@ -14,11 +14,13 @@ on:
     branches: [main, 'feat/**', 'fix/**']
     paths:
       - 'action/**'
+      - 'files/**'
       - 'tests/ci/**'
       - '.github/workflows/ci-script.yml'
   pull_request:
     paths:
       - 'action/**'
+      - 'files/**'
       - 'tests/ci/**'
       - '.github/workflows/ci-script.yml'
   workflow_dispatch:
