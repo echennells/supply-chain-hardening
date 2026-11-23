@@ -477,6 +477,7 @@ Outside GitHub, run the script directly; it takes the same `--emit` targets:
 ./action/verify.sh --emit=gitlab            # exit 1 on any gap
 ./action/verify.sh --strict --quiet         # table suppressed, exit code kept
 ./action/verify.sh --fail-on=config         # report every gap, fail only on the fixable ones
+./action/verify.sh --json                   # one JSON document on stdout instead of the table (docs/verify.md)
 ```
 
 If you set `env-file` or `output-file` on the harden step, **set the matching
