@@ -801,12 +801,9 @@ preflight_report() {
   echo ""
   echo "Ansible on this machine:"
   if path=$(command -v ansible-playbook 2>/dev/null); then
-    av=$( (cd / && ansible-playbook --version 2>/dev/null) | head -1) || true
-    case "$av" in
-      *"[core "*) ver=${av##*\[core }; ver=${ver%%\]*} ;;
-      *) ver=$(printf '%s\n' "$av" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || true ;;
-    esac
-    _pf_line "ansible-core ${ver:-<version not read>} ($path)"
+    ver=$(_pf_ansible_version "$path")
+    _pf_line "ansible-core ${ver:-(version not read)} ($path)"
+    [ -n "$ver" ] || _pf_note "its version could not be read without starting it; the role needs ansible-core >= 2.14, and on sudo-rs with a password prompt 2.20.11+, 2.21.6+ or 2.22+."
     if [ -n "$ver" ]; then
       version_ge "$ver" 2.14 || _pf_stop "ansible-core $ver is below 2.14, which the role needs."
       # tasks/preflight.yml: sudo-rs's prompt is not one this ansible-core can
@@ -910,6 +907,37 @@ preflight_report() {
   echo "and wait for their OK before applying. Nothing was changed here."
 }
 
+# _pf_ansible_version <ansible-playbook>: ansible-core's version, from its own
+# package files. Not `ansible-playbook --version`: that creates ~/.ansible
+# (MEASURED, ansible-core 2.16.3, find -newer over the filesystem). Empty when
+# the package is not where the script's interpreter puts it.
+_pf_ansible_version() {
+  local r py pre d
+  r=$(readlink -f "$1" 2>/dev/null) || return 0
+  py=$(head -1 "$r" 2>/dev/null | sed -e 's/^#![[:space:]]*//' -e 's/[[:space:]].*//') || true
+  # `#!/usr/bin/env python3`: which python3 that is here.
+  case "$py" in */env) py=$(command -v python3 2>/dev/null) || true ;; esac
+  # The interpreter's own lib directories; for the system's python, also where
+  # pip and pip --user put packages. A launcher that names neither (a shell
+  # wrapper) says nothing about which ansible it starts.
+  case "$py" in
+    /*/bin/*)
+      pre=${py%/bin/*}
+      case "$pre" in
+        /usr|/usr/local) set -- "$pre"/lib/python3*/dist-packages /usr/lib/python3/dist-packages \
+            /usr/local/lib/python3*/dist-packages "${HOME:-/nonexistent}"/.local/lib/python3*/site-packages ;;
+        *) set -- "$pre"/lib/python3*/site-packages "$pre"/lib/python3*/dist-packages ;;
+      esac ;;
+    *) return 0 ;;
+  esac
+  for d in "$@"; do
+    [ -f "$d/ansible/release.py" ] || continue
+    sed -n "s/^__version__[[:space:]]*=[[:space:]]*['\"]\([0-9][^'\"]*\)['\"].*/\1/p" "$d/ansible/release.py" 2>/dev/null | head -1
+    return 0
+  done
+  return 0
+}
+
 # _pf_below <version> <minimum>: 0 when a version was read and is below minimum.
 _pf_below() { [ -n "$1" ] && ! version_ge "$1" "$2"; }
 
@@ -923,7 +951,12 @@ _pf_version() {
   local t="$1" r d
   case "$t" in
     node|deno|bun|uv) detect_version "$t" "$t --version" ;;
-    go) detect_version go "go version" ;;
+    # Go writes telemetry counters under ~/.config/go for every `go` command,
+    # `go version` included (MEASURED, go1.24.2), so GOROOT's VERSION file is
+    # read instead.
+    go)
+      r=$(readlink -f "$2" 2>/dev/null) || return 0
+      sed -n 's/^go\([0-9][0-9.]*\).*/\1/p' "${r%/bin/*}/VERSION" 2>/dev/null | head -1 || true ;;
     python3) detect_version python3 "python3 -V" ;;
     # A rustup proxy would otherwise download the toolchain to answer.
     rustc|cargo) RUSTUP_AUTO_INSTALL=0 detect_version "$t" "$t --version" ;;

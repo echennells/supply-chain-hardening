@@ -35,6 +35,19 @@ preflight() {
     ${PF_ENV[@]+"${PF_ENV[@]}"} bash "$HARDEN_SH" --preflight "$@"
 }
 
+# ansible_at <version>: an ansible-playbook whose own package says <version>.
+# The preflight reads the package, so a launcher that runs would be a write: its
+# interpreter here records a run instead.
+ansible_at() {
+  local v="$BATS_TEST_TMPDIR/ansible-venv"
+  mkdir -p "$v/bin" "$v/lib/python3.12/site-packages/ansible"
+  printf "# release\n__version__ = '%s'\n" "$1" > "$v/lib/python3.12/site-packages/ansible/release.py"
+  printf '#!/bin/sh\ntouch "%s"\n' "$BATS_TEST_TMPDIR/ansible-ran" > "$v/bin/python3"
+  chmod +x "$v/bin/python3"
+  printf '#!%s\nnot python\n' "$v/bin/python3" > "${TEST_BIN}/ansible-playbook"
+  chmod +x "${TEST_BIN}/ansible-playbook"
+}
+
 # Snapshot: every path under the home and the scratch directory, with size and
 # checksum. Compared before and after a run.
 snapshot() {
@@ -80,13 +93,29 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
   done
   run preflight
   [ "$status" -ne 2 ]
-  for t in gradle mvn dotnet composer bundle gem poetry npq-hero sfw; do
+  # go writes telemetry for any command, `go version` included (MEASURED, 1.24.2).
+  for t in go gradle mvn dotnet composer bundle gem poetry npq-hero sfw; do
     ! grep -qx "$t" "$marker" || { echo "preflight ran $t"; return 1; }
   done
   # The ones it does ask: a version in the output.
   [[ "$output" == *"node 9.9.9 "* ]]
   [[ "$output" == *"uv 9.9.9 "* ]]
   [[ "$output" == *"gradle (version not read) "* ]]
+}
+
+@test "preflight: ansible-core's version comes from its package, and nothing is started to read it" {
+  # `ansible-playbook --version` creates ~/.ansible (MEASURED, 2.16.3).
+  ansible_at 2.21.6
+  run preflight
+  [[ "$output" == *"ansible-core 2.21.6 ($TEST_BIN/ansible-playbook)"* ]] || { echo "$output"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/ansible-ran" ]
+  [ ! -e "$TEST_HOME/.ansible" ]
+  # A layout it does not know: said, not guessed, and still not started.
+  printf '#!/bin/sh\ntouch "%s"\n' "$BATS_TEST_TMPDIR/ansible-ran" > "${TEST_BIN}/ansible-playbook"
+  run preflight
+  [[ "$output" == *"ansible-core (version not read)"* ]]
+  [[ "$output" == *"its version could not be read without starting it"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/ansible-ran" ]
 }
 
 @test "preflight: Ansible missing is a STOP, and the exit code says so" {
@@ -100,7 +129,7 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
 @test "preflight: an Ansible new enough, and nothing in the way, says so and exits 0" {
   [ "$(id -u)" -ne 0 ] || skip "running as root: a different report"
   stub_bin sudo 'case "$1" in --version) echo "Sudo version 1.9.15" ;; -n) shift; [ "$1" = true ] ;; *) exit 1 ;; esac'
-  stub_bin ansible-playbook 'echo "ansible-playbook [core 2.21.6]"'
+  ansible_at 2.21.6
   stub_bin date 'case "$*" in --version) echo "date (GNU coreutils) 9.4" ;; "-u -d @0 "*) echo 1970-01-01T00:00:00Z ;; *) exec /bin/date "$@" ;; esac'
   run preflight
   [[ "$output" == *"ansible-core 2.21.6"* ]]
@@ -110,7 +139,7 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
 }
 
 @test "preflight: an Ansible below 2.14 is a STOP" {
-  stub_bin ansible-playbook 'echo "ansible-playbook [core 2.12.10]"'
+  ansible_at 2.12.10
   run preflight
   [[ "$output" == *"STOP  ansible-core 2.12.10 is below 2.14"* ]]
   [ "$status" -eq 1 ]
@@ -127,20 +156,20 @@ sudo_rs_stub() {
   sudo_rs_stub
   local v
   for v in 2.16.14 2.20.10 2.21.5; do
-    stub_bin ansible-playbook "echo 'ansible-playbook [core $v]'"
+    ansible_at "$v"
     run preflight
     [[ "$output" == *"STOP  this host's sudo is sudo-rs and asks for a password, which ansible-core $v cannot answer"* ]] || { echo "$v: $output"; return 1; }
     [ "$status" -eq 1 ]
   done
   for v in 2.20.11 2.21.6 2.22.0; do
-    stub_bin ansible-playbook "echo 'ansible-playbook [core $v]'"
+    ansible_at "$v"
     run preflight
     [[ "$output" != *"sudo-rs"* ]] || { echo "$v: $output"; return 1; }
   done
 }
 
 @test "preflight: a per-user config this project did not write is a STOP; its own and dotnet's first-run are not" {
-  stub_bin ansible-playbook 'echo "ansible-playbook [core 2.21.6]"'
+  ansible_at 2.21.6
   stub_bin cargo 'echo cargo 1.100.0'
   mkdir -p "$TEST_HOME/.cargo"
   printf '[registries.corp]\nindex = "sparse+https://corp.invalid/"\n' > "$TEST_HOME/.cargo/config.toml"
@@ -177,7 +206,7 @@ sudo_rs_stub() {
   # host's own uid decides which branch runs, so a stub id that says 0.
   [ "$(id -u)" -ne 0 ] || skip "running as root already"
   stub_bin id 'case "$*" in -u) echo 0 ;; -un) echo root ;; *) exec /usr/bin/id "$@" ;; esac'
-  stub_bin ansible-playbook 'echo "ansible-playbook [core 2.21.6]"'
+  ansible_at 2.21.6
   PF_ENV=(SUDO_USER=alice HOME=/root)
   run preflight
   [[ "$output" == *"STOP  running as root under sudo from 'alice'"* ]]
@@ -194,7 +223,7 @@ sudo_rs_stub() {
 }
 
 @test "preflight=REPO prints the repo's --suggest output too" {
-  stub_bin ansible-playbook 'echo "ansible-playbook [core 2.21.6]"'
+  ansible_at 2.21.6
   local repo="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$repo"
   printf "lockfileVersion: '9.0'\npackages:\n  sharp@0.33.0:\n    requiresBuild: true\n" > "$repo/pnpm-lock.yaml"
