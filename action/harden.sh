@@ -808,7 +808,7 @@ preflight_report() {
     _pf_line "ansible-core ${ver:-(version not read)} ($path)"
     [ -n "$ver" ] || _pf_note "its version could not be read without starting it; the role needs ansible-core >= 2.14, and on sudo-rs with a password prompt 2.20.11+, 2.21.6+ or 2.22+."
     if [ -n "$ver" ]; then
-      version_ge "$ver" 2.14 || _pf_stop "ansible-core $ver is below 2.14, which the role needs."
+      version_ge "$ver" 2.14 || _pf_stop "ansible-core $ver is below 2.14, the role's documented minimum (README.md)."
       # tasks/preflight.yml: sudo-rs's prompt is not one this ansible-core can
       # answer, so every task that needs root would time out or hang.
       if [ "$is_rs" = 1 ] && [ "$need_pw" = 1 ] \
