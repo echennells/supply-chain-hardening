@@ -41,7 +41,8 @@ anything: an existing `/etc` file, a per-user cargo, maven or nuget config this 
 did not write, the wrong user, no Ansible or one too old. It lists the package managers
 found, and for a repo it adds `--suggest`: the exceptions that repo needs and its own
 config that outranks the host's. `ansible-playbook --check` is not this: it is a dry run
-of the whole play, stops at the first refusal, and runs the role's probes for real.
+of the whole play that stops at the first refusal, escalates, and runs the role's probes
+for real, which leaves npm logs, uv and node caches and Go telemetry behind.
 
 Tell the user what hardening does, unless they have already agreed to it:
 

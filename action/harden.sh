@@ -754,11 +754,14 @@ _sg_print_overrides() {
 # (tests/ci/11-preflight.bats compares the two), the same user_cfg_class as the
 # apply, and the same ansible-core and GNU-date conditions.
 #
-# WRITES NOTHING. It runs `sudo -n true` (which never prompts) to learn whether
-# sudo needs a password, as the role's preflight does, and tool version
-# commands from /, the ones measured to write nothing; tests/ci/11-preflight.bats
-# snapshots the home and the scratch directory around a run. A version command
-# that writes is not run; the tool is named with its path instead.
+# WRITES NOTHING. MEASURED in the test image with `find / -newer` over the whole
+# filesystem, as root and as a user with passwordless sudo: no file changed
+# (tests/ci/11-preflight.bats snapshots the home and the scratch directory on
+# every run). `sudo -n true` is run to learn whether sudo needs a password, as
+# the role's preflight does; it never prompts. Versions come from files where a
+# command that prints one writes something (ansible-core, go, npm, pnpm, yarn);
+# otherwise the command runs from / (_pf_version says which). For a tool whose
+# version would be a write, or that was not measured, only its path is printed.
 #
 # Exit 0 when nothing above would stop the play, 1 when something would: each
 # such line starts with STOP.
@@ -942,11 +945,11 @@ _pf_ansible_version() {
 _pf_below() { [ -n "$1" ] && ! version_ge "$1" "$2"; }
 
 # _pf_version <tool> <path>: a version without writing anything, or nothing.
-# MEASURED in the test image (tests/ci/11-preflight.bats holds the list to it):
-# the commands run here left the home and the scratch directory untouched.
-# Others download (a corepack shim), start a JVM or a first-run setup that
-# writes (gradle, dotnet, mvn's ~/.m2), or were not measured (composer, gem,
-# bundle, npq, sfw): those print nothing and are named with their path only.
+# The commands run here wrote nothing in the measurement above. Others download
+# (a corepack shim), write a telemetry file (go, read from GOROOT instead), or
+# start a JVM or a first-run setup that was not measured (gradle, mvn, dotnet,
+# composer, gem, bundle, poetry, npq, sfw): those print nothing and are named
+# with their path only.
 _pf_version() {
   local t="$1" r d
   case "$t" in
