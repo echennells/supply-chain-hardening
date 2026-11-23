@@ -2304,14 +2304,15 @@ y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_
 
 # mvn_trap <dir> <marker>: a <dir>/.mvn/jvm.config that writes <marker> when the
 # JVM maven starts reads it. A -javaagent where a JDK can build one (MEASURED on
-# maven 3.10.0); otherwise a 3 MB heap and -XX:OnOutOfMemoryError, which fired on
-# temurin 17 but not on every JDK.
+# maven 3.10.0), compiled for Java 8 where javac still targets it, so it loads
+# in whichever JVM maven picks; otherwise a 3 MB heap and
+# -XX:OnOutOfMemoryError, which fired on temurin 17 but not on every JDK.
 mvn_trap() {
   local d=$1 m=$2
   mkdir -p "$d/.mvn" "$d/.mvnagent"
   if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
     printf 'public class A { public static void premain(String a) throws Exception { java.nio.file.Files.write(java.nio.file.Paths.get(a), "ran".getBytes()); } }\n' > "$d/.mvnagent/A.java"
-    ( cd "$d/.mvnagent" && javac A.java && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1
+    ( cd "$d/.mvnagent" && { javac --release 8 A.java || javac A.java; } && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1
   fi
   if [ -f "$d/.mvnagent/agent.jar" ]; then
     printf -- '-javaagent:%s/.mvnagent/agent.jar=%s\n' "$d" "$m" > "$d/.mvn/jvm.config"
@@ -2388,8 +2389,8 @@ markers() { ls "$BATS_TEST_TMPDIR/markers" 2>/dev/null | tr '\n' ' '; }
     [ -e "$mk/uv-venv-python" ] || { echo "control: uv pip list did not run the venv's python"; return 1; }
   fi
   if command -v mvn >/dev/null 2>&1; then
-    ( cd "$d/sub" && mvn -v ) >/dev/null 2>&1 || true
-    [ -e "$mk/maven-jvm-config" ] || { echo "control: mvn -v did not apply .mvn/jvm.config"; return 1; }
+    local mo; mo=$( cd "$d/sub" && mvn -v 2>&1 ) || true
+    [ -e "$mk/maven-jvm-config" ] || { echo "control: mvn -v did not apply .mvn/jvm.config ($(cat "$d/.mvn/jvm.config")); it said:"; echo "$mo" | head -8; return 1; }
   fi
   case "$(readlink -f "$(command -v cargo 2>/dev/null)" 2>/dev/null)" in
     */rustup)
@@ -2476,8 +2477,8 @@ npc_verify() { # <dir> [VAR=value ...]: verify.sh in <dir>, the shims first on P
   # jvm.config to a run in any directory below it.
   if command -v mvn >/dev/null 2>&1; then
     mkdir -p "$ww/sub/ctl"
-    ( cd "$ww/sub/ctl" && mvn -v ) >/dev/null 2>&1 || true
-    [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: mvn -v below $ww did not apply $ww/.mvn/jvm.config"; return 1; }
+    local mo; mo=$( cd "$ww/sub/ctl" && mvn -v 2>&1 ) || true
+    [ -e "$mk/tmp-maven-jvm-config" ] || { echo "control: mvn -v below $ww did not apply $ww/.mvn/jvm.config ($(cat "$ww/.mvn/jvm.config")); it said:"; echo "$mo" | head -8; return 1; }
     rm -f "$mk/tmp-maven-jvm-config"
   fi
   npc_shims "$BATS_TEST_TMPDIR/shims" "$log"
