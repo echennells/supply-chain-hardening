@@ -2096,6 +2096,15 @@ npc_pick() {
     sudo -n chown "$(id -u)" "$SCV_PRIV/g"
     [[ "$out" == "$none"* ]] || { echo "$out"; return 1; }
   fi
+  # The macOS per-user temp dir, stood in for here so every platform runs the
+  # branch: a getconf that answers DARWIN_USER_TEMP_DIR (with the trailing slash
+  # macOS prints) puts the scratch dir there, without a warning.
+  mkdir -p "$SCV_PRIV/darwin" "$BATS_TEST_TMPDIR/fakeconf"
+  printf '#!/bin/sh\n[ "$1" = DARWIN_USER_TEMP_DIR ] && echo "%s/darwin/"\n' "$SCV_PRIV" > "$BATS_TEST_TMPDIR/fakeconf/getconf"
+  chmod +x "$BATS_TEST_TMPDIR/fakeconf/getconf"
+  run --separate-stderr npc_pick PATH="$BATS_TEST_TMPDIR/fakeconf:$PATH" TMPDIR="$ww/sub" HOME="$ww/h" -- /
+  [[ "$output" == "scratch=$SCV_PRIV/darwin/scv."*" mktemp=$SCV_PRIV/darwin/scv."* ]] || { echo "$output"; return 1; }
+  [[ "$stderr" != *"found no directory"* ]] || { echo "$stderr"; return 1; }
   # Nothing private: the probes stay under TMPDIR, and stderr says so. On a Mac
   # the per-user temp dir is taken instead, without a warning.
   run --separate-stderr npc_pick TMPDIR="$ww/sub" HOME="$ww/h" -- /
