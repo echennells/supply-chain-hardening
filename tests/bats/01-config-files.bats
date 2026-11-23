@@ -273,9 +273,18 @@ load setup
 }
 
 @test "root's ~/.yarnrc.yml: enableScripts false (sudo coverage); no /etc/yarnrc.yml, which Yarn never reads" {
-  local root_home
-  root_home=~root
-  assert_file_contains "$root_home/.yarnrc.yml" "enableScripts: false"
+  local root_home f
+  root_home=~root; f="$root_home/.yarnrc.yml"
+  if [ "$(id -u)" = 0 ]; then
+    assert_file_contains "$f" "enableScripts: false"
+  else
+    # Run as a normal user on a real host, /root (0700) hides the file, which
+    # read as "file not found" on all 7 role VMs in round 3 while it was there.
+    sudo -n true 2>/dev/null || skip "needs root or passwordless sudo: reads $f"
+    run sudo -n cat "$f"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"enableScripts: false"* ]] || { echo "$output"; return 1; }
+  fi
   [ ! -e /etc/yarnrc.yml ]
 }
 

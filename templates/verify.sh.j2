@@ -405,8 +405,18 @@ run_bounded() {
 # group-writable directory is accepted, as action/harden.sh accepts one for its
 # env file: the group is a grant somebody made. A base inside the working
 # directory is not, because the checkout's files would sit above the probes.
+# macOS's per-user temp dir (`getconf DARWIN_USER_TEMP_DIR`, /var/folders/../T,
+# 0700 under root-owned parents) is a candidate too, so a Mac always has one.
 # With no such base (HOME and TMPDIR both below /tmp, as in a test harness, and
 # no XDG_RUNTIME_DIR), the probes run under TMPDIR as before and stderr says so.
+#
+# TMPDIR ALONE DOES NOT STEER mktemp ON macOS. Given no template (`mktemp`,
+# `mktemp -d`), Apple's mktemp creates in the per-user temp dir from confstr
+# _CS_DARWIN_USER_TEMP_DIR and reads TMPDIR only when that is unavailable (its
+# man page says so, and on GitHub's macos-15 runner the maven probes did not run
+# under a TMPDIR exported below a planted .mvn/jvm.config). So while a scratch
+# dir is in use, mktemp is a function that names it in the template, and the
+# probes land in it on every platform. `command mktemp` is the real one.
 export COREPACK_ENV_FILE=0
 scv_private_dir() { # <absolute dir> -> 0 when it and every directory above it are owned by root or us and not world-writable
   scv__pd=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
@@ -424,7 +434,8 @@ scv_private_dir() { # <absolute dir> -> 0 when it and every directory above it a
 SCV_SCRATCH=""; SCV_SCRATCH_TRIED=""
 scv__pwdp=$(pwd -P 2>/dev/null)
 scv__cache="${XDG_CACHE_HOME:-${HOME:+$HOME/.cache}}"
-for scv__b in "${TMPDIR:-}" "${RUNNER_TEMP:-}" "${scv__cache:+$scv__cache/supply-chain-hardening}" "${XDG_RUNTIME_DIR:-}"; do
+scv__darwin=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || scv__darwin=""
+for scv__b in "${TMPDIR:-}" "${RUNNER_TEMP:-}" "${scv__cache:+$scv__cache/supply-chain-hardening}" "$scv__darwin" "${XDG_RUNTIME_DIR:-}"; do
   case "$scv__b" in /*) ;; *) continue ;; esac
   if [ "$scv__b" = "${scv__cache:+$scv__cache/supply-chain-hardening}" ] && [ ! -d "$scv__b" ]; then
     ( umask 077; mkdir -p -- "$scv__b" ) 2>/dev/null || true
@@ -435,12 +446,19 @@ for scv__b in "${TMPDIR:-}" "${RUNNER_TEMP:-}" "${scv__cache:+$scv__cache/supply
   if [ -n "$scv__pwdp" ] && [ "$scv__pwdp" != / ]; then
     case "$scv__bp/" in "$scv__pwdp"/*) continue ;; esac
   fi
-  SCV_SCRATCH=$(mktemp -d "$scv__bp/scv.XXXXXX" 2>/dev/null) || { SCV_SCRATCH=""; continue; }
+  SCV_SCRATCH=$(command mktemp -d "$scv__bp/scv.XXXXXX" 2>/dev/null) || { SCV_SCRATCH=""; continue; }
   break
 done
 if [ -n "$SCV_SCRATCH" ]; then
   TMPDIR=$SCV_SCRATCH; export TMPDIR
   trap 'rm -rf "$SCV_SCRATCH"' EXIT
+  mktemp() {
+    case "$*" in
+      '') command mktemp "$SCV_SCRATCH/tmp.XXXXXXXXXX" ;;
+      -d) command mktemp -d "$SCV_SCRATCH/tmp.XXXXXXXXXX" ;;
+      *)  command mktemp "$@" ;;
+    esac
+  }
 elif [ "${QUIET:-0}" != 1 ]; then
   echo "[supply-chain-verify] warning: found no directory for the probes' throwaway projects that only root and $(id -un 2>/dev/null) can write, all the way up (tried: ${SCV_SCRATCH_TRIED:-nothing}), so they run under ${TMPDIR:-/tmp}, where a file another account planted above them can run in them. Point TMPDIR at a directory of your own, outside the project" >&2
 fi
