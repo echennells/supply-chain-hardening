@@ -429,7 +429,7 @@ STUB
   local f="$BATS_TEST_TMPDIR/v.json" rc=0
   "$VERIFY" --json > "$f" 2>/dev/null || rc=$?
   python3 - "$f" "$rc" <<'PY'
-import json, re, sys
+import json, re, shutil, sys
 d = json.load(open(sys.argv[1])); rc = int(sys.argv[2])
 r, rows = d["result"], d["rows"]
 assert d["surface"] == "role", d["surface"]
@@ -448,6 +448,8 @@ for x in rows:
         if t in ("env", "hardening", "ci") or x["protection"].endswith(" coverage") \
            or x["protection"] == "python startup hooks" or t in want:
             continue
+        if t in ("npq", "sfw") and not shutil.which({"npq": "npq-hero"}.get(t, t)):
+            continue
         want.append(t)
 assert r["tools_seen"] == want, (r["tools_seen"], want)
 # This image has most of the package managers installed and hardened.
@@ -455,6 +457,32 @@ for t in ("npm", "pnpm", "uv", "cargo", "composer"):
     assert t in r["tools_seen"], (t, r["tools_seen"])
 assert r["ok"] > 10, r
 assert rc == (1 if r["gaps"] else 0), (rc, r)
+PY
+}
+
+@test "output: --json on a host with no package manager in reach has an empty tools_seen" {
+  # The rule an agent applies is "empty tools_seen: nothing was checked". On this
+  # surface npq and sfw are GAP rows when they are missing, and without the
+  # exclusion they were the two "tools seen" on a host that had neither.
+  # A copy of the deployed verifier, because go is looked for at a fixed place
+  # outside PATH and this image has one there.
+  local min="$BATS_TEST_TMPDIR/minbin" v="$BATS_TEST_TMPDIR/verify" f="$BATS_TEST_TMPDIR/e.json" t p
+  mkdir -p "$min" "$BATS_TEST_TMPDIR/emptyhome"
+  for t in bash sh awk basename cat chmod cp cut date dirname env find grep head hostname id ln ls md5sum mkdir mktemp mv od pgrep readlink realpath rm sed sleep sort stat tail tee timeout touch tr uname wc xargs; do
+    p=$(type -P "$t") && ln -s "$p" "$min/$t"
+  done
+  grep -q '/usr/local/go/bin' "$VERIFY"
+  sed 's#/usr/local/go/bin#/nonexistent/go/bin#g' "$VERIFY" > "$v"
+  env -i PATH="$min" HOME="$BATS_TEST_TMPDIR/emptyhome" bash "$v" --json > "$f" 2>/dev/null || true
+  python3 - "$f" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); r = d["result"]
+assert r["tools_seen"] == [], r
+# The promises are still broken promises: both are GAP rows.
+gaps = [x["protection"] for x in d["rows"] if x["status"] == "GAP"]
+assert "npq reputation checks" in gaps and "Socket Firewall" in gaps, gaps
+# The only row that can be OK is the scan that is about the host.
+assert all(x["protection"] == "python startup hooks" for x in d["rows"] if x["status"] == "OK"), d["rows"]
 PY
 }
 

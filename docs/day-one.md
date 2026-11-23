@@ -16,7 +16,7 @@ Azure VMs.
 
 ## The escapes, and what each one drops
 
-Every gate here has a way past it, because a person sometimes needs one. Take
+Most gates here have a way past them, because a person sometimes needs one. Take
 the narrowest: a flag on one command, then one variable for one command, then
 a file. What an escape drops depends on which it is:
 
@@ -24,11 +24,12 @@ a file. What an escape drops depends on which it is:
 |---|---|
 | `composer --no-cooldown` | Composer's age gate, for that command. |
 | `bundle lock --cooldown 0` | Bundler's age gate, for that command. |
-| `uv --no-config`, `uv --config-file <f>`, `UV_CONFIG_FILE=<f>` | Every setting in the `uv.toml` files: the age gate, `no-build`, the index order, all at once. `supply-chain-allow-build uv ...` lifts only `no-build`, for that command. |
+| `uv --no-config`, `uv --config-file <f>`, `UV_CONFIG_FILE=<f>` | Every setting in the `uv.toml` files: the age gate, `no-build`, the index order, all at once. |
 | Unsetting or overriding a variable from the env layer (`NPM_CONFIG_IGNORE_SCRIPTS=false`, `BUNDLE_FROZEN=false bundle add x`, `GOTOOLCHAIN=auto`, ...) | That one setting, for that command, if nothing else sets it. |
 | `composer-real`, `deno-real`, `bun-real`, `cargo-real`, or the binary a wrapper names | Everything the wrapper adds: `--no-scripts`, `--no-plugins`, the age gate, `--locked`, Socket Firewall. |
-| Editing `~/.npmrc`, `~/.config/uv/uv.toml`, `~/.bundle/config`, `poetry.toml`, or the `policy` in `composer.json` | That setting, for every command from then on, until the next apply rewrites the file the role manages. |
-| `supply-chain-allow-build <command>` | `no-build`, for that command, and it logs what was built. It is for a person, and the one escape that says what it did. |
+| Editing `~/.npmrc`, `~/.config/uv/uv.toml` or `~/.bundle/config` | That setting, for every project, until the next apply rewrites the file. |
+| Editing a project's own `poetry.toml`, or the `policy` in its `composer.json` | That setting, in that project, for everyone who checks it out. The role does not manage those files. |
+| `supply-chain-allow-build uv ...` | uv's `no-build`, for that command, and it lists what was built. It refuses any other tool. It is for a person. |
 
 The commands in the sections below are the narrow ones.
 

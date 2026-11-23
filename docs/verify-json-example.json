@@ -1,10 +1,10 @@
 {
   "surface": "role",
   "scope": "on test-container",
-  "generated": "2026-11-23T02:37:34Z",
+  "generated": "2026-11-23T02:54:21Z",
   "declared_intent_recorded": "2026-11-23",
   "min_age_hours": 48,
-  "result": { "gaps": 7, "weaks": 7, "na_design": 2, "ok": 29, "na_absent": 12, "tools_seen": ["npm", "pnpm", "npq", "sfw", "pip", "pip3", "bun", "bunx", "composer", "deno", "cargo", "yarn", "uv", "go", "bundler"] },
+  "result": { "gaps": 7, "weaks": 7, "na_design": 2, "ok": 29, "na_absent": 12, "tools_seen": ["npm", "pnpm", "npq", "pip", "pip3", "bun", "bunx", "composer", "deno", "cargo", "yarn", "uv", "go", "bundler"] },
   "rows": [
     { "status": "OK", "evidence": "PRESENT", "protection": "python startup hooks", "detail": "1 startup hook file(s), each unchanged from a Debian package or matching a known tool's generated line: /usr/lib/python3/dist-packages/distutils-precedence.pth (python3-setuptools package, checksum matches). That recognises the file named, not the module it imports, and it is not a clean bill for the host" },
     { "status": "OK", "evidence": "PARSED", "protection": "npm lifecycle scripts blocked", "detail": "npm implements ignore-scripts and reports true" },

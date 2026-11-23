@@ -49,14 +49,22 @@
 # tests/ci/10-verify-json.bats checks that every protection the three verifier
 # files name falls in one of those.
 #
+# npq and sfw are components the role installs, so on that surface their absence
+# is a GAP row: a row that judges something which was not found. They count only
+# when installed. MEASURED on a role-hardened host with no package manager in
+# reach, without this: tools_seen was ["npq", "sfw"], from "not installed" rows,
+# and those two were the only tools any row judged while absent.
+#
 # JSON escaping needs only backslash and double quote: row() already turned
 # every control character into a space, so a field holds no newline or tab.
 scv_jesc() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
 scv_json_report() {
-  local scv_t scv_c scv_h scv_ok scv_gap scv_weak scv_nd scv_na scv_first s e p d
+  local scv_t scv_c scv_h scv_ok scv_gap scv_weak scv_nd scv_na scv_first scv_gone=" " s e p d
+  command -v npq-hero >/dev/null 2>&1 || scv_gone="${scv_gone}npq "
+  command -v sfw >/dev/null 2>&1 || scv_gone="${scv_gone}sfw "
   # '%b' expands the row separators and undoes row()'s doubled backslashes, as
   # the table does.
-  scv_t=$(printf '%b' "$ROWS" | awk -F'\t' '
+  scv_t=$(printf '%b' "$ROWS" | awk -F'\t' -v gone="$scv_gone" '
     $1 == "" { next }
     $1 == "OK" { ok++ }
     $1 == "GAP" { gap++ }
@@ -67,7 +75,7 @@ scv_json_report() {
       t = $3; sub(/ .*/, "", t)
       if (t == "Socket") t = "sfw"
       if (t == "" || t == "env" || t == "hardening" || t == "ci" || $3 ~ / coverage$/) next
-      if ($3 == "python startup hooks") next
+      if ($3 == "python startup hooks" || index(gone, " " t " ")) next
       if (!(t in seen)) { seen[t] = 1; list = list (list == "" ? "" : ", ") "\"" t "\"" }
     }
     END { printf "%d %d %d %d %d|%s\n", ok, gap, weak, nd, na, list }')

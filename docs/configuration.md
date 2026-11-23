@@ -36,7 +36,7 @@ on three settings that are off by default:
 |---|---|---|
 | `verify_fail_on_gap` | A GAP fails the play. | Every GAP counts, including ones no configuration closes: npm older than 11.10, pip older than 26, and `cargo lockfile writers routed` wherever cargo-cooldown routes builds. The play fails until the tool is upgraded or this one is set back to `false`. |
 | `python_safe_path` | `PYTHONSAFEPATH=1`: a file in the working directory can no longer shadow a stdlib module. | `python script.py` importing a file next to it, and `python -m` of a local package that is not installed, fail with `ModuleNotFoundError`, which names neither this role nor the setting. |
-| `uv_exclude_newer_env` | `UV_EXCLUDE_NEWER` in login shells, so a repository's own `exclude-newer` cannot lift the uv age gate. | A project that pins its own earlier `exclude-newer` fails `uv sync --locked` in a login shell, and a lockfile written there fails `--locked` elsewhere. The error does not name the variable. |
+| `uv_exclude_newer_env` | `UV_EXCLUDE_NEWER` in login shells, so a repository's own `exclude-newer` cannot lift the uv age gate. | A project that pins its own earlier `exclude-newer` fails `uv sync --locked` in a login shell (uv 0.8.17, 0.11.16 and 0.12.7); on uv 0.13.9 its existing lockfile passes, but one written there fails `--locked` where the variable is not set. The error does not name the variable. |
 
 The last two fail the [attribution test](design-principles.md#the-attribution-test),
 which is why they are off by default. Turn the profile on only where the

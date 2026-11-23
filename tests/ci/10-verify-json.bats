@@ -23,10 +23,12 @@ REPORT="${ROOT}/templates/verify-report.sh.j2"
 
 # The rule docs/verify.md states, written out again so the test does not just
 # re-run the code under test: counts per status, and the first word of each OK,
-# WEAK or GAP row's protection, minus the rows about the run, "Socket" as sfw.
+# WEAK or GAP row's protection, minus the rows about the run, "Socket" as sfw,
+# and minus npq and sfw where they are not installed (ABSENT names those).
 CHECK_PY='
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1]))
+absent = os.environ.get("ABSENT", "").split()
 for k in ("surface", "scope", "generated", "declared_intent_recorded", "min_age_hours", "result", "rows"):
     assert k in d, "missing top-level field " + k
 r, rows = d["result"], d["rows"]
@@ -50,7 +52,7 @@ for x in rows:
     t = "sfw" if t == "Socket" else t
     if t in ("", "env", "hardening", "ci") or x["protection"].endswith(" coverage"):
         continue
-    if x["protection"] == "python startup hooks":
+    if x["protection"] == "python startup hooks" or t in absent:
         continue
     if t not in want:
         want.append(t)
@@ -63,7 +65,7 @@ check_json() { python3 -c "$CHECK_PY" "$1"; }
 # "STATUS|EVIDENCE|PROTECTION|DETAIL", with row()'s accounting.
 role_report() { # <rows> [JSON=1 ...]
   local rows="$1"; shift
-  env -i PATH="$PATH" "$@" bash -c '
+  env -i PATH="${TEST_BIN}:${PATH}" "$@" bash -c '
     set -u
     GAPS=0; WEAKS=0; WEAK_PRESENT=0; NA_DESIGN=0; ROWS=""; STRICT=0; QUIET=0
     SCV_SURFACE=role SCV_SCOPE_LABEL="on testhost" SCV_APPLIED_AT=2026-11-23 SCV_MIN_AGE_HOURS=48
@@ -116,6 +118,7 @@ N/A|BYDESIGN|python import-path shadowing|python_safe_path is not enabled
 GAP|PRESENT|maven coverage|declared, no row
 OK|FUNCTIONAL|env layer propagation|all present
 OK|PRESENT|python startup hooks|none found'
+  stub_bin sfw
   run --separate-stderr role_report "$rows" JSON=1
   [ "$status" -eq 1 ]                     # two GAP rows: the exit code is unchanged
   [ -z "$stderr" ]
@@ -134,6 +137,29 @@ assert (r["gaps"], r["weaks"], r["ok"], r["na_design"], r["na_absent"]) == (2, 1
 # Quotes and backslashes in a detail survive as data.
 assert d["rows"][1]["detail"] == 'yarn 4.1.0 has no "npmMinimalAgeGate" C:\\path', d["rows"][1]
 PY
+}
+
+@test "json report (role): npq and sfw are not tools seen when their row says they are missing" {
+  # A missing component is a GAP, and stays one; it was not found, so it was not
+  # seen. Only basic utilities on PATH, so a real sfw or npq here cannot answer.
+  local min="$BATS_TEST_TMPDIR/minbin" t p
+  mkdir -p "$min"
+  for t in bash awk date hostname sed cat; do p=$(type -P "$t") && ln -s "$p" "$min/$t"; done
+  local rows='GAP|PRESENT|npq reputation checks|npq-hero not installed
+GAP|PRESENT|Socket Firewall|sfw not installed
+N/A|-|npm|npm not installed'
+  run --separate-stderr role_report "$rows" JSON=1 PATH="$min"
+  printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/r.json"
+  ABSENT="npq sfw" run check_json "$BATS_TEST_TMPDIR/r.json"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$output" = "gaps=2 ok=0 tools=" ]
+  # Control: with both installed, the same rows are about tools that are here.
+  printf '#!/bin/sh\n' > "$min/sfw"; printf '#!/bin/sh\n' > "$min/npq-hero"; chmod +x "$min/sfw" "$min/npq-hero"
+  run --separate-stderr role_report "$rows" JSON=1 PATH="$min"
+  printf '%s\n' "$output" > "$BATS_TEST_TMPDIR/r.json"
+  run check_json "$BATS_TEST_TMPDIR/r.json"
+  [ "$output" = "gaps=2 ok=0 tools=npq,sfw" ]
 }
 
 @test "json report (role): no rows at all is a valid document with nothing seen" {
@@ -214,8 +240,12 @@ PY
 }
 
 @test "the checked-in example is a valid document, and docs/verify.md names every field in it" {
-  local ex="${ROOT}/docs/verify-json-example.json" doc="${ROOT}/docs/verify.md"
-  run check_json "$ex"
+  local ex="${ROOT}/docs/verify-json-example.json" doc="${ROOT}/docs/verify.md" absent
+  # What the example's own rows say was not installed when it was made.
+  absent=$(python3 -c 'import json,sys
+for r in json.load(open(sys.argv[1]))["rows"]:
+    if r["detail"].startswith(("sfw not installed", "npq-hero not installed")): print({"s": "sfw", "n": "npq"}[r["detail"][0]])' "$ex" | tr '\n' ' ')
+  ABSENT="$absent" run check_json "$ex"
   [ "$status" -eq 0 ]
   python3 - "$ex" "$doc" <<'PY'
 import json, sys
