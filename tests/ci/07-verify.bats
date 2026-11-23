@@ -1970,6 +1970,71 @@ minimumReleaseAge: 0   # off")
   done
 }
 
+# The file is the checkout's, and pnpm follows every spelling YAML allows. MEASURED
+# to set the gate on pnpm 11.29.0: all of these but the last-but-three (`? key`,
+# measured on Yarn) and the spaced colon. 10.34.9 refused the tagged key. Read by whichever reader, none may come out as
+# "sets neither" or OK.
+pn_forms() {
+  printf '%s\n' '{minimumReleaseAge: 0}' '--- {minimumReleaseAge: 0}' '  minimumReleaseAge: 0' \
+    '"minimumRelease\\x41ge": 0' '\357\273\277minimumReleaseAge: 0' '# c\rminimumReleaseAge: 0\r' \
+    '!!str minimumReleaseAge: 0' '"minimumReleaseAge" : 0' 'x: &k minimumReleaseAge\n*k : 0' \
+    '? minimumReleaseAge\n: 0' 'x: &a\n  minimumReleaseAge: 0\n<<: *a' \
+    'minimumReleaseAge: 0\nfoo: "\nminimumReleaseAge: 9999\n"' \
+    'minimumReleaseAge: 0\nfoo: {\nminimumReleaseAge: 9999\n}'
+}
+pn_forms_check() {
+  local y r n=0
+  while IFS= read -r y; do
+    pn_project ""
+    printf -- "$y\n" > "$PNP/pnpm-workspace.yaml"
+    run verify_in "$PNP/packages/a" --emit=plain
+    r=$(pn_row)
+    case "$r" in
+      GAP*"switches the age gate off"*|WEAK*"could not be read"*"was not judged"*) n=$((n + 1)) ;;
+      *) echo "$1, $y: $r"; return 1 ;;
+    esac
+  done < <(pn_forms)
+  [ "$n" -eq 13 ] || { echo "$1: $n forms"; return 1; }
+}
+
+@test "pnpm repo config override: no spelling of the key reads as nothing set, with PyYAML or without" {
+  pnpm_stub 11.28.13
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local real r; real=$(command -v python3) || skip "no python3"
+  pn_forms_check "as installed"
+  # A line break to YAML 1.1 only: with PyYAML a comment hid the key pnpm used.
+  r=$(pn_verdict $'minimumReleaseAge: 0\n# c\302\205minimumReleaseAge: 9999')
+  [[ "$r" == GAP* || "$r" == WEAK*"could not be read"* ]] || { echo "NEL: $r"; return 1; }
+  stub_bin python3 "case \"\$*\" in *'import yaml'*) exit 3 ;; esac; exec '$real' \"\$@\""
+  pn_forms_check "without PyYAML"
+  # What an ordinary workspace file holds is still read, not refused.
+  r=$(pn_verdict $'---\n# pnpm\npackages:\n- "packages/*"\ncatalogs:\n  react18:\n    react: ^18.0.0\nonlyBuiltDependencies: [esbuild]\n"linkWorkspacePackages": true')
+  [[ "$r" == "N/A"*"sets neither"* ]] || { echo "ordinary: $r"; return 1; }
+}
+
+@test "pnpm repo config override: pnpm 10's project .npmrc, quoted, escaped, after a byte-order mark or a lone CR" {
+  pnpm_stub 10.34.9
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  local y
+  while IFS= read -r y; do
+    pn_project ""
+    printf -- "$y" > "$PNP/.npmrc"
+    run verify_in "$PNP" --emit=plain
+    [[ "$(pn_row)" == GAP*"minimum-release-age 0 in $PNP/.npmrc switches the age gate off"* || "$(pn_row)" == WEAK*"could not be read"* ]] \
+      || { echo "$y: $(pn_row)"; return 1; }
+  done <<'FORMS'
+minimum-release-age=0\n
+"minimum-release-age"=0\n
+"minimum\\u002drelease-age"=0\n
+# c\rminimum-release-age=0\r
+\357\273\277minimum-release-age=0\n
+FORMS
+  pn_project ""
+  printf '# minimum-release-age=0\n//r.example/:_authToken=${T}\n' > "$PNP/.npmrc"
+  run verify_in "$PNP" --emit=plain
+  [[ "$(pn_row)" == "N/A"* ]] || { pn_row; return 1; }
+}
+
 @test "pnpm repo config override: N/A with no workspace file, with no age keys, from /, and on a pnpm with no age gate; a path with a space" {
   pnpm_stub 11.28.13
   harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
@@ -2292,6 +2357,103 @@ y_verdict() { y_project "$1"; run verify_in "$(YNP)/packages/a" --emit=plain; y_
     r=$(y_verdict "$y")
     [[ "$r" == WEAK*"could not be read by the reader"*"was not judged"* ]] || { echo "$y: $r"; return 1; }
   done
+}
+
+# As pn_forms above, for yarn: each MEASURED to turn enableScripts on for Yarn
+# 4.18.1, the last one as a yarn 1 lockfile, where a key needs no colon.
+y_forms() {
+  printf '%s\n' '{enableScripts: true}' '--- {enableScripts: true}' '  enableScripts: true' \
+    '"enable\\x53cripts": true' '\357\273\277enableScripts: true' '# c\renableScripts: true\r' \
+    '!!str enableScripts: true' '"enableScripts" : true' 'nodeLinker: &k enableScripts\n*k : true' \
+    '? "enable\\x53cripts"\n: true' 'enableScripts: true\nnpmRegistryServer: "\nenableScripts: false\n"' \
+    'enableScripts: true\nnpmScopes: {\nenableScripts: {}\n}' \
+    'enableScripts: true\n# c\302\205enableScripts: false' '# yarn lockfile v1\nenableScripts true' \
+    '# yarn lockfile v1\n"enable\\u0053cripts" true'
+}
+y_forms_check() {
+  local y r n=0
+  while IFS= read -r y; do
+    y_project ''
+    printf -- "$y\n" > "$(YNP)/.yarnrc.yml"
+    run verify_in "$(YNP)/packages/a" --emit=plain
+    r=$(y_row)
+    case "$r" in
+      GAP*"re-enables dependency install scripts"*|WEAK*"could not be read by the reader"*"was not judged"*) n=$((n + 1)) ;;
+      *) echo "$1, $y: $r"; return 1 ;;
+    esac
+  done < <(y_forms)
+  [ "$n" -eq 15 ] || { echo "$1: $n forms"; return 1; }
+}
+
+@test "yarn repo config override: no spelling of a key reads as nothing set, with PyYAML or without" {
+  yarn_rc_stub 4.19.0
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  local real r; real=$(command -v python3) || skip "no python3"
+  y_forms_check "as installed"
+  stub_bin python3 "case \"\$*\" in *'import yaml'*) exit 3 ;; esac; exec '$real' \"\$@\""
+  y_forms_check "without PyYAML"
+  r=$(y_verdict $'---\n# yarn\nnodeLinker: node-modules\nnpmScopes:\n  acme:\n    npmRegistryServer: "https://npm.example"\nunsafeHttpWhitelist: [\n  a,\n]')
+  [[ "$r" == "N/A"*"sets no yarnPath"* ]] || { echo "ordinary: $r"; return 1; }
+}
+
+# corepack reads package.json as JSON and climbs to the nearest one that has
+# packageManager. Each form was MEASURED to run the older yarn on corepack 0.36.0.
+@test "yarn repo config override: the packageManager graded is the one corepack runs, however package.json spells it" {
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  command -v python3 >/dev/null 2>&1 || skip "no python3"
+  mkdir -p "$BATS_TEST_TMPDIR/cp/corepack/dist"
+  yarn_rc_stub 4.19.0
+  mv "$TEST_BIN/yarn" "$BATS_TEST_TMPDIR/cp/corepack/dist/yarn.js"
+  ln -s "$BATS_TEST_TMPDIR/cp/corepack/dist/yarn.js" "$TEST_BIN/yarn"
+  local y n=0
+  while IFS= read -r y; do
+    y_project ''
+    printf -- "$y" > "$(YNP)/package.json"
+    run verify_in "$(YNP)/packages/a" --emit=plain
+    [[ "$(y_row)" == GAP*"yarn 4.9.1, which corepack downloads because packageManager in $(YNP)/package.json names it"* ]] || { echo "$y: $(y_row)"; return 1; }
+    n=$((n + 1))
+  done <<'FORMS'
+{"packageManager":"yarn@4.9.1"}
+{"packageManager":\n"yarn@4.9.1"}
+{"x":{"packageManager":"yarn@4.12.0"},\n"packageManager":"yarn@4.9.1"}
+{"packageManager":"yarn@4.12.0",\n"packageManager":"yarn@4.9.1"}
+{"package\\u004danager":"yarn@4.9.1"}
+{"devEngines":{"packageManager":{"name":"yarn","version":"4.9.1"}}}
+FORMS
+  [ "$n" -eq 6 ]
+  # A nearer package.json without one does not end the search.
+  y_project ''
+  printf '{"packageManager":"yarn@4.9.1"}' > "$(YNP)/package.json"
+  printf '{"name":"a","devEngines":{"packageManager":{"name":"yarn","version":"4.19.0"}}}' > "$(YNP)/packages/a/package.json"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == GAP*"yarn 4.9.1, which corepack downloads because packageManager in $(YNP)/package.json names it"* ]] || { y_row; return 1; }
+  # A range, or a file that cannot be read, is not judged as some other yarn.
+  for y in '{"devEngines":{"packageManager":{"name":"yarn","version":"^4.9.1"}}}' '{bad'; do
+    y_project ''
+    printf -- "$y" > "$(YNP)/package.json"
+    run verify_in "$(YNP)/packages/a" --emit=plain
+    [[ "$(y_row)" == WEAK*"the yarn corepack picks"*"a version this row cannot read"* ]] || { echo "$y: $(y_row)"; return 1; }
+  done
+  # Without python3, more than one mention is not guessed at.
+  stub_bin python3 'exit 127'
+  y_project ''
+  printf '{"x":{"packageManager":"yarn@4.12.0"},\n"packageManager":"yarn@4.9.1"}' > "$(YNP)/package.json"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == WEAK*"whose packageManager could not be read"* ]] || { y_row; return 1; }
+}
+
+@test "yarn repo config override: yarn 1's .yarnrc with a quoted or escaped yarn-path (MEASURED, 1.22.22)" {
+  yarn_rc_stub 1.22.22
+  harden ECOSYSTEMS=yarn -- --emit=plain >/dev/null
+  y_project ''
+  yarn_release "$(YNP)/.yarn/releases/yarn-4.9.1.cjs" 4.9.1
+  printf '"yarn-path" ".yarn/releases/yarn-4.9.1.cjs"\n' > "$(YNP)/.yarnrc"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == GAP*"names yarn-path"* ]] || { y_row; return 1; }
+  printf '"yarn\\u002dpath" ".yarn/releases/yarn-4.9.1.cjs"\n' > "$(YNP)/.yarnrc"
+  run verify_in "$(YNP)/packages/a" --emit=plain
+  [[ "$(y_row)" == WEAK*"$(YNP)/.yarnrc could not be read by the reader: a key written with an escape"* ]] || { y_row; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/markers/yarn-release-ran" ]
 }
 
 @test "yarn repo config override: N/A with no file, with no keys, from /, and a path with a space" {

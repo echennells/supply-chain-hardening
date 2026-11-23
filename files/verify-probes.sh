@@ -226,6 +226,39 @@ discover poetry  "$HOME/.local/bin" "${POETRY_HOME:-$HOME/.local/share/pypoetry}
 # the yarn that runs by the version string inside the yarnPath file (the bundles
 # carry `name:"@yarnpkg/cli",version:"X"`, MEASURED 4.1.0 to 4.19.0) or by the
 # packageManager corepack would download, a statement by the checkout itself.
+#
+# THE FILE IS THE CHECKOUT'S, AND THE READER MUST NOT SEE LESS THAN THE TOOL.
+# MEASURED (pnpm 10.34.9 and 11.29.0, Yarn 4.18.1), all honoured: a flow mapping,
+# an escaped, tagged or `? complex` key, a merge (pnpm), an indented top level,
+# `--- {key: v}`, a byte-order mark, a lone CR as the line break, and column-0
+# text inside a quoted or flow value that is not a key. A reader that does not
+# follow a form says "error", which the row reports as not judged; it never
+# reads such a file as setting nothing.
+#
+# scv_cfg_text <file>: the text as npm, pnpm and Yarn split it into lines.
+scv_cfg_text() {
+  LC_ALL=C tr '\r' '\n' < "$1" 2>/dev/null | LC_ALL=C tr -d '\000' \
+    | LC_ALL=C sed "1s/^$(printf '\357\273\277')//"
+}
+# The plain-key readers' own rule: every line at column 0 is a comment, a
+# document start, a plain or simply quoted key, a "- item" or a closing bracket.
+# With that, a key cannot be where they do not look. A tag, anchor, alias, escape,
+# merge or complex key, an indented top level and a second document are refused.
+scv_yaml_strict_awk='
+function strict(l) {
+  if (l ~ /^---[ \t]*(#.*)?$/) { if (seen) bad("more than one document"); return 0 }
+  if (!seen && l ~ /^[{[]/) bad("a flow-style document")
+  if (!seen && l ~ /^[ \t]/) bad("an indented top level")
+  seen = 1
+  if (l ~ /^(<<|\?)/) bad("a merge or complex key")
+  if (l ~ /^[ \t]/) return 1
+  if (l ~ /^[A-Za-z0-9_][A-Za-z0-9_.\/-]*[ \t]*:([ \t]|$)/) return 1
+  if (l ~ /^"[^"\\]*"[ \t]*:([ \t]|$)/ || l ~ /^\047[^\047]*\047[ \t]*:([ \t]|$)/) return 1
+  if (l ~ /^-([ \t]|$)/ || l ~ /^[]}]/) return 1
+  bad("a top-level line this reader does not follow")
+  return 1
+}
+'
 scv_yarn_rc_py='
 import re, sys
 try:
@@ -236,7 +269,14 @@ def clean(s):
     return re.sub(r"[\x00-\x1f\x7f]", "?", str(s))[:300]
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
-        d = yaml.load(f, Loader=yaml.BaseLoader)
+        t = f.read()
+    # Line breaks to YAML 1.1 (PyYAML), not to YAML 1.2 (yarn, pnpm). MEASURED:
+    # behind a "#" and U+0085, PyYAML took "enableScripts: false" for a key, and
+    # Yarn 4.18.1 used the true above it.
+    if re.search("[\x85\u2028\u2029]", t):
+        print("error\ta line separator that YAML 1.1 and 1.2 read differently")
+        sys.exit(0)
+    d = yaml.load(t, Loader=yaml.BaseLoader)
 except Exception as e:
     m = str(e).strip().splitlines()
     print("error\t" + clean(m[0] if m else type(e).__name__))
@@ -292,14 +332,12 @@ function val(s,   q, rest, i) {
 END {
   for (n = 1; n <= NR; n++) {
     l = line[n]
-    if (l ~ /^[ \t]*(#.*)?$/ || l ~ /^%/ || l ~ /^---[ \t]*$/) continue
-    if (!seen && l ~ /^[{[]/) bad("a flow-style document")
-    seen = 1
-    if (l ~ /^(<<|\?)/) bad("a merge or complex key")
+    if (l ~ /^[ \t]*(#.*)?$/ || (!seen && l ~ /^%/)) continue
+    if (!strict(l)) continue
     if (l ~ /^[ \t]/) continue
     k = l; sub(/[ \t]*:.*$/, "", k); gsub(/^["\047]|["\047]$/, "", k)
     if (k !~ /^(yarnPath|npmMinimalAgeGate|enableScripts|npmPreapprovedPackages|plugins)$/) continue
-    if (cnt[k]++) delete_items = 1
+    if (cnt[k]++) bad("a key twice")
     v = l; sub(/^[^:]*:/, "", v); v = trim(v)
     if (k == "npmPreapprovedPackages" || k == "plugins") {
       if (k == "npmPreapprovedPackages") ni = 0; else np = 0
@@ -353,10 +391,54 @@ END {
 # "t<TAB>key<TAB>type" for a value that is not a string, or "error<TAB>why".
 scv_yarn_rc_read() {
   local out rc
+  # Yarn parses a file with this comment as a yarn 1 lockfile, where a key needs
+  # no colon (MEASURED, 4.18.1: `enableScripts true` was honoured).
+  out=$(scv_cfg_text "$1" | LC_ALL=C grep -ciE '^#[[:space:]]+yarn[[:space:]]+lockfile[[:space:]]+v1')
+  if [ "${out:-0}" -gt 0 ]; then
+    printf 'by\tits first lines\nerror\tit is marked "yarn lockfile v1", which yarn parses by other rules\n'
+    return 0
+  fi
   out=$(run_bounded 20 python3 -I -c "$scv_yarn_rc_py" "$1" 2>/dev/null); rc=$?
   if [ "$rc" -eq 0 ]; then printf 'by\tPyYAML\n%s\n' "$out"; return 0; fi
   printf 'by\ta plain-key reader (python3 has no PyYAML here)\n'
-  awk "$scv_yarn_rc_awk" "$1" 2>/dev/null
+  scv_cfg_text "$1" | awk "$scv_yaml_strict_awk$scv_yarn_rc_awk" 2>/dev/null
+}
+# scv_pkg_manager <package.json>: "pm<TAB>value" for packageManager, "dev<TAB>value"
+# for devEngines.packageManager (which corepack uses only without the first),
+# "?" when it cannot be told, or nothing. JSON, so read as JSON: MEASURED with
+# corepack 0.36.0, the value on its own line, a nested or repeated key, an escaped
+# key and devEngines all chose the yarn that ran, and a line-by-line search saw
+# another version or none. Without python3 that search is all there is, so it
+# answers only when the file has one plain mention.
+scv_pkg_manager() {
+  local out rc n
+  out=$(run_bounded 20 python3 -I -c '
+import json, re, sys
+def clean(s):
+    return re.sub(r"[\x00-\x1f\x7f]", "?", s)[:200]
+try:
+    with open(sys.argv[1], encoding="utf-8-sig") as f:
+        d = json.load(f)
+except Exception:
+    print("?")
+    sys.exit(0)
+if not isinstance(d, dict):
+    sys.exit(0)
+v = d.get("packageManager")
+if v:
+    print("pm\t" + clean(v) if isinstance(v, str) else "?")
+    sys.exit(0)
+e = d.get("devEngines")
+p = e.get("packageManager") if isinstance(e, dict) else None
+if isinstance(p, dict) and isinstance(p.get("name"), str) and "@" not in p["name"]:
+    w = p.get("version")
+    print("dev\t" + clean(p["name"] + "@" + (w if isinstance(w, str) else "*")))
+' "$1" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ]; then [ -z "$out" ] || printf '%s\n' "$out"; return 0; fi
+  n=$(scv_cfg_text "$1" | LC_ALL=C grep -cE 'packageManager|devEngines|\\u')
+  out=$(scv_cfg_text "$1" | sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' | head -1)
+  if [ "${n:-0}" -eq 1 ] && [ -n "$out" ]; then printf 'pm\t%s\n' "$out"
+  elif [ "${n:-0}" -gt 0 ]; then printf '?\n'; fi
 }
 # The yarn version a bundle names, without running it; empty when it names none.
 scv_yarn_file_version() { # <yarn bundle>
@@ -416,18 +498,29 @@ else
 
   # ---- which yarn runs in $PWD, and the project's .yarnrc.yml files ---------
   yrcname=${YARN_RC_FILENAME:-.yarnrc.yml}
-  yfiles=""; yclassic=""; ypm=""; ypmsrc=""
+  yfiles=""; yclassic=""; ypm=""; ypmsrc=""; ypmhit=0; yclassicodd=""
   if [ "$PWD" != / ]; then
     yd=$PWD
     while [ -n "$yd" ] && [ "$yd" != / ]; do
       if [ "$yd" != "$HOME" ]; then
         [ -f "$yd/$yrcname" ] && yfiles="$yd/$yrcname${yfiles:+
 $yfiles}"
-        [ -z "$yclassic" ] && [ -f "$yd/.yarnrc" ] && grep -qE '^[[:space:]]*"?yarn-path"?[[:space:]]' "$yd/.yarnrc" 2>/dev/null && yclassic="$yd/.yarnrc"
+        if [ -f "$yd/.yarnrc" ]; then
+          [ -z "$yclassic" ] && [ "$(scv_cfg_text "$yd/.yarnrc" | LC_ALL=C grep -cE '^[[:space:]]*"?yarn-path"?[[:space:]]')" -gt 0 ] && yclassic="$yd/.yarnrc"
+          # An escaped key can spell yarn-path (MEASURED, 1.22.22).
+          [ -z "$yclassicodd" ] && [ "$(scv_cfg_text "$yd/.yarnrc" | LC_ALL=C grep -cE '^[[:space:]]*"[^"]*\\')" -gt 0 ] && yclassicodd="$yd/.yarnrc"
+        fi
       fi
-      if [ -z "$ypmsrc" ] && [ -f "$yd/package.json" ]; then
-        ypmsrc="$yd/package.json"
-        ypm=$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ypmsrc" 2>/dev/null | head -1)
+      # corepack takes the nearest package.json that has packageManager, and
+      # with none, the farthest one's devEngines (its loadSpec; the first part
+      # MEASURED on 0.36.0, with a child package.json that has none).
+      if [ "$ypmhit" = 0 ] && [ -f "$yd/package.json" ]; then
+        ypmread=$(scv_pkg_manager "$yd/package.json"); ypm=""; ypmsrc="$yd/package.json"
+        case "$ypmread" in
+          pm'	'*) ypm=${ypmread#*'	'}; ypmhit=1 ;;
+          dev'	'*) ypm=${ypmread#*'	'} ;;
+          '?'*) ypm='?'; ypmhit=1 ;;
+        esac
       fi
       yd=${yd%/*}
     done
@@ -439,6 +532,10 @@ $yfiles}"
       scv_yarn_rc_read "$yf" | YF=$yf awk '{ print ENVIRON["YF"] "\t" $0 }'
     done)
   fi
+  if [ -n "$yclassicodd" ] && [ "$yhostclassic" = 1 ]; then
+    yread="${yread:+$yread
+}$yclassicodd	error	a key written with an escape, which can spell yarn-path"
+  fi
   # The project's yarnPath (the nearest file that names one) and its version.
   ypath=""; ypathsrc=""; ypathv=""; ypathkey=yarnPath
   ypline=$(printf '%s\n' "$yread" | awk -F'\t' '$2 == "k" && $3 == "yarnPath"' | tail -1)
@@ -447,7 +544,7 @@ $yfiles}"
     case "$ypath" in /*) ;; ?*) ypath="${ypathsrc%/*}/${ypath#./}" ;; esac
   elif [ -n "$yclassic" ] && [ "$yhostclassic" = 1 ]; then
     ypathsrc=$yclassic; ypathkey=yarn-path
-    ypath=$(sed -n 's/^[[:space:]]*"\{0,1\}yarn-path"\{0,1\}[[:space:]][[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$yclassic" | tail -1)
+    ypath=$(scv_cfg_text "$yclassic" | sed -n 's/^[[:space:]]*"\{0,1\}yarn-path"\{0,1\}[[:space:]][[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' | tail -1)
     case "$ypath" in /*) ;; ?*) ypath="${yclassic%/*}/${ypath#./}" ;; esac
   fi
   [ -n "$ypath" ] && [ -f "$ypath" ] && ypathv=$(scv_yarn_file_version "$ypath")
@@ -462,6 +559,8 @@ $yfiles}"
       yarn@[0-9]*)
         yeff=${ypm#yarn@}; yeff=${yeff%%+*}
         yeffwhy="yarn $yeff, which corepack downloads because packageManager in $ypmsrc names it" ;;
+      '?') yeff=""; yeffwhy="the yarn corepack picks from $ypmsrc, whose packageManager could not be read" ;;
+      yarn@*) yeff=""; yeffwhy="the yarn corepack picks for $ypm in $ypmsrc" ;;
     esac
   fi
 
@@ -520,7 +619,7 @@ $yfiles}"
   if [ "$PWD" = / ]; then
     row "N/A" - "yarn repo config override" \
       "the verifier ran from /, where no project's .yarnrc.yml applies - run it from a project to check that project's yarn settings"
-  elif [ -z "$yfiles" ] && [ -z "$yeffwhy" ]; then
+  elif [ -z "$yfiles" ] && [ -z "$yeffwhy" ] && [ -z "$yread" ]; then
     row "N/A" - "yarn repo config override" "no $yrcname at or above $PWD, and the yarn that runs there is this host's"
   else
     ygap=""; yweak=""; yodd=""; yfine=""; ymask=""; yerr=""; ykeys=0
@@ -747,7 +846,12 @@ def clean(s):
     return re.sub(r"[\x00-\x1f\x7f]", "?", str(s))[:200]
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
-        loader = L(f)
+        t = f.read()
+        # See scv_yarn_rc_py: line breaks to PyYAML and not to pnpm.
+        if re.search("[\x85\u2028\u2029]", t):
+            print("error\ta line separator that YAML 1.1 and 1.2 read differently")
+            sys.exit(0)
+        loader = L(t)
         try:
             node = loader.get_single_node()
             # PyYAML keeps the last of a repeated key; pnpm may refuse the file.
@@ -834,10 +938,8 @@ function kind(v,   t) {
 END {
   for (n = 1; n <= NR; n++) {
     l = line[n]
-    if (l ~ /^[ \t]*(#.*)?$/ || l ~ /^%/ || l ~ /^---[ \t]*$/) continue
-    if (!seen_content && l ~ /^[{[]/) bad("a flow-style document")
-    seen_content = 1
-    if (l ~ /^(<<|\?)/) bad("a merge or complex key")
+    if (l ~ /^[ \t]*(#.*)?$/ || (!seen && l ~ /^%/)) continue
+    if (!strict(l)) continue
     if (l ~ /^[^ \t#][^:]*:[ \t]*[[{]/ && l !~ /[]}][ \t]*(#.*)?$/) bad("a [..] or {..} value over several lines")
     k = ""
     if (l ~ /^("minimumReleaseAge"|\047minimumReleaseAge\047|minimumReleaseAge)[ \t]*:([ \t]|$)/) k = "age"
@@ -902,18 +1004,24 @@ scv_pnpm_ws_read() {
   out=$(run_bounded 20 python3 -I -c "$scv_pnpm_ws_py" "$1" 2>/dev/null); rc=$?
   if [ "$rc" -eq 0 ]; then printf 'by\tPyYAML\n%s\n' "$out"; return 0; fi
   printf 'by\ta plain-key reader (python3 has no PyYAML here)\n'
-  awk "$scv_pnpm_ws_awk" "$1" 2>/dev/null
+  scv_cfg_text "$1" | awk "$scv_yaml_strict_awk$scv_pnpm_ws_awk" 2>/dev/null
 }
-# scv_pnpm_npmrc_read <.npmrc>: the same lines, for pnpm 10's kebab keys.
+# scv_pnpm_npmrc_read <.npmrc>: the same lines, for pnpm 10's kebab keys. A quoted
+# key is the key, and a quoted one with an escape can spell any (MEASURED,
+# 10.34.9), so that is "error".
 scv_pnpm_npmrc_read() {
-  awk -F= '
+  scv_cfg_text "$1" | awk -F= '
+    /^[ \t]*[;#]/ { next }
     { k = $0; sub(/=.*/, "", k); gsub(/^[ \t]+|[ \t\r]+$/, "", k); v = substr($0, index($0, "=") + 1); gsub(/^[ \t"\047]+|[ \t\r"\047]+$/, "", v) }
+    k ~ /^".*\\/ { esc = 1 }
+    k ~ /^".*"$/ || k ~ /^\047.*\047$/ { k = substr(k, 2, length(k) - 2) }
     k == "minimum-release-age" { age = v; has = 1 }
     k == "minimum-release-age-exclude[]" || k == "minimum-release-age-exclude" { n = split(v, p, ","); for (i = 1; i <= n; i++) if (p[i] != "") items[++ni] = p[i]; hx = 1 }
     END {
+      if (esc) { print "error\ta key written with an escape"; exit }
       if (has) { if (age ~ /^-?[0-9]+$/) print "age\tint\t" age; else if (age ~ /^(true|false)$/) print "age\tbool\t" age; else if (age == "" || age == "null") print "age\tnull\t"; else print "age\tstr\t" age }
       if (hx) { print "excl\tlist\t" ni; for (i = 1; i <= ni; i++) print "item\t" items[i] }
-    }' "$1" 2>/dev/null
+    }' 2>/dev/null
 }
 
 if ! have pnpm || { command -v requested >/dev/null 2>&1 && ! requested pnpm; }; then
@@ -930,7 +1038,7 @@ else
   pnrc=""
   if [ "${pnmaj:-0}" = 10 ]; then
     for pnd in "$PWD" "${pnws%/*}"; do
-      [ -n "$pnd" ] && [ -f "$pnd/.npmrc" ] && [ "$pnd" != "$HOME" ] && grep -qE '^[[:space:]]*minimum-release-age' "$pnd/.npmrc" 2>/dev/null \
+      [ -n "$pnd" ] && [ -f "$pnd/.npmrc" ] && [ "$pnd" != "$HOME" ] && [ -n "$(scv_pnpm_npmrc_read "$pnd/.npmrc")" ] \
         && { pnrc="$pnd/.npmrc"; break; }
     done
   fi
