@@ -985,6 +985,11 @@ jobs:
       # local-checkout job above.
       - uses: echennells/supply-chain-hardening/action@v2
         id: harden
+        with:
+          # This job has no Cargo.lock, so without the backend the cargo
+          # publish-age row is a gap a re-run can close, and `fail-on: config`
+          # below would fail on it.
+          install_cargo_cooldown: 'true'
 
       - name: Outputs are populated (same as local-checkout test)
         run: |
@@ -1003,26 +1008,19 @@ jobs:
           grep -q "ignoreScripts: true" "$HOME/.config/pnpm/config.yaml"
 
       # The second ref consumers write. This step proves that verify@v2
-      # RESOLVES, RUNS to completion and READS harden@v2's output — the same
-      # consumption property as the harden step above, not the hardening
-      # posture of a stock runner. `fail-on: never` because with every
-      # ecosystem hardened, verify on ubuntu-24.04 reports GAPs that are
-      # already known and are not this job's to fail on: the npm age gate
-      # (npm 10.9.8 predates min-release-age — a toolchain limit; the inverse
-      # job below asserts it is reported) and three role-vs-action parity
-      # bugs in harden.sh found the first time this exact combination ran,
-      # tracked in the issue linked from the assertion below. Flip to
-      # `fail-on: config` once those are fixed — at that point a red step
-      # here means the published release regressed for real consumers.
+      # RESOLVES, RUNS to completion and READS harden@v2's output, and that the
+      # published release leaves no gap it could have closed itself. `fail-on:
+      # config`: the gaps of a stock ubuntu-24.04 runner's own tools (npm and pip
+      # too old for their age gates, Yarn 1) are reported and do not fail the
+      # step; the inverse job below asserts npm's. It was `never` until v2.1.0,
+      # while v2.0.0 had three harden.sh bugs this combination found (#29). A red
+      # step here means the published release regressed for real consumers.
       - uses: echennells/supply-chain-hardening/action/verify@v2
         id: verify
         with:
-          fail-on: never
+          fail-on: config
 
       - name: verify@v2 ran and read harden@v2's output
-        # Known GAPs on a stock runner with all ecosystems hardened (the three
-        # harden.sh bugs, plus npm's toolchain gap): see
-        # https://github.com/echennells/supply-chain-hardening/issues/29
         env:
           ROWS: ${{ steps.verify.outputs.rows }}
           GAPS: ${{ steps.verify.outputs.gaps }}
