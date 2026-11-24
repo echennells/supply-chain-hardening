@@ -116,6 +116,31 @@ assert_no_download() {
   if grep -E '^(curl|wget) ' "$CALLS"; then echo "it downloaded the pin"; return 1; fi
 }
 
+@test "sfw: root's npm install of it uses a cache of its own, and removes it" {
+  # On macOS sudo keeps the caller's HOME: in ~/.npm root's npm leaves files the
+  # caller's npm cannot open.
+  stub_bin npm 'case "$*" in
+  "install -g --ignore-scripts sfw@2.0.6")
+    echo "npm cache=[${npm_config_cache:-unset}] uid=$(id -u)" >> "'"$CALLS"'"
+    [ -d "${npm_config_cache:-/nonexistent}" ] && : > "$npm_config_cache/written" && exit 0
+    exit 1 ;;
+  "--version") echo "10.9.8" ;;
+  *) echo "STUB:npm ARGS=[$*]" ;;
+esac'
+  : > "$BATS_TEST_TMPDIR/api-ok"
+  harden_sfw
+  [ "$status" -eq 0 ]
+  assert_file_contains "$OUT_FILE" "sfw_installed=true"
+  local c
+  c=$(sed -n 's/^npm cache=\[\(.*\)\] uid=0$/\1/p' "$CALLS")
+  [ -n "$c" ]
+  [ "$c" != unset ]
+  case "$c" in "$TEST_HOME"/*|"$HOME"/*) echo "under the caller's home: $c"; return 1 ;; esac
+  # Not left behind. (root's, so looked for as root.)
+  run sudo test -e "$c"
+  [ "$status" -ne 0 ]
+}
+
 @test "sfw pin: where sfw's own fetch works, the pinned binary is not downloaded" {
   pin_the_payload
   touch "$BATS_TEST_TMPDIR/api-ok"

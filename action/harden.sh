@@ -4550,7 +4550,12 @@ install_sfw_and_wrap() {
   # to everyone but root.
   local npm_bin
   npm_bin=$(command -v npm)
-  (cd / && $SUDO sh -c 'umask 022; exec "$@"' sh "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}") >/dev/null 2>&1 || {
+  #
+  # An npm cache of its own for this one call. sudo keeps the caller's HOME on
+  # macOS, so root's npm left root-owned files in ~/.npm, and every later npm
+  # install of the caller failed: MEASURED on macos-15 and macos-15-intel,
+  # "EACCES ... Your cache folder contains root-owned files".
+  (cd / && $SUDO sh -c 'umask 022; npm_config_cache=$(mktemp -d) || exit 1; export npm_config_cache; trap "rm -rf -- \"\$npm_config_cache\"" 0; "$@"' sh "$npm_bin" install -g --ignore-scripts "sfw@${SFW_NPM_VERSION}") >/dev/null 2>&1 || {
     warn "sfw global install failed; skipping wrapper deployment"
     end_section
     return 0
