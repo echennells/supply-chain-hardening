@@ -391,9 +391,10 @@ ucf_copy() {
 }
 
 # ucf_replace <kind> <path>: replace one of the seven with the body on stdin.
-# Prints "ok" or "changed", "copy <file>" when the user's version was kept, and
-# "error <why>". UCF_DRY=1 reports and writes nothing. With UCF_FOREIGN=refuse a
-# file with the user's settings is left alone: "refused", status 42.
+# Prints "ok" or "changed", "copy <file>" ("-" in a dry run) when the user's
+# version is kept, and "error: <why>" with status 1. UCF_DRY=1 reports and writes
+# nothing. With UCF_FOREIGN=refuse a file with the user's settings is left alone:
+# "refused <path>", status 42.
 ucf_replace() {
   local kind="$1" path="$2" want why bak cls=absent
   want=$(ucf_sign) || { echo "error: no marker line in the new $kind file"; return 1; }
@@ -408,10 +409,11 @@ ucf_replace() {
   fi
   if [ "$cls" = foreign ]; then
     if [ "${UCF_FOREIGN:-keep}" = refuse ]; then printf 'refused %s\n' "$path"; return 42; fi
+    bak=-
     if [ "${UCF_DRY:-0}" != 1 ]; then
       bak=$(ucf_copy "$path") || { printf 'error: could not copy %s next to itself before replacing it; it was left as it is\n' "$path"; return 1; }
-      printf 'copy %s\n' "$bak"
     fi
+    printf 'copy %s\n' "$bak"
   fi
   if [ "${UCF_DRY:-0}" != 1 ]; then
     ucf_put "$path" 644 "$want"$'\n' || { printf 'error: could not write %s\n' "$path"; return 1; }
@@ -609,6 +611,7 @@ ucf_npmrc_scan() (
 #                   the last line for a key wins, so it would beat the block
 #   unsure <what>   a line that stays, and that may set or defeat one of ours
 #   copy <file>     where the file as it was is kept; only when one was removed
+#                   ("-" in a dry run)
 #   mode <string>   other accounts could read it, and no longer can
 #   ok | changed, or "error: <why>" and status 1.
 # UCF_DRY=1 reports and writes nothing.
@@ -646,12 +649,15 @@ ucf_npmrc() {
     case "$m" in ????r*|???????r*) printf 'mode %s\n' "$m" ;; esac
     if [ "$new" = "$bom$cur" ] && [ "$m" = "$(ucf_mode "$real" 600)" ]; then echo ok; return 0; fi
   fi
-  if [ "${UCF_DRY:-0}" != 1 ]; then
-    case "$nl$notes" in
-      *"$nl"removed\ *)
+  case "$nl$notes" in
+    *"$nl"removed\ *)
+      bak=-
+      if [ "${UCF_DRY:-0}" != 1 ]; then
         bak=$(ucf_copy "$path") || { printf 'error: could not copy %s next to itself before taking lines out of it; it was left as it is\n' "$path"; return 1; }
-        printf 'copy %s\n' "$bak" ;;
-    esac
+      fi
+      printf 'copy %s\n' "$bak" ;;
+  esac
+  if [ "${UCF_DRY:-0}" != 1 ]; then
     ucf_put "$path" 600 "$new" || { printf 'error: could not write %s\n' "$path"; return 1; }
   fi
   echo changed

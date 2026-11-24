@@ -365,6 +365,8 @@
         - {{ f.path }}: kept, but it may set or defeat a setting this project writes there: {{ l | regex_replace('^unsure ', '') }}
       {% elif l is match('mode ') %}
         - {{ f.path }}: other accounts could read it ({{ l | regex_replace('^mode ', '') }}); it {{ 'would become' if ansible_check_mode else 'is now' }} 0600
+      {% elif l == 'copy -' %}
+        - {{ f.path }}: would be copied next to itself (0600) first
       {% elif l is match('copy ') %}
         - {{ f.path }}: the file as it was is at {{ l | regex_replace('^copy ', '') }}
       {% endif %}
