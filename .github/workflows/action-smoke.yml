@@ -1268,8 +1268,13 @@ jobs:
         run: test "${{ steps.harden.outputs.sfw-installed }}" = "true"
 
   action-sfw-pinned-floor:
-    name: 'Action: intel sfw works with the GitHub API unreachable'
-    runs-on: ubuntu-24.04
+    name: 'Action: intel sfw works with the GitHub API unreachable (${{ matrix.runner }})'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm64 too: it is the only place here that runs the arm64 binary.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     # 10 of 30 sfw jobs here in one week started on a runner whose API quota was
     # already used up, and sfw was then missing for the whole job. Waiting for
     # that to happen by chance proves nothing, so this job makes it happen.
@@ -1295,7 +1300,8 @@ jobs:
           want=$(sed -n 's/^SFW_BINARY_VERSION="\(.*\)"$/\1/p' action/harden.sh)
           latest=$(readlink -f "$(npm root -g)/sfw/.sfw-cache/latest")
           echo "cached: $latest, pinned: $want"
-          case "$latest" in */"$want"/sfw-free-linux-*) ;; *) echo "::error::not the pinned binary"; exit 1 ;; esac
+          case "$(uname -m)" in aarch64) asset=sfw-free-linux-arm64 ;; *) asset=sfw-free-linux-x86_64 ;; esac
+          [ "$latest" = "${latest%/*/*}/$want/$asset" ] || { echo "::error::not the pinned binary"; exit 1; }
           test "$(stat -c '%U %a' "$latest")" = "root 755"
 
       - name: npm installs through it, as the runner user
