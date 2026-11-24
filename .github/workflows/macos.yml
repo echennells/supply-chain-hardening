@@ -1,0 +1,154 @@
+name: macOS
+
+# The Action on real Macs, judged by what it stops. Until this job, nothing in CI
+# ran the Action itself on macOS: only the host-side tests did, mostly against
+# stubs. harden.sh wrote pnpm's config where pnpm on macOS never looks, every
+# check said it had been applied, and a package's postinstall ran (issue 48).
+#
+# Each attack must FIRE before the Action and be blocked after it, by the control
+# that is meant to block it (tests/macos/attacks.sh). An attack that Maven Central's
+# rate limit (429) kept from running is "not tested": a warning, never a pass.
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+    paths:
+      - 'action/**'
+      - 'files/**'
+      - 'tasks/preflight.yml'
+      - 'tests/macos/**'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'action/**'
+      - 'files/**'
+      - 'tasks/preflight.yml'
+      - 'tests/macos/**'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  attacks:
+    name: "real attacks (${{ matrix.runner }})"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple silicon and Intel.
+        runner: [macos-15, macos-15-intel]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: The tools the image does not have
+        run: |
+          set -euo pipefail
+          for t in deno uv composer; do command -v "$t" >/dev/null || brew install -q "$t"; done
+          command -v bun >/dev/null || brew install -q oven-sh/bun/bun
+          # Two pnpm majors, each in a directory of its own: they read different
+          # files. Pinned, so a red run is about this repo.
+          npm install -g --silent --prefix "$RUNNER_TEMP/pnpm10" pnpm@10.34.9
+          npm install -g --silent --prefix "$RUNNER_TEMP/pnpm11" pnpm@11.29.0
+          echo "PNPM10=$RUNNER_TEMP/pnpm10/bin" >> "$GITHUB_ENV"
+          echo "PNPM11=$RUNNER_TEMP/pnpm11/bin" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-<unset>}"
+          for t in node npm yarn bun deno uv python3 pip3 composer php cargo bundle gem go dotnet mvn gradle; do
+            printf '%-9s %s\n' "$t" "$(command -v "$t" || echo absent)"
+          done
+
+      - name: Every attack fires on the unhardened machine (the control)
+        run: tests/macos/attacks.sh before
+
+      - name: What works before
+        run: |
+          tests/macos/normal-use.sh before "$RUNNER_TEMP/normal"
+          tests/macos/root-owned.sh before "$RUNNER_TEMP/root-owned"
+
+      - uses: ./action
+        id: harden
+
+      - name: Every attack is blocked after the Action
+        if: always() && steps.harden.outcome == 'success'
+        run: tests/macos/attacks.sh after
+
+      - name: What worked before still works
+        if: always() && steps.harden.outcome == 'success'
+        run: tests/macos/normal-use.sh after "$RUNNER_TEMP/normal"
+
+      - name: No root-owned file was left in HOME
+        if: always() && steps.harden.outcome == 'success'
+        run: tests/macos/root-owned.sh after "$RUNNER_TEMP/root-owned"
+
+      - name: The verifier agrees, and pnpm's rows are what pnpm says
+        if: always() && steps.harden.outcome == 'success'
+        run: |
+          set -uo pipefail
+          export PATH="$PNPM11:$PATH"
+          cd /
+          rc=0
+          "$GITHUB_WORKSPACE/action/verify.sh" --fail-on=config > "$RUNNER_TEMP/verify.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/verify.txt"
+          grep -qE '^OK +PARSED +pnpm lifecycle scripts blocked' "$RUNNER_TEMP/verify.txt" \
+            || { echo "::error::pnpm does not report our ignore-scripts"; exit 1; }
+          grep -qE '^OK +PARSED +pnpm age gate' "$RUNNER_TEMP/verify.txt" \
+            || { echo "::error::pnpm does not report our age gate"; exit 1; }
+          [ "$rc" -eq 0 ] || { echo "::error::the verifier found a gap a re-run could close"; exit 1; }
+
+  role-refuses:
+    name: "the role refuses a Mac before writing anything"
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: ansible-core
+        run: |
+          python3 -m venv "$RUNNER_TEMP/av"
+          "$RUNNER_TEMP/av/bin/pip" install -q 'ansible-core>=2.18,<2.21'
+          echo "$RUNNER_TEMP/av/bin" >> "$GITHUB_PATH"
+
+      - name: --preflight says STOP
+        run: |
+          set +e
+          out=$(./action/harden.sh --preflight 2>&1); rc=$?
+          echo "$out"
+          set -e
+          [ "$rc" -eq 1 ]
+          grep -q 'STOP  it is macOS, and the Ansible role supports Linux only' <<<"$out"
+          ! grep -q 'Nothing above would stop the play' <<<"$out"
+          ! grep -qiE 'coreutils|gnubin' <<<"$out"
+
+      - name: The play refuses, and writes nothing
+        run: |
+          set +e
+          touch "$RUNNER_TEMP/mark"; sleep 1
+          # With everything that used to get a Mac further: the cutoff pinned (no GNU
+          # date needed) and every file accepted.
+          out=$(ansible-playbook site.yml --limit localhost -e uv_exclude_newer=2026-11-01T00:00:00Z \
+                  -e accept_etc_overwrite=true -e accept_user_config_overwrite=true 2>&1); rc=$?
+          echo "$out"
+          set -e
+          [ "$rc" -ne 0 ]
+          grep -q 'this role supports Linux' <<<"$out"
+          grep -q 'changed=0' <<<"$out"
+          [ ! -e /etc/npmrc ] && [ ! -e "$HOME/.npmrc" ] && [ ! -e "$HOME/.yarnrc.yml" ]
+          [ ! -e /etc/profile.d/supply-chain-hardening.sh ]
+          new=$(find "$HOME" -maxdepth 2 -newer "$RUNNER_TEMP/mark" \( -name '.npmrc' -o -name '.yarnrc.yml' -o -name '.bunfig.toml' -o -name 'pip.conf' -o -name 'uv.toml' \) 2>/dev/null)
+          [ -z "$new" ] || { echo "::error::written: $new"; exit 1; }
+
+      - name: A Linux target from this Mac is not refused for the Mac's sake
+        run: |
+          # The role's checks on their own (they write nothing), told the target is
+          # Linux: the refusal is about the target, and this controller is a Mac
+          # without GNU date, which a pinned cutoff does not need.
+          printf '%s\n' '- hosts: localhost' '  connection: local' '  vars: { release_age_hours: 48 }' '  tasks:' \
+            '    - ansible.builtin.include_vars: "{{ playbook_dir }}/defaults/main.yml"' \
+            '    - ansible.builtin.import_tasks: "{{ playbook_dir }}/tasks/preflight.yml"' > preflight-only.yml
+          ansible-playbook -i localhost, preflight-only.yml -e ansible_system=Linux \
+            -e uv_exclude_newer=2026-11-01T00:00:00Z -e accept_etc_overwrite=true -e accept_user_config_overwrite=true
