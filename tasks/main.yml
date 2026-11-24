@@ -353,7 +353,7 @@
       - { path: "{{ uv_config_dir | default('') }}/uv.toml", lines: "{{ sch_ucf_uv.stdout_lines | default([]) }}" }
       - { path: "{{ bun_bunfig_path | default('') }}", lines: "{{ sch_ucf_bun.stdout_lines | default([]) }}" }
       - { path: "{{ ansible_env.HOME }}/.bundle/config", lines: "{{ sch_ucf_bundler.stdout_lines | default([]) }}" }
-    sch_ucf_said: "{{ sch_ucf_files | map(attribute='lines') | flatten | select('match', '(copy|removed|unsure|mode) ') | list }}"
+    sch_ucf_said: "{{ sch_ucf_files | map(attribute='lines') | flatten | select('match', '(copy|removed|stricter|unsure|mode) ') | list }}"
   ansible.builtin.debug:
     msg: |-
       In your own config files{{ ' (a dry run: nothing was written)' if ansible_check_mode else '' }}:
@@ -361,6 +361,8 @@
       {% for l in f.lines %}
       {% if l is match('removed ') %}
         - {{ f.path }}: your own setting of {{ l | regex_replace('^removed ', '') }} {{ 'would be' if ansible_check_mode else 'was' }} taken out; a line after the block this project writes would win over it
+      {% elif l is match('stricter ') %}
+        - {{ f.path }}: your own {{ l | regex_replace('^stricter ', '') }} stays, because it is longer than this project's. It applies where NPM_CONFIG_MIN_RELEASE_AGE is not set; that variable, in /etc/profile.d and /etc/environment, outranks the file
       {% elif l is match('unsure ') %}
         - {{ f.path }}: kept, but it may set or defeat a setting this project writes there: {{ l | regex_replace('^unsure ', '') }}
       {% elif l is match('mode ') %}

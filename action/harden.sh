@@ -639,9 +639,10 @@ ucf_unsafe() {
 }
 
 # ucf_npmrc_scan <content> <new block body> <block intact: 0|1> <old whole file: role|action|"">
-# Goes through the file as npm would read it. Prints "removed <key>" and
-# "unsure <what>" lines, a record separator, and the lines that stay, byte for
-# byte, with an x after them so a command substitution keeps the last newline.
+# Goes through the file as npm would read it. Prints "removed <key>", "stricter
+# <key>" and "unsure <what>" lines, a record separator, and the lines that stay,
+# byte for byte, with an x after them so a command substitution keeps the last
+# newline.
 ucf_npmrc_scan() (
   LC_ALL=C
   nl=$'\n' cr=$'\r' open='${' close='}'
@@ -740,6 +741,14 @@ ucf_npmrc_scan() (
         esac
       fi
     fi
+    # a longer window of the user's own: it wins over the block's, and may
+    if [ "$arr:$k" = 0:min-release-age ]; then
+      t=${vals#*"${nl}min-release-age="}; t=${t%%"$nl"*}
+      case "$v:$t" in
+        0*|*[!0-9:]*|:*|*:|?????????*:*) ;;
+        *) if [ "$v" -gt "$t" ]; then note "stricter min-release-age"; return 1; fi ;;
+      esac
+    fi
     note "removed $k"
     return 0
   }
@@ -775,6 +784,7 @@ ucf_npmrc_scan() (
 # key=value lines) into that npmrc. Prints
 #   removed <key>   a line of the user's for one of our settings was taken out:
 #                   the last line for a key wins, so it would beat the block
+#   stricter <key>  a line that stays: a longer window than ours, which it beats
 #   unsure <what>   a line that stays, and that may set or defeat one of ours
 #   copy <file>     where the file as it was is kept; only when one was removed
 #                   ("-" in a dry run)
@@ -1660,7 +1670,7 @@ preflight_report() {
   # The files in a home directory. Same code as the apply (ucf_*, user_cfg_class),
   # so what is said here is what happens; which file is whose is asked of the file
   # itself, and no line of one is printed.
-  local out l gone maybe mode hours="$RELEASE_AGE_HOURS"
+  local out l gone maybe longer mode hours="$RELEASE_AGE_HOURS"
   _pf_user_file() { # <kind>
     ucf_applies "$1" || return 0
     f=$(ucf_path "$1")
@@ -1691,11 +1701,12 @@ preflight_report() {
     case "$hours" in ""|*[!0-9]*) hours=48 ;; esac
     hours=$((10#$hours / 24)); [ "$hours" -ge 1 ] || hours=1
     out=$(npm_settings "$hours" | UCF_DRY=1 ucf_npmrc "$f") || true
-    gone="" maybe="" mode=""
+    gone="" maybe="" longer="" mode=""
     while IFS= read -r l; do
       case "$l" in
         "removed "*) gone="${gone:+$gone, }${l#removed }" ;;
         "unsure "*)  maybe="${maybe:+$maybe; }${l#unsure }" ;;
+        "stricter "*) longer=${l#stricter } ;;
         "mode "*)    mode=${l#mode } ;;
       esac
     done <<<"$out"
@@ -1703,6 +1714,7 @@ preflight_report() {
     if [ -n "$gone" ]; then
       _pf_note "$f: except your own setting of $gone, which would win over the block (min-release-age compared with $hours days). It is taken out, after a copy of the file next to it (0600)."
     fi
+    [ -z "$longer" ] || _pf_note "$f: your own $longer stays, because it is longer than this project's ($hours days). It applies where NPM_CONFIG_MIN_RELEASE_AGE is not set; that variable outranks the file."
     [ -z "$maybe" ] || _pf_note "$f: kept, but may set or defeat one of the settings in the block: $maybe."
     [ -z "$mode" ] || _pf_note "$f: other accounts can read it ($mode); it becomes 0600."
   }
@@ -2449,7 +2461,7 @@ keep_user_copy() {
 # what that did to anything of the user's in it. Paths and key names only: these
 # files hold tokens, and this is a job log.
 put_user_cfg() {
-  local kind="$1" path="$2" out rc=0 l bak="" gone="" maybe="" tool="${1%%-*}"
+  local kind="$1" path="$2" out rc=0 l bak="" gone="" maybe="" longer="" tool="${1%%-*}"
   if [[ "$kind" == npmrc ]]; then
     out=$(ucf_npmrc "$path") || rc=$?
   else
@@ -2460,6 +2472,7 @@ put_user_cfg() {
       "copy "*)    bak=${l#copy } ;;
       "removed "*) gone="${gone:+$gone, }${l#removed }" ;;
       "unsure "*)  maybe="${maybe:+$maybe; }${l#unsure }" ;;
+      "stricter "*) longer=${l#stricter } ;;
       "mode "*)    log "$path: other accounts could read it (${l#mode }); it is 0600 now" ;;
       "error: "*)  err "${tool%rc}: ${l#error: }" ;;
     esac
@@ -2472,6 +2485,9 @@ put_user_cfg() {
     warn "npm: took your own setting of $gone out of $path, because a line after this project's block would win over it. The file as it was is at $bak"
   elif [[ -n "$bak" ]]; then
     warn "$tool: replaced $path, which was not exactly what this project last wrote. Any registry, token or other setting you added to it no longer applies; the previous file is at $bak"
+  fi
+  if [[ -n "$longer" ]]; then
+    log "npm: kept your own $longer in $path, which is longer than this project's. It applies where NPM_CONFIG_MIN_RELEASE_AGE is not set; that variable outranks the file"
   fi
   if [[ -n "$maybe" ]]; then
     warn "npm: kept, in $path, lines that may set or defeat one of the settings this project writes there: $maybe"

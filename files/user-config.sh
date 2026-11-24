@@ -499,9 +499,10 @@ ucf_unsafe() {
 }
 
 # ucf_npmrc_scan <content> <new block body> <block intact: 0|1> <old whole file: role|action|"">
-# Goes through the file as npm would read it. Prints "removed <key>" and
-# "unsure <what>" lines, a record separator, and the lines that stay, byte for
-# byte, with an x after them so a command substitution keeps the last newline.
+# Goes through the file as npm would read it. Prints "removed <key>", "stricter
+# <key>" and "unsure <what>" lines, a record separator, and the lines that stay,
+# byte for byte, with an x after them so a command substitution keeps the last
+# newline.
 ucf_npmrc_scan() (
   LC_ALL=C
   nl=$'\n' cr=$'\r' open='${' close='}'
@@ -600,6 +601,14 @@ ucf_npmrc_scan() (
         esac
       fi
     fi
+    # a longer window of the user's own: it wins over the block's, and may
+    if [ "$arr:$k" = 0:min-release-age ]; then
+      t=${vals#*"${nl}min-release-age="}; t=${t%%"$nl"*}
+      case "$v:$t" in
+        0*|*[!0-9:]*|:*|*:|?????????*:*) ;;
+        *) if [ "$v" -gt "$t" ]; then note "stricter min-release-age"; return 1; fi ;;
+      esac
+    fi
     note "removed $k"
     return 0
   }
@@ -635,6 +644,7 @@ ucf_npmrc_scan() (
 # key=value lines) into that npmrc. Prints
 #   removed <key>   a line of the user's for one of our settings was taken out:
 #                   the last line for a key wins, so it would beat the block
+#   stricter <key>  a line that stays: a longer window than ours, which it beats
 #   unsure <what>   a line that stays, and that may set or defeat one of ours
 #   copy <file>     where the file as it was is kept; only when one was removed
 #                   ("-" in a dry run)

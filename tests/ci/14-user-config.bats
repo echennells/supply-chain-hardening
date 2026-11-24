@@ -407,6 +407,41 @@ fixture() { # <version-surface>: put its eight files where they go
   grep -q 'line 1, before, which npm uses instead of min-release-age' "$BATS_TEST_TMPDIR/log"
 }
 
+@test "npmrc: a longer min-release-age of the user's own is not loosened; a shorter one, or one that is not a whole number, goes" {
+  local v
+  for v in 3 14 '"30"' ' 365 ; a year'; do
+    printf 'a=b\nmin-release-age=%s\n' "$v" > "$(f npmrc)"
+    cp "$(f npmrc)" "$BATS_TEST_TMPDIR/mine"
+    ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
+    npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine" || { echo "$v"; cat "$(f npmrc)"; return 1; }
+    [ -z "$(copies npmrc)" ]
+    grep -q "npm: kept your own min-release-age in $(f npmrc), which is longer than this project's" "$BATS_TEST_TMPDIR/log"
+    ! grep -E 'took your own' "$BATS_TEST_TMPDIR/log"
+    # and again, the same
+    cp "$(f npmrc)" "$BATS_TEST_TMPDIR/once"
+    ECO=npm apply >/dev/null 2>&1
+    cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/once"
+    pf > "$BATS_TEST_TMPDIR/pf" || true
+    grep -qF "$(f npmrc): your own min-release-age stays, because it is longer" "$BATS_TEST_TMPDIR/pf"
+  done
+  if have npm; then
+    mkdir -p "$BATS_TEST_TMPDIR/empty"
+    [ "$(cd "$BATS_TEST_TMPDIR/empty" && env -i PATH="$PATH" HOME="$TEST_HOME" npm config get min-release-age 2>/dev/null)" = 365 ]
+  fi
+  # shorter, equal (dropped: the block says it), nonsense, and the last one wins
+  for v in 0 1 007 2.5 99d -5 true 99999999999; do
+    rm -f "$(f npmrc)"*
+    printf 'min-release-age=%s\n' "$v" > "$(f npmrc)"
+    ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
+    [ -z "$(rest)" ] || { echo "$v"; rest; return 1; }
+    grep -q 'took your own setting of min-release-age out of' "$BATS_TEST_TMPDIR/log" || { echo "$v"; return 1; }
+  done
+  rm -f "$(f npmrc)"*
+  printf 'min-release-age=14\nmin-release-age=1\nmin-release-age[]=99\n' > "$(f npmrc)"
+  ECO=npm apply >/dev/null 2>&1
+  [ "$(rest)" = 'min-release-age=14' ]
+}
+
 @test "npmrc: a byte-order mark stays at the start of the file" {
   printf '\357\273\277//registry.example/:_authToken=SECRET\n' > "$(f npmrc)"
   ECO=npm apply >/dev/null 2>&1
