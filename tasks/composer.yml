@@ -205,7 +205,7 @@
   ansible.builtin.set_fact:
     skipped_protections: >-
       {{ (skipped_protections | default([])) + [
-           ('Composer sudo coverage — ' ~ (item.stdout_lines | select('match', 'path ') | map('regex_replace', '^path ', '') | first | default('root\'s composer config.json')) ~ (' is not exactly what this project last wrote, so it was left alone (it may hold a repository and its credentials).' if item.rc == 42 else ' could not be written: ' ~ (item.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ')) ~ '.') ~ ' `sudo composer` reads that file, not the settings this role writes. Move it aside and re-apply.')
+           ('Composer sudo coverage — ' ~ (item.stdout_lines | select('match', 'path ') | map('regex_replace', '^path ', '') | first | default('the composer config.json of root')) ~ (' is not exactly what this project last wrote, so it was left alone (it may hold a repository and its credentials).' if item.rc == 42 else ' could not be written: ' ~ (item.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ')) ~ '.') ~ ' `sudo composer` reads that file, not the settings this role writes. Move it aside and re-apply.')
          ] }}
   loop: "{{ [sch_ucf_composer_root, sch_ucf_composer_home_root] }}"
   loop_control:
