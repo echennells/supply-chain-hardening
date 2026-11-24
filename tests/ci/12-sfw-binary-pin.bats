@@ -32,9 +32,10 @@ setup() {
   sfw_host linux-x64
 }
 
-# Root owns part of it.
+# Root owns part of it. Not asked for at all where the test was skipped: a person
+# with no passwordless sudo would be prompted once per test.
 teardown() {
-  [ -z "${BATS_TEST_TMPDIR:-}" ] || sudo rm -rf -- "$BATS_TEST_TMPDIR/prefix"
+  [ ! -e "${BATS_TEST_TMPDIR:-/nonexistent}/prefix" ] || sudo -n rm -rf -- "$BATS_TEST_TMPDIR/prefix"
 }
 
 sha256_of() {

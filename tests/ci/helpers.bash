@@ -211,9 +211,11 @@ stub_bin() {
   *) echo "STUB:'"$name"' ARGV0=$0 ARGS=[$*]" ;;
 esac'
   fi
-  # A previous wrap in the same test leaves a root-owned wrapper at this
-  # path (harden.sh writes it with sudo), so plain truncation fails.
-  [[ -e "${TEST_BIN}/${name}" ]] && sudo rm -f "${TEST_BIN}/${name}"
+  # A previous wrap in the same test leaves a root-owned wrapper at this path
+  # (harden.sh writes it with sudo), so plain truncation fails. Removing it does
+  # not need root: TEST_BIN is ours, and a directory decides about its entries.
+  # A bare `sudo rm` here asked a person for their password.
+  rm -f "${TEST_BIN}/${name}"
   printf '#!/bin/bash\n%s\n' "$body" > "${TEST_BIN}/${name}"
   chmod +x "${TEST_BIN}/${name}"
 }
@@ -226,7 +228,7 @@ esac'
 # files is testing a shape that does not occur in the wild.
 stub_symlink() {
   local name="$1" target="$2"
-  [[ -e "${TEST_BIN}/${name}" || -L "${TEST_BIN}/${name}" ]] && sudo rm -f "${TEST_BIN}/${name}"
+  rm -f "${TEST_BIN}/${name}"
   ln -s "$target" "${TEST_BIN}/${name}"
 }
 
@@ -287,8 +289,6 @@ assert_file_lacks() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Rewrite a file in place, keeping its mode and owner: `filter_file FILE CMD...`
-# runs CMD with FILE on stdin and writes its stdout back over FILE. Use it
 # stub_npm <version>: an npm that says it is that version and does nothing else.
 # harden.sh writes min-release-age and allow-git by the npm it finds (npm 11.2.0 to
 # 11.9.0 warns about them on every command), so a test about what those keys say
@@ -319,6 +319,8 @@ npm_ge() {
     exit 0 }'
 }
 
+# Rewrite a file in place, keeping its mode and owner: `filter_file FILE CMD...`
+# runs CMD with FILE on stdin and writes its stdout back over FILE. Use it
 # instead of `sed -i`: BSD sed on the macOS runners has no plain -i (it takes
 # the script as a backup suffix) and no \n in a replacement.
 filter_file() {
@@ -326,6 +328,6 @@ filter_file() {
   shift
   tmp="$BATS_TEST_TMPDIR/filter_file.$$.$RANDOM"
   "$@" < "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
-  if [ -w "$f" ]; then cat "$tmp" > "$f"; else sudo cp "$tmp" "$f"; fi
+  if [ -w "$f" ]; then cat "$tmp" > "$f"; else sudo -n cp "$tmp" "$f"; fi
   rm -f "$tmp"
 }

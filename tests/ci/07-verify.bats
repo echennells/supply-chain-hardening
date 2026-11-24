@@ -1118,12 +1118,16 @@ case "$*" in
   *) exit 1 ;;
 esac'
 }
+# Only pip is hardened and then checked: with no record every tool here is probed.
+# The env file is not sourced, so no PIP_UPLOADED_PRIOR_TO but what a test sets.
+pip_only() { harden ECOSYSTEMS=pip -- --emit=plain >/dev/null; }
 ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $ARGV[0] * 3600))' -- "$1"; }
 
 @test "pip venv: a pip that can gate and has no cutoff is a GAP, not OK" {
   # It was OK whenever ensurepip's pip was 26.0 or newer, so an unhardened HOME
   # printed "GAP pip native age gate" and "OK pip venv age gate" together.
   venv_pip ""
+  pip_only
   run verify -- --emit=plain
   [[ "$output" == *"GAP    PARSED      pip native age gate"* ]] || { echo "$output" | grep 'pip '; false; }
   [[ "$output" == *"GAP    PARSED      pip venv age gate"*"no cutoff is set in a file or variable a pip in a venv reads"* ]] || { echo "$output" | grep 'pip '; false; }
@@ -1131,6 +1135,7 @@ ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $
 
 @test "pip venv: a cutoff a venv's pip reads is OK; stale is WEAK, in the future a GAP" {
   venv_pip "$(ago 72)"
+  pip_only
   run verify -- --emit=plain
   [[ "$output" == *"OK     PARSED      pip venv age gate"*"would read the cutoff 20"* ]] || { echo "$output" | grep 'pip '; false; }
   venv_pip "$(ago 720)"
@@ -1149,6 +1154,7 @@ ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $
   # the pip of a venv made from it.
   local c; c=$(ago 72)
   venv_pip "$c" "$c" ""
+  pip_only
   run verify -- --emit=plain
   [[ "$output" == *"OK     PARSED      pip native age gate"* ]] || { echo "$output" | grep 'pip '; false; }
   [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
@@ -1162,18 +1168,19 @@ ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $
   [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
 }
 
-@test "pip venv: the real python, with no cutoff anywhere and then hardened" {
+@test "pip venv: the real python, hardened and then with no cutoff anywhere" {
   local v
   v=$(python3 -I -c 'import ensurepip; print(ensurepip.version())' 2>/dev/null) || skip "this python3 has no ensurepip"
   [ "$(printf '26.0\n%s\n' "$v" | sort -V | head -1)" = 26.0 ] || skip "ensurepip here is pip $v, below 26.0"
   for f in /etc/pip.conf /etc/xdg/pip/pip.conf "/Library/Application Support/pip/pip.conf"; do
     ! grep -qs uploaded-prior-to "$f" || skip "$f on this machine sets a cutoff"
   done
-  run verify -- --emit=plain
-  [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
-  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  pip_only
   run verify -- --emit=plain
   [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  rm -f "$TEST_HOME/.config/pip/pip.conf"
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
 }
 
 @test "a job holding id-token: write is told so, and one without gets no row" {
@@ -2688,9 +2695,13 @@ FORMS
 mvn_trap() {
   local d=$1 m=$2
   mkdir -p "$d/.mvn" "$d/.mvnagent"
-  if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+  # javac that RUNS, not one that exists: without a JDK, macOS has a /usr/bin/javac
+  # that prints "Unable to locate a Java Runtime" and exits 1, which stopped every
+  # test that builds this fixture. The fallback below needs no JDK.
+  if javac -version >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
     printf 'public class A { public static void premain(String a) throws Exception { java.nio.file.Files.write(java.nio.file.Paths.get(a), "ran".getBytes()); } }\n' > "$d/.mvnagent/A.java"
-    ( cd "$d/.mvnagent" && { javac --release 8 A.java || javac A.java; } && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1
+    ( cd "$d/.mvnagent" && { javac --release 8 A.java || javac A.java; } && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1 \
+      || rm -f "$d/.mvnagent/agent.jar"
   fi
   if [ -f "$d/.mvnagent/agent.jar" ]; then
     printf -- '-javaagent:%s/.mvnagent/agent.jar=%s\n' "$d" "$m" > "$d/.mvn/jvm.config"
@@ -2766,7 +2777,8 @@ markers() { ls "$BATS_TEST_TMPDIR/markers" 2>/dev/null | tr '\n' ' '; }
     ( cd "$d" && uv pip list ) >/dev/null 2>&1 || true
     [ -e "$mk/uv-venv-python" ] || { echo "control: uv pip list did not run the venv's python"; return 1; }
   fi
-  if command -v mvn >/dev/null 2>&1; then
+  # A maven with a JVM to start; without one no jvm.config can reach it.
+  if command -v mvn >/dev/null 2>&1 && ( cd / && mvn -v ) >/dev/null 2>&1; then
     local mo; mo=$( cd "$d/sub" && mvn -v 2>&1 ) || true
     [ -e "$mk/maven-jvm-config" ] || { echo "control: mvn -v did not apply .mvn/jvm.config ($(cat "$d/.mvn/jvm.config")); it said:"; echo "$mo" | head -8; return 1; }
   fi

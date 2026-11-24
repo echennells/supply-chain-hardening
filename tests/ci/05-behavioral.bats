@@ -9,6 +9,9 @@
 # Each one skips when its tool is absent rather than failing, so the suite
 # stays useful on a bare checkout and gets stricter on a fuller machine.
 
+# `run --separate-stderr`: npm's warnings must not be read as its answer.
+bats_require_minimum_version 1.5.0
+
 load helpers
 
 setup() { common_setup; }
@@ -71,7 +74,8 @@ JSON
 @test "npm: the hardened npmrc is what npm actually reads" {
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  # Only the answer: npm's warnings are stderr's, and the next test's subject.
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
@@ -228,7 +232,7 @@ TOML
   # This is the mechanism a Drone/Woodpecker step or a Dockerfile would use:
   # config files came along on disk, and the env layer is picked up by hand.
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome2" bash -c "
+  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome2" bash -c "
     mkdir -p '$BATS_TEST_TMPDIR/cleanhome2'
     source '$ENV_FILE'
     npm config get ignore-scripts"
@@ -238,15 +242,31 @@ TOML
 
 # --- bundler ----------------------------------------------------------------
 
+# bundle_read <key>: the arguments that ask this bundler for a key. `config get` is
+# Bundler 2.1's. Before that, macOS's /usr/bin/bundle (1.17.2) included, it parses as
+# "set the key `get` to <key>": it WRITES BUNDLE_GET to ~/.bundle/config, prints
+# nothing, and exits 0. `config <key>` reads there.
+bundle_read() {
+  local v
+  v=$(cd / && bundle --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  case "$v" in
+    0.*|1.*|2.0) printf 'config %s' "$1" ;;
+    *)           printf 'config get %s' "$1" ;;
+  esac
+}
+
 @test "bundler: bundler itself reads our age gate back" {
   # PARSED-strength: proves bundler read our file and accepted the key. Note
   # what this does NOT prove — see the next test.
   have bundle || skip "bundler not installed"
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$TEST_HOME" bundle config get cooldown
+  # shellcheck disable=SC2046  # two or three words, on purpose
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bundle $(bundle_read cooldown)
   [ "$status" -eq 0 ]
   [[ "$output" == *"2"* ]]
   [[ "$output" == *".bundle/config"* ]]
+  # Asking wrote nothing, on any bundler.
+  assert_file_lacks "$TEST_HOME/.bundle/config" "BUNDLE_GET"
 }
 
 @test "bundler: config get echoes ANY key, so it is not evidence on its own" {
@@ -255,10 +275,12 @@ TOML
   # the file was READ, not that the setting is implemented. This test exists so
   # nobody later mistakes the test above for proof of enforcement.
   have bundle || skip "bundler not installed"
+  # shellcheck disable=SC2046
   run env -i PATH="$PATH" HOME="$TEST_HOME" \
-    BUNDLE_TOTALLY_FAKE_KEY=9 bundle config get totally_fake_key
+    BUNDLE_TOTALLY_FAKE_KEY=9 bundle $(bundle_read totally_fake_key)
   [ "$status" -eq 0 ]
   [[ "$output" == *"9"* ]]
+  assert_file_lacks "$TEST_HOME/.bundle/config" "BUNDLE_GET"
 }
 
 @test "bundler: cooldown is a real registered setting, not an echoed one" {
