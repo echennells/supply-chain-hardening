@@ -297,7 +297,11 @@
   # selected, and each one's tool gate (tasks/maven.yml, tasks/nuget.yml) must
   # pass. ucf_path and ucf_applies in files/user-config.sh resolve the path and the
   # gate the way those task files do. Keep them in step.
-  ansible.builtin.script: "user-config.sh classify {{ sch_user_cfg_kinds }}"
+  #
+  # ../files/, not the bare name the other tasks use: tests/bats/38 and 50 import
+  # this file on its own, where the role's files/ is not on the search path and
+  # only the directory of this file is.
+  ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"
   args:
     executable: /bin/bash
   vars:
@@ -330,7 +334,7 @@
   changed_when: false
   check_mode: false
   # Fail closed: a check that could not run must not read as "no conflict".
-  failed_when: user_cfg_preflight.rc not in [0, 42]
+  failed_when: user_cfg_preflight.rc | default(1) not in [0, 42]
 
 - name: Record which per-user files get a backup before they are replaced
   # Every file this project did not write: an accepted foreign file, and
