@@ -102,8 +102,8 @@ poetry_min_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max
 # lookup('pipe', ...) runs on the controller; ansible_date_time.epoch is
 # the target's epoch. Both produce the same RFC 3339 from the same epoch
 # input, so this works correctly for remote-target apply too. Requires
-# GNU date on the controller (Linux yes; macOS controllers need
-# `brew install coreutils` for `date -u -d @...` syntax).
+# GNU date on the controller, for the `date -u -d @...` syntax; a controller
+# without it (a Mac applying to a Linux host) can pin uv_exclude_newer instead.
 #
 # The cutoff is computed at apply time. On systemd hosts a timer advances it
 # afterwards (age_gate_refresh, below); elsewhere it stays frozen until the

@@ -48,13 +48,15 @@ Package manager config files are written to their expected paths before the tool
 
 Files deployed: `~/.npmrc`, `~/.config/pnpm/rc`, `~/.config/pnpm/config.yaml`, `~/.yarnrc.yml`, bun's global bunfig (`$XDG_CONFIG_HOME/.bunfig.toml` — dot-prefixed — when `XDG_CONFIG_HOME` is set, `~/.bunfig.toml` only when it is unset; bun has no fallback between the two), `~/.config/uv/uv.toml`, `~/.config/pip/pip.conf`, `$CARGO_HOME/config.toml` and `$CARGO_HOME/cooldown.toml` (`$CARGO_HOME` defaults to `~/.cargo` but is resolved, not assumed), `~/.config/composer/config.json`, `~/.bundle/config`.
 
+**pnpm's directory.** pnpm reads its user config from `$XDG_CONFIG_HOME/pnpm` when that is set, from `~/Library/Preferences/pnpm` on macOS, and from `~/.config/pnpm` otherwise. The role and `harden.sh` write there, and `supply-chain-verify` asks pnpm what it read.
+
 **pnpm needs two files for version compatibility.** pnpm 11 stopped reading `~/.npmrc`, `~/.config/pnpm/rc` (the old ini-format file), `/etc/npmrc`, and `NPM_CONFIG_*` environment variables for non-auth settings — verified empirically against pnpm 11.1.3. Only `~/.config/pnpm/config.yaml` (YAML, camelCase) works on pnpm 11+ as a file; from the environment it reads `pnpm_config_*`, which the env layer sets for the age gate. pnpm 10 still reads the ini-format `rc` file. Both files are written so the host stays protected across pnpm version upgrades in either direction.
 
 **System-wide fallback for sudo and other users.** Per-user config files only protect the user the role was applied as. A `sudo npm install` flips `$HOME` to `/root` and reads `/root/.npmrc` (which doesn't exist); same for any second account on the host. To close that gap, the role also deploys the equivalent system-wide config files, which every user — including root — reads regardless of `$HOME`:
 
 - `/etc/npmrc` — read by npm and by pnpm 10 (pnpm 11 ignores it; pnpm 11's system protection has to come from per-user config.yaml until pnpm adds a system path)
 - `/etc/pip.conf` — pip's global config
-- `/etc/uv/uv.toml` — uv's documented system config path on Linux/macOS
+- `/etc/uv/uv.toml` — uv's documented system config path
 
 User-level configs override these **per-key**: a setting *present* in the user file wins, but a setting *omitted* from the user file falls through to the system value. Most settings are absent from both files until the role sets them, so this rarely matters — but it does mean the user file must explicitly set any value it wants to override, not rely on omission. (Example: the pnpm rc deliberately sets `ignore-scripts=false` when the build-script allowlist is configured, to prevent `/etc/npmrc`'s `ignore-scripts=true` from silently winning.) Ecosystems without a true system config path (Yarn, Bun, Cargo, Bundler) get no `/etc` file; their config lives in home directories. Yarn Berry reads a `.yarnrc.yml` only in the project, its parent directories and `$HOME`; it never reads `/etc/yarnrc.yml` (MEASURED on Yarn 4.9.4 to 4.18.1), which this role used to write. Composer and Yarn are also written to root's home (`/root/.config/composer/config.json`, `/root/.yarnrc.yml`) to cover `sudo composer …` and `sudo yarn …` (which land with `HOME=/root` on Linux; when the role runs as a non-root user, a `/root/.yarnrc.yml` this project did not write is left alone and listed in the run summary), but other non-root users on the host still see only upstream defaults — see [limitations.md](limitations.md).
 
@@ -124,7 +126,10 @@ Other traps:
 - **Composer scripts:** no config key blocks them. Without the wrapper they still run.
 - **npm `allow-git=none`** (npm 11.9.0+): under `actions/setup-node` with `registry-url`, npm
   reads neither `~/.npmrc` nor `/etc/npmrc`, so also set `NPM_CONFIG_ALLOW_GIT=none`. Not on
-  npm 11.2.0 to 11.8.x, which warn about it on every command.
+  npm 11.2.0 to 11.8.x, which warn about it on every command, and neither `min-release-age`
+  on 11.2.0 to 11.9.0.
+- **pnpm on macOS** reads `~/Library/Preferences/pnpm`, not `~/.config/pnpm`, unless
+  `XDG_CONFIG_HOME` is set.
 - **Config paths:** ask the tool rather than guessing. `npm config get globalconfig`
   (`/etc/npmrc` is only read by Debian and Ubuntu's apt npm) and
   `composer config --global home`.

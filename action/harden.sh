@@ -961,6 +961,14 @@ preflight_report() {
   echo "supply-chain-hardening preflight for ${me}@$(hostname 2>/dev/null || echo this host). It reads; it changes nothing."
   echo ""
 
+  # tasks/preflight.yml refuses a macOS target first of all. This runs on the
+  # host that would be hardened, so here it is this machine.
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    echo "This machine:"
+    _pf_stop "it is macOS, and the Ansible role supports Linux only: the play refuses it before anything is written. Use action/harden.sh --emit=plain here (AGENTS.md, \"Apply without Ansible\"). Applying the role FROM a Mac to a Linux host works; run this on that host."
+    echo ""
+  fi
+
   echo "Who would run the play (as this user, without sudo or --become):"
   _pf_line "user $me (uid $uid), HOME=${HOME:-<unset>}"
   if [ -z "${HOME:-}" ]; then
@@ -1013,11 +1021,10 @@ preflight_report() {
   # The role's probe is `date -u -d @0`. Not on macOS, where the play stops above
   # and BSD date reads -d as "set the kernel's daylight-saving value".
   f=$(date --version 2>/dev/null | head -1) || true
-  if [ "${f#*GNU}" != "$f" ]; then
+  if [ "${f#*GNU}" != "$f" ] || [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     :
-  elif [ "$(uname -s 2>/dev/null)" = Darwin ] \
-       || [ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" != "1970-01-01T00:00:00Z" ]; then
-    _pf_stop "this machine's date is not GNU date, which the role's rolling uv/pip cutoff needs (macOS: brew install coreutils and put its gnubin first on PATH for this shell, or pin uv_exclude_newer to an instant)."
+  elif [ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" != "1970-01-01T00:00:00Z" ]; then
+    _pf_stop "this machine's date is not GNU date, which the role's rolling uv/pip cutoff needs (install GNU coreutils and put its date first on PATH for this shell, or pin uv_exclude_newer to an instant)."
   fi
 
   echo ""
@@ -1183,13 +1190,6 @@ _pf_version() {
   return 0
 }
 
-if [ "$SUGGEST" = "1" ]; then
-  suggest_for_repo "$SUGGEST_PATH"
-  exit $?
-fi
-
-if [ "$PREFLIGHT" = "1" ]; then
-  preflight_report "$PREFLIGHT_REPO"
 # ---- which npm keys this host's npm takes ----
 #
 # npm prints `npm warn Unknown user config "<key>". This will stop working in the
@@ -1256,6 +1256,13 @@ npm_writes_key() {
   [ "$warns" = 0 ]
 }
 
+if [ "$SUGGEST" = "1" ]; then
+  suggest_for_repo "$SUGGEST_PATH"
+  exit $?
+fi
+
+if [ "$PREFLIGHT" = "1" ]; then
+  preflight_report "$PREFLIGHT_REPO"
   exit $?
 fi
 
@@ -2030,6 +2037,9 @@ harden_npm() {
   section "npm"
   local npm_v npm_vs npm_age=true npm_git=true
   npm_v=$(detect_version npm "npm --version")
+  npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
+  npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
+  npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
   write_env NPM_CONFIG_IGNORE_SCRIPTS  true
   write_env NPM_CONFIG_AUDIT           true
   write_env NPM_CONFIG_SAVE_EXACT      true
@@ -2037,9 +2047,6 @@ harden_npm() {
   write_env NPM_CONFIG_UPDATE_NOTIFIER false
   # NPM_CONFIG_MIN_RELEASE_AGE stays exported, unlike pnpm's variable (see
   # harden_pnpm), although it also outranks a project's own .npmrc in both
-  npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
-  npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
-  npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
   # directions. The files below are not always read: actions/setup-node with
   # registry-url writes its own .npmrc under RUNNER_TEMP and exports
   # NPM_CONFIG_USERCONFIG at it (src/authutil.ts, CHECKED 2026-11-22), so npm
@@ -2070,6 +2077,8 @@ fund=false
 update-notifier=false
 min-release-age=$NPM_AGE_DAYS
 allow-git=none"
+  if [[ "$npm_age" != true ]]; then content=$(grep -v '^min-release-age=' <<<"$content"); fi
+  if [[ "$npm_git" != true ]]; then content=$(grep -v '^allow-git=' <<<"$content"); fi
 
   echo "$content" > "$HOME/.npmrc"
   echo "$content" | write_etc /etc/npmrc
@@ -2077,8 +2086,6 @@ allow-git=none"
   HARDENED+=("npm")
   set_tool_version "npm" "$npm_v"
   # SAY IT HERE, NOT ONLY IN THE VERIFIER.
-  if [[ "$npm_age" != true ]]; then content=$(grep -v '^min-release-age=' <<<"$content"); fi
-  if [[ "$npm_git" != true ]]; then content=$(grep -v '^allow-git=' <<<"$content"); fi
   #
   # min-release-age landed in npm 11.10.0. Older npm ACCEPTS the key, echoes
   # it back from `npm config get`, and enforces nothing — so the line below
