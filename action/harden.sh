@@ -2479,13 +2479,31 @@ can_write() {
   return 1
 }
 
+# ucf_as_root <kind> <path>, the new body on stdin: ucf_replace, run as root with
+# the functions above handed over as text. Root's shell gets no variable of this
+# one's, and finds its tools in the system's directories only.
+ucf_as_root() {
+  local body
+  body=$(cat)
+  {
+    # shellcheck disable=SC2046  # one word each: they are function names
+    declare -f $(declare -F | awk '$3 ~ /^(ucf_|user_cfg_class$)/ { print $3 }')
+    declare -p UCF_LINES
+    printf 'UCF_FOREIGN=keep\nucf_replace %q %q <<<%q\n' "$1" "$2" "$body"
+  } | $SUDO /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/ bash
+}
+
 # put_user_cfg <kind> <path>, the new body on stdin — writes one of the per-user
-# files above ("the per-user config files this project writes") and says
-# what that did to anything of the user's in it. Paths and key names only: these
-# files hold tokens, and this is a job log.
+# files above ("the per-user config files this project writes") and says what that
+# did to anything of the user's in it. Paths and key names only: these files hold
+# tokens, and this is a job log. With PUT_AS_ROOT=1 the file is one in root's home:
+# it is read and written as root, and a run that cannot write it says so and goes
+# on, because the user's own file is already in place.
 put_user_cfg() {
   local kind="$1" path="$2" out rc=0 l bak="" gone="" maybe="" longer="" tool="${1%%-*}"
-  if [[ "$kind" == npmrc ]]; then
+  if [[ "${PUT_AS_ROOT:-}" == 1 ]]; then
+    out=$(ucf_as_root "$kind" "$path") || rc=$?
+  elif [[ "$kind" == npmrc ]]; then
     out=$(ucf_npmrc "$path") || rc=$?
   else
     out=$(ucf_replace "$kind" "$path") || rc=$?
@@ -2498,11 +2516,13 @@ put_user_cfg() {
       "unsure "*)  maybe="${maybe:+$maybe; }${l#unsure }" ;;
       "stricter "*) longer=${l#stricter } ;;
       "mode "*)    log "$path: other accounts could read it (${l#mode }); it is 0600 now" ;;
-      "error: "*)  err "${tool%rc}: ${l#error: }" ;;
+      "error: "*)
+        if [[ "${PUT_AS_ROOT:-}" == 1 ]]; then warn "${tool%rc}: ${l#error: }"; else err "${tool%rc}: ${l#error: }"; fi ;;
     esac
   done <<<"$out"
   if [[ "$rc" -ne 0 ]]; then
     [[ -z "$bak" ]] || err "${tool%rc}: a copy of $path from before this run is at $bak"
+    if [[ "${PUT_AS_ROOT:-}" == 1 ]]; then return 0; fi
     exit 1
   fi
   if [[ -n "$gone" ]]; then
@@ -2869,7 +2889,7 @@ harden_yarn() {
     has_hardened=false
   fi
 
-  {
+  _yarn_config() {
     echo "# Managed by supply-chain-harden action"
     echo "npmMinimalAgeGate: $YARN_AGE"
     echo "enableScripts: false"
@@ -2884,7 +2904,10 @@ harden_yarn() {
     if [[ "$has_hardened" == "true" ]]; then
       echo "enableHardenedMode: true"
     fi
-  } | put_user_cfg yarn "$HOME/.yarnrc.yml"
+  }
+  local yarn_body
+  yarn_body=$(_yarn_config)
+  put_user_cfg yarn "$HOME/.yarnrc.yml" <<<"$yarn_body"
 
   # Root's ~/.yarnrc.yml, not /etc/yarnrc.yml: Yarn Berry reads no system-wide
   # file (MEASURED on 4.9.4, 4.10.3, 4.11.0 and 4.18.1: settings in
@@ -2893,46 +2916,23 @@ harden_yarn() {
   # 1.9.15p5 on Ubuntu 24.04), so this is the file a later `sudo yarn` step
   # reads. See tasks/yarn.yml. Root's home from the passwd database: /var/root
   # on macOS. Root's own file is in use for `sudo yarn` and may hold a registry
-  # and its token, so one this project did not write is copied next to itself
-  # first and the replacement is a warning, as keep_user_copy does for the
-  # per-user registry files. An /etc/yarnrc.yml an earlier version wrote is
-  # removed; anyone else's is left alone.
-  local root_home root_rc root_bak
+  # and its token, so it is judged and kept by the same rule as the user's, as
+  # root. An /etc/yarnrc.yml an earlier version wrote is removed; anyone else's is
+  # left alone.
+  local root_home
   root_home=~root
   case "$root_home" in /*) ;; *) root_home="" ;; esac
-  if [[ "$WRITE_ETC" == "true" ]] && [[ -n "$root_home" ]] && [[ "$root_home" != "$HOME" ]] \
-     && can_write "$root_home/.yarnrc.yml"; then
-    root_rc="$root_home/.yarnrc.yml"
-    if $SUDO test -e "$root_rc" \
-       && ! $SUDO grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$root_rc" 2>/dev/null; then
-      root_bak="${root_rc}.$$.$(date +%Y-%m-%d@%H:%M:%S)~"
-      if ! $SUDO cp -p "$root_rc" "$root_bak"; then
-        err "yarn: could not copy $root_rc to $root_bak before replacing it; refusing to replace a file this project did not write without a copy"
-        exit 1
-      fi
-      warn "yarn: replaced $root_rc (root's own, read by \`sudo yarn\`), which this project did not write. Any registry or token in it no longer applies to \`sudo yarn\`; the previous file is at $root_bak"
-    fi
-  fi
   if [[ "$WRITE_ETC" == "true" ]] && can_write /etc/yarnrc.yml && $SUDO test -f /etc/yarnrc.yml \
      && $SUDO grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' /etc/yarnrc.yml 2>/dev/null; then
     $SUDO rm -f /etc/yarnrc.yml && log "yarn: removed /etc/yarnrc.yml, which an earlier version wrote and Yarn never reads"
   fi
-  {
-    echo "# Managed by supply-chain-harden action"
-    echo "npmMinimalAgeGate: $YARN_AGE"
-    echo "enableScripts: false"
-    echo "defaultSemverRangePrefix: \"\""
-    echo "enableTelemetry: false"
-    echo "enableImmutableInstalls: true"
-    echo "enableImmutableCache: false"   # true fails every cold-cache install (YN0056); see the role default
-    echo "checksumBehavior: throw"
-    # Empty allowlist = no host may be fetched over plain HTTP. yarn treats an
-    # absent key as "no restriction", so emitting [] is what closes it.
-    echo "unsafeHttpWhitelist: []"
-    if [[ "$has_hardened" == "true" ]]; then
-      echo "enableHardenedMode: true"
+  if [[ "$WRITE_ETC" == "true" && -n "$root_home" && "$root_home" != "$HOME" ]]; then
+    if [[ "${CAN_ESCALATE:-0}" -eq 1 ]]; then
+      PUT_AS_ROOT=1 put_user_cfg yarn "$root_home/.yarnrc.yml" <<<"$yarn_body"
+    else
+      warn "cannot write $root_home/.yarnrc.yml (no root and no usable sudo) — per-user config still applies, but a later \`sudo\` step will not see it"
     fi
-  } | if [[ -n "$root_home" ]] && [[ "$root_home" != "$HOME" ]]; then write_etc "$root_home/.yarnrc.yml"; else cat >/dev/null; fi
+  fi
 
   HARDENED+=("yarn")
   set_tool_version "yarn" "$yarn_version"

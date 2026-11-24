@@ -101,35 +101,27 @@
 # one already there is root's own `sudo yarn` configuration and may hold a
 # registry and its npmAuthToken. The preflight refused to overwrite an
 # unmanaged /etc/yarnrc.yml; this keeps that promise for the file that replaced
-# it: one this project did not write is left alone, and the summary says so.
-# When the role runs as root, root's home IS the deploying user's, written
-# above as it always was.
-- name: Check root's ~/.yarnrc.yml before writing it (sudo coverage)
+# it: one that is not exactly what this project last wrote is left alone, and the
+# summary says so. It used to be judged by the marker alone, so a token added to it
+# after hardening was lost (MEASURED at 860a91c).
+# When the role runs as root, root's home IS the deploying user's, written above.
+- name: Deploy hardened .yarnrc.yml to root's home (sudo coverage)
   become: true
-  ansible.builtin.shell:
-    cmd: |
-      f={{ ((yarn_root_home.stdout | trim) ~ '/.yarnrc.yml') | quote }}
-      [ -e "$f" ] || { echo absent; exit 0; }
-      grep -qE "Managed by (ansible-supply-chain-security|supply-chain-harden)" "$f" && { echo ours; exit 0; }
-      echo foreign
+  ansible.builtin.script: user-config.sh replace yarn
+  args:
     executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ yarn_root_home.stdout | trim }}/.yarnrc.yml"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'yarnrc.yml.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "refuse"
   register: yarn_root_rc
-  changed_when: false
   check_mode: false
+  changed_when: "'changed' in (yarn_root_rc.stdout_lines | default([]))"
+  failed_when: yarn_root_rc.rc | default(2) not in [0, 1, 42]
   when:
     - (yarn_root_home.stdout | default('') | trim) is match('^/')
     - (yarn_root_home.stdout | trim) != ansible_env.HOME
-
-- name: Deploy hardened .yarnrc.yml to root's home (sudo coverage)
-  become: true
-  ansible.builtin.template:
-    src: yarnrc.yml.j2
-    dest: "{{ yarn_root_home.stdout | trim }}/.yarnrc.yml"
-    owner: root
-    mode: "0644"
-  when:
-    - yarn_root_rc is not skipped
-    - (yarn_root_rc.stdout | default('') | trim) in ['absent', 'ours']
 
 # Named apart from "Record skipped protection": tests/bats/32-yarn-tier-rendering.bats
 # lifts the one task with that prefix by name.
@@ -137,11 +129,11 @@
   ansible.builtin.set_fact:
     skipped_protections: >-
       {{ (skipped_protections | default([])) + [
-           ('Yarn sudo coverage — ' ~ (yarn_root_home.stdout | trim) ~ '/.yarnrc.yml exists and this project did not write it, so it was left alone (it may hold a registry and its token). `sudo yarn` reads that file, not the yarn settings this role writes. Move it aside, or add the settings from ~/.yarnrc.yml to it, and re-apply.')
+           ('Yarn sudo coverage — ' ~ (yarn_root_home.stdout | trim) ~ '/.yarnrc.yml ' ~ ('exists and is not exactly what this project last wrote, so it was left alone (it may hold a registry and its token).' if yarn_root_rc.rc == 42 else 'could not be written: ' ~ (yarn_root_rc.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ')) ~ '.') ~ ' `sudo yarn` reads that file, not the yarn settings this role writes. Move it aside, or add the settings from ~/.yarnrc.yml to it, and re-apply.')
          ] }}
   when:
     - yarn_root_rc is not skipped
-    - (yarn_root_rc.stdout | default('') | trim) == 'foreign'
+    - yarn_root_rc.rc | default(0) != 0
 
 - name: Remove the /etc/yarnrc.yml an earlier version wrote (Yarn never reads it)
   # Only a file carrying one of this project's markers; anyone else's is left

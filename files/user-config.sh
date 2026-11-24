@@ -6,7 +6,8 @@
 # and write a file the same way. bash 3.2, BSD, BusyBox and GNU tools.
 #
 #   user-config.sh classify <kind>...   one line per file that is in the way
-#   user-config.sh replace <kind>       write $SCH_UCF_BODY to $SCH_UCF_PATH
+#   user-config.sh replace <kind>       write $SCH_UCF_BODY to $SCH_UCF_PATH, or to
+#                                       the kind's own path; prints which
 #   user-config.sh npmrc                merge $SCH_UCF_BODY into $SCH_UCF_PATH
 #
 # replace and npmrc take SCH_UCF_DRY=1 (report, write nothing) and, for a file
@@ -772,11 +773,8 @@ case "${1:-}" in
     for k in "$@"; do
       ucf_applies "$k" || continue
       p=$(ucf_path "$k")
-      case " $UCF_KINDS " in
-        *" $k "*)
-          why=$(ucf_blocked "$k" "$p")
-          if [ -n "$why" ]; then printf 'blocked %s %s\n' "$p" "$why"; rc=42; continue; fi ;;
-      esac
+      why=$(ucf_blocked "$k" "$p")
+      if [ -n "$why" ]; then printf 'blocked %s %s\n' "$p" "$why"; rc=42; continue; fi
       [ -e "$p" ] && [ "$k" != npmrc ] || continue
       c=$(user_cfg_class "$k" "$p")
       [ "$c" = ours ] || printf '%s %s\n' "$c" "$p"
@@ -787,14 +785,19 @@ case "${1:-}" in
     # A new file is 0644 whatever the umask of the account the role connects as.
     umask 022
     UCF_DRY=${SCH_UCF_DRY:-0} UCF_FOREIGN=${SCH_UCF_FOREIGN:-refuse}
-    if [ "$1" = npmrc ]; then
-      ucf_npmrc "${SCH_UCF_PATH:?}" <<<"${SCH_UCF_BODY:?}"
+    kind=${2:-$1}
+    path=${SCH_UCF_PATH:-$(ucf_path "$kind")}
+    body=${SCH_UCF_BODY:?}
+    case "$kind" in composer*) body=${body#x} ;; esac
+    printf 'path %s\n' "${path:?}"
+    if [ "$kind" = npmrc ]; then
+      ucf_npmrc "$path" <<<"$body"
     else
-      ucf_replace "${2:?}" "${SCH_UCF_PATH:?}" <<<"${SCH_UCF_BODY:?}"
+      ucf_replace "$kind" "$path" <<<"$body"
       rc=$?
-      # The preflight refuses first; this is a run that skipped it, or a file
-      # changed since.
-      [ "$rc" -ne 42 ] || echo "[supply-chain-hardening] $SCH_UCF_PATH is not exactly what this project last wrote, so it was left as it is. Move it aside and re-run, or set accept_user_config_overwrite=true to copy it next to itself and replace it." >&2
+      # The preflight refuses first; this is a run that skipped it, a file changed
+      # since, or root's own file, which the role leaves alone and reports.
+      [ "$rc" -ne 42 ] || echo "[supply-chain-hardening] $path is not exactly what this project last wrote, so it was left as it is. Move it aside and re-run, or set accept_user_config_overwrite=true to copy it next to itself and replace it." >&2
       exit "$rc"
     fi ;;
   *)

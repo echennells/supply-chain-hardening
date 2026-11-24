@@ -274,24 +274,23 @@
 - name: Detect per-user config files this run would replace that this project did not write
   # The same refusal as the /etc check above, for the per-user files the role
   # REPLACES wholesale: pnpm's config.yaml and rc, ~/.yarnrc.yml, pip.conf,
-  # uv.toml, bunfig, ~/.bundle/config, $CARGO_HOME/config.toml, ~/.m2/settings.xml
-  # and NuGet's user NuGet.Config. Each is where a private registry or mirror
-  # lives, next to its credentials. MEASURED (8281a6b for the last three, d738db8
-  # for the rest): an apply replaced them, left no copy, and reported nothing; the
-  # corporate mirror and the credentials were gone. With the mirror gone, an
-  # internal package name resolves against the public registry instead: dependency
-  # confusion, the case the /etc check exists for.
+  # uv.toml, bunfig, ~/.bundle/config, $CARGO_HOME/config.toml, ~/.m2/settings.xml,
+  # NuGet's user NuGet.Config and Composer's config.json. Each is where a private
+  # registry or mirror lives, next to its credentials. MEASURED (8281a6b for cargo,
+  # maven and nuget, d738db8 for the rest): an apply replaced them, left no copy, and
+  # reported nothing; the corporate mirror and the credentials were gone. With the
+  # mirror gone, an internal package name resolves against the public registry
+  # instead: dependency confusion, the case the /etc check exists for.
   #
   # ~/.npmrc is merged (tasks/npm.yml), so nothing of the user's stops the play
   # there. It is in the list only for the check that it can be written at all.
   #
   # What counts as this project's own is user_cfg_class in files/user-config.sh,
-  # which action/harden.sh carries too. For the first seven it is the file exactly
-  # as it was last written: a marker alone is not enough, because a token added
-  # after hardening sits in a file that carries it (MEASURED). For the other three
-  # it is either project's marker, or a version of what the role wrote before it
-  # had one; dotnet's own first-run NuGet.Config, which lists nuget.org and nothing
-  # else, is not a choice anyone made and is replaced too, after a backup.
+  # which action/harden.sh carries too: the file exactly as it was last written, or
+  # as a version from before the checksum wrote it. A marker alone is not enough,
+  # because a token added after hardening sits in a file that carries it (MEASURED).
+  # dotnet's own first-run NuGet.Config, which lists nuget.org and nothing else, is
+  # not a choice anyone made and is replaced too, after a copy.
   #
   # Only the files THIS run would write are checked: each one's tag must be
   # selected, and each one's tool gate (tasks/maven.yml, tasks/nuget.yml) must
@@ -322,6 +321,8 @@
       cargo: [cargo, rust]
       maven: [maven, java]
       nuget: [nuget, dotnet]
+      composer: [composer, php]
+      composer-home: [composer, php]
     sch_user_cfg_kinds: >-
       {%- set kinds = [] -%}
       {%- for k, t in sch_user_cfg_tags.items() -%}
@@ -335,14 +336,6 @@
   check_mode: false
   # Fail closed: a check that could not run must not read as "no conflict".
   failed_when: user_cfg_preflight.rc | default(1) not in [0, 42]
-
-- name: Record which per-user files get a backup before they are replaced
-  # Every file this project did not write: an accepted foreign file, and
-  # dotnet's first-run NuGet.Config. The deploy tasks in cargo.yml, maven.yml
-  # and nuget.yml set `backup:` from this list; the others copy for themselves
-  # (files/user-config.sh, 0600).
-  ansible.builtin.set_fact:
-    sch_user_cfg_backup: "{{ user_cfg_preflight.stdout_lines | select('match', '(foreign|stock) ') | map('regex_replace', '^[a-z]+ ', '') | list }}"
 
 - name: Fail when a per-user config file cannot be written as it has to be
   # Before anything is changed: one the role cannot read, does not own or cannot
@@ -378,7 +371,7 @@
         1. Move the files aside, then re-run; or
         2. Set `accept_user_config_overwrite=true` to replace them anyway
            (e.g. `ansible-playbook site.yml -e accept_user_config_overwrite=true`).
-           Each is backed up next to itself first, as
+           Each is backed up next to itself first (0600), as
            <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~; re-add anything you still
            need by hand.
       (~/.npmrc is not one of them: the role merges into it.)
