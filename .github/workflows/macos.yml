@@ -53,10 +53,10 @@ jobs:
           set -euo pipefail
           for t in deno uv composer; do command -v "$t" >/dev/null || brew install -q "$t"; done
           command -v bun >/dev/null || brew install -q oven-sh/bun/bun
-          # A go older than the newest release, which the toolchain attack names:
-          # the image's own (its tool cache), not the one Homebrew would build on.
+          # A go older than the newest release, which the toolchain attack names: the oldest
+          # in the image's tool cache, not the one Homebrew would install.
           if ! command -v go >/dev/null; then
-            gobin=$(ls -d "${RUNNER_TOOL_CACHE:-/nonexistent}"/go/*/*/bin 2>/dev/null | sort -V | tail -1 || true)
+            gobin=$(ls -d "${RUNNER_TOOL_CACHE:-/nonexistent}"/go/*/*/bin 2>/dev/null | sort -V | head -1 || true)
             if [ -z "$gobin" ]; then brew install -q go@1.26; gobin="$(brew --prefix)/opt/go@1.26/bin"; fi
             echo "$gobin" >> "$GITHUB_PATH"; export PATH="$gobin:$PATH"
           fi
