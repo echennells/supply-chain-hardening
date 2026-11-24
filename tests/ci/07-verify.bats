@@ -1015,7 +1015,7 @@ bundler_local_layer() { echo "Set for your local app ($CHECKOUT/.bundle/config):
             echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
   *) echo STUB ;;
 esac"
-  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=composer COMPOSER_HOME="$TEST_HOME/.composer" -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
   [[ "$output" == *"OK     PARSED      composer config in effect"* ]]
   echo '{"config":{}}' > "$TEST_HOME/.composer/config.json"

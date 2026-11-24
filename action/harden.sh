@@ -3173,21 +3173,17 @@ harden_composer() {
 
   # That directory is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
-  # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
-  # From /: not the checkout, and not a mktemp dir under /tmp, where composer
-  # will use a composer.json from a parent directory (its documented
-  # use-parent-dir setting) and another account can plant one.
-  local composer_home=""
+  # and the audit keys off. Worked out by composer's own rule, as the role does, not
+  # by asking composer: `composer config --global home` writes into the home it is
+  # asked about (see tasks/composer.yml).
+  local composer_home
   if command -v composer >/dev/null 2>&1; then
-    composer_home=$(cd / && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
+    composer_home=$(ucf_path composer-home)
+    if [[ -n "$composer_home" ]]; then
+      mkdir -p "$(dirname "$composer_home")"
+      put_user_cfg composer-home "$composer_home" <<<"$composer_body"
+    fi
   fi
-  case "$composer_home" in
-    /*)
-      if [[ "$composer_home" != "$composer_base" ]]; then
-        mkdir -p "$composer_home"
-        put_user_cfg composer-home "$composer_home/config.json" <<<"$composer_body"
-      fi ;;
-  esac
 
   HARDENED+=("composer")
   set_tool_version "composer" "$composer_version"

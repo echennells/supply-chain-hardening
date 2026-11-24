@@ -666,14 +666,17 @@ esac'
   [[ "$output" == *"PERIOD=259200 BLOCK=1"* ]]
 }
 
-@test "composer: config also lands in the home composer really reads" {
+@test "composer: config also lands in the home composer really reads, and composer is not asked which that is" {
+  # `composer config --global home` writes into the home it is asked about (MEASURED:
+  # config.json, auth.json, .htaccess and a cache directory, on 2.0.14).
   stub_bin composer "case \"\$*\" in
   *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
-  *'config --global home'*) echo '$TEST_HOME/.composer' ;;
+  *'config --global'*) touch '$BATS_TEST_TMPDIR/asked' ;;
   *) echo STUB ;;
 esac"
-  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
-  cmp "$TEST_HOME/.config/composer/config.json" "$TEST_HOME/.composer/config.json"
+  harden ECOSYSTEMS=composer COMPOSER_HOME="$TEST_HOME/elsewhere" -- --emit=plain >/dev/null
+  cmp "$TEST_HOME/.config/composer/config.json" "$TEST_HOME/elsewhere/config.json"
+  [ ! -e "$BATS_TEST_TMPDIR/asked" ]
 }
 
 @test "composer: config.json stays valid JSON with the policy block on every audit tier" {

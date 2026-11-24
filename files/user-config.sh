@@ -789,6 +789,7 @@ case "${1:-}" in
     kind=${2:-$1}
     path=${SCH_UCF_PATH:-$(ucf_path "$kind")}
     body=${SCH_UCF_BODY:?}
+    if [ "$kind" = composer-home ] && [ -z "$path" ]; then echo ok; exit 0; fi
     case "$kind" in composer*) body=${body#x} ;; esac
     printf 'path %s\n' "${path:?}"
     if [ "$kind" = npmrc ]; then
