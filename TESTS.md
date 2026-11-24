@@ -1,12 +1,12 @@
 # Tests
 
-632 container tests verify the supply chain hardening works (`make test`), plus 466 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+633 container tests verify the supply chain hardening works (`make test`), plus 466 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
 | File | Tests | What it covers |
 |---|---|---|
-| 01-config-files.bats | 52 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
+| 01-config-files.bats | 53 | All config files deployed with correct content (incl. /etc/* fallbacks and pnpm 11 config.yaml) |
 | 02-env-vars.bats | 23 | System-wide env vars in /etc/profile.d/ and /etc/environment; GOFLAGS is not written by default, and COMPOSER_ALLOW_SUPERUSER is set only inside the composer wrapper, not host-wide; NPM_CONFIG_ALLOW_GIT=none is in both unless the npm the role found warns about it (11.2.0 to 11.8.x) |
 | 03-npm.bats | 8 | npm ignore-scripts behavioral test + config readback; allow-git=none refuses a git dependency (npm 11.9.0+), and with the user config redirected (as setup-node's registry-url does) and a project .npmrc allow-git=all, the env layer's NPM_CONFIG_ALLOW_GIT still refuses a git+file dependency with EALLOWGIT, with a FIXTURE CONTROL that installs it without the variable |
 | 04-python.bats | 9 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check); `supply-chain-allow-build` lifts only no-build, refuses non-uv commands, and its build report lists what built, never a refusal |

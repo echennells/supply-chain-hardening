@@ -36,7 +36,7 @@ JSON
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
 
   # Install with the hardened HOME in force, offline-safe (local path dep).
-  run env -i PATH="$PATH" HOME="$TEST_HOME" \
+  run env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" \
     npm install --prefix "$BATS_TEST_TMPDIR/proj" \
     --no-audit --no-fund "$BATS_TEST_TMPDIR/evil"
 
@@ -64,7 +64,7 @@ JSON
 
   # Pristine HOME: no hardening applied.
   mkdir -p "$BATS_TEST_TMPDIR/cleanhome"
-  run env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome" \
+  run env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" \
     npm install --prefix "$BATS_TEST_TMPDIR/proj" \
     --no-audit --no-fund "$BATS_TEST_TMPDIR/evil"
 
@@ -75,7 +75,7 @@ JSON
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   # Only the answer: npm's warnings are stderr's, and the next test's subject.
-  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" npm config get ignore-scripts
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
@@ -83,7 +83,7 @@ JSON
 @test "npm: npm reports the age gate under the key we wrote" {
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm RELEASE_AGE_HOURS=96 -- --emit=plain >/dev/null
-  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get min-release-age
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" npm config get min-release-age
   [ "$status" -eq 0 ]
   if npm_ge 11.14.0 || ! npm_ge 11.2.0; then
     [ "$output" = "4" ]
@@ -91,7 +91,7 @@ JSON
     # MEASURED on 11.10.0 to 11.13.0: npm enforces the key and prints null for it,
     # and prints the cutoff it became as `before`.
     [ "$output" = "null" ]
-    run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get before
+    run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" npm config get before
     [ "$output" != "null" ]
   else
     # 11.2.0 to 11.9.0 do not know the key and warn about it, so it is not written.
@@ -106,14 +106,14 @@ JSON
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   local v="npm $(npm --version 2>/dev/null)"
-  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" npm config get ignore-scripts
   [ "$output" = true ]
   [[ "$stderr" != *"Unknown"* ]] || { echo "$v, the files: $stderr"; false; }
   mkdir -p "$BATS_TEST_TMPDIR/nohome"
-  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/nohome" bash -c "source '$ENV_FILE'; npm config get ignore-scripts"
+  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/nohome" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" bash -c "source '$ENV_FILE'; npm config get ignore-scripts"
   [ "$output" = true ]
   [[ "$stderr" != *"Unknown"* ]] || { echo "$v, the env layer: $stderr"; false; }
-  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; npm --version"
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" bash -c "source '$ENV_FILE'; npm --version"
   [[ "$stderr" != *"Unknown"* ]] || { echo "$v, both: $stderr"; false; }
 }
 
@@ -149,7 +149,7 @@ npm_install_git_dep() {
   printf '{"name":"p","version":"1.0.0","private":true,"dependencies":{"gitdep":"%s"}}\n' "$url" > "$proj/package.json"
   # What setup-node writes for registry-url (src/authutil.ts).
   printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://registry.npmjs.org/\n' > "$rt/.npmrc"
-  local -a envs=(PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_USERCONFIG="$rt/.npmrc" NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX)
+  local -a envs=(PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" NPM_CONFIG_USERCONFIG="$rt/.npmrc" NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX)
   while IFS= read -r kv; do [ -n "$kv" ] && envs+=("$kv"); done < "$TEST_TMP/ghenv"
   run env -i "${envs[@]}" "$@" npm install --prefix "$proj" --no-audit --no-fund
 }
@@ -232,7 +232,7 @@ TOML
   # This is the mechanism a Drone/Woodpecker step or a Dockerfile would use:
   # config files came along on disk, and the env layer is picked up by hand.
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome2" bash -c "
+  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome2" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" bash -c "
     mkdir -p '$BATS_TEST_TMPDIR/cleanhome2'
     source '$ENV_FILE'
     npm config get ignore-scripts"

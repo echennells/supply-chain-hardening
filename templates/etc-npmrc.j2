@@ -1,26 +1,14 @@
 ; Managed by ansible-supply-chain-security
-; System-wide config. pnpm's resolution chain (per https://pnpm.io/npmrc)
-; includes /etc/npmrc as the lowest-priority layer, so the pnpm-only keys
-; below cover `sudo pnpm` and other-user pnpm (<= 10) system-wide. Closes the
-; gap where flipping $HOME misses the deploying user's ~/.npmrc / ~/.config/pnpm.
+; System-wide npm config. npm reads this file as its global config only on
+; Debian/Ubuntu apt npm, and where its prefix is /. npm keys only: npm 11.2.0 to
+; 11.19.1 print `Unknown global config` about a pnpm key on every command, and
+; pnpm does not read this file (MEASURED, pnpm 9.15.9 and 10.34.9 on Debian 13,
+; Ubuntu 24.04 and the node image: pnpm reads <node prefix>/etc/npmrc, so
+; /usr/etc/npmrc or /usr/local/etc/npmrc; pnpm 11 reads neither). The pnpm keys
+; that were here protected no one. pnpm's settings are in ~/.config/pnpm.
 ;
-; WHY npm's globalconfig gets a DIFFERENT file (npmrc.j2, npm-keys only):
-; npm also reads a global config, but it warns `Unknown global config` about the
-; pnpm-only keys below on EVERY command (measured npm 11.19). On non-apt layouts
-; npm's globalconfig is {prefix}/etc/npmrc (e.g. /usr/etc/npmrc), NOT this file,
-; so tasks/npm.yml deploys the npm-only npmrc.j2 there and npm never sees these
-; keys. On Debian/Ubuntu apt npm, globalconfig IS /etc/npmrc: npm and pnpm share
-; this file, and the warning is the unavoidable cost of pnpm-<=10 coverage there.
-; (pnpm 11 reads NEITHER system file — measured — so for it these keys are inert
-; and per-user ~/.config/pnpm carries the live settings.)
-;
-; User-level config still wins — npm and pnpm both treat per-user
-; settings as higher precedence than system config.
+; User-level config still wins: npm treats it as higher precedence.
 
-; --- npm-relevant keys (pnpm ignores `min-release-age`; it uses
-;     `minimum-release-age` below; note also that pnpm 11 ignores
-;     ALL of these — pnpm 11 settings live in
-;     ~/.config/pnpm/config.yaml) ---
 ignore-scripts={{ npm_ignore_scripts | bool | lower }}
 audit={{ npm_audit | bool | lower }}
 save-exact={{ npm_save_exact | bool | lower }}
@@ -31,29 +19,4 @@ min-release-age={{ npm_minimum_release_age_days }}
 {% endif %}
 {% if sch_npm_writes_allow_git | bool %}
 allow-git=none
-{% endif %}
-
-; --- pnpm-relevant keys (npm does NOT ignore these — it warns `Unknown global
-;     config` about them on every command; see the header for why they are kept
-;     out of the file npm reads as globalconfig) ---
-minimum-release-age={{ pnpm_minimum_release_age_minutes }}
-minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
-{% for pkg in pnpm_minimum_release_age_exclude %}
-minimum-release-age-exclude[]={{ pkg }}
-{% endfor %}
-; block-exotic-subdeps is deliberately NOT emitted here — it would be inert
-; for every reader of this file. npm has no such setting; pnpm 10 reads this
-; file but silently ignores the key (verified against 10.34.5); pnpm 11+
-; honors the key but does not read /etc/npmrc. The live emission is
-; `blockExoticSubdeps: true` in the per-user config.yaml, and a pnpm older
-; than 11 is reported via the end-of-run coverage summary.
-{% if pnpm_built_dependencies | length > 0 %}
-; Build-script allowlist. Note: `ignore-scripts=true` above is a hard
-; block in pnpm and takes precedence — under sudo, even allowlisted
-; packages won't run build scripts. This is intentional: sudo should
-; be more conservative than normal-user invocations. If you need build
-; scripts under sudo, override at the per-user level (root's ~/.npmrc).
-{% for pkg in pnpm_built_dependencies %}
-only-built-dependencies[]={{ pkg }}
-{% endfor %}
 {% endif %}

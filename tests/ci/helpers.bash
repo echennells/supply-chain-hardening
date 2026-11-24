@@ -48,6 +48,12 @@ common_setup() {
   ENV_FILE="${STATE_DIR}/supply-chain-hardening.env"
   # shellcheck disable=SC2034
   OUT_FILE="${STATE_DIR}/supply-chain-hardening.outputs"
+  # Not there. The real npm reads the host's global npmrc whatever HOME is, so on a
+  # host the role has hardened (or any with a company one) a test of what harden.sh
+  # wrote to HOME, or of npm with nothing written, was a test of that file as well.
+  # MEASURED: 5 of 436 failed under the role's /etc/npmrc (npm 11.19.1).
+  # shellcheck disable=SC2034
+  NO_GLOBAL_NPMRC="${TEST_TMP}/no-global-npmrc"
   # Where pnpm reads its config, and so where harden.sh writes it: harden() runs
   # with no XDG_CONFIG_HOME. See pnpm_config_dir in action/harden.sh.
   # shellcheck disable=SC2034

@@ -139,7 +139,7 @@ setup() { common_setup; }
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
 
   # A completely fresh environment — no sourcing, no inherited variables.
-  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$NO_GLOBAL_NPMRC" npm config get ignore-scripts
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }

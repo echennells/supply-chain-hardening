@@ -106,10 +106,10 @@ load setup
   assert_file_contains "$HOME/.config/pnpm/rc" "Explicit build-script allowlist\|equivalent default-deny via the"
 }
 
-@test "pnpm-rc.j2 template: allowlist branch emits ignore-scripts=false (regression: don't let /etc/npmrc win silently)" {
+@test "pnpm-rc.j2 template: allowlist branch emits ignore-scripts=false (regression: don't let npm's global npmrc win silently)" {
   # When pnpm_built_dependencies is non-empty, the user rc switches to
   # only-built-dependencies semantics and MUST explicitly set
-  # ignore-scripts=false. Otherwise /etc/npmrc's ignore-scripts=true
+  # ignore-scripts=false. Otherwise the ignore-scripts=true of npm's global npmrc
   # wins via pnpm's per-key config merge and silently blocks all build
   # scripts — including allowlisted ones. We can't easily test the
   # non-default vars path end-to-end, so assert against the template
@@ -265,14 +265,38 @@ load setup
   assert_file_contains "/etc/npmrc" "min-release-age="
 }
 
-@test "/etc/npmrc: pnpm keys present (sudo-safe pnpm via shared file)" {
-  # pnpm's resolution chain includes /etc/npmrc. Verifying pnpm-specific
-  # keys here confirms both tools are covered by one file.
-  assert_file_contains "/etc/npmrc" "minimum-release-age-strict="
-  # block-exotic-subdeps is deliberately absent — inert for every reader of
-  # this file. npm has no such setting, pnpm 10 ignores it, and pnpm 11 does
-  # not read /etc/npmrc. See the pnpm rc test above.
-  ! grep -qE '^block-exotic-subdeps=' /etc/npmrc
+@test "/etc/npmrc: npm keys only - an npm that reads it prints no warning" {
+  # It carried pnpm's keys, "for pnpm's lowest layer", and the test here grepped
+  # for them. Nobody asked pnpm, which does not read this file (next test), and
+  # every npm 11.2.0 to 11.19.1 that does read it warned on every command.
+  ! grep -qE '^(minimum-release-age|only-built-dependencies|block-exotic-subdeps)' /etc/npmrc
+  run bash -c 'cd / && NPM_CONFIG_GLOBALCONFIG=/etc/npmrc npm config get ignore-scripts 2>&1'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *true* ]]
+  [[ "$output" != *"Unknown global config"* ]] || { echo "npm $(npm --version): $output"; false; }
+}
+
+@test "pnpm does not read /etc/npmrc: its global file is <node prefix>/etc/npmrc (asked of pnpm)" {
+  require_root "writes /etc/npmrc"
+  command -v pnpm >/dev/null || skip "pnpm not installed"
+  local v; v=$(cd / && pnpm --version 2>/dev/null)
+  case "$v" in 9.*|10.*) ;; *) skip "pnpm $v reads no system npmrc" ;; esac
+  local h="$BATS_TEST_TMPDIR/h" real keep="" ans_etc ans_real
+  mkdir -p "$h"
+  real="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")/etc/npmrc"
+  [ "$real" != /etc/npmrc ] || skip "node's prefix is /"
+  ask() { (cd / && env -i HOME="$h" PATH="$PATH" pnpm config get minimum-release-age 2>/dev/null | tail -n 1); }
+  with() { # <file>: the answer with that one line added to it, restored after
+    local f="$1" b="$BATS_TEST_TMPDIR/b" had=0 a
+    if [ -e "$f" ]; then had=1; cp -p "$f" "$b"; fi
+    mkdir -p "${f%/*}"; printf '\nminimum-release-age=4321\n' >> "$f"; a=$(ask)
+    if [ "$had" = 1 ]; then cp -p "$b" "$f"; else rm -f "$f"; fi
+    printf '%s' "$a"
+  }
+  ans_etc=$(with /etc/npmrc)
+  ans_real=$(with "$real")
+  [ "$ans_real" = 4321 ]      # FIXTURE CONTROL: this pnpm does read a global file
+  [ "$ans_etc" != 4321 ]
 }
 
 @test "root's ~/.yarnrc.yml: enableScripts false (sudo coverage); no /etc/yarnrc.yml, which Yarn never reads" {
