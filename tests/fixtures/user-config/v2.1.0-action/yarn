@@ -1,0 +1,10 @@
+# Managed by supply-chain-harden action
+npmMinimalAgeGate: 2880
+enableScripts: false
+defaultSemverRangePrefix: ""
+enableTelemetry: false
+enableImmutableInstalls: true
+enableImmutableCache: false
+checksumBehavior: throw
+unsafeHttpWhitelist: []
+enableHardenedMode: true

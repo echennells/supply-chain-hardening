@@ -1,0 +1,5 @@
+; Managed by supply-chain-harden action
+minimum-release-age=2880
+minimum-release-age-strict=true
+block-exotic-subdeps=true
+ignore-scripts=true

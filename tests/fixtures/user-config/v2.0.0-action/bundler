@@ -1,0 +1,5 @@
+# Managed by supply-chain-harden
+---
+BUNDLE_FROZEN: "true"
+BUNDLE_COOLDOWN: "2"
+BUNDLE_DISABLE_CHECKSUM_VALIDATION: "false"

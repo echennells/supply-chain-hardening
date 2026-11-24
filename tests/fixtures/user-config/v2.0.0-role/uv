@@ -1,0 +1,28 @@
+# Managed by ansible-supply-chain-security
+#
+# index-strategy = "first-index" closes the dependency-confusion attack
+# class: if a package exists on the primary index, uv refuses to fall
+# through to a secondary index even when the name matches. Without this,
+# extra-index-url configurations can be exploited by an attacker
+# publishing a same-named package to a public index. Universal across
+# all current uv versions.
+index-strategy = "first-index"
+
+# Empty allow-insecure-host explicitly documents intent that no host
+# gets TLS verification bypass. Override via the uv_allow_insecure_host
+# role var if you have a private registry behind a self-signed cert.
+allow-insecure-host = []
+
+# Reject packages published after 2026-11-22T00:00:00Z
+# (release_age_hours = 48 subtracted from apply-time clock).
+# uv's exclude-newer requires an absolute RFC 3339 timestamp — NOT a relative
+# duration. The cutoff is frozen at apply time; re-apply the role to advance.
+exclude-newer = "2026-11-22T00:00:00Z"
+
+# Force wheels only — blocks setup.py execution from source distributions.
+no-build = true
+
+[pip]
+# Verify hashes when present (lockfiles), but don't require them for
+# ad-hoc installs.
+verify-hashes = true

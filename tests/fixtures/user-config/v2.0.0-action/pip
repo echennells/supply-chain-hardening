@@ -1,0 +1,8 @@
+; Managed by supply-chain-harden action
+[global]
+disable-pip-version-check = true
+
+[install]
+; Refuse sdists — blocks the LiteLLM/BufferZoneCorp-class attack
+; where setup.py executes arbitrary code at install time.
+only-binary = :all:

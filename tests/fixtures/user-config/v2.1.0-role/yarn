@@ -1,0 +1,26 @@
+# Managed by ansible-supply-chain-security
+#
+# enableHardenedMode (Yarn 4.0+) is the highest-value setting here — it
+# instructs Yarn to query remote registries to validate that lockfile
+# content matches what upstream actually published. This catches
+# lockfile-tampering attacks (an attacker modifies yarn.lock to point at
+# a malicious version). Yarn >= 4.0 honors the key; older versions warn
+# on unknown keys but don't error. The role omits it on detected <4.0
+# to keep logs clean; when Yarn isn't detectable at apply time we assume
+# modern and emit it (downside on 3.x is a single warning per install).
+# npmMinimalAgeGate (Yarn 4.10+) is INTEGER MINUTES, unquoted. Yarn 4.10.x
+# reads a duration string as its leading integer ("2d" = 2 minutes); 4.11+
+# parses it. Integer minutes mean the same on both (MEASURED 2026-11-19).
+# Emitted unconditionally for forward-compat: in ~/.yarnrc.yml, Yarn < 4.10
+# ignores the key with no warning (MEASURED 4.1.0, 4.9.4), and it becomes
+# active as soon as Yarn is upgraded. tasks/yarn.yml records the inert case.
+npmMinimalAgeGate: 2880
+enableScripts: false
+defaultSemverRangePrefix: ""
+enableTelemetry: false
+enableImmutableInstalls: true
+enableImmutableCache: false
+checksumBehavior: throw
+unsafeHttpWhitelist: []
+enableHardenedMode: true
+

@@ -1,0 +1,18 @@
+; Managed by ansible-supply-chain-security
+; npm config — npm-RECOGNISED keys only. Deployed both as per-user ~/.npmrc and
+; as npm's resolved global config on non-apt layouts (e.g. /usr/etc/npmrc on
+; NodeSource/nvm/fnm/volta). The pnpm-only keys (minimum-release-age*) are
+; deliberately NOT emitted here: npm warns `Unknown global config` about them on
+; every command (measured npm 11.19), and pnpm does not read this path anyway —
+; pnpm reads /etc/npmrc, which carries those keys. See tasks/npm.yml and
+; templates/etc-npmrc.j2 (ECH-196).
+ignore-scripts=true
+; audit: install-time vulnerability REPORT only. It prints counts and blocks
+; nothing, and POSTs the dependency tree to the registry. Observability, not a
+; gate — do not count it among the protections. See defaults/main.yml (npm_audit).
+audit=true
+save-exact=true
+fund=false
+update-notifier=false
+min-release-age=2
+allow-git=none

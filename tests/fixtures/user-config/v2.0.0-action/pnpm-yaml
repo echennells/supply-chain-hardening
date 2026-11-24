@@ -1,0 +1,8 @@
+# Managed by supply-chain-harden action
+ignoreScripts: true
+minimumReleaseAge: 2880
+minimumReleaseAgeStrict: true
+minimumReleaseAgeExclude: []
+blockExoticSubdeps: true
+verifyStoreIntegrity: true
+preferFrozenLockfile: true
