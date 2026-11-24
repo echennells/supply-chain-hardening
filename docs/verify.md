@@ -163,7 +163,15 @@ files, so the evidence is `PRESENT`. Where the yarn that runs in the project is
 not the host's, the host rows say so, and a classic host yarn, which hands such a
 project to its `yarnPath`, is `N/A` there rather than a `GAP`.
 
-**pnpm.** The `pnpm repo config override` row reads the `pnpm-workspace.yaml` pnpm
+**pnpm on this host.** `pnpm lifecycle scripts blocked` and `pnpm age gate` are what
+pnpm itself reports, asked from `/` with the variables the hardening exports set
+aside, so the value came from a file pnpm read. A file pnpm does not read is a `GAP`,
+whatever is in it: MEASURED on GitHub's macos-15, where pnpm reads
+`~/Library/Preferences/pnpm` and the hardening wrote `~/.config/pnpm`. The age gate
+below pnpm 10.16.0 is a `GAP` too, because those versions print the key back and
+enforce nothing (10.15.1 installed, 10.16.0 refused).
+
+**pnpm in a project.** The `pnpm repo config override` row reads the `pnpm-workspace.yaml` pnpm
 would use (and, for pnpm 10, a project `.npmrc`) and judges `minimumReleaseAge`,
 `minimumReleaseAgeExclude` and `minimumReleaseAgeStrict`.
 
