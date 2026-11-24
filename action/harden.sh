@@ -532,6 +532,17 @@ ucf_blocked() {
   return 0
 }
 
+# ucf_stuck <kind> <path>: the same, as a preflight has to judge it. A file that is
+# ours does not stop anything: the write comes only if it has to change (a shared
+# CARGO_HOME, where another account already wrote the same one).
+ucf_stuck() {
+  local why
+  why=$(ucf_blocked "$1" "$2")
+  [ -n "$why" ] || return 0
+  if [ "$1" != npmrc ] && [ -f "$2" ] && [ -r "$2" ] && [ "$(user_cfg_class "$1" "$2")" = ours ]; then return 0; fi
+  printf '%s\n' "$why"
+}
+
 # ucf_mode <path> <600|644|=644>: the mode string that file ends with: what it has,
 # with anything that mode does not grant taken away. 600, or 644 less the umask,
 # for a file that is not there yet. =644 is 644 whatever it was: a system file every
@@ -1776,7 +1787,7 @@ preflight_report() {
   _pf_user_file() { # <kind>
     ucf_applies "$1" || return 0
     f=$(ucf_path "$1")
-    out=$(ucf_blocked "$1" "$f")
+    out=$(ucf_stuck "$1" "$f")
     if [ -n "$out" ]; then
       _pf_stop "$f: $out. Both the role and action/harden.sh stop on that; accept_user_config_overwrite does not change it."
       return 0

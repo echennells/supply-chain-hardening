@@ -735,6 +735,27 @@ JS
   [ ! -e "$(f npmrc)" ]
 }
 
+@test "user config: another account's file that is already what we write stops nothing (a shared CARGO_HOME)" {
+  sudo -n true 2>/dev/null || skip "no passwordless sudo"
+  [ "$(id -u)" -ne 0 ] || skip "running as root"
+  local ch="$BATS_TEST_TMPDIR/cargo"
+  mkdir -m 777 "$ch"
+  cargo_apply() { harden ECOSYSTEMS=cargo CARGO_HOME="$ch" -- --emit=plain; }
+  cargo_apply >/dev/null 2>&1
+  sudo chown 0 "$ch/config.toml"
+  run cargo_apply
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" CARGO_HOME="$ch" bash "$HARDEN_SH" --preflight > "$BATS_TEST_TMPDIR/pf" || true
+  grep -qF "$ch/config.toml: exactly what this project last wrote" "$BATS_TEST_TMPDIR/pf"
+  # with something in it that is not ours, it is refused by name
+  echo '# SECRET' | sudo tee -a "$ch/config.toml" >/dev/null
+  run cargo_apply
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cargo: $ch/config.toml belongs to another account (root)"* ]]
+  sudo grep -q SECRET "$ch/config.toml"
+  sudo rm -f "$ch/config.toml"
+}
+
 @test "user config: a file another account owns is refused, and kept" {
   sudo -n true 2>/dev/null || skip "no passwordless sudo"
   [ "$(id -u)" -ne 0 ] || skip "running as root"
