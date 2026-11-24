@@ -163,17 +163,20 @@ done
 #   ~/.npmrc is merged. This project's settings go in a marked block at the TOP
 #   of the file and every other line stays, byte for byte (ucf_npmrc).
 #
-#   pnpm's config.yaml and rc, .yarnrc.yml, pip.conf, uv.toml, bunfig and
-#   ~/.bundle/config are still replaced whole, but only a file that is exactly
-#   what was last written is replaced without a word. The marker line carries a
-#   checksum of the rest of the file (ucf_sign), so a line added later shows.
+#   pnpm's config.yaml and rc, .yarnrc.yml, pip.conf, uv.toml, bunfig,
+#   ~/.bundle/config, cargo's config.toml, Maven's settings.xml, NuGet.Config and
+#   Composer's config.json are still replaced whole, but only a file that is
+#   exactly what was last written is replaced without a word. The marker line
+#   carries a checksum of the rest of the file (ucf_sign), so a line added later
+#   shows. JSON has no comment to carry one, so Composer's is judged by its lines:
+#   ours when some version of this project has written every one of them.
 #   Anything else is the user's: the role refuses to touch it, and harden.sh
 #   copies it next to itself (0600) and says so.
 #
 # Nothing here prints a line from a user's file: paths, key names from this
 # project's own list, and line numbers only.
 
-UCF_KINDS="npmrc pnpm-yaml pnpm-rc yarn pip uv bun bundler"
+UCF_KINDS="npmrc pnpm-yaml pnpm-rc yarn pip uv bun bundler cargo maven nuget composer composer-home"
 
 # ucf_path <kind>: where that file is for this user, as the role resolves it.
 ucf_path() {
@@ -196,7 +199,40 @@ ucf_path() {
     cargo)     printf '%s\n' "${CARGO_HOME:-$HOME/.cargo}/config.toml" ;;
     maven)     printf '%s\n' "$HOME/.m2/settings.xml" ;;
     nuget)     printf '%s\n' "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config" ;;
+    composer)  printf '%s\n' "$(ucf_composer_base)/config.json" ;;
+    composer-home)
+      d=$(ucf_composer_home)
+      [ "$d" = "$(ucf_composer_base)" ] || printf '%s\n' "$d/config.json" ;;
   esac
+}
+
+# ucf_composer_base: the directory written whether or not composer is here. Not
+# ~/.config/composer when only ~/.composer is there: composer takes the first of
+# the two that exists wherever an XDG_ variable or /etc/xdg does, so making the
+# first hid ~/.composer and the tokens in its auth.json (MEASURED, 2.11.2).
+ucf_composer_base() {
+  if [ ! -d "$HOME/.config/composer" ] && [ -d "$HOME/.composer" ]; then
+    printf '%s\n' "$HOME/.composer"
+  else
+    printf '%s\n' "$HOME/.config/composer"
+  fi
+}
+
+# ucf_composer_home: the directory composer reads, once ucf_composer_base is there,
+# without starting composer (`composer config --global home` writes into the home:
+# MEASURED, 2.0.14). Composer's own rule, compared with it over 288 combinations of
+# COMPOSER_HOME, XDG_ variables, /etc/xdg and directories on 2.0.14, 2.2.6, 2.5.5,
+# 2.7.1, 2.8.8 and 2.11.2.
+ucf_composer_home() {
+  local d
+  if [ -n "${COMPOSER_HOME:-}" ]; then printf '%s\n' "$COMPOSER_HOME"; return 0; fi
+  if [ -d /etc/xdg ] || [ -n "$(env | grep '^XDG_')" ]; then
+    d="${XDG_CONFIG_HOME:-$HOME/.config}/composer"
+    if [ -d "$d" ] || [ "$d" = "$(ucf_composer_base)" ] || [ ! -d "$HOME/.composer" ]; then
+      printf '%s\n' "$d"; return 0
+    fi
+  fi
+  printf '%s\n' "$HOME/.composer"
 }
 
 # ucf_applies <kind>: whether the role would write that file on this host.
@@ -207,6 +243,7 @@ ucf_applies() {
     maven) command -v mvn >/dev/null 2>&1 || command -v java >/dev/null 2>&1 \
              || { [ -n "${JAVA_HOME:-}" ] && [ -x "${JAVA_HOME:-}/bin/java" ]; } ;;
     nuget) command -v dotnet >/dev/null 2>&1 ;;
+    composer-home) command -v composer >/dev/null 2>&1 && [ -n "$(ucf_path composer-home)" ] ;;
   esac
 }
 
@@ -239,13 +276,14 @@ ucf_body() {
     -e "s/^uploaded-prior-to = $ts\$/uploaded-prior-to = /"
 }
 
-# ucf_marker <file>: the number of its marker line (the first or second;
-# ~/.bundle/config has to open with ---) and the checksum in it, if any.
+# ucf_marker <file>: the number of its marker line (the first or second: a
+# ~/.bundle/config has to open with ---, and XML with its declaration) and the
+# checksum in it, if any.
 ucf_marker() {
-  local l n=0 re='^[#;] Managed by (ansible-supply-chain-security|supply-chain-harden|supply-chain-harden action)(; self-check ([a-z0-9]+:[0-9a-f-]+))?$'
+  local l n=0 re='^(# |; |<!-- )Managed by (ansible-supply-chain-security|supply-chain-harden|supply-chain-harden action)(; self-check ([a-z0-9]+:[0-9a-f-]+))?( -->)?$'
   while [ "$n" -lt 2 ] && { IFS= read -r l || [ -n "$l" ]; }; do
     n=$((n + 1))
-    if [[ "$l" =~ $re ]]; then printf '%s %s\n' "$n" "${BASH_REMATCH[3]:-}"; return 0; fi
+    if [[ "$l" =~ $re ]]; then printf '%s %s\n' "$n" "${BASH_REMATCH[4]:-}"; return 0; fi
   done < "$1"
   return 0
 }
@@ -257,16 +295,21 @@ ucf_sign() {
   body=$(cat)
   while [ "$n" -lt 2 ] && IFS= read -r l; do
     n=$((n + 1))
-    case "$l" in "# Managed by "*|"; Managed by "*) at=$n; break ;; esac
+    case "$l" in "# Managed by "*|"; Managed by "*|"<!-- Managed by "*" -->") at=$n; break ;; esac
   done <<<"$body"
   [ "$at" -gt 0 ] || return 1
   sum=$(printf '%s\n' "$body" | ucf_body "$at" | ucf_sum)
-  printf '%s\n' "$body" | sed "${at}s/\$/; self-check $sum/"
+  case "$l" in *" -->") l="${l% -->}; self-check $sum -->" ;; *) l="$l; self-check $sum" ;; esac
+  n=0
+  while IFS= read -r sum; do
+    n=$((n + 1))
+    if [ "$n" = "$at" ]; then printf '%s\n' "$l"; else printf '%s\n' "$sum"; fi
+  done <<<"$body"
 }
 
 # ucf_settings <kind>: every setting line any version of this project has
-# written to that file, as one extended regex. With UCF_COMMENTS this is how a
-# file from before the checksum is told from one with something added to it.
+# written to that file, as one extended regex. With UCF_LINES this is how a file
+# from before the checksum is told from one with something added to it.
 ucf_settings() {
   local b='(true|false)' pkg='"?@?[A-Za-z0-9_./-]+"?'
   case "$1" in
@@ -276,62 +319,93 @@ ucf_settings() {
     pip)       printf '%s' "\[(global|install)\]|disable-pip-version-check = $b|uploaded-prior-to = [0-9A-Z:.+-]+|only-binary = :all:|require-hashes = true" ;;
     uv)        printf '%s' "\[pip\]|index-strategy = \"[a-z-]+\"|allow-insecure-host = \[\]?|  \"[A-Za-z0-9*.:_-]+\",|\]|exclude-newer = \"[0-9A-Za-z:.+ -]+\"|no-build = true|(verify|require)-hashes = true" ;;
     bun)       printf '%s' "\[install(\.security)?\]|minimumReleaseAge = [0-9]+|(exact|ignoreScripts|lifecycleScripts|frozenLockfile|saveTextLockfile) = $b|auto = \"[a-z]+\"|scanner = \"[@A-Za-z0-9_./-]+\"" ;;
+    cargo)     printf '%s' "root = \"[A-Za-z0-9._/-]+\"" ;;
+    composer*) printf '%s' "\{|  \"config\": \{|    \"(secure-http|lock|scripts-are-disabled)\": true,|    \"preferred-install\": \"dist\",|    \"allow-plugins\": (true|false|\{\}),?|    \"audit\": \{|      \"abandoned\": \"[a-z]+\",?|      \"block-insecure\": $b,|      \"block-abandoned\": $b|    \},?|    \"policy\": \{|      \"cooldown\": \{|        \"period\": [0-9]+,|        \"block\": true|      \}|  \}|\}" ;;
     bundler)   printf '%s' "---|BUNDLE_(FROZEN|DEPLOYMENT|DISABLE_EXEC_LOAD|DISABLE_CHECKSUM_VALIDATION): \"$b\"|BUNDLE_COOLDOWN: \"[0-9]+\"" ;;
   esac
 }
 
-# The comment lines every version before the checksum wrote to these files, as
-# the cksum of each with its numbers replaced by N. Taken from the full history
-# of the templates, of the tasks that held file bodies, and of harden.sh, up to
-# d738db8. A file written since is recognised by its checksum, so this list does
-# not grow.
-UCF_COMMENTS="
-16525038 21871804 32150554 43907897 47931416 55973644 69316955 105001757 105892395 128665454
-175274273 178849623 200300571 227981860 239698099 287077081 365023710 378289750 400057024
-404142847 406588281 423346594 442000343 457662746 480185687 495546462 525078076 533827307
-534359993 541135190 566593694 590162472 605195884 609895156 620068839 623983281 645071874
-659341542 662095973 665169919 676397890 676452693 678903473 698746493 706861579 752989721
-754514485 761418702 763897198 767642206 780035631 807176139 811096765 822283647 850984450
-851995495 857513513 871339096 882036600 887840420 914394579 946961410 956752516 962375387
-967119353 971991551 973005913 990068066 1010244358 1034315139 1086581569 1094282732 1130513908
-1143484216 1171045470 1208393765 1218543117 1220014093 1223360892 1261714146 1263262543 1265749696
-1279840774 1299265572 1317891570 1326837714 1353146482 1412089512 1415879662 1442417585 1443997311
-1458290740 1460165626 1503295801 1503828058 1506383425 1528186005 1555761671 1590698284 1596979382
-1602124173 1604734001 1615633999 1617717831 1624869757 1629313848 1665228443 1693356012 1702901289
-1717377404 1731640410 1779340826 1804999554 1825130484 1848409489 1862209121 1876759700 1885420368
-1886008490 1890543521 1926614231 1929107881 1933481240 1940260606 1951441247 1959004320 1974900389
-1998983759 2001361852 2008011601 2013828265 2020712404 2036418807 2041416390 2059790614 2065949424
-2071261798 2073041987 2097239662 2097937815 2107048927 2111733905 2151704586 2163831583 2164390978
-2177254588 2205464476 2217588667 2231711062 2244097877 2244240049 2250113593 2257637074 2270544086
-2282546424 2298240656 2302859127 2307443183 2344062860 2375681719 2380494202 2396691812 2405118425
-2406300254 2418201151 2418603402 2423330056 2424955648 2437712885 2450664865 2462106124 2508979248
-2520848859 2525961786 2530280945 2532656106 2589908363 2608169811 2623014578 2641150404 2646182193
-2675788109 2676103573 2678035591 2692919221 2699926567 2735555215 2740590091 2803650760 2804934355
-2806616818 2828038750 2829134946 2859044314 2862455256 2872993376 2875338965 2879118241 2890406335
-2931523466 2941754597 2965115596 3011098759 3043122243 3059239056 3070869805 3082536336 3084694776
-3088475917 3103206383 3109696787 3138848547 3174496324 3176005236 3181547447 3207794189 3220286758
-3225303355 3240026043 3255040544 3267656043 3308486726 3310122909 3332470975 3359503045 3365361455
-3371086111 3377219643 3405234329 3446823395 3447275383 3477144607 3501233636 3530917337 3534829072
-3540864410 3559392846 3561851686 3570113122 3592020093 3600443778 3615099103 3616788605 3716039824
-3774832778 3782170922 3789297986 3790384087 3794482279 3803650350 3811320475 3814041862 3854269605
-3857682206 3879323867 3883983730 3894417574 3918509061 3943714449 3980610148 4013068897 4027145760
-4081681318 4093752315 4121261445 4143239405 4144104894 4145960931 4147756996 4151822944 4152993966
-4167262084 4173685148 4175278786 4177171127 4199336900 4211861283 4212708504 4217618386 4246611539
-4264870084 4279237107
+# The comment lines every version before the checksum wrote to these files, and
+# every line of the cargo, Maven and NuGet ones, as the cksum of each with its
+# numbers replaced by N. Taken from the full history of the templates, of the tasks
+# that held file bodies, and of harden.sh. A file written since is recognised by its
+# checksum, so this list does not grow.
+UCF_LINES="
+16525038 21871804 32150554 43907897 47931416 55973644 69316955 75018455 92254761 99047990
+105001757 105892395 128665454 164957136 175274273 178849623 180963873 200300571 205262278
+227981860 231743868 239698099 244582398 249062952 253515295 264950892 264997010 265990664
+287077081 317215674 322868702 332741136 365023710 378289750 387007019 391023080 400057024
+404142847 406588281 423346594 442000343 456403245 457662746 480185687 492417082 495546462
+498809095 525078076 533827307 534359993 541135190 554815028 566593694 574086755 587546401
+590162472 600144794 605195884 609895156 620068839 623983281 625798930 645071874 659341542
+662095973 665169919 667208199 671640442 676397890 676452693 678903473 685523158 690175511
+698746493 706861579 740279536 752989721 754514485 761418702 763897198 767642206 780035631
+787965426 806849663 807176139 811096765 811858366 819089461 819514087 822283647 837637123
+844578259 850984450 851995495 853144288 857513513 864647159 868637979 871175528 871339096
+878886439 882036600 887397410 887840420 889024284 913529607 914394579 929101728 946961410
+952718198 956752516 957363945 962375387 967119353 971991551 973005913 978051292 990068066
+1010244358 1019191397 1034315139 1045039222 1056865907 1086581569 1094282732 1097107875 1130513908
+1133061042 1143484216 1150240927 1171045470 1181850251 1198410501 1208393765 1218543117 1220014093
+1223360892 1261714146 1263262543 1265749696 1266284216 1279840774 1286739529 1299265572 1315033360
+1317891570 1321245308 1326837714 1352502691 1353146482 1378950304 1409658597 1412089512 1415879662
+1416207569 1442417585 1443997311 1458290740 1460165626 1467162857 1484159843 1487549359 1503295801
+1503828058 1506383425 1528186005 1545777852 1555761671 1561625287 1568436816 1587709424 1590698284
+1591424799 1596979382 1602124173 1604734001 1615633999 1617717831 1624869757 1629313848 1639599188
+1665228443 1665385156 1688887071 1691294512 1693356012 1702901289 1717377404 1731640410 1770362664
+1779340826 1795300060 1796776748 1804999554 1808856842 1825130484 1848409489 1862209121 1876759700
+1885420368 1886008490 1890543521 1926614231 1929107881 1933481240 1940260606 1951441247 1959004320
+1974900389 1986693095 1990388406 1998983759 2001361852 2008011601 2013828265 2020712404 2029760290
+2036418807 2041416390 2059790614 2065949424 2071261798 2073041987 2097239662 2097937815 2107048927
+2111733905 2127375107 2151704586 2163831583 2164390978 2177254588 2189032946 2195906590 2205464476
+2217588667 2222828683 2225056686 2231711062 2244097877 2244240049 2247086009 2250113593 2257637074
+2270544086 2282546424 2287750646 2294124807 2298240656 2302859127 2307443183 2308009035 2344062860
+2344336215 2368994911 2375681719 2380494202 2396691812 2405118425 2406300254 2418201151 2418603402
+2423330056 2424955648 2437712885 2450664865 2460113068 2462106124 2483611390 2490405041 2500571310
+2508979248 2512201841 2520848859 2525961786 2530280945 2532656106 2589908363 2599848016 2602417845
+2608169811 2623014578 2639177799 2641149129 2641150404 2646182193 2663064860 2664931995 2675788109
+2676103573 2678035591 2692919221 2693733235 2699926567 2730118179 2735555215 2740590091 2748165258
+2757639096 2803650760 2804934355 2806616818 2815040139 2828038750 2829134946 2859044314 2862455256
+2872993376 2875338965 2879118241 2890406335 2893314068 2906792237 2931523466 2941754597 2942702396
+2947594206 2953723617 2962640778 2965115596 3002072409 3011098759 3030239236 3031490675 3043122243
+3059239056 3063172753 3070869805 3082536336 3084694776 3088475917 3091039106 3103206383 3109696787
+3125889587 3138848547 3146333249 3167505492 3174496324 3176005236 3181547447 3183432067 3200846651
+3207794189 3220286758 3225303355 3240026043 3255040544 3259375870 3267656043 3290714861 3294750702
+3304346521 3307975335 3308486726 3310122909 3318799363 3332470975 3344313876 3359503045 3365361455
+3366898389 3369899408 3371086111 3375723095 3377219643 3381418214 3405234329 3407597702 3411670937
+3428684975 3446823395 3447275383 3477144607 3501233636 3501782603 3514636630 3530917337 3534719225
+3534829072 3538692411 3540864410 3544835939 3552374706 3559392846 3561851686 3570113122 3574820150
+3592020093 3600443778 3615099103 3616788605 3628264553 3643812220 3716039824 3744651278 3774832778
+3782170922 3789297986 3790384087 3794482279 3803650350 3811320475 3814041862 3820819069 3854269605
+3857682206 3873997537 3879323867 3883983730 3887455320 3892647386 3894417574 3898244350 3907023923
+3918509061 3919420630 3919764144 3928389811 3939373795 3943714449 3955134236 3979503096 3980610148
+3993801748 4013068897 4022390717 4027145760 4037019286 4050652467 4059418307 4071878307 4072044868
+4081681318 4093752315 4119373269 4121261445 4143239405 4144104894 4145960931 4147756996 4148688032
+4151822944 4152993966 4154458387 4162136566 4163794268 4167262084 4173452971 4173685148 4175278786
+4177171127 4180754901 4199336900 4211861283 4212708504 4217618386 4246611539 4257410267 4263887137
+4264870084 4266726453 4279237107 4280704102
 "
-ucf_our_comment() { # <line>
+ucf_our_line() { # <line>
   local c
   c=$(printf '%s\n' "$1" | LC_ALL=C sed 's/[0-9][0-9]*/N/g' | cksum) || return 1
-  case "$UCF_COMMENTS" in *[[:space:]]"${c%% *}"[[:space:]]*) return 0 ;; esac
+  case "$UCF_LINES" in *[[:space:]]"${c%% *}"[[:space:]]*) return 0 ;; esac
   return 1
 }
 
-# ucf_old_file <kind> <file>: a file from before the checksum that holds only
-# lines this project has written. The role's ~/.bundle/config had no marker, so
-# that one has to be the whole file it wrote.
+# ucf_old_file <kind> <file>: a file with no checksum (from before it, or
+# Composer's) that holds only lines this project has written, so that nothing of
+# the user's goes with it. The first seven also carried a marker, but for the
+# role's ~/.bundle/config, which then has to be the whole file it wrote.
 ucf_old_file() {
-  local l rest
+  local l rest re
+  rest=$(LC_ALL=C tr -d '[:space:]' < "$2")
+  [ -n "$rest" ] || return 0
+  re=$(ucf_settings "$1")
   case "$1" in
+    composer*)
+      # what composer itself writes the first time it is asked anything
+      case "$rest" in '{}'|'{"config":{}}') return 0 ;; esac
+      rest=$(LC_ALL=C grep -vxE -e "$re" "$2") || true
+      [ -z "$(printf '%s' "$rest" | LC_ALL=C tr -d '[:space:]')" ]; return ;;
     bundler)
       rest=$(sed 's/^\(BUNDLE_COOLDOWN: \)"[0-9][0-9]*"$/\1N/' "$2" | tr '\n' ' ')
       case "$rest" in
@@ -339,61 +413,41 @@ ucf_old_file() {
         '--- BUNDLE_FROZEN: "true" BUNDLE_COOLDOWN: N BUNDLE_DISABLE_CHECKSUM_VALIDATION: "false" ') return 0 ;;
       esac ;;
   esac
-  [ -n "$(ucf_marker "$2")" ] || return 1
-  rest=$(LC_ALL=C grep -vxE -e "$(ucf_settings "$1")|[#;] Managed by (ansible-supply-chain-security|supply-chain-harden|supply-chain-harden action)" "$2") || true
+  case "$1" in cargo|maven|nuget) ;; *) [ -n "$(ucf_marker "$2")" ] || return 1 ;; esac
+  rest=$(LC_ALL=C grep -vxE -e "${re:+$re|}(# |; |<!-- )Managed by (ansible-supply-chain-security|supply-chain-harden|supply-chain-harden action)( -->)?" "$2") || true
   while IFS= read -r l; do
     [ -n "$l" ] || continue
-    case "$l" in "#"*|";"*) ;; *) return 1 ;; esac
-    ucf_our_comment "$l" || return 1
+    case "$1:$l" in cargo:*|maven:*|nuget:*|*:"#"*|*:";"*) ;; *) return 1 ;; esac
+    ucf_our_line "$l" || return 1
   done <<<"$rest"
   return 0
 }
 
 # user_cfg_class <kind> <path> -> ours | stock | foreign
 #
-# Whether a per-user config file that is replaced whole is this project's.
-#   pnpm, yarn, pip, uv, bun, bundler: ours is exactly what was last written, or
-#     what a version from before the checksum wrote with nothing added.
-#   cargo, maven, nuget: ours carries either project's marker, or is what the
-#     role wrote before it had one; dotnet's own first-run NuGet.Config
-#     (nuget.org and nothing else) is stock.
+# Whether a per-user config file that is replaced whole is this project's: exactly
+# what was last written, or what a version from before the checksum wrote with
+# nothing added (ucf_old_file). A marker alone is not enough: a credential added
+# after hardening sits in a file that carries it. stock is dotnet's own first-run
+# NuGet.Config, which lists nuget.org and nothing else.
 user_cfg_class() {
-  local m s
-  case "$1" in
-    pnpm-yaml|pnpm-rc|yarn|pip|uv|bun|bundler)
-      m=$(ucf_marker "$2") s=""
-      case "$m" in *" "?*) s=${m#* } ;; esac
-      if [ -n "$s" ]; then
-        if [ "$(ucf_body "${m%% *}" < "$2" | ucf_sum "${s%%:*}")" = "$s" ]; then echo ours; else echo foreign; fi
-      elif ucf_old_file "$1" "$2"; then
-        echo ours
-      else
-        echo foreign
-      fi
-      return 0 ;;
-  esac
-  grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$2" 2>/dev/null && { echo ours; return 0; }
-  case "$1" in
-    cargo)
-      head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
-        && { echo ours; return 0; } ;;
-    maven)
-      grep -q '<id>central-https</id>' "$2" \
-        && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
-        && { echo ours; return 0; } ;;
-    nuget)
-      grep -q 'key="signatureValidationMode" value="require"' "$2" \
-        && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
-        && { echo ours; return 0; }
-      # dotnet's first-run file, compared with the BOM, comments and whitespace
-      # stripped (MEASURED, apt dotnet-sdk-8.0 8.0.134: the first `dotnet nuget
-      # list source` in a fresh home writes it, opening with a UTF-8 byte-order
-      # mark and with no trailing newline).
-      if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
-           '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
-        echo stock; return 0
-      fi ;;
-  esac
+  local m s=""
+  m=$(ucf_marker "$2")
+  case "$m" in *" "?*) s=${m#* } ;; esac
+  if [ -n "$s" ]; then
+    if [ "$(ucf_body "${m%% *}" < "$2" | ucf_sum "${s%%:*}")" = "$s" ]; then echo ours; else echo foreign; fi
+    return 0
+  fi
+  if ucf_old_file "$1" "$2"; then echo ours; return 0; fi
+  # dotnet's first-run file, compared with the BOM, comments and whitespace
+  # stripped (MEASURED, apt dotnet-sdk-8.0 8.0.134: the first `dotnet nuget list
+  # source` in a fresh home writes it, opening with a UTF-8 byte-order mark and
+  # with no trailing newline).
+  if [ "$1" = nuget ] \
+     && [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
+          '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
+    echo stock; return 0
+  fi
   echo foreign
 }
 
@@ -555,30 +609,35 @@ ucf_copy() {
   ucf_copy_new "$1"
 }
 
-# ucf_replace <kind> <path>: replace one of the seven with the body on stdin.
-# Prints "ok" or "changed", "copy <file>" ("-" in a dry run) when the user's
-# version is kept, and "error: <why>" with status 1. UCF_DRY=1 reports and writes
-# nothing. With UCF_FOREIGN=refuse a file with the user's settings is left alone:
-# "refused <path>", status 42.
+# ucf_replace <kind> <path>: replace one of them with the body on stdin. Prints
+# "ok" or "changed", "copy <file>" ("-" in a dry run) when the user's version is
+# kept, "stock <file>" when dotnet's own is, and "error: <why>" with status 1.
+# UCF_DRY=1 reports and writes nothing. With UCF_FOREIGN=refuse a file with the
+# user's settings is left alone: "refused <path>", status 42.
 ucf_replace() {
   local kind="$1" path="$2" want why bak cls=absent
-  want=$(ucf_sign) || { echo "error: no marker line in the new $kind file"; return 1; }
-  why=$(ucf_blocked "$kind" "$path")
-  if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
-  if [ -e "$path" ]; then
+  case "$kind" in
+    composer*) want=$(cat) ;;
+    *) want=$(ucf_sign) || { echo "error: no marker line in the new $kind file"; return 1; } ;;
+  esac
+  if [ -f "$path" ] && [ -r "$path" ]; then
     cls=$(user_cfg_class "$kind" "$path")
     if [ "$cls" = ours ] && printf '%s\n' "$want" | cmp -s - "$path" \
        && [ "$(ucf_ls "$(ucf_real "$path")" | cut -c1-10)" = "$(ucf_mode "$(ucf_real "$path")" 644)" ]; then
       echo ok; return 0
     fi
   fi
-  if [ "$cls" = foreign ]; then
-    if [ "${UCF_FOREIGN:-keep}" = refuse ]; then printf 'refused %s\n' "$path"; return 42; fi
+  why=$(ucf_blocked "$kind" "$path")
+  if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
+  if [ "$cls" = foreign ] && [ "${UCF_FOREIGN:-keep}" = refuse ]; then
+    printf 'refused %s\n' "$path"; return 42
+  fi
+  if [ "$cls" = foreign ] || [ "$cls" = stock ]; then
     bak=-
     if [ "${UCF_DRY:-0}" != 1 ]; then
       bak=$(ucf_copy "$path") || { printf 'error: could not copy %s next to itself before replacing it; it was left as it is\n' "$path"; return 1; }
     fi
-    printf 'copy %s\n' "$bak"
+    if [ "$cls" = stock ]; then printf 'stock %s\n' "$bak"; else printf 'copy %s\n' "$bak"; fi
   fi
   if [ "${UCF_DRY:-0}" != 1 ]; then
     ucf_put "$path" 644 "$want"$'\n' || { printf 'error: could not write %s\n' "$path"; return 1; }
@@ -669,7 +728,7 @@ ucf_npmrc_scan() (
         [ -n "$old" ] || [ "$loose" = 1 ] || return 1
         case "$seg" in "; Managed by ansible-supply-chain-security"|"; Managed by supply-chain-harden action") return 0 ;; esac
         case "$body" in *"$nl$seg$nl"*) return 0 ;; esac
-        ucf_our_comment "$seg"; return ;;
+        ucf_our_line "$seg"; return ;;
     esac
     # A [section]. With a space after the ] it is one for npm 10 and later and a
     # key for npm 8 and earlier (measured), so keys after it may be top-level.
@@ -1674,27 +1733,17 @@ preflight_report() {
   _pf_user_file() { # <kind>
     ucf_applies "$1" || return 0
     f=$(ucf_path "$1")
-    case " $UCF_KINDS " in
-      *" $1 "*)
-        out=$(ucf_blocked "$1" "$f")
-        if [ -n "$out" ]; then
-          _pf_stop "$f: $out. Both the role and action/harden.sh stop on that; accept_user_config_overwrite does not change it."
-          return 0
-        fi
-        if [ ! -e "$f" ]; then _pf_line "$f: not there, will be created"; return 0; fi
-        [ "$1" != npmrc ] || { _pf_npmrc; return 0; }
-        case "$(user_cfg_class "$1" "$f")" in
-          ours) _pf_line "$f: exactly what this project last wrote, replaced as before" ;;
-          *) _pf_stop "$f: not exactly what this project last wrote, so it may hold a private registry or a login token. Tell the owner, without printing it; only with their agreement, -e accept_user_config_overwrite=true copies it next to itself (0600) and replaces it." ;;
-        esac
-        return 0 ;;
-    esac
-    [ -e "$f" ] || return 0
-    cls=$(user_cfg_class "$1" "$f")
-    case "$cls" in
-      ours) _pf_line "$f: written by this project, replaced as before" ;;
-      stock) _pf_note "$f: dotnet's own first-run file; replaced without stopping, after a backup next to it." ;;
-      *) _pf_stop "$f: not written by this project, and often a private registry with credentials. Show it to the owner; only with their agreement, -e accept_user_config_overwrite=true backs it up next to itself and replaces it." ;;
+    out=$(ucf_blocked "$1" "$f")
+    if [ -n "$out" ]; then
+      _pf_stop "$f: $out. Both the role and action/harden.sh stop on that; accept_user_config_overwrite does not change it."
+      return 0
+    fi
+    if [ ! -e "$f" ]; then _pf_line "$f: not there, will be created"; return 0; fi
+    [ "$1" != npmrc ] || { _pf_npmrc; return 0; }
+    case "$(user_cfg_class "$1" "$f")" in
+      ours) _pf_line "$f: exactly what this project last wrote, replaced as before" ;;
+      stock) _pf_note "$f: dotnet's own first-run file; replaced without stopping, after a copy next to it (0600)." ;;
+      *) _pf_stop "$f: not exactly what this project last wrote, so it may hold a private registry or a login token. Tell the owner, without printing it; only with their agreement, -e accept_user_config_overwrite=true copies it next to itself (0600) and replaces it." ;;
     esac
   }
   _pf_npmrc() { # ~/.npmrc is merged, so it never stops the play; say what changes in it
@@ -1718,7 +1767,7 @@ preflight_report() {
     [ -z "$maybe" ] || _pf_note "$f: kept, but may set or defeat one of the settings in the block: $maybe."
     [ -z "$mode" ] || _pf_note "$f: other accounts can read it ($mode); it becomes 0600."
   }
-  for l in cargo maven nuget $UCF_KINDS; do _pf_user_file "$l"; done
+  for l in $UCF_KINDS; do _pf_user_file "$l"; done
   # Not a stop, and not read: as a non-root user the role leaves root's yarn file
   # alone if it did not write it, and lists it in the run summary
   # (tasks/yarn.yml). Finding out needs root, and nobody has agreed to anything
@@ -2430,34 +2479,8 @@ can_write() {
   return 1
 }
 
-# keep_user_copy <kind> <path> — call before REPLACING cargo's config.toml,
-# ~/.m2/settings.xml or NuGet.Config whole. Those files are where a private
-# registry or mirror and its credentials live, and the writers below do not merge
-# into them. MEASURED (8281a6b): the role replaced all three with no copy and no
-# message; this script did the same. The role now refuses unless
-# accept_user_config_overwrite=true (tasks/preflight.yml, CMP 4.7). This script
-# runs in CI jobs and keeps replacing, but it no longer does so silently: a file
-# this project did not write (user_cfg_class) is copied next to itself first
-# (ucf_copy), and the replacement is a warning that names the copy; dotnet's own
-# first-run NuGet.Config is copied without a warning.
-keep_user_copy() {
-  local kind="$1" path="$2" cls bak
-  [[ -e "$path" ]] || return 0
-  cls=$(user_cfg_class "$kind" "$path")
-  [[ "$cls" == ours ]] && return 0
-  if ! bak=$(ucf_copy "$path"); then
-    err "$kind: could not copy $path next to itself before replacing it; refusing to replace a file this project did not write without a copy"
-    exit 1
-  fi
-  if [[ "$cls" == foreign ]]; then
-    warn "$kind: replaced $path, which this project did not write. Any registry mirror, private source or credentials in it no longer apply; the previous file is at $bak"
-  else
-    log "$kind: replaced dotnet's first-run $path (nuget.org only); copy at $bak"
-  fi
-}
-
-# put_user_cfg <kind> <path>, the new body on stdin — writes one of the eight
-# per-user files above ("the per-user config files this project writes") and says
+# put_user_cfg <kind> <path>, the new body on stdin — writes one of the per-user
+# files above ("the per-user config files this project writes") and says
 # what that did to anything of the user's in it. Paths and key names only: these
 # files hold tokens, and this is a job log.
 put_user_cfg() {
@@ -2470,6 +2493,7 @@ put_user_cfg() {
   while IFS= read -r l; do
     case "$l" in
       "copy "*)    bak=${l#copy } ;;
+      "stock "*)   log "$tool: replaced dotnet's first-run $path (nuget.org only); copy at ${l#stock }" ;;
       "removed "*) gone="${gone:+$gone, }${l#removed }" ;;
       "unsure "*)  maybe="${maybe:+$maybe; }${l#unsure }" ;;
       "stricter "*) longer=${l#stricter } ;;
@@ -3053,7 +3077,6 @@ EOF
 
 harden_composer() {
   section "composer"
-  mkdir -p "$HOME/.config/composer"
 
   local composer_version
   # --no-plugins, and the home lookup below runs from an empty directory:
@@ -3108,7 +3131,8 @@ harden_composer() {
     allow_plugins_json="true"
   fi
 
-  {
+  local composer_body composer_base
+  _composer_config() {
     echo "{"
     echo "  \"config\": {"
     echo "    \"secure-http\": true,"
@@ -3139,9 +3163,14 @@ harden_composer() {
     echo "    }"
     echo "  }"
     echo "}"
-  } > "$HOME/.config/composer/config.json"
+  }
+  composer_body=$(_composer_config)
+  # auth.json, where composer keeps tokens, is neither read nor written here.
+  composer_base=$(ucf_composer_base)
+  mkdir -p "$composer_base"
+  put_user_cfg composer "$composer_base/config.json" <<<"$composer_body"
 
-  # ~/.config/composer is not where composer reads on every host: with no XDG_*
+  # That directory is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
   # and the audit keys off. Ask composer, the same remedy as tasks/composer.yml.
   # From /: not the checkout, and not a mktemp dir under /tmp, where composer
@@ -3153,9 +3182,9 @@ harden_composer() {
   fi
   case "$composer_home" in
     /*)
-      if [[ "$composer_home" != "$HOME/.config/composer" ]]; then
+      if [[ "$composer_home" != "$composer_base" ]]; then
         mkdir -p "$composer_home"
-        cp "$HOME/.config/composer/config.json" "$composer_home/config.json"
+        put_user_cfg composer-home "$composer_home/config.json" <<<"$composer_body"
       fi ;;
   esac
 
@@ -3829,8 +3858,7 @@ harden_cargo() {
   local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   mkdir -p "$cargo_home"
 
-  keep_user_copy cargo "$cargo_home/config.toml"
-  cat > "$cargo_home/config.toml" <<'EOF'
+  put_user_cfg cargo "$cargo_home/config.toml" <<'EOF'
 # Managed by supply-chain-harden
 # Note: build.rs / proc-macro execution CANNOT be blocked by cargo config —
 # structural gap. Refusing to RESOLVE a too-new version is the only control
@@ -4898,8 +4926,7 @@ DENOWRAP
 harden_maven() {
   section "maven"
   mkdir -p "$HOME/.m2"
-  keep_user_copy maven "$HOME/.m2/settings.xml"
-  cat > "$HOME/.m2/settings.xml" <<'EOF'
+  put_user_cfg maven "$HOME/.m2/settings.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by supply-chain-harden action -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
@@ -5088,8 +5115,7 @@ harden_nuget() {
   # b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5).
   local nuget_home="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet"
   mkdir -p "$nuget_home"
-  keep_user_copy nuget "$nuget_home/NuGet.Config"
-  cat > "$nuget_home/NuGet.Config" <<'EOF'
+  put_user_cfg nuget "$nuget_home/NuGet.Config" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Managed by supply-chain-harden action -->
 <configuration>
