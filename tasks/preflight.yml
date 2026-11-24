@@ -271,6 +271,68 @@
     - etc_preflight.rc == 42
     - not (accept_etc_overwrite | default(false) | bool)
 
+# npm reads its global config from {prefix}/etc/npmrc on every layout but Debian's,
+# and tasks/npm.yml writes it there too. MEASURED (d738db8, NodeSource's
+# /usr/etc/npmrc): a registry and a token in it were gone after an apply, with no
+# copy, and --diff printed them. Resolved here, as the user, before anything is
+# changed, and judged like the files above: one that is not exactly what this project
+# last wrote, which a token added since makes it, stops the play.
+- name: Resolve npm's global config path (before anything is changed)
+  ansible.builtin.script: ../files/user-config.sh path npm-global
+  args:
+    executable: /bin/bash
+  register: npm_global_preflight
+  changed_when: false
+  check_mode: false
+  when:
+    - "'all' in (ansible_run_tags | default(['all'])) or 'npm' in (ansible_run_tags | default(['all']))"
+    - "'npm' not in (ansible_skip_tags | default([]))"
+
+- name: Detect a global npmrc this project did not write
+  become: true
+  ansible.builtin.script: ../files/user-config.sh classify npm-global
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ npm_global_preflight.stdout_lines | first }}"
+  register: npm_global_class
+  changed_when: false
+  check_mode: false
+  failed_when: npm_global_class.rc | default(1) not in [0, 42]
+  when: npm_global_preflight.stdout_lines | default([]) | length > 0
+
+- name: Fail when npm's global config exists and this project did not write it
+  ansible.builtin.fail:
+    msg: |
+      {% for l in npm_global_class.stdout_lines if l is match('blocked ') %}
+      [supply-chain-hardening] npm's global config cannot be written:
+
+        {{ l | regex_replace('^blocked ', '') }}
+
+      Fix or move it, then re-run. Nothing has been changed yet.
+      {% else %}
+      [supply-chain-hardening] Refusing to overwrite npm's global config, which is
+      not exactly what this project wrote:
+
+        {{ npm_global_preflight.stdout_lines | first }}
+
+      It commonly holds a corporate registry and its token; overwriting it blindly
+      can cause dependency confusion or break installs entirely. Nothing has been
+      changed yet.
+
+      To proceed, either:
+        1. Move the file aside, then re-run; or
+        2. Set `accept_etc_overwrite=true` to overwrite it anyway (e.g.
+           `ansible-playbook site.yml -e accept_etc_overwrite=true`). It is copied
+           next to itself first (0600), as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~.
+      {% endfor %}
+  when:
+    - npm_global_class.stdout_lines is defined
+    - >-
+      npm_global_class.stdout_lines | select('match', 'blocked ') | list | length > 0
+      or (npm_global_class.stdout_lines | select('match', 'foreign ') | list | length > 0
+          and not (accept_etc_overwrite | default(false) | bool))
+
 - name: Detect per-user config files this run would replace that this project did not write
   # The same refusal as the /etc check above, for the per-user files the role
   # REPLACES wholesale: pnpm's config.yaml and rc, ~/.yarnrc.yml, pip.conf,

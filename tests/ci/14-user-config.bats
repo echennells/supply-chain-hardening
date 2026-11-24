@@ -949,6 +949,27 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   [ -z "$(find "$TEST_HOME" -type f)" ]
 }
 
+@test "preflight: npm's global config is named, and judged; action/harden.sh does not write it" {
+  have npm && have node || skip "npm not installed"
+  local g="$TEST_HOME/npm/globalrc"
+  gpf() { env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$g" TMPDIR="$TEST_TMP" bash "$HARDEN_SH" --preflight > "$BATS_TEST_TMPDIR/pf" || true; }
+  gpf
+  grep -qF "$g: npm's global config, not there, will be created" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
+  [ ! -e "$TEST_HOME/.npm" ] && [ -z "$(ls -A "$TEST_TMP")" ]          # asking npm wrote nothing
+  mkdir -p "$TEST_HOME/npm"
+  cp "$ROOT/tests/fixtures/user-config/v2.1.0-role/npmrc" "$g"
+  gpf
+  grep -qF "$g: npm's global config, exactly what this project last wrote" "$BATS_TEST_TMPDIR/pf"
+  # a marker is not enough
+  printf '//corp.example/:_authToken=SECRET\n' >> "$g"
+  cp "$g" "$BATS_TEST_TMPDIR/before"
+  gpf
+  grep -qE "STOP  $g: npm's global config, not exactly .*accept_etc_overwrite=true" "$BATS_TEST_TMPDIR/pf"
+  ! grep SECRET "$BATS_TEST_TMPDIR/pf"
+  ECO=npm apply NPM_CONFIG_GLOBALCONFIG="$g" >/dev/null 2>&1
+  cmp "$g" "$BATS_TEST_TMPDIR/before"
+}
+
 # --------------------------------------------------------- the same on both surfaces
 
 @test "user config: the block in files/user-config.sh is harden.sh's, byte for byte" {

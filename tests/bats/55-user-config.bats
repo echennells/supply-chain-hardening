@@ -25,7 +25,8 @@ setup() {
   mkdir -p "$H"
   stub_java_dotnet
   # What the role also writes outside the home, so a test can leave it as it was.
-  SAVED="/root/.cargo/cooldown.toml /root/.config/composer/config.json /root/.composer/config.json /etc/npmrc /etc/pip.conf /etc/uv/uv.toml /etc/environment /etc/profile.d/supply-chain-hardening.sh /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/sbin/supply-chain-age-gate-refresh"
+  G=$(bash "$ROLE_DIR/files/user-config.sh" path npm-global 2>/dev/null || true)
+  SAVED="$G /root/.cargo/cooldown.toml /root/.config/composer/config.json /root/.composer/config.json /etc/npmrc /etc/pip.conf /etc/uv/uv.toml /etc/environment /etc/profile.d/supply-chain-hardening.sh /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/sbin/supply-chain-age-gate-refresh"
   local x
   for x in $SAVED; do
     if [ -e "$x" ]; then mkdir -p "$T/saved$(dirname "$x")"; cp -p "$x" "$T/saved$x"; fi
@@ -313,4 +314,93 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   grep -q '"secure-http": true' "$H/.composer/config.json"
   cmp "$H/.composer/auth.json" "$T/auth"
   [ "$(stat -c %a "$H/.composer/auth.json")" = 600 ]
+}
+
+# ---- npm's global config (where it is not /etc/npmrc)
+#
+# MEASURED at d738db8 (NodeSource's /usr/etc/npmrc): a registry and a token in it
+# were gone after an apply, with no copy, and --diff printed them. In a home it and
+# its directory became root's.
+
+@test "role: npm's global config is refused when it holds something we did not write, and copied when that is accepted" {
+  [ -n "$G" ] || skip "npm's global config here is /etc/npmrc"
+  # what v2.1.0 wrote there is ours
+  cp "/opt/test-fixtures/user-config/v2.1.0-role/npmrc" "$G"; chmod 644 "$G"
+  ONLY=npm role
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  grep -q 'Managed by ansible-supply-chain-security; self-check sha256:' "$G"
+  [ "$(stat -c '%a %U' "$G")" = '644 root' ]
+  ONLY=npm role
+  [ "$(changed)" = 0 ]
+  # a token added since, in a file that carries the marker
+  printf '//corp.example/:_authToken=SECRET\n' >> "$G"
+  cp "$G" "$T/before"
+  ONLY=npm role --diff
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "Refusing to overwrite npm's global config"
+  echo "$output" | grep -qF "$G"
+  echo "$output" | grep -q 'accept_etc_overwrite=true'
+  [ "$(changed)" = 0 ]
+  cmp "$G" "$T/before"
+  ! echo "$output" | grep SECRET
+  # not a reason to stop a run that does not write it
+  ONLY=bundler role
+  [ "$status" -eq 0 ]
+  # a corporate one with no marker, 0600
+  printf 'registry=https://corp.example/\n//corp.example/:_authToken=SECRET\n' > "$G"; chmod 600 "$G"
+  cp "$G" "$T/before"
+  ONLY=npm role
+  [ "$status" -ne 0 ]
+  cmp "$G" "$T/before"
+  ONLY=npm role --diff -vvv -e accept_etc_overwrite=true
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  ! echo "$output" | grep SECRET
+  local c
+  c=$(ls "$G".*~)
+  cmp "$c" "$T/before"
+  [ "$(stat -c %a "$c")" = 600 ]
+  [ "$(stat -c %a "$G")" = 644 ]                      # every account reads it
+  echo "$output" | grep -qF "$G: the file as it was is at $c"
+  rm -f "$c"
+}
+
+@test "role: a global npmrc in the user's home stays the user's, and one an earlier version made root's is given back" {
+  # As a user of its own, with sudo: as root there is nothing to take or give back.
+  id kcuser >/dev/null 2>&1 || useradd -m -s /bin/bash kcuser
+  echo 'kcuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kcuser
+  local h=/home/kcuser g=/home/kcuser/npm/etc/npmrc
+  rm -rf "$h/npm" "$h/.npmrc"; mkdir -p "$h/npm"; chown -R kcuser:kcuser "$h/npm"; chmod 700 "$h/npm"
+  asuser() {
+    run su - kcuser -c "cd $ROLE_DIR && NPM_CONFIG_GLOBALCONFIG=$g PATH=/usr/local/bin:/usr/bin:/bin ansible-playbook site.yml \
+      --connection=local --limit localhost --tags npm --skip-tags npq,socket -e podman_enabled=false -e verify_protections=false \
+      -e socket_firewall_install=false $*"
+  }
+  asuser
+  echo "$output" | tail -3
+  [ "$status" -eq 0 ]
+  [ "$(stat -c '%U %a' "$h/npm")" = 'kcuser 700' ]
+  [ "$(stat -c %U "$h/npm/etc")" = kcuser ] && [ "$(stat -c %U "$g")" = kcuser ]
+  grep -q '^ignore-scripts=true' "$g"
+  # as d738db8 left it: root's file, in root's directory
+  cp /opt/test-fixtures/user-config/v2.1.0-role/npmrc "$g"
+  chown root:root "$h/npm/etc" "$g"
+  asuser --check
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  [ "$(stat -c %U "$g")" = root ]
+  asuser
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  [ "$(stat -c %U "$h/npm/etc")" = kcuser ] && [ "$(stat -c %U "$g")" = kcuser ]
+  grep -q 'self-check sha256:' "$g"
+  asuser
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
+  # and the user's own is refused, then kept as a copy
+  printf '//corp.example/:_authToken=SECRET\n' > "$g"; chmod 600 "$g"
+  asuser
+  [ "$status" -ne 0 ]
+  grep -q SECRET "$g"
+  asuser -e accept_etc_overwrite=true
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  grep -q SECRET "$g".*~
+  [ "$(stat -c '%U %a' "$g".*~)" = 'kcuser 600' ]
+  rm -f /etc/sudoers.d/kcuser; userdel -r kcuser 2>/dev/null || true
 }

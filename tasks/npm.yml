@@ -123,25 +123,32 @@
   failed_when: false
   when: npm_check.rc == 0
 
-- name: Ensure npm's resolved global config directory exists
-  # {prefix}/etc may not exist yet (e.g. /usr/etc on NodeSource). Skipped when
-  # globalconfig resolves to /etc/npmrc (already deployed) or to an empty /
-  # relative value.
-  #
-  # Only when it is not there. With NPM_CONFIG_GLOBALCONFIG or a prefix in a home
-  # this is a directory of the user's, the home itself included, and a mode and an
-  # owner on it chowned it to root (MEASURED at 860a91c).
+- name: Give back a global npmrc an earlier version made root's in the user's home
+  # A prefix in the home (nvm, a user prefix) or NPM_CONFIG_GLOBALCONFIG. MEASURED
+  # (d738db8): the file and the directory it is in became root's, so the user could
+  # neither edit nor remove them. Only what carries this project's marker, and never
+  # the home itself.
   become: true
   ansible.builtin.shell:
-    cmd: umask 022 && mkdir -p -- {{ ((npm_globalconfig.stdout | trim) | dirname) | quote }}
-    creates: "{{ ((npm_globalconfig.stdout | trim) | dirname) }}"
+    cmd: |
+      f={{ (npm_globalconfig.stdout | trim) | quote }}
+      d=$(dirname -- "$f")
+      [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %u "$f")" = 0 ] || exit 0
+      grep -q 'Managed by ansible-supply-chain-security' "$f" || exit 0
+      chown {{ ansible_user_uid }}:{{ ansible_user_gid }} "$f" && echo changed
+      [ "$d" = {{ ansible_env.HOME | quote }} ] || [ -L "$d" ] || [ "$(stat -c %u "$d")" != 0 ] \
+        || chown {{ ansible_user_uid }}:{{ ansible_user_gid }} "$d"
     executable: /bin/bash
+  register: npm_global_given_back
+  changed_when: "'changed' in npm_global_given_back.stdout"
   when:
     - npm_check.rc == 0
     - npm_globalconfig is defined
     - npm_globalconfig.stdout | default('') | trim | length > 0
     - (npm_globalconfig.stdout | trim) is match('^/')
     - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
+    - (npm_globalconfig.stdout | trim).startswith(ansible_env.HOME ~ '/')
+    - ansible_user_uid | int != 0
 
 - name: Deploy hardened npmrc to npm's resolved global config path (non-apt layouts)
   # Closes the sudo / other-user gap on every layout where globalconfig is not
@@ -153,13 +160,22 @@
   # npm 11.19). pnpm does not read this path — it reads /etc/npmrc, deployed above
   # with the full key set — so emitting the pnpm keys here bought no pnpm coverage
   # and only produced the warning. /etc/npmrc keeps them for pnpm's lowest layer.
-  become: true
-  ansible.builtin.template:
-    src: npmrc.j2
-    dest: "{{ npm_globalconfig.stdout | trim }}"
-    owner: root
-    group: root
-    mode: "0644"
+  #
+  # Replaced whole, but only a file that is exactly what this project last wrote:
+  # anything else stopped the play in preflight, unless accept_etc_overwrite=true,
+  # which copies it first. In the user's home it is written as the user.
+  become: "{{ ansible_check_mode or not (npm_globalconfig.stdout | default('') | trim).startswith(ansible_env.HOME ~ '/') }}"
+  ansible.builtin.script: user-config.sh replace npm-global
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ npm_globalconfig.stdout | trim }}"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_etc_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_npm_global
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_npm_global.stdout_lines | default([]))"
   when:
     - npm_check.rc == 0
     - npm_globalconfig is defined

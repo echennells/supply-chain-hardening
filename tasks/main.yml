@@ -346,6 +346,7 @@
   vars:
     sch_ucf_out:
       - "{{ sch_ucf_npmrc.stdout_lines | default([]) }}"
+      - "{{ sch_ucf_npm_global.stdout_lines | default([]) }}"
       - "{{ sch_ucf_pnpm_rc.stdout_lines | default([]) }}"
       - "{{ sch_ucf_pnpm_yaml.stdout_lines | default([]) }}"
       - "{{ sch_ucf_yarn.stdout_lines | default([]) }}"
