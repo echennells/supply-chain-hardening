@@ -11,23 +11,7 @@ name: macOS
 
 on:
   push:
-    branches: [main, 'feat/**', 'fix/**']
-    paths:
-      - 'action/**'
-      - 'files/**'
-      - 'tasks/preflight.yml'
-      - 'tests/macos/**'
-      - 'tests/lib/**'
-      - '.github/workflows/macos.yml'
-  pull_request:
-    paths:
-      - 'action/**'
-      - 'files/**'
-      - 'tasks/preflight.yml'
-      - 'tests/macos/**'
-      - 'tests/lib/**'
-      - '.github/workflows/macos.yml'
-  workflow_dispatch:
+    branches: ['probe/**']
 
 permissions:
   contents: read

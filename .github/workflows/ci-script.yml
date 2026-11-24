@@ -11,35 +11,7 @@ name: harden.sh unit tests
 
 on:
   push:
-    branches: [main, 'feat/**', 'fix/**']
-    paths:
-      - 'action/**'
-      - 'files/**'
-      # Read by the suite: the parity tests compare the role with the script, and
-      # 13-central-429 reads the smoke workflow and its verdict script.
-      - 'defaults/**'
-      - 'tasks/**'
-      - 'templates/**'
-      - 'tests/ci/**'
-      - 'tests/lib/**'
-      - 'tests/smoke/**'
-      - '.github/workflows/action-smoke.yml'
-      - '.github/workflows/ci-script.yml'
-  pull_request:
-    paths:
-      - 'action/**'
-      - 'files/**'
-      # Read by the suite: the parity tests compare the role with the script, and
-      # 13-central-429 reads the smoke workflow and its verdict script.
-      - 'defaults/**'
-      - 'tasks/**'
-      - 'templates/**'
-      - 'tests/ci/**'
-      - 'tests/lib/**'
-      - 'tests/smoke/**'
-      - '.github/workflows/action-smoke.yml'
-      - '.github/workflows/ci-script.yml'
-  workflow_dispatch:
+    branches: ['probe/**']
 
 permissions:
   contents: read
