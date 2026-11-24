@@ -27,7 +27,7 @@ a file. What an escape drops depends on which it is:
 | `uv --no-config`, `uv --config-file <f>`, `UV_CONFIG_FILE=<f>` | Every setting in the `uv.toml` files: the age gate, `no-build`, the index order, all at once. |
 | Unsetting or overriding a variable from the env layer (`NPM_CONFIG_IGNORE_SCRIPTS=false`, `BUNDLE_FROZEN=false bundle add x`, `GOTOOLCHAIN=auto`, ...) | That one setting, for that command, if nothing else sets it. |
 | `composer-real`, `deno-real`, `bun-real`, `cargo-real`, or the binary a wrapper names | Everything the wrapper adds: `--no-scripts`, `--no-plugins`, the age gate, `--locked`, Socket Firewall. |
-| Editing one of this project's settings in `~/.npmrc`, or editing `~/.config/uv/uv.toml` or `~/.bundle/config` | That setting, for every project. The next apply takes it out of `~/.npmrc` after a copy, and stops on the other two until you move the edit out of the way or accept the overwrite. Your own lines in `~/.npmrc` (tokens, registries, `min-release-age-exclude`) stay. |
+| Editing one of this project's settings in `~/.npmrc`, or editing `~/.config/uv/uv.toml` or `~/.bundle/config` | That setting, for every project. The next apply takes it out of `~/.npmrc` after a copy, and stops on the other two until you move the edit out of the way or accept the overwrite. Your own lines in `~/.npmrc` (tokens, registries, `min-release-age-exclude`, a longer `min-release-age`) stay. |
 | Editing a project's own `poetry.toml`, or the `policy` in its `composer.json` | That setting, in that project, for everyone who checks it out. The role does not manage those files. |
 | `supply-chain-allow-build uv ...` | uv's `no-build`, for that command, and it lists what was built. It refuses any other tool. It is for a person. |
 

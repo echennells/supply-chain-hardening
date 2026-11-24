@@ -57,7 +57,8 @@ Tell the user what hardening does, unless they have already agreed to it:
 - Several package managers are replaced by wrappers at their current path.
 - `~/.npmrc` is merged: its own lines, tokens included, stay below a block of settings,
   and it ends 0600. A line that sets one of those settings is taken out after a copy.
-- `~/.yarnrc.yml`, the bunfig, `~/.bundle/config`, the pnpm files, `pip.conf` and `uv.toml`
+- `~/.yarnrc.yml`, the bunfig, `~/.bundle/config`, the pnpm files, `pip.conf`, `uv.toml`,
+  cargo's `config.toml`, Maven's `settings.xml`, `NuGet.Config` and Composer's `config.json`
   are replaced whole. If one is not exactly what this project last wrote, the role stops
   before changing anything; `harden.sh` copies it next to itself (0600) and says so. A
   token or registry in it then no longer applies until the user puts it back.
@@ -86,7 +87,7 @@ supply-chain-verify --json
   `--become`: per-user config would land in root's home. The preflight refuses this.
 - If the play stops on a file, don't override it yourself. Tell the user which one (it may
   hold a token, so don't print it), and
-  pass `-e accept_etc_overwrite=true` (the `/etc` files) or
+  pass `-e accept_etc_overwrite=true` (the `/etc` files and npm's global config) or
   `-e accept_user_config_overwrite=true` (the per-user ones) only if they agree.
 - On Ubuntu 26.04's sudo-rs the preflight may stop because ansible-core cannot answer its
   password prompt. The fix is a newer ansible-core for the user

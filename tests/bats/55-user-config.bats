@@ -25,7 +25,8 @@ setup() {
   mkdir -p "$H"
   stub_java_dotnet
   # What the role also writes outside the home, so a test can leave it as it was.
-  G=$(bash "$ROLE_DIR/files/user-config.sh" path npm-global 2>/dev/null || true)
+  G=$(cd / && npm config get globalconfig 2>/dev/null) || G=""
+  [ "$G" != /etc/npmrc ] || G=""
   SAVED="$G /root/.cargo/cooldown.toml /root/.config/composer/config.json /root/.composer/config.json /etc/npmrc /etc/pip.conf /etc/uv/uv.toml /etc/environment /etc/profile.d/supply-chain-hardening.sh /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/sbin/supply-chain-age-gate-refresh"
   local x
   for x in $SAVED; do
