@@ -1273,8 +1273,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # arm64 too: it is the only place here that runs the arm64 binary.
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        # Every platform the pin names. It is the only place here that runs the
+        # arm64 and the macOS binaries.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
     # 10 of 30 sfw jobs here in one week started on a runner whose API quota was
     # already used up, and sfw was then missing for the whole job. Waiting for
     # that to happen by chance proves nothing, so this job makes it happen.
@@ -1283,7 +1284,9 @@ jobs:
 
       - name: Make api.github.com unreachable for this job
         run: |
+          uname -srm; node --version; npm --version; command -v npm
           echo '127.0.0.1 api.github.com' | sudo tee -a /etc/hosts >/dev/null
+          if [ "$(uname -s)" = Darwin ]; then sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder; sleep 2; fi
           if curl -s -m 10 -o /dev/null https://api.github.com/rate_limit; then
             echo "::error::the API still answers, so this job would prove nothing"; exit 1
           fi
@@ -1295,18 +1298,39 @@ jobs:
           intel: sfw
 
       - name: sfw is installed, and runs the pinned binary
+        # python3 for the paths and modes: readlink and stat differ on macOS.
         run: |
           test "${{ steps.harden.outputs.sfw-installed }}" = "true"
           want=$(sed -n 's/^SFW_BINARY_VERSION="\(.*\)"$/\1/p' action/harden.sh)
-          latest=$(readlink -f "$(npm root -g)/sfw/.sfw-cache/latest")
-          echo "cached: $latest, pinned: $want"
-          case "$(uname -m)" in aarch64) asset=sfw-free-linux-arm64 ;; *) asset=sfw-free-linux-x86_64 ;; esac
-          [ "$latest" = "${latest%/*/*}/$want/$asset" ] || { echo "::error::not the pinned binary"; exit 1; }
-          test "$(stat -c '%U %a' "$latest")" = "root 755"
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) asset=sfw-free-linux-x86_64; key=LINUX_X86_64 ;;
+            Linux-aarch64) asset=sfw-free-linux-arm64; key=LINUX_ARM64 ;;
+            Darwin-arm64) asset=sfw-free-macos-arm64; key=MACOS_ARM64 ;;
+            Darwin-x86_64) asset=sfw-free-macos-x86_64; key=MACOS_X86_64 ;;
+            *) echo "::error::no pin for this platform"; exit 1 ;;
+          esac
+          sum=$(sed -n "s/^SFW_BINARY_SHA256_$key=\"\(.*\)\"$/\1/p" action/harden.sh)
+          python3 -I - "$(command -v sfw)" "$want" "$asset" "$sum" <<'PY'
+          import hashlib, os, sys
+          sfw, want, asset, sha = sys.argv[1:]
+          pkg = os.path.dirname(os.path.dirname(os.path.realpath(sfw)))
+          latest = os.path.realpath(os.path.join(pkg, ".sfw-cache", "latest"))
+          st = os.stat(latest)
+          print("cached:", latest, "uid", st.st_uid, "mode", oct(st.st_mode & 0o7777))
+          assert latest == os.path.join(pkg, ".sfw-cache", want, asset), "not the pinned binary"
+          assert (st.st_uid, st.st_mode & 0o7777) == (0, 0o755), "not root's, or writable by others"
+          h = hashlib.sha256()
+          with open(latest, "rb") as f:
+              for b in iter(lambda: f.read(1 << 20), b""):
+                  h.update(b)
+          assert h.hexdigest() == sha, "its sha256 is not the pinned one"
+          print("pinned, root's, and its sha256 matches")
+          PY
 
       - name: npm installs through it, as the runner user
         run: |
           grep -q "supply-chain-harden" "$(command -v npm)"
+          sfw true && echo "the binary runs"
           mkdir -p /tmp/sfwproj && cd /tmp/sfwproj && npm init -y >/dev/null
           npm install is-number@7.0.0
           test -d node_modules/is-number && echo "npm install through the pinned sfw OK"
