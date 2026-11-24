@@ -445,7 +445,7 @@ ucf_blocked() {
     t=$(ucf_ls "$path"); t=${t#* }; t=${t%% *}
     if [ "$t" != 0 ] && [ "$t" != "$u" ]; then echo "is a link owned by uid $t to a file owned by uid $u"; return 0; fi
   fi
-  if [ ! -w "${real%/*}/" ] && [ ! -w "$real" ]; then echo "cannot be written by $(id -un)"; return 0; fi
+  if [ ! -w "${real%/*}/" ]; then echo "cannot be replaced: ${real%/*} is not writable by $(id -un)"; return 0; fi
   if [ "$kind" = npmrc ] && [ "$(LC_ALL=C tr -d '\000' < "$real" | wc -c)" -ne "$(wc -c < "$real")" ]; then
     echo "holds NUL bytes (UTF-16?), which npm does not read either"
   fi
@@ -484,50 +484,71 @@ ucf_chmod() { # <file> <mode string from ucf_mode>
   chmod "u=$u,g=$g,o=$o" "$1"
 }
 
-# ucf_put <path> <600|644> <content>: write it, atomically (a temporary file in
-# the same directory, renamed over), through a symlink to the file it names, the
-# owner kept and the mode as ucf_mode says. Where the rename is impossible (a
-# file bind-mounted into a container, a directory that is read-only) and the file
-# itself is writable, it is written in place, as these files always used to be.
-ucf_put() {
-  local path="$1" content="$3" real mode own="" tmp
-  real=$(ucf_real "$path") || return 1
+# ucf_temp <file>: a new 0600 file in the same directory (mktemp: never one that
+# is there already, and never through a link); prints its name.
+ucf_temp() { ( umask 077; mktemp "$(dirname -- "$1")/.sch-XXXXXX" 2>/dev/null ); }
+
+# ucf_put <path> <600|644> <content>: write it, atomically: a temporary file in the
+# same directory, renamed over, so a run killed at any point leaves the old file or
+# the new one. Through a symlink to the file it names, the owner kept, and the mode
+# as ucf_mode says. Where the rename is impossible (a file bind-mounted into a
+# container) it is written in place, with a copy of the old one kept until the new
+# one is complete. A subshell, for its trap.
+ucf_put() (
+  path="$1" content="$3" tmp="" bak="" own=""
+  trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
+  trap 'exit 1' HUP INT TERM
+  real=$(ucf_real "$path") || exit 1
   mode=$(ucf_mode "$real" "$2")
   if [ -e "$real" ]; then own=$(ucf_ls "$real"); own=${own#* }; fi
-  if tmp=$(umask 077; mktemp "${real%/*}/.sch-XXXXXX" 2>/dev/null); then
-    if printf '%s' "$content" > "$tmp" 2>/dev/null && ucf_chmod "$tmp" "$mode"; then
-      if [ -n "$own" ]; then
-        if [ "$(id -u)" = 0 ]; then chown "${own% *}:${own#* }" "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-        else chgrp "${own#* }" "$tmp" 2>/dev/null || true; fi
-        ucf_chmod "$tmp" "$mode"
-      fi
-      if mv -f -- "$tmp" "$real" 2>/dev/null; then return 0; fi
-    fi
-    rm -f -- "$tmp"
+  tmp=$(ucf_temp "$real") || { tmp=""; exit 1; }
+  printf '%s' "$content" > "$tmp" 2>/dev/null || exit 1
+  if [ -n "$own" ] && [ "$(id -u)" = 0 ]; then
+    chown "${own% *}:${own#* }" "$tmp" 2>/dev/null || exit 1
+  elif [ -n "$own" ]; then
+    # A group this account is not in cannot be kept, and no other group gets what
+    # it had.
+    chgrp "${own#* }" "$tmp" 2>/dev/null || mode="${mode:0:4}---${mode:7}"
   fi
-  [ -f "$real" ] && [ -w "$real" ] || return 1
-  printf '%s' "$content" 2>/dev/null > "$real" && ucf_chmod "$real" "$mode"
+  ucf_chmod "$tmp" "$mode" || exit 1
+  if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
+  [ -f "$real" ] && [ -w "$real" ] || exit 1
+  bak=$(ucf_copy_new "$real") || exit 1
+  cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode" && rm -f -- "$bak"
+)
+
+# ucf_copy_new <path>: a 0600 copy next to it, named as ansible's backup names one
+# (<file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~); prints the name. Complete before it has
+# that name, and never over anything already there.
+ucf_copy_new() {
+  local p="$1" b tmp own n=1
+  tmp=$(ucf_temp "$p") || return 1
+  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! cmp -s "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if [ "$(id -u)" = 0 ]; then
+    own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown "$own" "$tmp" 2>/dev/null || true
+  fi
+  b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)"
+  while [ -e "$b~" ] || [ -L "$b~" ]; do
+    n=$((n + 1))
+    [ "$n" -le 20 ] || { rm -f -- "$tmp"; return 1; }
+    b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)-$n"
+  done
+  mv -f -- "$tmp" "$b~" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+  [ -f "$b~" ] && [ ! -L "$b~" ] && cmp -s "$p" "$b~" || return 1
+  printf '%s\n' "$b~"
 }
 
-# ucf_copy <path>: a 0600 copy next to it, named as ansible's backup names one
-# (<file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~); prints the name. A copy with the same
-# bytes is reused: on a runner whose jobs put the same token back every time,
-# that keeps one copy of it and not one per job.
+# ucf_copy <path>: the same, but a copy with the same bytes that is there already
+# is reused: on a runner whose jobs put the same token back every time, that keeps
+# one copy of it and not one per job.
 ucf_copy() {
-  local p="$1" b own
-  for b in "$p".*"~"; do
-    if [ -f "$b" ] && [ ! -L "$b" ] && cmp -s "$p" "$b"; then
-      chmod 600 "$b" 2>/dev/null || true
+  local b
+  for b in "$1".[0-9]*.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]@*"~"; do
+    if [ -f "$b" ] && [ ! -L "$b" ] && cmp -s "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
       printf '%s\n' "$b"; return 0
     fi
   done
-  b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)~"
-  ( umask 077; set -C; cat -- "$p" > "$b" ) 2>/dev/null || return 1
-  if ! cmp -s "$p" "$b"; then rm -f -- "$b"; return 1; fi
-  if [ "$(id -u)" = 0 ]; then
-    own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown "$own" "$b" 2>/dev/null || true
-  fi
-  printf '%s\n' "$b"
+  ucf_copy_new "$1"
 }
 
 # ucf_replace <kind> <path>: replace one of the seven with the body on stdin.
@@ -674,15 +695,14 @@ ucf_npmrc_scan() (
     case "$k" in ?*"[]") arr=1; k=${k%"[]"} ;; esac
     case "$k" in
       *"$open"*"$close"*)
-        # a glob of what the expanded key can be, and the key as it may be shown
+        # a glob of what the expanded key can be, and the key as it is shown
         g="" d="" t=$k
         while :; do
           case "$t" in *"$open"*"$close"*) ;; *) break ;; esac
           s=${t%%"$open"*}; t=${t#*"$open"}
           g="$g$s*" d="$d$s"
-          s=${t%%"$close"*}; t=${t#*"$close"}
-          s=${s//[!A-Za-z0-9_]/?}
-          d="$d$open$s$close"
+          t=${t#*"$close"}
+          d="$d$open...$close"
         done
         g="$g$t" d="$d$t"
         case "$g" in *[!a-z*-]*) return 1 ;; esac

@@ -35,6 +35,8 @@
   # (mirrors, <servers> credentials) stops the play in preflight unless
   # accept_user_config_overwrite=true, and is backed up here first
   # (tasks/preflight.yml, CMP 4.7).
+  # A diff would print the credentials in the file being replaced.
+  diff: false
   ansible.builtin.copy:
     dest: "{{ ansible_env.HOME }}/.m2/settings.xml"
     mode: "0644"

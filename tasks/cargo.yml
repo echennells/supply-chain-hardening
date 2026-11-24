@@ -34,6 +34,8 @@
   # registry mirror, private registries, credential providers) stops the play
   # in preflight unless accept_user_config_overwrite=true, and is backed up
   # here first (tasks/preflight.yml, CMP 4.7).
+  # A diff would print the credentials in the file being replaced.
+  diff: false
   ansible.builtin.template:
     src: cargo-config.toml.j2
     dest: "{{ cargo_home }}/config.toml"

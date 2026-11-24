@@ -31,6 +31,8 @@
   # (private feeds and their credentials) stops the play in preflight unless
   # accept_user_config_overwrite=true; it, and dotnet's own first-run file,
   # are backed up here first (tasks/preflight.yml, CMP 4.7).
+  # A diff would print the credentials in the file being replaced.
+  diff: false
   ansible.builtin.copy:
     dest: "{{ nuget_config_home }}/NuGet.Config"
     mode: "0644"

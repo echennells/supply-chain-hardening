@@ -181,6 +181,13 @@ lib() {
 
 @test "user config: bunfig without XDG_CONFIG_HOME is kept the same way (~/.bunfig.toml)" {
   printf '[install]\nregistry = "https://u:SECRET-bun@example"\n' > "$TEST_HOME/.bunfig.toml"
+  # --preflight follows XDG_CONFIG_HOME the way the write does.
+  run pf
+  [[ "$output" != *"$TEST_HOME/.bunfig.toml"* ]]
+  [[ "$output" == *"$XDG/.bunfig.toml: not there, will be created"* ]]
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" bash "$HARDEN_SH" --preflight
+  [[ "$output" == *"STOP  $TEST_HOME/.bunfig.toml: not exactly"* ]]
+  [[ "$output" != *"$XDG/.bunfig.toml"* ]]
   harden ECOSYSTEMS=bun -- --emit=plain >/dev/null 2>&1
   assert_file_lacks "$TEST_HOME/.bunfig.toml" SECRET
   grep -q SECRET-bun "$TEST_HOME"/.bunfig.toml.*~
@@ -356,9 +363,9 @@ fixture() { # <version-surface>: put its eight files where they go
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine"
   # shellcheck disable=SC2016
-  grep -qF 'line 1, a quoted key with an escape in it; line 2, the key ${X}; line 3, the key ignore-${Y}; line 5, a [section] named after fund' "$BATS_TEST_TMPDIR/log" \
+  grep -qF 'line 1, a quoted key with an escape in it; line 2, the key ${...}; line 3, the key ignore-${...}; line 5, a [section] named after fund' "$BATS_TEST_TMPDIR/log" \
     || { cat "$BATS_TEST_TMPDIR/log"; return 1; }
-  ! grep -E 'SECRET|HOST' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'SECRET|HOST|\$\{[A-Z]' "$BATS_TEST_TMPDIR/log"
 }
 
 @test "npmrc: before, which npm uses instead of min-release-age, is kept and named" {
@@ -498,19 +505,19 @@ JS
   [ "$status" -eq 1 ]
   [[ "$output" == *"npm: $(f npmrc) cannot be read by"* ]]
   [ "$(cat "$(f npmrc)")" = a=SECRET ]
-  # a directory that cannot be written to, with a file that can: written in place
-  ECO=uv apply >/dev/null 2>&1
-  chmod 555 "$(dirname "$(f uv)")"
-  ECO=uv run apply RELEASE_AGE_HOURS=72
-  chmod 755 "$(dirname "$(f uv)")"
-  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  # and with one that cannot be, nor copied: refused, unchanged
+  # a directory that cannot be written to: no atomic write and no copy is possible
+  mkdir -p "$(dirname "$(f uv)")"
   printf 'x = "SECRET"\n' > "$(f uv)"
+  chmod 555 "$(dirname "$(f uv)")"
+  run pf
+  chmod 755 "$(dirname "$(f uv)")"
+  [[ "$output" == *"STOP  $(f uv): cannot be replaced: $(dirname "$(f uv)") is not writable by"* ]] || { echo "$output"; return 1; }
+  [ "$(cat "$(f uv)")" = 'x = "SECRET"' ]
   chmod 555 "$(dirname "$(f uv)")"
   ECO=uv run apply
   chmod 755 "$(dirname "$(f uv)")"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"could not copy $(f uv) next to itself"* ]]
+  [[ "$output" == *"uv: $(f uv) cannot be replaced: $(dirname "$(f uv)") is not writable by"* ]]
   [ "$(cat "$(f uv)")" = 'x = "SECRET"' ]
 }
 
@@ -537,7 +544,80 @@ JS
   grep -q SECRET "$(f npmrc)"
 }
 
-@test "user config: a killed run leaves the old file or the new one, never half of one" {
+# stub <name> <body>: first on PATH for the ucf_ functions of this test
+stub() { mkdir -p "$BATS_TEST_TMPDIR/stub"; printf '#!/bin/bash\n%s\n' "$2" > "$BATS_TEST_TMPDIR/stub/$1"; chmod +x "$BATS_TEST_TMPDIR/stub/$1"; }
+npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
+
+@test "user config: a run killed before the rename leaves the file as it was; TERM leaves no temporary file" {
+  lib
+  printf 'a=SECRET\nfund=true\n' > "$(f npmrc)"
+  cp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  # mode and owner are set just before the rename
+  stub chmod 'kill -KILL $PPID'
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) >/dev/null 2>&1 || true
+  cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  rm -f "$TEST_HOME"/.sch-*
+  stub chmod 'kill -TERM $PPID; sleep 1; exit 1'
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) >/dev/null 2>&1 || true
+  cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  [ -z "$(ls -A "$TEST_HOME" | grep '^\.sch-')" ] || { ls -la "$TEST_HOME"; return 1; }
+  # the same for a copy: cut short, it never gets the name of one
+  stub cat 'case "$*" in *npmrc) head -c 3 "${@: -1}"; kill -KILL $PPID ;; *) exec /bin/cat "$@" ;; esac'
+  rm -f "$BATS_TEST_TMPDIR/stub/chmod" "$TEST_HOME"/.npmrc.*
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; ucf_copy "$(f npmrc)" ) >/dev/null 2>&1 || true
+  [ -z "$(copies npmrc)" ]
+  cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+}
+
+@test "user config: where the rename is impossible (a bind mount) the old bytes stay on disk until the new ones are complete" {
+  lib
+  printf 'a=SECRET\n' > "$(f npmrc)"
+  cp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  # rename(2) over a mount point is EBUSY; the copy's own rename still works
+  stub mv 'case "${@: -1}" in *.npmrc) exit 1 ;; *) exec /bin/mv "$@" ;; esac'
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) > "$BATS_TEST_TMPDIR/out"
+  grep -qx changed "$BATS_TEST_TMPDIR/out"
+  npmrc_is_ours_then "$BATS_TEST_TMPDIR/orig"
+  [ "$(mode "$(f npmrc)")" = -rw------- ]
+  [ -z "$(copies npmrc)" ] && [ -z "$(ls -A "$TEST_HOME" | grep '^\.sch-')" ]
+  # killed half way through that write
+  cp "$BATS_TEST_TMPDIR/orig" "$(f npmrc)"
+  stub cat 'case "$*" in */.sch-*) head -c 5 "${@: -1}"; kill -KILL $PPID ;; *) exec /bin/cat "$@" ;; esac'
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) >/dev/null 2>&1 || true
+  ! cmp -s "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"          # the control: it was cut short
+  cmp "$(copies npmrc)" "$BATS_TEST_TMPDIR/orig"
+}
+
+@test "user config: nothing planted at a copy's name is followed, entered or overwritten, an earlier copy included" {
+  lib
+  local i t what name
+  printf 'a=SECRET\n' > "$(f npmrc)"
+  for what in file link dangling dir fifo; do
+    rm -rf "$TEST_HOME"/.npmrc.* "$BATS_TEST_TMPDIR/victim" "$BATS_TEST_TMPDIR/new"
+    echo precious > "$BATS_TEST_TMPDIR/victim"
+    t=$(date +%s)
+    for i in 0 1 2 3; do
+      name="$(f npmrc).$$.$(date -d "@$((t + i))" +%Y-%m-%d@%H:%M:%S 2>/dev/null || date -r "$((t + i))" +%Y-%m-%d@%H:%M:%S)~"
+      case "$what" in
+        file) echo earlier > "$name" ;;
+        link) ln -s "$BATS_TEST_TMPDIR/victim" "$name" ;;
+        dangling) ln -s "$BATS_TEST_TMPDIR/new" "$name" ;;
+        dir) mkdir "$name" ;;
+        fifo) mkfifo "$name" ;;
+      esac
+    done
+    run ucf_copy "$(f npmrc)"
+    [ "$status" -eq 0 ] || { echo "$what: $output"; return 1; }
+    case "$output" in *-2~) ;; *) echo "$what: $output"; return 1 ;; esac
+    cmp "$output" "$(f npmrc)"
+    [ "$(mode "$output")" = -rw------- ]
+    [ "$(cat "$BATS_TEST_TMPDIR/victim")" = precious ] && [ ! -e "$BATS_TEST_TMPDIR/new" ]
+    if [ "$what" = file ]; then [ "$(cat "$name")" = earlier ]; fi
+    if [ "$what" = dir ]; then [ -z "$(ls -A "$name")" ]; fi
+  done
+}
+
+@test "user config: a write leaves the old file or the new one to anyone reading it, never half of one" {
   # The write is a rename: no other process ever sees the target empty.
   plant
   lib
