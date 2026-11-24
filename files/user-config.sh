@@ -5,7 +5,8 @@
 # byte (tests/ci/14-user-config.bats compares them), so the two surfaces judge
 # and write a file the same way. bash 3.2, BSD, BusyBox and GNU tools.
 #
-#   user-config.sh path <kind>          where that kind's file is; nothing if nowhere
+#   user-config.sh path <kind>          where that kind's file is, and "uid <n>", the
+#                                       owner of its directory; nothing if nowhere
 #   user-config.sh classify <kind>...   one line per file that is in the way
 #   user-config.sh replace <kind>       write $SCH_UCF_BODY to $SCH_UCF_PATH, or to
 #                                       the kind's own path; prints which
@@ -808,7 +809,15 @@ ucf_npmrc() {
 # <<< user_config
 
 case "${1:-}" in
-  path) ucf_path "${2:?}" ;;
+  path)
+    p=$(ucf_path "${2:?}")
+    if [ -n "$p" ]; then
+      # and whose directory it is in, or would be
+      d=$(dirname -- "$p")
+      while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname -- "$d"); done
+      o=$(ucf_ls "$d/."); o=${o#* }
+      printf '%s\nuid %s\n' "$p" "${o%% *}"
+    fi ;;
   classify)
     shift
     rc=0

@@ -163,8 +163,12 @@
   #
   # Replaced whole, but only a file that is exactly what this project last wrote:
   # anything else stopped the play in preflight, unless accept_etc_overwrite=true,
-  # which copies it first. In the user's home it is written as the user.
-  become: "{{ ansible_check_mode or not (npm_globalconfig.stdout | default('') | trim).startswith(ansible_env.HOME ~ '/') }}"
+  # which copies it first. In the user's home, or a prefix that is the user's
+  # (linuxbrew), it is written as the user, so it is not root's.
+  become: >-
+    {{ ansible_check_mode
+       or not ((npm_globalconfig.stdout | default('') | trim).startswith(ansible_env.HOME ~ '/')
+               or ('uid ' ~ ansible_user_uid) in (npm_global_preflight.stdout_lines | default([]))) }}
   ansible.builtin.script: user-config.sh replace npm-global
   args:
     executable: /bin/bash

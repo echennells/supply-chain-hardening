@@ -403,5 +403,12 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
   grep -q SECRET "$g".*~
   [ "$(stat -c '%U %a' "$g".*~)" = 'kcuser 600' ]
+  # a prefix of the user's outside the home
+  rm -rf /opt/kcprefix; mkdir -p /opt/kcprefix/etc; chown -R kcuser:kcuser /opt/kcprefix
+  g=/opt/kcprefix/etc/npmrc
+  asuser
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  [ "$(stat -c %U "$g")" = kcuser ] && [ "$(stat -c %U /opt/kcprefix/etc)" = kcuser ]
+  rm -rf /opt/kcprefix
   rm -f /etc/sudoers.d/kcuser; userdel -r kcuser 2>/dev/null || true
 }
