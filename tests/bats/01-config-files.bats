@@ -269,7 +269,9 @@ load setup
   # It carried pnpm's keys, "for pnpm's lowest layer", and the test here grepped
   # for them. Nobody asked pnpm, which does not read this file (next test), and
   # every npm 11.2.0 to 11.19.1 that does read it warned on every command.
-  ! grep -qE '^(minimum-release-age|only-built-dependencies|block-exotic-subdeps)' /etc/npmrc
+  # Not `! grep`: bats does not fail a test on one.
+  run grep -E '^(minimum-release-age|only-built-dependencies|block-exotic-subdeps)' /etc/npmrc
+  [ "$status" -eq 1 ] || { echo "still there: $output"; return 1; }
   run bash -c 'cd / && NPM_CONFIG_GLOBALCONFIG=/etc/npmrc npm config get ignore-scripts 2>&1'
   [ "$status" -eq 0 ]
   [[ "$output" == *true* ]]
@@ -278,14 +280,17 @@ load setup
 
 @test "pnpm does not read /etc/npmrc: its global file is <node prefix>/etc/npmrc (asked of pnpm)" {
   require_root "writes /etc/npmrc"
-  command -v pnpm >/dev/null || skip "pnpm not installed"
-  local v; v=$(cd / && pnpm --version 2>/dev/null)
-  case "$v" in 9.*|10.*) ;; *) skip "pnpm $v reads no system npmrc" ;; esac
-  local h="$BATS_TEST_TMPDIR/h" real keep="" ans_etc ans_real
+  # pnpm 10 whatever the image has: 11 and later read no system npmrc at all.
+  local pn="$BATS_TEST_TMPDIR/pnpm10"
+  (cd / && npm install --silent --no-audit --no-fund --ignore-scripts --prefix "$pn" pnpm@10.34.9 >/dev/null 2>&1) \
+    || skip "pnpm 10.34.9 could not be installed (offline?)"
+  pn="$pn/node_modules/.bin"
+  [ "$(cd / && "$pn/pnpm" --version 2>/dev/null)" = 10.34.9 ]
+  local h="$BATS_TEST_TMPDIR/h" real ans_etc ans_real
   mkdir -p "$h"
   real="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")/etc/npmrc"
   [ "$real" != /etc/npmrc ] || skip "node's prefix is /"
-  ask() { (cd / && env -i HOME="$h" PATH="$PATH" pnpm config get minimum-release-age 2>/dev/null | tail -n 1); }
+  ask() { (cd / && env -i HOME="$h" PATH="$pn:$PATH" pnpm config get minimum-release-age 2>/dev/null | tail -n 1); }
   with() { # <file>: the answer with that one line added to it, restored after
     local f="$1" b="$BATS_TEST_TMPDIR/b" had=0 a
     if [ -e "$f" ]; then had=1; cp -p "$f" "$b"; fi

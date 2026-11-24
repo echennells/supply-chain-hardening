@@ -34,7 +34,9 @@ load setup
   gp=$(npm config get globalconfig 2>/dev/null | tr -d '\r')
   [ -n "$gp" ] || skip "npm did not report a globalconfig path"
   [ -f "$gp" ]
-  ! grep -qE '^minimum-release-age' "$gp"
+  # Not `! grep`: bats does not fail a test on one, and this line never could.
+  run grep -E '^minimum-release-age' "$gp"
+  [ "$status" -eq 1 ] || { echo "still there: $output"; return 1; }
   # Behavioral: a plain npm command emits no unknown-config warning. Harmless on an
   # npm too old to warn; catches the regression on one that does.
   run npm config get registry
