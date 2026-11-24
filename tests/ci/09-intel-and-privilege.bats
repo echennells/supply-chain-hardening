@@ -317,6 +317,60 @@ EOF
   [[ "$output" == *"no root and no usable sudo"* ]]
 }
 
+@test "no sudo: a bunx this account cannot replace degrades bun and does not eat the ecosystems after it" {
+  # MEASURED (v2.1.0, main 8cfc1c4): bun in the home directory and bunx in a
+  # root-owned one. `rm -f bunx` died on "Permission denied" under set -e: rc 1,
+  # no summary, and every ecosystem after bun skipped.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.2.0";; *) echo STUB;; esac'
+  rm -f "${TEST_BIN}/bunx"
+  local ro="${BATS_TEST_TMPDIR}/ro-bunx"
+  mkdir -p "$ro"
+  printf '#!/bin/bash\necho THEIRS\n' > "$ro/bunx"
+  chmod 755 "$ro/bunx"
+  chmod 555 "$ro"
+
+  run env -i PATH="${NOSUDO}:${TEST_BIN}:${ro}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=false ECOSYSTEMS=bun,npm,pip bash "$HARDEN_SH" --emit=plain
+  local theirs; theirs=$("$ro/bunx")
+  chmod 755 "$ro"
+
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_HOME/.npmrc" ]                         # the ecosystems after bun
+  [ -f "$TEST_HOME/.config/pip/pip.conf" ]
+  grep -q "supply-chain-harden" "${TEST_BIN}/bun"    # bun itself is still wrapped
+  [ "$theirs" = THEIRS ]                             # bunx is left as it was
+  [[ "$output" == *"cannot deploy the PATH wrapper at $ro/bunx"* ]]
+  [[ "$output" == *"degraded: "*bun* ]]              # and the verdict line says so
+}
+
+@test "no sudo: an npx wrapper this account cannot rewrite is left alone and does not end the run" {
+  # npm's directory lets this account in and npx's does not; npx there is the
+  # wrapper an earlier run as root left. Only the FIRST wrap asked about privilege,
+  # so the re-wrap's `tee` died on "Permission denied" under set -e.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
+  stub_bin npm 'case "${1:-}" in --version|-v) echo "11.12.0";; root|prefix) echo "$TMPDIR";; *) exit 0;; esac'
+  stub_bin sfw 'exec "$@"'
+  rm -f "${TEST_BIN}/npx"
+  local ro="${BATS_TEST_TMPDIR}/ro-npx"
+  mkdir -p "$ro"
+  printf '#!/bin/bash\n# Managed by supply-chain-harden action\nREAL_NPX=x\n' > "$ro/npx"
+  printf '#!/bin/bash\necho REAL\n' > "$ro/npx-real"
+  chmod 755 "$ro/npx" "$ro/npx-real"
+  cp "$ro/npx" "${BATS_TEST_TMPDIR}/npx.before"
+  chmod 555 "$ro" "$ro/npx"
+
+  run env -i PATH="${NOSUDO}:${TEST_BIN}:${ro}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=false INSTALL_SFW=true ECOSYSTEMS=npm bash "$HARDEN_SH" --emit=plain
+  chmod 755 "$ro"
+
+  [ "$status" -eq 0 ]
+  grep -q "supply-chain-harden" "${TEST_BIN}/npm"    # FIXTURE CONTROL: the run got as far as wrapping
+  cmp "$ro/npx" "${BATS_TEST_TMPDIR}/npx.before"
+  [[ "$output" == *"npx: cannot deploy the PATH wrapper"* ]]
+  [[ "$output" == *"done (emit=plain)"* ]]
+}
+
 @test "a degraded wrapper is reported in the verdict line, not only the table" {
   # A status word outside the APPLIED/PARTIAL/INERT vocabulary lands in
   # neither summary list, so the ecosystem vanishes from the one line most

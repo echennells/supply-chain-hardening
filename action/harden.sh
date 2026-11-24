@@ -3179,6 +3179,12 @@ EOF
 
   if [[ -z "$real_bunx" ]]; then
     log "bunx not found — no bunx wrapper deployed"
+  elif ! require_privilege bun "$real_bunx" PARTIAL "bunx PATH wrapper not deployed at $real_bunx: no root and no usable sudo in this job. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."; then
+    # bunx can live in a directory bun does not: bun in ~/.bun/bin, bunx in
+    # /usr/local/bin. The gate above asked about bun's directory only. MEASURED
+    # (v2.1.0, main 8cfc1c4): the `rm` below then died on "Permission denied",
+    # and nothing after bun was applied, nor any summary printed.
+    :
   else
     # REMOVE FIRST, THEN WRITE. bunx is normally a SYMLINK to the bun binary,
     # and by this point that symlink resolves to the bun WRAPPER deployed
@@ -4935,6 +4941,9 @@ EOF
     return 0
   fi
   npx_target="$real_npx"
+  # Before the re-wrap too, and not only before the first wrap: an npx wrapper an
+  # earlier run as root left is not this account's to rewrite.
+  require_privilege npx "$npx_target" || { end_section; return 0; }
   if is_our_wrapper "$real_npx"; then
     if [[ -x "${real_npx}-real" ]]; then
       real_npx="${real_npx}-real"
@@ -4944,7 +4953,6 @@ EOF
       return 0
     fi
   else
-    require_privilege npx "$npx_target" || { end_section; return 0; }
     $SUDO mv "$real_npx" "${real_npx}-real"
     real_npx="${real_npx}-real"
   fi
