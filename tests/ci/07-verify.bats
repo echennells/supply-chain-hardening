@@ -1031,15 +1031,14 @@ esac"
             echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
   *) echo STUB ;;
 esac"
-  # an unhardened home with a config of the user's
-  printf '{\n    "config": {\n        "secure-http": true\n    }\n}\n' > "$TEST_HOME/.composer/config.json"
-  run verify -- --emit=plain
-  [[ "$output" == *"GAP    PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
-  rm -f "$TEST_HOME/.composer/config.json"
   harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
   [ ! -e "$TEST_HOME/.config/composer" ]
   run verify_sourced --emit=plain
   [[ "$output" == *"OK     PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
+  # a config of the user's there, as composer writes it
+  printf '{\n    "config": {\n        "secure-http": true\n    }\n}\n' > "$TEST_HOME/.composer/config.json"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
 }
 
 @test "npm: a window shorter than the declared one is WEAK and names the env var" {
