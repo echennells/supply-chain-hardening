@@ -57,6 +57,12 @@ them cares which CI you are on:
    `~/.yarnrc.yml`, `pip.conf`, `uv.toml`, `.bunfig.toml`, `.bundle/config`,
    `cooldown.toml`, maven `settings.xml`, gradle init script, `nuget.config`.
    These persist for the life of the job everywhere. No coupling.
+   `~/.npmrc` is merged: a token, registry or scope an earlier step put there
+   stays, and the file ends 0600. The others are replaced; one that is not what
+   this project last wrote is copied next to itself first (0600), and the log
+   has a warning with the path. No value from any of them is printed. If a later
+   step needs a registry that was in one, put it back after this one, or pass it
+   in the environment.
 2. **PATH wrappers** — bun, bunx, composer, deno, cargo, wrapped in place at
    their discovered path. No coupling.
 3. **Env vars** — the only layer that needs the platform's own mechanism to

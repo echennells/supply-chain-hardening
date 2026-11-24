@@ -39,8 +39,9 @@ for their OK**:
 It changes no file, and run as a normal user it reads none as root; it makes one
 `sudo -n true` probe, which sudo logs. A line starting with `STOP` would end the play
 before it changes anything, or keep it from running: an existing `/etc` file, a per-user
-cargo, maven or nuget config this project did not write, the wrong user, no Ansible or
-one too old. It lists the package managers found, and for a repo it adds `--suggest`: the
+config file that is not exactly what this project wrote, the wrong user, no Ansible or
+one too old. It says what happens to `~/.npmrc`, names the keys that would be taken out of
+it, lists the package managers found, and for a repo it adds `--suggest`: the
 exceptions that repo needs and its own config that outranks the host's.
 `ansible-playbook --check` is not this: it is a dry run of the whole play that stops at
 the first refusal, escalates, and runs the role's probes for real, which leaves npm logs,
@@ -54,10 +55,12 @@ Tell the user what hardening does, unless they have already agreed to it:
 - `composer` runs with `--no-plugins`, and with `--no-scripts` except for a script named
   on the command line (`composer test`); `bundle` runs frozen.
 - Several package managers are replaced by wrappers at their current path.
-- `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.bundle/config`, the pnpm files in
-  `~/.config/pnpm`, `~/.config/pip/pip.conf` and `~/.config/uv/uv.toml` are replaced with no
-  backup, login tokens included, on the first run and every later one. **Copy them first,
-  with the user's OK.**
+- `~/.npmrc` is merged: its own lines, tokens included, stay below a block of settings,
+  and it ends 0600. A line that sets one of those settings is taken out after a copy.
+- `~/.yarnrc.yml`, the bunfig, `~/.bundle/config`, the pnpm files, `pip.conf` and `uv.toml`
+  are replaced whole. If one is not exactly what this project last wrote, the role stops
+  before changing anything; `harden.sh` copies it next to itself (0600) and says so. A
+  token or registry in it then no longer applies until the user puts it back.
 - There is no single uninstall command.
 
 **Agent hosts.** If the host's job is running agents in repositories nobody vetted, ask
@@ -81,7 +84,8 @@ supply-chain-verify --json
 
 - Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or a global
   `--become`: per-user config would land in root's home. The preflight refuses this.
-- If the play stops on a file, don't override it yourself. Show the file to the user, and
+- If the play stops on a file, don't override it yourself. Tell the user which one (it may
+  hold a token, so don't print it), and
   pass `-e accept_etc_overwrite=true` (the `/etc` files) or
   `-e accept_user_config_overwrite=true` (the per-user ones) only if they agree.
 - On Ubuntu 26.04's sudo-rs the preflight may stop because ansible-core cannot answer its

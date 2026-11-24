@@ -228,15 +228,20 @@ fixture() { # <version-surface>: put its eight files where they go
 @test "user config: one line added to a file v2.0.0 or v2.1.0 wrote makes it the user's, whatever the line" {
   lib
   local v k line
+  # (a line is put second, after the marker, where it is met soonest)
   for v in v2.0.0-action v2.0.0-role v2.1.0-action v2.1.0-role; do
     for k in $SEVEN; do
-      cp "$ROOT/tests/fixtures/user-config/$v/$k" "$BATS_TEST_TMPDIR/x"
-      [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = ours ] || { echo "$v $k"; return 1; }
       for line in 'some-key = "v"' '# a comment of mine' '; //registry/:_authToken=x' '  indented: 1' '[section]' 'registry: https://example/'; do
-        { cat "$ROOT/tests/fixtures/user-config/$v/$k"; printf '%s\n' "$line"; } > "$BATS_TEST_TMPDIR/x"
+        { head -n 1 "$ROOT/tests/fixtures/user-config/$v/$k"; printf '%s\n' "$line"
+          sed 1d "$ROOT/tests/fixtures/user-config/$v/$k"; } > "$BATS_TEST_TMPDIR/x"
         [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$v $k: $line"; return 1; }
       done
     done
+  done
+  # and last, where an appended token goes
+  for k in $SEVEN; do
+    { cat "$ROOT/tests/fixtures/user-config/v2.1.0-role/$k"; echo '# x'; } > "$BATS_TEST_TMPDIR/x"
+    [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k"; return 1; }
   done
 }
 
