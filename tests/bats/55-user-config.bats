@@ -55,7 +55,10 @@ copies() { local b; for b in "$(f "$1")".*~; do [ -e "$b" ] && echo "$b"; done; 
 
 role() { # [ansible args]: output in $output, the play's status in $status
   cd "$ROLE_DIR"
-  run env -u XDG_CONFIG_HOME HOME="$H" ansible-playbook site.yml --connection=local --limit localhost \
+  # corepack's cache is root's (in a new home it downloads pnpm, 45 s a run), and
+  # with no uv on PATH the role installs no uv tools into the home.
+  run env -u XDG_CONFIG_HOME HOME="$H" COREPACK_HOME=/root/.cache/node/corepack \
+    PATH=/usr/local/bin:/usr/bin:/bin ansible-playbook site.yml --connection=local --limit localhost \
     --tags "${ONLY:-$TAGS}" --skip-tags npq,socket \
     -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false -e age_gate_refresh=false "$@"
 }
