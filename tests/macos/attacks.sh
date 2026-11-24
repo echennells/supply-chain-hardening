@@ -247,7 +247,7 @@ P
   bounded 400 mvn -B -X -gs "$d/empty.xml" -Dmaven.repo.local="$d/local" validate > o 2>&1; rc=$?
   if grep -q 'GET /m2/com/evil/parent' "$d/access" && [ $rc -eq 0 ]; then result "maven http repository" FIRED "the parent POM came over http ($(mvn -v 2>/dev/null | head -1))"
   elif [ $rc -ne 0 ] && ! grep -q 'GET /m2/com/evil/parent' "$d/access" \
-       && said=$(grep -oE 'central-https-only \(.*Blocked mirror for repositories: \[http-repo \(http://[^,]*|Using mirror central-https-only \([^)]*\) for http-repo \(http://[^)]*\)' o | head -1); then
+       && said=$(grep -oE 'central-https-only \(.*Blocked mirror for repositories: \[http-repo \(http://[^,]*|Using mirror central-https-only \([^)]*\) for http-repo \(http://[^)]*\)' o | head -1) && [ -n "$said" ]; then
     result "maven http repository" blocked "$said"
   elif central_refused o; then result "maven http repository" NOT-TESTED "Maven Central answered 429"
   else
