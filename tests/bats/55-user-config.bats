@@ -8,7 +8,7 @@
 # to a token added after hardening.
 #
 # Each test applies the role for a home of its own (HOME is what the role reads),
-# with only the tasks that write these files. tests/ci/13-user-config.bats covers
+# with only the tasks that write these files. tests/ci/14-user-config.bats covers
 # the same code on the action's side in more detail.
 
 load setup

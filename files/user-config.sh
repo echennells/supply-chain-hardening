@@ -2,7 +2,7 @@
 # What happens to a user's own config files. Run by the role on the target
 # (tasks/user_config_file.yml, tasks/npm.yml, tasks/preflight.yml) with the
 # script module. The marked block below is also in action/harden.sh, byte for
-# byte (tests/ci/13-user-config.bats compares them), so the two surfaces judge
+# byte (tests/ci/14-user-config.bats compares them), so the two surfaces judge
 # and write a file the same way. bash 3.2, BSD, BusyBox and GNU tools.
 #
 #   user-config.sh classify <kind>...   one line per file that is in the way
