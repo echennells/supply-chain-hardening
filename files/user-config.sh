@@ -602,6 +602,8 @@ ucf_npmrc_scan() (
       esac
     done
   done
+  # Never drop to the end of the file: a block that did not end was not intact.
+  [ "$skip" = 0 ] || exit 1
   printf '%s\036%sx' "$notes" "$keep"
 )
 
@@ -616,7 +618,7 @@ ucf_npmrc_scan() (
 #   ok | changed, or "error: <why>" and status 1.
 # UCF_DRY=1 reports and writes nothing.
 ucf_npmrc() {
-  local path="$1" want who sum new real="" cur="" bom="" out notes keep intact=0 old="" why bak m=""
+  local path="$1" want who sum new real="" cur="" bom="" out notes keep intact=0 old="" why bak m="" blk
   local nl=$'\n' cr=$'\r' rs=$'\036' utf8=$'\357\273\277'
   want=$(cat)
   who=$(printf '%s\n' "$want" | sed -n '1s/^; Managed by //p')
@@ -629,8 +631,14 @@ ucf_npmrc() {
     cur=$(cat -- "$real"; printf x); cur=${cur%x}
     case "$cur" in "$utf8"*) bom=$utf8; cur=${cur#"$utf8"} ;; esac
     m=$(printf '%s' "$cur" | LC_ALL=C sed -n 's/^; >>> supply-chain-hardening: Managed by [a-z -]*; self-check \([a-z0-9]*:[0-9a-f-]*\)$/\1/p' | sed -n 1p)
-    if [ -n "$m" ] && [ "$(printf '%s' "$cur" | LC_ALL=C sed -n '/^; >>> supply-chain-hardening: /,/^; <<< supply-chain-hardening$/p' | LC_ALL=C sed -e 1d -e '$d' | ucf_sum "${m%%:*}")" = "$m" ]; then
-      intact=1
+    if [ -n "$m" ]; then
+      # From the first begin marker to its end marker, which has to be there:
+      # without it the range runs to the end of the file, over the user's lines.
+      blk=$(printf '%s' "$cur" | LC_ALL=C sed -n '/^; >>> supply-chain-hardening: /,/^; <<< supply-chain-hardening$/p')
+      case "$blk" in
+        *"$nl; <<< supply-chain-hardening")
+          if [ "$(printf '%s\n' "$blk" | LC_ALL=C sed -e 1d -e '$d' | ucf_sum "${m%%:*}")" = "$m" ]; then intact=1; fi ;;
+      esac
     fi
     case "$nl${cur//$cr/}$nl" in
       *"$nl; >>> supply-chain-hardening: "*) ;;

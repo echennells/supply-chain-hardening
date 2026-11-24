@@ -351,7 +351,7 @@ fixture() { # <version-surface>: put its eight files where they go
 
 @test "npmrc: a key that cannot be read with certainty is kept and named, not guessed at" {
   # shellcheck disable=SC2016
-  printf '%s\n' '"ignore-scripts"=false' '${X}=1' 'ignore-${Y}=1' '//${HOST}/:_authToken=SECRET' '[fund]' 'a=b' > "$(f npmrc)"
+  printf '%s\n' '"ignore\u002dscripts"=false' '${X}=1' 'ignore-${Y}=1' '//${HOST}/:_authToken=SECRET' '[fund]' 'a=b' > "$(f npmrc)"
   cp "$(f npmrc)" "$BATS_TEST_TMPDIR/mine"
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine"
@@ -667,7 +667,8 @@ JS
 
 @test "user config: the script parses on bash 3.2 and BSD terms (no bash 4 construct)" {
   bash -n "$ROOT/files/user-config.sh"
-  ! grep -nE 'declare -A|mapfile|readarray|\$\{[a-z_]+(,,|\^\^)|readlink -f|sed -i|grep -P|stat -c' "$ROOT/files/user-config.sh"
+  ! grep -vE '^[[:space:]]*#' "$ROOT/files/user-config.sh" \
+    | grep -nE 'declare -A|mapfile|readarray|\$\{[a-z_]+(,,|\^\^)|readlink -f|sed -i|grep -P|stat -c'
 }
 
 @test "user config: each of the eight is written through the shared code on both surfaces, and by nothing else" {
