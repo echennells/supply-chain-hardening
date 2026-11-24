@@ -101,12 +101,6 @@
           {{ pnpm_minimum_release_age_exclude | join(', ') if pnpm_minimum_release_age_exclude | length > 0 else '(none — all packages age-gated)' }}
   when: (pnpm_built_dependencies | length + pnpm_minimum_release_age_exclude | length) > 0
 
-- name: Create pnpm config directory
-  ansible.builtin.file:
-    path: "{{ pnpm_config_dir }}"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened pnpm rc (ini format — for pnpm 10 and earlier)
   # Replaced whole, but only a file that is exactly what this project last wrote
   # (files/user-config.sh, user_cfg_class). Anything else stopped the play in

@@ -116,10 +116,12 @@
     - composer_detected_version is version('2.11.0', '<')
 
 - name: Create composer config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.config/composer"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (ansible_env.HOME ~ '/.config/composer') | quote }}
+    creates: "{{ (ansible_env.HOME ~ '/.config/composer') }}"
+    executable: /bin/bash
 
 - name: Deploy hardened composer config.json (tier matches detected version)
   ansible.builtin.template:
@@ -133,13 +135,13 @@
 # When the role itself is run as root, the dest below is identical to the
 # per-user dest — the task becomes an idempotent re-render of the same file.
 - name: Create /root composer config directory (sudo coverage)
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
   become: true
-  ansible.builtin.file:
-    path: /root/.config/composer
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ '/root/.config/composer' | quote }}
+    creates: "{{ '/root/.config/composer' }}"
+    executable: /bin/bash
 
 - name: Deploy hardened composer config.json to /root (sudo coverage)
   become: true
@@ -172,10 +174,12 @@
   when: composer_detected_version | length > 0
 
 - name: Ensure composer's real global config home exists (invoking user)
-  ansible.builtin.file:
-    path: "{{ composer_home_user.stdout | trim }}"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (composer_home_user.stdout | trim) | quote }}
+    creates: "{{ (composer_home_user.stdout | trim) }}"
+    executable: /bin/bash
   when:
     - composer_detected_version | length > 0
     - composer_home_user is defined
@@ -210,13 +214,13 @@
   when: composer_detected_version | length > 0
 
 - name: Ensure root's composer global config home exists (sudo coverage)
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
   become: true
-  ansible.builtin.file:
-    path: "{{ composer_home_root.stdout | trim }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (composer_home_root.stdout | trim) | quote }}
+    creates: "{{ (composer_home_root.stdout | trim) }}"
+    executable: /bin/bash
   when:
     - composer_detected_version | length > 0
     - composer_home_root is defined

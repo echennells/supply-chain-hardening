@@ -12,12 +12,6 @@
 #     4.1.0 (2026-11-16) added one and reads this same BUNDLE_COOLDOWN (MEASURED,
 #     see docs/limitations.md), but no stock distro ships 4.1.0 yet
 
-- name: Create bundler config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.bundle"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened bundler config
   # Same keys as action/harden.sh. BUNDLE_DEPLOYMENT and BUNDLE_DISABLE_EXEC_LOAD
   # are gone from both: DEPLOYMENT adds nothing over FROZEN and silently moves every

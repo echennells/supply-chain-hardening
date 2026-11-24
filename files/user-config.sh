@@ -358,6 +358,8 @@ ucf_put() (
   path="$1" content="$3" tmp="" bak="" own=""
   trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
   trap 'exit 1' HUP INT TERM
+  # A directory that is there keeps its mode, whatever it is.
+  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || exit 1
   real=$(ucf_real "$path") || exit 1
   mode=$(ucf_mode "$real" "$2")
   if [ -e "$real" ]; then own=$(ucf_ls "$real"); own=${own#* }; fi

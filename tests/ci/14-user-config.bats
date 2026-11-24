@@ -822,3 +822,25 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
     *) [ "$(ucf_path pnpm-yaml)" = /h/.config/pnpm/config.yaml ] ;;
   esac
 }
+
+@test "user config: no task of the role sets a mode on a directory that may be the user's" {
+  # A `state: directory` with a mode changes a directory that is there (MEASURED: a
+  # 0750 home became 0755). Only fixed system paths may have one.
+  python3 -c 'import yaml' 2>/dev/null || skip "no PyYAML"
+  python3 - "$ROOT"/tasks/*.yml <<'PY'
+import sys, yaml
+bad = []
+def walk(tasks, f):
+    for t in tasks or []:
+        if not isinstance(t, dict): continue
+        for k in ('block', 'rescue', 'always'): walk(t.get(k), f)
+        m = t.get('ansible.builtin.file') or t.get('file')
+        if isinstance(m, dict) and m.get('state') == 'directory' and 'mode' in m:
+            paths = t['loop'] if m['path'] == '{{ item }}' else [m['path']]
+            for p in paths:
+                if '{{' in p or not p.startswith(('/etc/', '/usr/')): bad.append((f, t.get('name'), p))
+for f in sys.argv[1:]: walk(yaml.safe_load(open(f)), f)
+for b in bad: print(b)
+sys.exit(bool(bad))
+PY
+}

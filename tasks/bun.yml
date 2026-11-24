@@ -78,14 +78,6 @@
       bunfig and fail every install with
       "Invalid Bunfig: failed to load bunfig".
 
-- name: Ensure the bunfig parent directory exists
-  # XDG_CONFIG_HOME can point at a directory that does not exist yet; without
-  # this the template task fails instead of hardening.
-  ansible.builtin.file:
-    path: "{{ bun_bunfig_path | dirname }}"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened global bunfig.toml
   # Replaced whole, but only a file that is exactly what this project last wrote
   # (files/user-config.sh, user_cfg_class). Anything else stopped the play in

@@ -24,10 +24,12 @@
   failed_when: false
 
 - name: Create Maven config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.m2"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (ansible_env.HOME ~ '/.m2') | quote }}
+    creates: "{{ (ansible_env.HOME ~ '/.m2') }}"
+    executable: /bin/bash
   when: mvn_check.rc == 0
 
 - name: Deploy Maven settings.xml with HTTPS-only mirror and strict checksums

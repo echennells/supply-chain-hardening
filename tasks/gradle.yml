@@ -68,10 +68,12 @@
   when: gradle_check.rc == 0
 
 - name: Create Gradle init.d directory
-  ansible.builtin.file:
-    path: "{{ gradle_user_home_resolved }}/init.d"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (gradle_user_home_resolved ~ '/init.d') | quote }}
+    creates: "{{ (gradle_user_home_resolved ~ '/init.d') }}"
+    executable: /bin/bash
   when: gradle_check.rc == 0
 
 - name: Deploy Gradle init script to enforce HTTPS-only repositories

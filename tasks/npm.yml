@@ -127,13 +127,15 @@
   # {prefix}/etc may not exist yet (e.g. /usr/etc on NodeSource). Skipped when
   # globalconfig resolves to /etc/npmrc (already deployed) or to an empty /
   # relative value.
+  #
+  # Only when it is not there. With NPM_CONFIG_GLOBALCONFIG or a prefix in a home
+  # this is a directory of the user's, the home itself included, and a mode and an
+  # owner on it chowned it to root (MEASURED at 860a91c).
   become: true
-  ansible.builtin.file:
-    path: "{{ (npm_globalconfig.stdout | trim) | dirname }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ ((npm_globalconfig.stdout | trim) | dirname) | quote }}
+    creates: "{{ ((npm_globalconfig.stdout | trim) | dirname) }}"
+    executable: /bin/bash
   when:
     - npm_check.rc == 0
     - npm_globalconfig is defined

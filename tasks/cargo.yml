@@ -24,10 +24,12 @@
     cargo_home: "{{ cargo_home_check.stdout | trim }}"
 
 - name: Create cargo config directory
-  ansible.builtin.file:
-    path: "{{ cargo_home }}"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ cargo_home | quote }}
+    creates: "{{ cargo_home }}"
+    executable: /bin/bash
 
 - name: Deploy hardened cargo config.toml
   # Replaces the file whole. A config.toml this project did not write (a
@@ -61,13 +63,13 @@
   # Mirrors the composer /root pattern. A build run under sudo reads root's
   # CARGO_HOME, not the invoking user's, so without this the gate silently
   # does not apply to `sudo cargo build`.
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
   become: true
-  ansible.builtin.file:
-    path: /root/.cargo
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ '/root/.cargo' | quote }}
+    creates: "{{ '/root/.cargo' }}"
+    executable: /bin/bash
   when: cargo_cooldown_enforce | bool
 
 - name: Deploy publish-age gate config to /root (sudo coverage)

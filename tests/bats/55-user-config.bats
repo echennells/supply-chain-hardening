@@ -58,9 +58,17 @@ role() { # [ansible args]: output in $output, the play's status in $status
   # corepack's cache is root's (in a new home it downloads pnpm, 45 s a run), and
   # with no uv on PATH the role installs no uv tools into the home.
   run env -u XDG_CONFIG_HOME HOME="$H" COREPACK_HOME=/root/.cache/node/corepack \
-    PATH=/usr/local/bin:/usr/bin:/bin ansible-playbook site.yml --connection=local --limit localhost \
+    GRADLE_USER_HOME="$H/.gradle" CARGO_HOME="$H/.cargo" ${ROLE_ENV:+"$ROLE_ENV"} \
+    PATH="$T/bin:/usr/local/bin:/usr/bin:/bin" ansible-playbook site.yml --connection=local --limit localhost \
     --tags "${ONLY:-$TAGS}" --skip-tags npq,socket \
     -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false -e age_gate_refresh=false "$@"
+}
+
+stub_java_dotnet() { # the maven, gradle and nuget tasks' tool gates
+  mkdir -p "$T/bin"
+  printf '#!/bin/sh\necho "openjdk version 21" >&2\n' > "$T/bin/java"
+  printf '#!/bin/sh\necho 8.0.100\n' > "$T/bin/dotnet"
+  chmod +x "$T/bin/java" "$T/bin/dotnet"
 }
 
 changed() { echo "$output" | sed -n 's/^localhost .*changed=\([0-9]*\).*/\1/p' | tail -1; }
@@ -220,4 +228,45 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   [[ "$after_uv" != *2020-01-01* ]] && [[ "$after_pip" != *2020-01-01* ]]
   [ -z "$cls" ]
   [ "$edited" = "foreign $uv" ]
+}
+
+@test "role: no directory that is already there changes mode or owner, the home first of all" {
+  # MEASURED at d738db8: a 0750 home became 0755 (tasks/bun.yml), and every config
+  # directory of the user's with it. At 860a91c a global npmrc named in the home
+  # (NPM_CONFIG_GLOBALCONFIG) also made the home root's.
+  local d dirs="." x
+  for d in .config .config/pnpm .config/pip .config/uv .config/composer .config/pypoetry .composer .bundle \
+           .cargo .m2 .nuget .nuget/NuGet .gradle .gradle/init.d; do
+    mkdir -p "$H/$d"; dirs="$dirs $d"
+  done
+  chown -R 12345:12345 "$H"
+  for d in $dirs; do chmod 700 "$H/$d"; done
+  chmod 750 "$H"
+  stub_java_dotnet
+  local before after rootbefore rootafter
+  before=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
+  rootbefore=$(stat -c '%a %u:%g %n' /root /root/.config /root/.cargo /root/.composer /root/.config/composer 2>/dev/null)
+  ROLE_ENV="NPM_CONFIG_GLOBALCONFIG=$H/globalrc" ONLY=$TAGS,composer,cargo,maven,gradle,nuget role
+  after=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
+  rootafter=$(stat -c '%a %u:%g %n' /root /root/.config /root/.cargo /root/.composer /root/.config/composer 2>/dev/null)
+  echo "$output" | tail -4
+  [ "$status" -eq 0 ]
+  diff <(echo "$before") <(echo "$after")
+  diff <(echo "$rootbefore") <(echo "$rootafter")
+  # the files did land
+  for x in .npmrc .yarnrc.yml .bunfig.toml .bundle/config .cargo/config.toml .m2/settings.xml .nuget/NuGet/NuGet.Config .gradle/init.d/supply-chain-security.gradle .config/uv/uv.toml; do
+    [ -f "$H/$x" ] || { echo "$x missing"; return 1; }
+  done
+}
+
+@test "role: a directory it has to make is 0755 whatever the umask, and nothing in it is writable by others" {
+  stub_java_dotnet
+  umask 0000
+  ONLY=$TAGS,composer,cargo,maven,gradle,nuget role
+  umask 022
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
+  local d
+  for d in .config/pnpm .config/pip .config/uv .config/composer .config/pypoetry .bundle .cargo .m2 .nuget/NuGet .gradle/init.d; do
+    [ "$(stat -c %a "$H/$d")" = 755 ] || { stat -c '%a %n' "$H/$d"; return 1; }
+  done
 }

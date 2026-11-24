@@ -98,12 +98,6 @@
     - pip_age_gate_support is defined
     - (pip_age_gate_support.stdout | default('') | trim) is match('^UNSUPPORTED:')
 
-- name: Create pip config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.config/pip"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened pip.conf as fallback
   # Replaced whole, but only a file that is exactly what this project last wrote
   # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
@@ -142,10 +136,12 @@
 # env layer.
 
 - name: Create Poetry config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.config/pypoetry"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (ansible_env.HOME ~ '/.config/pypoetry') | quote }}
+    creates: "{{ (ansible_env.HOME ~ '/.config/pypoetry') }}"
+    executable: /bin/bash
 
 - name: Deploy Poetry's publish-age gate (never over an existing config)
   # force: false because this file is the user's whole Poetry config, and appending

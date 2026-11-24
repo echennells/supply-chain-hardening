@@ -24,12 +24,6 @@
         else ansible_env.HOME ~ '/.config/uv'
       }}
 
-- name: Create uv config directory
-  ansible.builtin.file:
-    path: "{{ uv_config_dir }}"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened uv.toml
   # Replaced whole, but only a file that is exactly what this project last wrote
   # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
