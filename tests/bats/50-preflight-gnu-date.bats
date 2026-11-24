@@ -101,7 +101,10 @@ run_pf() {
     echo "$output" | grep -q 'this role supports Linux'
     echo "$output" | grep -q 'action/harden.sh --emit=plain'
     # It is the first task: none of the checks below it ran, the sudo ones included.
-    [ "$(echo "$output" | grep -c '^TASK \[')" -le 2 ] || { echo "$output" | grep '^TASK \['; return 1; }
+    # (Gathering facts and loading the defaults are this test's own playbook.)
+    [ "$(echo "$output" | grep '^TASK \[' | grep -vcE 'Gathering Facts|include_vars')" -eq 1 ] \
+      && echo "$output" | grep '^TASK \[' | tail -n 1 | grep -q 'Refuse a macOS target before anything is written' \
+      || { echo "$output" | grep '^TASK \['; return 1; }
     [[ "$output" != *"Detect non-managed existing system config files"* ]]
   done
 }
