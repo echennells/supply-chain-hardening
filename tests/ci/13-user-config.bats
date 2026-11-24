@@ -23,6 +23,8 @@ setup() {
   stub_bin yarn 'echo 4.18.1'
 }
 
+teardown() { touch "$BATS_TEST_TMPDIR/stop"; }
+
 f() { # <kind>: where harden.sh puts it here
   case "$1" in
     npmrc) echo "$TEST_HOME/.npmrc" ;;
@@ -656,9 +658,12 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   plant
   lib
   local i=0 bad="$BATS_TEST_TMPDIR/bad"
-  ( while [ ! -e "$BATS_TEST_TMPDIR/stop" ]; do
+  # bounded, and stopped by teardown too, so a failure here cannot hang the suite
+  ( n=0
+    while [ ! -e "$BATS_TEST_TMPDIR/stop" ] && [ "$n" -lt 20000 ]; do
+      n=$((n + 1))
       grep -q SECRET-npmrc "$(f npmrc)" 2>/dev/null || { echo half >> "$bad"; }
-    done ) 3>&- &
+    done ) 3>&- >/dev/null 2>&1 &
   local pid=$!
   while [ "$i" -lt 20 ]; do
     i=$((i + 1))
