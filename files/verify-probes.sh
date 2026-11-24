@@ -1150,7 +1150,7 @@ scv_pnpm_npmrc_read() {
 }
 
 if ! have pnpm || { command -v requested >/dev/null 2>&1 && ! requested pnpm; }; then
-  :   # the preamble's pnpm row already says which
+  :   # the pnpm row above already says which
 else
   pnpv=$(cd / && pnpm --version 2>/dev/null | head -1 | tr -d '\r')
   case "$pnpv" in [0-9]*.[0-9]*) ;; *) pnpv="" ;; esac

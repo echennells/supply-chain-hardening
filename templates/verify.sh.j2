@@ -6,10 +6,10 @@
 #
 #   00-context.sh   templates/verify.sh.j2         (this file)
 #                   the CONTEXT PREAMBLE, the row/expectation API, and the
-#                   probes that are still host-only (npm, pnpm, npq,
+#                   probes that are still host-only (npm, npq,
 #                   sfw, PATH wrappers, go GOFLAGS, pip)
 #   50-probes.sh    files/verify-probes.sh         (SHARED, byte-identical
-#                   with the CI surface: yarn, bun, deno, uv, pip age gates,
+#                   with the CI surface: yarn, pnpm, bun, deno, uv, pip age gates,
 #                   go checksum db + toolchain, composer, cargo, bundler,
 #                   maven, gradle, nuget)
 #   90-report.sh    templates/verify-report.sh.j2  (renderer + exit code)
@@ -26,7 +26,7 @@
 #   yarn npmMinimalAgeGate: "2d"     -> 2 MINUTES on yarn 4.10.x, gate effectively absent
 #   npm  MINIMUM_RELEASE_AGE         -> key npm does not read, gate absent
 #   pnpm 11                          -> stopped reading rc/npmrc entirely
-#   pnpm 10 block-exotic-subdeps     -> accepted the key, ignored it
+#   pnpm < 10.26 block-exotic-subdeps -> accepted the key, ignored it
 #   bun  ignoreScripts               -> bunfig not loaded for `bun run`
 #   npq  on Node < 20.13             -> passes through to npm, exits 0
 #
