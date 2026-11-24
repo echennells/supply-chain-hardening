@@ -253,15 +253,15 @@ ucf_marker() {
 # ucf_sign: stdin, whose first or second line is a bare marker, with the
 # checksum added to that line.
 ucf_sign() {
-  local body l n=0 sum
+  local body l n=0 at=0 sum
   body=$(cat)
-  while IFS= read -r l; do
+  while [ "$n" -lt 2 ] && IFS= read -r l; do
     n=$((n + 1))
-    case "$l" in "# Managed by "*|"; Managed by "*) break ;; esac
-    [ "$n" -lt 2 ] || return 1
+    case "$l" in "# Managed by "*|"; Managed by "*) at=$n; break ;; esac
   done <<<"$body"
-  sum=$(printf '%s\n' "$body" | ucf_body "$n" | ucf_sum)
-  printf '%s\n' "$body" | sed "${n}s/\$/; self-check $sum/"
+  [ "$at" -gt 0 ] || return 1
+  sum=$(printf '%s\n' "$body" | ucf_body "$at" | ucf_sum)
+  printf '%s\n' "$body" | sed "${at}s/\$/; self-check $sum/"
 }
 
 # ucf_settings <kind>: every setting line any version of this project has
@@ -514,7 +514,9 @@ ucf_put() (
   if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
   [ -f "$real" ] && [ -w "$real" ] || exit 1
   bak=$(ucf_copy_new "$real") || exit 1
-  cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode" && rm -f -- "$bak"
+  if cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
+  printf 'error: %s may be incomplete; as it was, it is at %s\n' "$path" "$bak"
+  exit 1
 )
 
 # ucf_copy_new <path>: a 0600 copy next to it, named as ansible's backup names one
@@ -614,7 +616,7 @@ ucf_trim() {
 # ucf_unsafe <text>: npm's ini unsafe() (quotes, comments), in REPLY. Fails on a
 # quoted text with an escape in it, which only a JSON parser can read.
 ucf_unsafe() {
-  local s t special='[\;#]*'
+  local s t
   ucf_trim "$1"; s=$REPLY
   case "$s" in
     \'*\')
@@ -628,10 +630,9 @@ ucf_unsafe() {
       case "$t" in *\\*) return 1 ;; *\"*) REPLY=$s ;; *) REPLY=$t ;; esac
       return 0 ;;
   esac
-  # An escape outside quotes only ever yields a \, ; or #, so a key or value with
-  # one is none of ours and is left as it is.
-  t=${s%%$special}
-  case "${s#"$t"}" in \\*) REPLY=$s ;; *) ucf_trim "$t" ;; esac
+  # Up to the first ; or #. One with a \ before it does not end the text for npm;
+  # what is cut there keeps the \, and no key or value of ours has one.
+  ucf_trim "${s%%[;#]*}"
   return 0
 }
 
@@ -2460,7 +2461,10 @@ put_user_cfg() {
       "error: "*)  err "${tool%rc}: ${l#error: }" ;;
     esac
   done <<<"$out"
-  [[ "$rc" -eq 0 ]] || exit 1
+  if [[ "$rc" -ne 0 ]]; then
+    [[ -z "$bak" ]] || err "${tool%rc}: a copy of $path from before this run is at $bak"
+    exit 1
+  fi
   if [[ -n "$gone" ]]; then
     warn "npm: took your own setting of $gone out of $path, because a line after this project's block would win over it. The file as it was is at $bak"
   elif [[ -n "$bak" ]]; then
