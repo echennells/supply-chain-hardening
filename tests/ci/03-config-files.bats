@@ -551,9 +551,9 @@ one_backup_of() {
   plant_user_configs
   run harden ECOSYSTEMS=cargo,maven,nuget -- --emit=plain
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "cargo: replaced $TEST_HOME/.cargo/config.toml, which this project did not write"
-  echo "$output" | grep -q "maven: replaced $TEST_HOME/.m2/settings.xml, which this project did not write"
-  echo "$output" | grep -q "nuget: replaced $TEST_HOME/.nuget/NuGet/NuGet.Config, which this project did not write"
+  echo "$output" | grep -q "cargo: replaced $TEST_HOME/.cargo/config.toml, which was not exactly what this project last wrote"
+  echo "$output" | grep -q "maven: replaced $TEST_HOME/.m2/settings.xml, which was not exactly what this project last wrote"
+  echo "$output" | grep -q "nuget: replaced $TEST_HOME/.nuget/NuGet/NuGet.Config, which was not exactly what this project last wrote"
   one_backup_of "$TEST_HOME/.cargo/config.toml" "$BATS_TEST_TMPDIR/orig/cargo"
   one_backup_of "$TEST_HOME/.m2/settings.xml" "$BATS_TEST_TMPDIR/orig/maven"
   one_backup_of "$TEST_HOME/.nuget/NuGet/NuGet.Config" "$BATS_TEST_TMPDIR/orig/nuget"
@@ -570,7 +570,7 @@ one_backup_of() {
     > "$TEST_HOME/.nuget/NuGet/NuGet.Config"
   run harden ECOSYSTEMS=cargo,maven,nuget -- --emit=plain
   [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q 'which this project did not write'
+  ! echo "$output" | grep -q 'not exactly what this project last wrote'
   [ -z "$(ls -a "$TEST_HOME/.cargo" "$TEST_HOME/.m2" | grep '~$')" ]
   [ "$(ls -a "$TEST_HOME/.nuget/NuGet" | grep -c '~$')" -eq 1 ]
   echo "$output" | grep -q "replaced dotnet's first-run"

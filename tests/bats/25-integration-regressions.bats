@@ -430,10 +430,12 @@ ucfg_backup_of() {
   local tags=maven,nuget
   ucfg_setup none
   ucfg_no_cargo && tags=cargo,$tags
-  # the role's own files as 8281a6b wrote them, before they carried a marker
-  printf '# Cargo supply-chain hardening — system defaults.\n[net]\nretry = 3\n' > "$T/home/.cargo/config.toml"
-  printf '<settings><mirrors><mirror><id>central-https</id></mirror></mirrors><activeProfiles><activeProfile>strict-checksums</activeProfile></activeProfiles></settings>\n' \
-    > "$T/home/.m2/settings.xml"
+  # the role's own files as v2.0.0 wrote them, before they carried a marker
+  local fx=/opt/test-fixtures/user-config/v2.0.0-role
+  [ -d "$fx" ] || fx="$ROLE_DIR/tests/fixtures/user-config/v2.0.0-role"
+  ! grep -l 'Managed by' "$fx/cargo" "$fx/maven"
+  cp "$fx/cargo" "$T/home/.cargo/config.toml"
+  cp "$fx/maven" "$T/home/.m2/settings.xml"
   # dotnet's first-run file as SDK 8.0.134 writes it (UTF-8 BOM, no final
   # newline), which nobody chose
   printf '\357\273\277<?xml version="1.0" encoding="utf-8"?>\n<configuration>\n  <packageSources>\n    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />\n  </packageSources>\n</configuration>' \

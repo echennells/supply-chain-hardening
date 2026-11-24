@@ -1,11 +1,12 @@
 #!/usr/bin/env bats
-# The role and what is the user's in the eight per-user config files it writes
-# (issue 48, item 1). ~/.npmrc is merged; the other seven are replaced whole, and
-# the preflight refuses one that is not exactly what the role last wrote.
+# The role and what is the user's in the per-user config files it writes (issue 48,
+# item 1). ~/.npmrc is merged; the others are replaced whole, and the preflight
+# refuses one that is not exactly what the role last wrote.
 #
-# MEASURED at d738db8: an apply dropped a fake token or registry from all eight,
+# MEASURED at d738db8: an apply dropped a fake token or registry from eight of them,
 # with no copy and no message, turned a 0600 ~/.npmrc into 0644, and did it again
-# to a token added after hardening.
+# to a token added after hardening. At 860a91c it still did so to Composer's
+# config.json, and to a token added after hardening to cargo's, Maven's and NuGet's.
 #
 # Each test applies the role for a home of its own (HOME is what the role reads),
 # with only the tasks that write these files. tests/ci/14-user-config.bats covers
@@ -13,16 +14,18 @@
 
 load setup
 
-SEVEN="pnpm-yaml pnpm-rc yarn pip uv bun bundler"
-TAGS=npm,pnpm,yarn,bun,uv,pip,bundler
+MARKED="pnpm-yaml pnpm-rc yarn pip uv bun bundler cargo maven nuget"
+OTHERS="$MARKED composer"
+TAGS=npm,pnpm,yarn,bun,uv,pip,bundler,cargo,maven,nuget,composer
 
 setup() {
   require_root "applies the role, which writes /etc and /usr/local/bin"
   T=$(mktemp -d)
   H="$T/home"
   mkdir -p "$H"
+  stub_java_dotnet
   # What the role also writes outside the home, so a test can leave it as it was.
-  SAVED="/etc/npmrc /etc/pip.conf /etc/uv/uv.toml /etc/environment /etc/profile.d/supply-chain-hardening.sh /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/sbin/supply-chain-age-gate-refresh"
+  SAVED="/root/.cargo/cooldown.toml /root/.config/composer/config.json /root/.composer/config.json /etc/npmrc /etc/pip.conf /etc/uv/uv.toml /etc/environment /etc/profile.d/supply-chain-hardening.sh /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/sbin/supply-chain-age-gate-refresh"
   local x
   for x in $SAVED; do
     if [ -e "$x" ]; then mkdir -p "$T/saved$(dirname "$x")"; cp -p "$x" "$T/saved$x"; fi
@@ -48,6 +51,10 @@ f() { # <kind>
     uv) echo "$H/.config/uv/uv.toml" ;;
     bun) echo "$H/.bunfig.toml" ;;
     bundler) echo "$H/.bundle/config" ;;
+    cargo) echo "$H/.cargo/config.toml" ;;
+    maven) echo "$H/.m2/settings.xml" ;;
+    nuget) echo "$H/.nuget/NuGet/NuGet.Config" ;;
+    composer) echo "$H/.config/composer/config.json" ;;
   esac
 }
 
@@ -83,20 +90,25 @@ plant() {
   printf '[[index]]\nurl = "https://u:SECRET-uv@example/simple"\n' > "$(f uv)"
   printf '[install]\nregistry = "https://u:SECRET-bun@example"\n' > "$(f bun)"
   printf -- '---\nBUNDLE_GEMS__EXAMPLE: "u:SECRET-bundler"\n' > "$(f bundler)"
+  mkdir -p "$H/.cargo" "$H/.m2" "$H/.nuget/NuGet" "$H/.config/composer"
+  printf '[registries.corp]\ntoken = "SECRET-cargo"\n' > "$(f cargo)"
+  printf '<settings><servers><server><id>corp</id><password>SECRET-maven</password></server></servers></settings>\n' > "$(f maven)"
+  printf '<configuration><packageSourceCredentials><corp><add key="ClearTextPassword" value="SECRET-nuget" /></corp></packageSourceCredentials></configuration>\n' > "$(f nuget)"
+  printf '{"config": {"http-basic": {"corp": {"username": "u", "password": "SECRET-composer"}}}}\n' > "$(f composer)"
   local k
-  for k in npmrc $SEVEN; do chmod 600 "$(f "$k")"; done
+  for k in npmrc $OTHERS; do chmod 600 "$(f "$k")"; done
 }
 
 snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prune -o -path ./.npm -prune -o -path ./.local -prune -o \( -type f -o -type l \) -printf '%p %m %u %s\n' -exec cksum {} \; | sort ); }
 
-@test "role: refuses the seven when they hold something of the user's, before anything is changed, and says which" {
+@test "role: refuses the others when they hold something of the user's, before anything is changed, and says which" {
   plant
   local before k
   before=$(snapshot)
   role --diff
   [ "$status" -ne 0 ]
   echo "$output" | grep -q '\[supply-chain-hardening\] Refusing to overwrite existing per-user config'
-  for k in $SEVEN; do echo "$output" | grep -qF "$(f "$k")" || { echo "$k not named"; return 1; }; done
+  for k in $OTHERS; do echo "$output" | grep -qF "$(f "$k")" || { echo "$k not named"; return 1; }; done
   echo "$output" | grep -q 'accept_user_config_overwrite=true'
   [ "$(changed)" = 0 ]
   diff <(echo "$before") <(snapshot)
@@ -120,7 +132,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   ! echo "$output" | grep SECRET
 }
 
-@test "role: with the overwrite accepted ~/.npmrc is merged, the seven are copied 0600 and replaced, nothing is lost or printed, and a second run changes nothing" {
+@test "role: with the overwrite accepted ~/.npmrc is merged, the others are copied 0600 and replaced, nothing is lost or printed, and a second run changes nothing" {
   plant
   role -vvv --diff -e accept_user_config_overwrite=true
   [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
@@ -135,9 +147,9 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   [ "$(stat -c %a "$(copies npmrc)")" = 600 ]
   head -1 "$(f npmrc)" | grep -q '^; >>> supply-chain-hardening: Managed by ansible-supply-chain-security; self-check sha256:'
   echo "$output" | grep -qF "$(f npmrc): your own setting of fund was taken out"
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     ! grep -q SECRET "$(f "$k")"
-    grep -q 'Managed by ansible-supply-chain-security; self-check sha256:' "$(f "$k")" || { echo "$k"; return 1; }
+    [ "$k" = composer ] || grep -q 'Managed by ansible-supply-chain-security; self-check sha256:' "$(f "$k")" || { echo "$k"; return 1; }
     grep -q "SECRET-$k" "$(copies "$k")" || { echo "$k lost"; return 1; }
     [ "$(stat -c %a "$(copies "$k")")" = 600 ]
     [ "$(stat -c %a "$(f "$k")")" = 600 ]              # kept, not loosened to 0644
@@ -150,18 +162,18 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   diff <(echo "$before") <(snapshot)
 }
 
-@test "role: a token added after hardening stops the play for the seven, and stays in ~/.npmrc" {
+@test "role: a token added after hardening stops the play for the others, and stays in ~/.npmrc" {
   role
   [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
   [ "$(stat -c %a "$(f npmrc)")" = 600 ]
   [ "$(stat -c %a "$(f uv)")" = 644 ]
   local k
-  for k in npmrc $SEVEN; do printf '# SECRET-%s\n' "$k" >> "$(f "$k")"; done
+  for k in npmrc $OTHERS; do printf '# SECRET-%s\n' "$k" >> "$(f "$k")"; done
   local before
   before=$(snapshot)
   role
   [ "$status" -ne 0 ]
-  for k in $SEVEN; do echo "$output" | grep -qF "$(f "$k")" || { echo "$k not named"; return 1; }; done
+  for k in $OTHERS; do echo "$output" | grep -qF "$(f "$k")" || { echo "$k not named"; return 1; }; done
   diff <(echo "$before") <(snapshot)
   ONLY=npm role
   [ "$status" -eq 0 ]
@@ -173,7 +185,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   local v k d
   for v in v2.0.0-action v2.0.0-role v2.1.0-action v2.1.0-role; do
     rm -rf "$H"; mkdir -p "$H"
-    for k in npmrc $SEVEN; do
+    for k in npmrc $OTHERS; do
       mkdir -p "$(dirname "$(f "$k")")"
       d="/opt/test-fixtures/user-config/$v/$k"
       [ -f "$d" ] || d="$ROLE_DIR/tests/fixtures/user-config/$v/$k"
@@ -182,9 +194,9 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
     echo '//registry.example/:_authToken=SECRET-npmrc' >> "$(f npmrc)"
     role
     [ "$status" -eq 0 ] || { echo "$v"; echo "$output" | tail -30; return 1; }
-    for k in npmrc $SEVEN; do
+    for k in npmrc $OTHERS; do
       [ -z "$(copies "$k")" ] || { echo "$v $k"; return 1; }
-      grep -q 'Managed by ansible-supply-chain-security; self-check ' "$(f "$k")" || { echo "$v $k"; return 1; }
+      [ "$k" = composer ] || grep -q 'Managed by ansible-supply-chain-security; self-check ' "$(f "$k")" || { echo "$v $k"; return 1; }
     done
     [ "$(sed '1,/^; <<< supply-chain-hardening$/d' "$(f npmrc)")" = '//registry.example/:_authToken=SECRET-npmrc' ] || { echo "$v"; cat "$(f npmrc)"; return 1; }
   done
@@ -242,11 +254,10 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   chown -R 12345:12345 "$H"
   for d in $dirs; do chmod 700 "$H/$d"; done
   chmod 750 "$H"
-  stub_java_dotnet
   local before after rootbefore rootafter
   before=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
   rootbefore=$(stat -c '%a %u:%g %n' /root /root/.config /root/.cargo /root/.composer /root/.config/composer 2>/dev/null)
-  ROLE_ENV="NPM_CONFIG_GLOBALCONFIG=$H/globalrc" ONLY=$TAGS,composer,cargo,maven,gradle,nuget role
+  ROLE_ENV="NPM_CONFIG_GLOBALCONFIG=$H/globalrc" ONLY=$TAGS,gradle role
   after=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
   rootafter=$(stat -c '%a %u:%g %n' /root /root/.config /root/.cargo /root/.composer /root/.config/composer 2>/dev/null)
   echo "$output" | tail -4
@@ -260,13 +271,46 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
 }
 
 @test "role: a directory it has to make is 0755 whatever the umask, and nothing in it is writable by others" {
-  stub_java_dotnet
   umask 0000
-  ONLY=$TAGS,composer,cargo,maven,gradle,nuget role
+  ONLY=$TAGS,gradle role
   umask 022
   [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
   local d
   for d in .config/pnpm .config/pip .config/uv .config/composer .config/pypoetry .bundle .cargo .m2 .nuget/NuGet .gradle/init.d; do
     [ "$(stat -c %a "$H/$d")" = 755 ] || { stat -c '%a %n' "$H/$d"; return 1; }
   done
+}
+
+@test "role: root's own composer config is left alone and listed when it holds something of root's" {
+  # The role here runs as root with a home elsewhere, so /root is another home to it.
+  local r=/root/.config/composer/config.json
+  mkdir -p "$(dirname "$r")"
+  printf '{"config": {"http-basic": {"corp": {"username": "u", "password": "SECRET-root"}}}}\n' > "$r"
+  cp "$r" "$T/before"
+  ONLY=composer role --diff
+  cmp "$r" "$T/before"; local same=$?
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
+  [ "$same" -eq 0 ]
+  echo "$output" | grep -q "Composer sudo coverage — $r is not exactly what this project last wrote, so it was left alone"
+  ! echo "$output" | grep SECRET
+  # and one this project wrote is kept up to date
+  rm -f "$r"
+  ONLY=composer role
+  grep -q '"secure-http": true' "$r"
+  ! echo "$output" | grep -q 'Composer sudo coverage'
+}
+
+@test "role: a home that only has ~/.composer keeps it, and its auth.json is not touched" {
+  mkdir -p "$H/.composer"
+  printf '{"github-oauth": {"github.com": "SECRET"}}\n' > "$H/.composer/auth.json"
+  chmod 600 "$H/.composer/auth.json"
+  cp -p "$H/.composer/auth.json" "$T/auth"
+  ONLY=composer role
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
+  ONLY=composer role
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
+  [ ! -e "$H/.config/composer" ]
+  grep -q '"secure-http": true' "$H/.composer/config.json"
+  cmp "$H/.composer/auth.json" "$T/auth"
+  [ "$(stat -c %a "$H/.composer/auth.json")" = 600 ]
 }

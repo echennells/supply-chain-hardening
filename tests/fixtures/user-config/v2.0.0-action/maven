@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Managed by supply-chain-harden action -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <servers/>
+  <mirrors>
+    <!-- Force HTTPS Maven Central — refuses HTTP-only repos -->
+    <mirror>
+      <id>central-https-only</id>
+      <mirrorOf>external:http:*</mirrorOf>
+      <name>HTTPS-only mirror</name>
+      <url>https://repo.maven.apache.org/maven2</url>
+      <blocked>true</blocked>
+    </mirror>
+  </mirrors>
+  <profiles/>
+</settings>

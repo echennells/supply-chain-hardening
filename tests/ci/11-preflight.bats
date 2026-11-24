@@ -189,11 +189,11 @@ sudo_rs_stub() {
   printf '[registries.corp]\nindex = "sparse+https://corp.invalid/"\n' > "$TEST_HOME/.cargo/config.toml"
   run preflight
   [ "$status" -eq 1 ]
-  [[ "$output" == *"STOP  $TEST_HOME/.cargo/config.toml: not written by this project"*"accept_user_config_overwrite=true"* ]]
+  [[ "$output" == *"STOP  $TEST_HOME/.cargo/config.toml: not exactly what this project last wrote"*"accept_user_config_overwrite=true"* ]]
   # Ours, by the marker the role writes first.
   printf '# Cargo supply-chain hardening — system defaults.\n[net]\nretry = 3\n' > "$TEST_HOME/.cargo/config.toml"
   run preflight
-  [[ "$output" == *"$TEST_HOME/.cargo/config.toml: written by this project"* ]]
+  [[ "$output" == *"$TEST_HOME/.cargo/config.toml: exactly what this project last wrote"* ]]
   # CARGO_HOME moves it, as the role resolves it.
   PF_ENV=(CARGO_HOME="$BATS_TEST_TMPDIR/ch")
   mkdir -p "$BATS_TEST_TMPDIR/ch"; echo 'x' > "$BATS_TEST_TMPDIR/ch/config.toml"
@@ -212,7 +212,7 @@ sudo_rs_stub() {
   [[ "$output" != *"settings.xml"* ]]
   stub_bin mvn 'echo "Apache Maven 3.9.9"'
   run preflight
-  [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not written by this project"* ]]
+  [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not exactly what this project last wrote"* ]]
 }
 
 @test "preflight: sudo is only asked whether it needs a password, never to read or run anything else" {
@@ -301,11 +301,11 @@ exit 0"
   # and the role asks about every kind the block knows, once each
   # shellcheck disable=SC1090
   . "$role"
-  for k in cargo maven nuget $UCF_KINDS; do
+  for k in $UCF_KINDS; do
     [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE "^ +$k: \[")" -eq 1 ] || { echo "$k"; return 1; }
-    [ -n "$(HOME=/h ucf_path "$k")" ]
+    [ "$k" = composer-home ] || [ -n "$(HOME=/h ucf_path "$k")" ]
   done
-  [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE '^ +[a-z-]+: \[')" -eq 11 ]
+  [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE '^ +[a-z-]+: \[')" -eq 13 ]
 }
 
 @test "preflight: the ansible-core versions it calls affected are the role's" {

@@ -1,17 +1,20 @@
 #!/usr/bin/env bats
-# The eight per-user config files this project writes, and what is the user's in
-# them (issue 48, item 1). MEASURED at d738db8: a fake token or registry in each
-# was gone after one run, with no copy and no message, and so was a token added
-# after hardening. Every test here that plants one fails there.
+# The per-user config files this project writes, and what is the user's in them
+# (issue 48, item 1). MEASURED at d738db8: a fake token or registry in each was
+# gone after one run, with no copy and no message, and so was a token added after
+# hardening (cargo, maven and nuget kept a copy on the first run, and lost a token
+# added later). Every test here that plants one fails there.
 #
-# ~/.npmrc is merged. The other seven are replaced whole, but only a file that is
-# exactly what was last written goes without a copy and a warning.
+# ~/.npmrc is merged. The others are replaced whole, but only a file that is exactly
+# what was last written goes without a copy and a warning.
 
 load helpers
 
 ROOT="${BATS_TEST_DIRNAME}/../.."
-ALL=npm,pnpm,yarn,pip,uv,bun,bundler
-SEVEN="pnpm-yaml pnpm-rc yarn pip uv bun bundler"
+ALL=npm,pnpm,yarn,pip,uv,bun,bundler,cargo,maven,nuget,composer
+# Replaced whole: the ones with a marker line, and Composer's JSON, which has none.
+MARKED="pnpm-yaml pnpm-rc yarn pip uv bun bundler cargo maven nuget"
+OTHERS="$MARKED composer"
 
 setup() {
   common_setup
@@ -21,6 +24,9 @@ setup() {
   # (a pnpm 12 here took 18 s, and corepack downloads).
   stub_bin pnpm 'echo 11.28.13'
   stub_bin yarn 'echo 4.18.1'
+  # The preflight looks at Maven's and NuGet's only where a tool would read them.
+  stub_bin java 'echo "openjdk version 21" >&2'
+  stub_bin dotnet 'echo 8.0.100'
 }
 
 teardown() { touch "$BATS_TEST_TMPDIR/stop"; }
@@ -35,6 +41,10 @@ f() { # <kind>: where harden.sh puts it here
     uv) echo "$XDG/uv/uv.toml" ;;
     bun) echo "$XDG/.bunfig.toml" ;;
     bundler) echo "$TEST_HOME/.bundle/config" ;;
+    cargo) echo "$TEST_HOME/.cargo/config.toml" ;;
+    maven) echo "$TEST_HOME/.m2/settings.xml" ;;
+    nuget) echo "$TEST_HOME/.nuget/NuGet/NuGet.Config" ;;
+    composer) echo "$XDG/composer/config.json" ;;
   esac
 }
 
@@ -49,7 +59,8 @@ pf() {
 
 # plant: a fake secret of the user's in each file, as each tool would hold it
 plant() {
-  mkdir -p "$XDG/pnpm" "$XDG/uv" "$TEST_HOME/.config/pip" "$TEST_HOME/.bundle"
+  mkdir -p "$XDG/pnpm" "$XDG/uv" "$TEST_HOME/.config/pip" "$TEST_HOME/.bundle" \
+    "$TEST_HOME/.cargo" "$TEST_HOME/.m2" "$TEST_HOME/.nuget/NuGet" "$XDG/composer"
   printf '//registry.example/:_authToken=SECRET-npmrc\n' > "$(f npmrc)"
   printf 'registry: https://u:SECRET-pnpm-yaml@example/\n' > "$(f pnpm-yaml)"
   printf 'registry=https://u:SECRET-pnpm-rc@example/\n' > "$(f pnpm-rc)"
@@ -58,6 +69,10 @@ plant() {
   printf '[[index]]\nurl = "https://u:SECRET-uv@example/simple"\n' > "$(f uv)"
   printf '[install]\nregistry = "https://u:SECRET-bun@example"\n' > "$(f bun)"
   printf -- '---\nBUNDLE_GEMS__EXAMPLE: "u:SECRET-bundler"\n' > "$(f bundler)"
+  printf '[registries.corp]\ntoken = "SECRET-cargo"\n' > "$(f cargo)"
+  printf '<settings><servers><server><id>corp</id><password>SECRET-maven</password></server></servers></settings>\n' > "$(f maven)"
+  printf '<configuration><packageSourceCredentials><corp><add key="ClearTextPassword" value="SECRET-nuget" /></corp></packageSourceCredentials></configuration>\n' > "$(f nuget)"
+  printf '{"config": {"http-basic": {"corp": {"username": "u", "password": "SECRET-composer"}}}}\n' > "$(f composer)"
 }
 
 mode() { ls -ld "$1" | cut -c1-10; }
@@ -108,13 +123,13 @@ lib() {
 
 # ------------------------------------------------------------- nothing is lost
 
-@test "user config: a fake secret in each of the eight files is still on disk after the first run" {
+@test "user config: a fake secret in each of the files is still on disk after the first run" {
   plant
   apply > "$BATS_TEST_TMPDIR/log" 2>&1
   grep -q 'SECRET-npmrc' "$(f npmrc)"                  # still in use
   [ -z "$(copies npmrc)" ]                             # so no copy was needed
   local k
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     assert_file_lacks "$(f "$k")" SECRET               # replaced
     [ "$(copies "$k" | wc -l)" -eq 1 ] || { echo "$k: $(copies "$k")"; return 1; }
     grep -q "SECRET-$k" "$(copies "$k")"
@@ -126,18 +141,16 @@ lib() {
   ! grep SECRET "$BATS_TEST_TMPDIR/log"
 }
 
-@test "user config: a token added after hardening survives the next run, in each of the eight" {
+@test "user config: a token added after hardening survives the next run, in each of them" {
   apply >/dev/null 2>&1
   # Appended, so the file still carries the marker: recognising our files by the
   # marker alone deleted it (MEASURED at d738db8).
   local k
-  for k in npmrc $SEVEN; do
-    grep -q 'Managed by supply-chain-harden' "$(f "$k")"
-    printf '# SECRET-%s\n' "$k" >> "$(f "$k")"
-  done
+  for k in npmrc $MARKED; do grep -q 'Managed by supply-chain-harden' "$(f "$k")"; done
+  for k in npmrc $OTHERS; do printf '# SECRET-%s\n' "$k" >> "$(f "$k")"; done
   apply > "$BATS_TEST_TMPDIR/log" 2>&1
   grep -q 'SECRET-npmrc' "$(f npmrc)"
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     assert_file_lacks "$(f "$k")" SECRET
     grep -q "SECRET-$k" "$(copies "$k")" || { echo "$k lost"; return 1; }
   done
@@ -147,17 +160,17 @@ lib() {
 @test "user config: CRLF files, and files with no last newline, are copied byte for byte; one of ours saved as CRLF is noticed" {
   local k
   plant
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     awk '{ printf "%s\r\n", $0 } END { printf "# no last newline" }' "$(f "$k")" > "$BATS_TEST_TMPDIR/x.$k"
     cat "$BATS_TEST_TMPDIR/x.$k" > "$(f "$k")"
   done
   apply >/dev/null 2>&1
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     cmp "$(copies "$k")" "$BATS_TEST_TMPDIR/x.$k" || { echo "$k"; return 1; }
     assert_file_lacks "$(f "$k")" SECRET
   done
   lib
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     awk '{ printf "%s\r\n", $0 }' "$(f "$k")" > "$BATS_TEST_TMPDIR/x"
     [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k"; return 1; }
   done
@@ -174,7 +187,7 @@ lib() {
   # with the user content still there, not because it is gone
   local k
   grep -q SECRET-npmrc "$(f npmrc)"
-  for k in $SEVEN; do grep -q "SECRET-$k" "$(copies "$k")"; done
+  for k in $OTHERS; do grep -q "SECRET-$k" "$(copies "$k")"; done
 }
 
 @test "user config: content that comes back every run is copied once, not once per run" {
@@ -186,7 +199,7 @@ lib() {
     apply >/dev/null 2>&1
   done
   local k
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     [ "$(copies "$k" | wc -l)" -eq 1 ] || { copies "$k"; return 1; }
     [ "$(mode "$(copies "$k")")" = -rw------- ]
   done
@@ -195,7 +208,7 @@ lib() {
 @test "user config: no per-user file at all is created as before, and nothing is said about it" {
   apply > "$BATS_TEST_TMPDIR/log" 2>&1
   local k
-  for k in npmrc $SEVEN; do
+  for k in npmrc $OTHERS; do
     [ -f "$(f "$k")" ]
     [ -z "$(copies "$k")" ]
   done
@@ -223,9 +236,9 @@ lib() {
 # tests/fixtures/user-config: what v2.0.0 and v2.1.0 wrote, each surface, made by
 # running that version (role: ansible-core 2.16; no tools installed).
 
-fixture() { # <version-surface>: put its eight files where they go
+fixture() { # <version-surface>: put its files where they go
   local k d="$ROOT/tests/fixtures/user-config/$1"
-  for k in npmrc $SEVEN; do
+  for k in npmrc $OTHERS; do
     mkdir -p "$(dirname "$(f "$k")")"
     cp "$d/$k" "$(f "$k")"
     chmod 644 "$(f "$k")"
@@ -241,8 +254,10 @@ fixture() { # <version-surface>: put its eight files where they go
     ! grep -F "STOP  $TEST_HOME" "$BATS_TEST_TMPDIR/pf" || { echo "$v"; return 1; }
     apply > "$BATS_TEST_TMPDIR/log" 2>&1
     ! grep -E 'replaced .*not exactly|took your own|may set or defeat' "$BATS_TEST_TMPDIR/log" || { echo "$v"; return 1; }
-    for k in npmrc $SEVEN; do
+    for k in npmrc $OTHERS; do
       [ -z "$(copies "$k")" ] || { echo "$v $k: $(copies "$k")"; return 1; }
+    done
+    for k in npmrc $MARKED; do
       grep -q 'self-check ' "$(f "$k")" || { echo "$v $k"; return 1; }
     done
     : > "$BATS_TEST_TMPDIR/none"
@@ -255,7 +270,7 @@ fixture() { # <version-surface>: put its eight files where they go
   local v k line
   # (a line is put second, after the marker, where it is met soonest)
   for v in v2.0.0-action v2.0.0-role v2.1.0-action v2.1.0-role; do
-    for k in $SEVEN; do
+    for k in $OTHERS; do
       for line in 'some-key = "v"' '# a comment of mine' '; //registry/:_authToken=x' '  indented: 1' '[section]' 'registry: https://example/'; do
         { head -n 1 "$ROOT/tests/fixtures/user-config/$v/$k"; printf '%s\n' "$line"
           sed 1d "$ROOT/tests/fixtures/user-config/$v/$k"; } > "$BATS_TEST_TMPDIR/x"
@@ -264,7 +279,7 @@ fixture() { # <version-surface>: put its eight files where they go
     done
   done
   # and last, where an appended token goes
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     { cat "$ROOT/tests/fixtures/user-config/v2.1.0-role/$k"; echo '# x'; } > "$BATS_TEST_TMPDIR/x"
     [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k"; return 1; }
   done
@@ -497,6 +512,126 @@ JS
   grep -qx 'Bearer FAKETOKEN' "$BATS_TEST_TMPDIR/auth" || { cat "$BATS_TEST_TMPDIR/auth"; return 1; }
 }
 
+# -------------------------------------------------------------------- composer
+
+@test "composer: a home that only has ~/.composer keeps it, and the tokens in its auth.json stay composer's" {
+  # composer reads the first that exists of ~/.config/composer and ~/.composer
+  # wherever an XDG_ variable or /etc/xdg does. Making the first hid the second, and
+  # its auth.json (MEASURED on 2.11.2).
+  mkdir -p "$TEST_HOME/.composer"
+  printf '{"github-oauth": {"github.com": "SECRET"}}\n' > "$TEST_HOME/.composer/auth.json"
+  chmod 600 "$TEST_HOME/.composer/auth.json"
+  cp "$TEST_HOME/.composer/auth.json" "$BATS_TEST_TMPDIR/auth"
+  harden ECOSYSTEMS=composer -- --emit=plain > "$BATS_TEST_TMPDIR/log" 2>&1
+  harden ECOSYSTEMS=composer -- --emit=plain >> "$BATS_TEST_TMPDIR/log" 2>&1
+  [ ! -e "$TEST_HOME/.config/composer" ]
+  grep -q '"period": 172800' "$TEST_HOME/.composer/config.json"
+  cmp "$TEST_HOME/.composer/auth.json" "$BATS_TEST_TMPDIR/auth"
+  [ "$(mode "$TEST_HOME/.composer/auth.json")" = -rw------- ]
+  ! grep -E 'SECRET|not exactly' "$BATS_TEST_TMPDIR/log"
+  # and where both are there, both stay
+  mkdir -p "$TEST_HOME/.config/composer"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null 2>&1
+  [ -f "$TEST_HOME/.config/composer/config.json" ]
+  cmp "$TEST_HOME/.composer/auth.json" "$BATS_TEST_TMPDIR/auth"
+}
+
+@test "composer: what composer writes the first time it is asked anything is not the user's" {
+  mkdir -p "$XDG/composer"
+  local c
+  for c in '{"config": {}}' '{\n    "config": {}\n}\n' '{}' '' '\n'; do
+    printf "$c" > "$(f composer)"
+    ECO=composer apply > "$BATS_TEST_TMPDIR/log" 2>&1
+    grep -q '"secure-http": true' "$(f composer)"
+    [ -z "$(copies composer)" ]
+    ! grep 'not exactly' "$BATS_TEST_TMPDIR/log"
+  done
+  # but any setting is
+  for c in '{"config": {"lock": false}}' '{"repositories": []}' '{\n  "config": {\n    "secure-http": false\n  }\n}'; do
+    rm -f "$(f composer)"*
+    printf "$c" > "$(f composer)"
+    ECO=composer apply > "$BATS_TEST_TMPDIR/log" 2>&1
+    [ -n "$(copies composer)" ] || { echo "$c"; return 1; }
+    grep -q 'composer: replaced .*not exactly' "$BATS_TEST_TMPDIR/log"
+  done
+}
+
+@test "composer: the directory it reads is worked out as composer does" {
+  lib
+  local H="$BATS_TEST_TMPDIR/ch" xdg=0
+  [ ! -d /etc/xdg ] || xdg=1
+  home() { env -i PATH="$PATH" HOME="$H" "$@" bash -c '. "$0"; ucf_composer_home' "$BATS_TEST_TMPDIR/lib.sh"; }
+  mkdir -p "$H"
+  [ "$(home COMPOSER_HOME=/ch XDG_RUNTIME_DIR=/r)" = /ch ]
+  [ "$(home XDG_RUNTIME_DIR=/r)" = "$H/.config/composer" ]
+  [ "$(home XDG_CONFIG_HOME="$H/xc")" = "$H/xc/composer" ]
+  if [ "$xdg" = 0 ]; then [ "$(home)" = "$H/.composer" ]; else [ "$(home)" = "$H/.config/composer" ]; fi
+  mkdir -p "$H/.composer"
+  [ "$(home XDG_RUNTIME_DIR=/r)" = "$H/.composer" ]
+  [ "$(home XDG_CONFIG_HOME="$H/xc")" = "$H/.composer" ]
+  mkdir -p "$H/.config/composer" "$H/xc/composer"
+  [ "$(home XDG_RUNTIME_DIR=/r)" = "$H/.config/composer" ]
+  [ "$(home XDG_CONFIG_HOME="$H/xc")" = "$H/xc/composer" ]
+  if [ "$xdg" = 0 ]; then [ "$(home)" = "$H/.composer" ]; fi
+  # and as the composer here answers, where there is one
+  have composer || return 0
+  [ "$(home XDG_RUNTIME_DIR=/r)" = "$(cd / && env -i PATH="$PATH" HOME="$H" XDG_RUNTIME_DIR=/r COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-plugins -n 2>/dev/null | tail -1)" ]
+}
+
+# ------------------------------------------------------------ root's yarn file
+
+@test "user config: a file in root's home is read, kept and written as root, by the same rule" {
+  # harden.sh's ucf_as_root hands its functions to a root shell. The rule is the
+  # shared one: what differs is whose file it is.
+  sudo -n true 2>/dev/null || skip "no passwordless sudo"
+  lib
+  sed -n '/^ucf_as_root() {$/,/^}$/p' "$HARDEN_SH" > "$BATS_TEST_TMPDIR/asroot.sh"
+  # shellcheck disable=SC1091
+  . "$BATS_TEST_TMPDIR/asroot.sh"
+  # shellcheck disable=SC2034
+  SUDO=sudo
+  local d="$BATS_TEST_TMPDIR/roothome" body
+  sudo mkdir -m 700 "$d"
+  body=$'# Managed by supply-chain-harden action\nenableScripts: false'
+  [ "$(ucf_as_root yarn "$d/.yarnrc.yml" <<<"$body")" = changed ]
+  sudo head -1 "$d/.yarnrc.yml" | grep -q 'self-check sha256:'
+  [ "$(sudo ls -ldn "$d/.yarnrc.yml" | awk '{print $1, $3}' | cut -c1-12)" = '-rw-r--r-- 0' ]
+  [ "$(ucf_as_root yarn "$d/.yarnrc.yml" <<<"$body")" = ok ]
+  # a token added to it since: kept, 0600, root's, and not printed
+  echo 'npmAuthToken: "SECRET"' | sudo tee -a "$d/.yarnrc.yml" >/dev/null
+  sudo chmod 600 "$d/.yarnrc.yml"
+  run ucf_as_root yarn "$d/.yarnrc.yml" <<<"$body"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "copy $d/.yarnrc.yml."*$'\n'changed ]] || { echo "$output"; return 1; }
+  sudo grep -q SECRET "${lines[0]#copy }"
+  [ "$(sudo ls -ldn "${lines[0]#copy }" | awk '{print $1, $3}' | cut -c1-12)" = '-rw------- 0' ]
+  ! sudo grep -q SECRET "$d/.yarnrc.yml"
+  [ "$(sudo ls -ldn "$d/.yarnrc.yml" | cut -c1-10)" = -rw------- ]
+  sudo rm -rf "$d"
+}
+
+@test "user config: root's shell for that file gets nothing of the caller's PATH or environment" {
+  # A root shell that found its tools on the caller's PATH would run what the caller
+  # put there.
+  sudo -n true 2>/dev/null || skip "no passwordless sudo"
+  lib
+  sed -n '/^ucf_as_root() {$/,/^}$/p' "$HARDEN_SH" > "$BATS_TEST_TMPDIR/asroot.sh"
+  # shellcheck disable=SC1091
+  . "$BATS_TEST_TMPDIR/asroot.sh"
+  # shellcheck disable=SC2034
+  SUDO=sudo
+  local t
+  mkdir -p "$BATS_TEST_TMPDIR/evil"
+  for t in sed cat mktemp mv chmod ls cmp sha256sum awk bash env; do
+    printf '#!/bin/sh\n[ "$(id -u)" != 0 ] || touch "%s/ran-%s"\nexec /usr/bin/env -i PATH=/usr/bin:/bin %s "$@"\n' "$BATS_TEST_TMPDIR" "$t" "$t" > "$BATS_TEST_TMPDIR/evil/$t"
+    chmod +x "$BATS_TEST_TMPDIR/evil/$t"
+  done
+  ( PATH="$BATS_TEST_TMPDIR/evil:$PATH"; BASH_ENV="$BATS_TEST_TMPDIR/evil/bash"; export BASH_ENV
+    ucf_as_root yarn "$BATS_TEST_TMPDIR/y" <<<$'# Managed by supply-chain-harden action\na: 1' ) | grep -qx changed
+  [ -z "$(ls "$BATS_TEST_TMPDIR" | grep '^ran-')" ] || { ls "$BATS_TEST_TMPDIR"; return 1; }
+  sudo rm -f "$BATS_TEST_TMPDIR/y"
+}
+
 # --------------------------------------------------------------- modes and links
 
 @test "user config: ~/.npmrc ends 0600, or tighter if it was; nothing is loosened" {
@@ -514,35 +649,36 @@ JS
 @test "user config: the other seven keep their mode or get a tighter one" {
   plant
   local k
-  for k in $SEVEN; do chmod 600 "$(f "$k")"; done
+  for k in $OTHERS; do chmod 600 "$(f "$k")"; done
   apply >/dev/null 2>&1
-  for k in $SEVEN; do [ "$(mode "$(f "$k")")" = -rw------- ] || { echo "$k $(mode "$(f "$k")")"; return 1; }; done
+  for k in $OTHERS; do [ "$(mode "$(f "$k")")" = -rw------- ] || { echo "$k $(mode "$(f "$k")")"; return 1; }; done
   # and over a file of our own, loosened by hand
-  for k in $SEVEN; do chmod 666 "$(f "$k")"; done
+  for k in $OTHERS; do chmod 666 "$(f "$k")"; done
   apply >/dev/null 2>&1
-  for k in $SEVEN; do [ "$(mode "$(f "$k")")" = -rw-r--r-- ] || { echo "$k $(mode "$(f "$k")")"; return 1; }; done
+  for k in $OTHERS; do [ "$(mode "$(f "$k")")" = -rw-r--r-- ] || { echo "$k $(mode "$(f "$k")")"; return 1; }; done
 }
 
 @test "user config: a symlinked file is written through, and the link stays" {
   mkdir -p "$TEST_HOME/dotfiles"
   plant
   local k
-  for k in npmrc $SEVEN; do
+  for k in npmrc $OTHERS; do
     mv "$(f "$k")" "$TEST_HOME/dotfiles/$k"
     ln -s "$TEST_HOME/dotfiles/$k" "$(f "$k")"
   done
   # a relative link too
   rm -f "$(f npmrc)"; ln -s dotfiles/npmrc "$(f npmrc)"
   apply >/dev/null 2>&1
-  for k in npmrc $SEVEN; do
+  for k in npmrc $OTHERS; do
     [ -L "$(f "$k")" ] || { echo "$k: link gone"; return 1; }
     [ ! -L "$TEST_HOME/dotfiles/$k" ]
-    grep -q 'Managed by supply-chain-harden' "$TEST_HOME/dotfiles/$k" || { echo "$k"; return 1; }
   done
+  for k in npmrc $MARKED; do grep -q 'Managed by supply-chain-harden' "$TEST_HOME/dotfiles/$k" || { echo "$k"; return 1; }; done
+  grep -q '"secure-http": true' "$TEST_HOME/dotfiles/composer"
   grep -q SECRET-npmrc "$TEST_HOME/dotfiles/npmrc"
   # the copies are next to the link, not in the dotfiles checkout somebody commits
   [ -z "$(ls "$TEST_HOME/dotfiles" | grep '~$')" ]
-  for k in $SEVEN; do grep -q "SECRET-$k" "$(copies "$k")"; done
+  for k in $OTHERS; do grep -q "SECRET-$k" "$(copies "$k")"; done
   local before
   before=$(snapshot_but_cutoffs)
   apply >/dev/null 2>&1
@@ -715,14 +851,20 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   apply >/dev/null 2>&1
   lib
   local k
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     [ "$(user_cfg_class "$k" "$(f "$k")")" = ours ] || { echo "$k"; cat "$(f "$k")"; return 1; }
+    cp "$(f "$k")" "$BATS_TEST_TMPDIR/x"; echo 'x = "SECRET"' >> "$BATS_TEST_TMPDIR/x"
+    [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k: a line more"; return 1; }
+    : > "$BATS_TEST_TMPDIR/x"
+    [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = ours ] || { echo "$k: an empty file has nothing to lose"; return 1; }
+  done
+  for k in $MARKED; do
     cp "$(f "$k")" "$BATS_TEST_TMPDIR/x"; printf ' ' >> "$BATS_TEST_TMPDIR/x"
     [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k: one space"; return 1; }
-    grep -v "$(grep -v '^[#;]' "$(f "$k")" | sed -n '3p' | cut -c1-6)" "$(f "$k")" > "$BATS_TEST_TMPDIR/x"
+    sed '$d' "$(f "$k")" > "$BATS_TEST_TMPDIR/x"
     [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k: a line gone"; return 1; }
     # the marker without its checksum, over a line of the user's
-    { sed 's/; self-check .*//' "$(f "$k")"; echo 'x = "SECRET"'; } > "$BATS_TEST_TMPDIR/x"
+    { sed 's/; self-check [a-z0-9:-]*//' "$(f "$k")"; echo 'x = "SECRET"'; } > "$BATS_TEST_TMPDIR/x"
     [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k: marker cut"; return 1; }
     # no marker
     grep -v 'Managed by' "$(f "$k")" > "$BATS_TEST_TMPDIR/x"; echo 'x = "SECRET"' >> "$BATS_TEST_TMPDIR/x"
@@ -767,7 +909,7 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
 
 # -------------------------------------------------------------------- preflight
 
-@test "preflight: STOP for each of the seven that is not ours, a note for ~/.npmrc, and it is what the run does" {
+@test "preflight: STOP for each file that is not ours, a note for ~/.npmrc, and it is what the run does" {
   plant
   printf 'fund=true\nbefore=2026-01-01\n' >> "$(f npmrc)"
   chmod 644 "$(f npmrc)"
@@ -776,7 +918,7 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   pf > "$BATS_TEST_TMPDIR/pf" || true
   diff <(printf '%s\n' "$before") <(snapshot)          # it changed nothing
   ! grep SECRET "$BATS_TEST_TMPDIR/pf"
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     grep -qF "STOP  $(f "$k"): not exactly what this project last wrote" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
   done
   ! grep -F "STOP  $(f npmrc)" "$BATS_TEST_TMPDIR/pf"
@@ -792,16 +934,16 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   # And after it nothing stops.
   pf > "$BATS_TEST_TMPDIR/pf" || true
   ! grep -F "STOP  $TEST_HOME" "$BATS_TEST_TMPDIR/pf"
-  for k in $SEVEN; do
+  for k in $OTHERS; do
     grep -qF "$(f "$k"): exactly what this project last wrote, replaced as before" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
   done
   ! grep 'except your own setting\|it becomes 0600' "$BATS_TEST_TMPDIR/pf"
 }
 
-@test "preflight: a home with none of the eight says each will be created" {
+@test "preflight: a home with none of them says each will be created" {
   pf > "$BATS_TEST_TMPDIR/pf" || true
   local k
-  for k in npmrc $SEVEN; do
+  for k in npmrc $OTHERS; do
     grep -qF "$(f "$k"): not there, will be created" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
   done
   [ -z "$(find "$TEST_HOME" -type f)" ]
@@ -824,25 +966,27 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
     | grep -nE 'declare -A|mapfile|readarray|\$\{[a-z_]+(,,|\^\^)|readlink -f|sed -i|grep -P|stat -c'
 }
 
-@test "user config: each of the eight is written through the shared code on both surfaces, and by nothing else" {
+@test "user config: each of them is written through the shared code on both surfaces, and by nothing else" {
   local k
-  for k in npmrc $SEVEN; do
-    [ "$(grep -c "put_user_cfg $k " "$HARDEN_SH")" -eq 1 ] || { echo "harden.sh: $k"; return 1; }
-  done
+  [ "$(grep -c "put_user_cfg npmrc " "$HARDEN_SH")" -eq 1 ]
   [ "$(cat "$ROOT"/tasks/*.yml | grep -c 'ansible.builtin.script: user-config.sh npmrc$')" -eq 1 ]
-  for k in $SEVEN; do
-    [ "$(cat "$ROOT"/tasks/*.yml | grep -c "ansible.builtin.script: user-config.sh replace $k\$")" -eq 1 ] || { echo "role: $k"; return 1; }
+  for k in $OTHERS composer-home; do
+    grep -q "put_user_cfg $k " "$HARDEN_SH" || { echo "harden.sh: $k"; return 1; }
+    cat "$ROOT"/tasks/*.yml | grep -q "ansible.builtin.script: user-config.sh replace $k\$" || { echo "role: $k"; return 1; }
   done
+  # root's own yarn file is written by the same code, as root, on both
+  grep -q 'PUT_AS_ROOT=1 put_user_cfg yarn "$root_home/.yarnrc.yml"' "$HARDEN_SH"
+  [ "$(grep -c 'ansible.builtin.script: user-config.sh replace yarn$' "$ROOT/tasks/yarn.yml")" -eq 2 ]
   # no template or redirect into one of them is left
-  ! grep -nE '> "\$HOME/\.(npmrc|yarnrc\.yml|bundle/config|config/(pnpm|pip))' "$HARDEN_SH"
-  ! grep -nE 'dest: .*(ansible_env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path)' "$ROOT"/tasks/*.yml
+  ! grep -nE '> "\$HOME/\.(npmrc|yarnrc\.yml|bundle/config|m2|config/(pnpm|pip|composer))|> "\$(cargo|nuget)_home/(config.toml|NuGet)' "$HARDEN_SH"
+  ! grep -nE 'dest: .*(ansible_env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config|m2)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path|config\.json|NuGet\.Config|cargo_home \}\}/config\.toml)' "$ROOT"/tasks/*.yml
 }
 
 @test "user config: the role's tasks judge the same files, at the paths they write" {
   # tasks/preflight.yml names every kind, with the tags of its include.
   lib
   local k
-  for k in $UCF_KINDS cargo maven nuget; do
+  for k in $UCF_KINDS; do
     grep -qE "^      $k: \[" "$ROOT/tasks/preflight.yml" || { echo "$k"; return 1; }
   done
   # and the role's own path expression for each is the one ucf_path gives

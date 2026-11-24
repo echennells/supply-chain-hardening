@@ -1,0 +1,8 @@
+# Managed by supply-chain-harden
+# Note: build.rs / proc-macro execution CANNOT be blocked by cargo config —
+# structural gap. Refusing to RESOLVE a too-new version is the only control
+# that prevents execution, which is what cooldown.toml below is for.
+# Run cargo-deny / cargo-audit in your workflow for detection.
+[net]
+git-fetch-with-cli = true
+retry = 3

@@ -1,0 +1,33 @@
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0
+          https://maven.apache.org/xsd/settings-1.2.0.xsd">
+  <!-- Force all repositories through HTTPS -->
+  <mirrors>
+    <mirror>
+      <id>central-https</id>
+      <url>https://repo.maven.apache.org/maven2</url>
+      <mirrorOf>*</mirrorOf>
+    </mirror>
+  </mirrors>
+  <profiles>
+    <profile>
+      <id>strict-checksums</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <releases>
+            <checksumPolicy>fail</checksumPolicy>
+          </releases>
+          <snapshots>
+            <checksumPolicy>fail</checksumPolicy>
+          </snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>strict-checksums</activeProfile>
+  </activeProfiles>
+</settings>
