@@ -57,10 +57,20 @@
     - yarn_detected_version is version('4.10.0', '<')
 
 - name: Deploy hardened global .yarnrc.yml
-  ansible.builtin.template:
-    src: yarnrc.yml.j2
-    dest: "{{ ansible_env.HOME }}/.yarnrc.yml"
-    mode: "0644"
+  # Replaced whole, but only a file that is exactly what this project last wrote
+  # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
+  # preflight, unless accept_user_config_overwrite=true, which copies it first.
+  ansible.builtin.script: user-config.sh replace yarn
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.yarnrc.yml"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'yarnrc.yml.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_yarn
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_yarn.stdout_lines | default([]))"
 
 # Yarn Berry has NO system-wide config file. It reads a .yarnrc.yml in the
 # working directory and each parent up to /, then the one in $HOME, and the

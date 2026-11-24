@@ -2,17 +2,32 @@
 # npm supply chain hardening
 # Config files deployed unconditionally — ready when npm arrives
 
-- name: Deploy hardened .npmrc (per-user)
+- name: Merge the hardened settings into .npmrc (per-user)
+  # Merged, never replaced: this is where `npm login` keeps its token. MEASURED
+  # (d738db8, issue 48): the template task that was here dropped every line of the
+  # user's on every apply, and turned a 0600 file into 0644. files/user-config.sh
+  # puts the settings in a marked block at the top, keeps every other line, and
+  # ends the file 0600. A line of the user's for one of these settings would win
+  # over the block, so it is taken out, after a copy; the end-of-run report names
+  # the key. Never the line: no diff is produced here, so --diff prints none.
+  #
   # Template-driven so npm_ignore_scripts / npm_audit / npm_save_exact /
   # npm_fund / npm_update_notifier actually control behavior. Previously
   # this content was hardcoded inline, which made those variables
   # misleading: setting npm_ignore_scripts=false did nothing for the
   # config files (only the env var). The template now makes the variable
   # names match what they actually do.
-  ansible.builtin.template:
-    src: npmrc.j2
-    dest: "{{ ansible_env.HOME }}/.npmrc"
-    mode: "0644"
+  ansible.builtin.script: user-config.sh npmrc
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.npmrc"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_npmrc
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_npmrc.stdout_lines | default([]))"
 
 - name: Deploy hardened /etc/npmrc (correct on Debian/Ubuntu apt npm; harmless baseline elsewhere)
   # The per-user ~/.npmrc above only protects the user the role ran against.

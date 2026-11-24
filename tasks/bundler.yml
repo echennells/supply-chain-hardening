@@ -22,14 +22,28 @@
   # Same keys as action/harden.sh. BUNDLE_DEPLOYMENT and BUNDLE_DISABLE_EXEC_LOAD
   # are gone from both: DEPLOYMENT adds nothing over FROZEN and silently moves every
   # install into ./vendor/bundle, and EXEC_LOAD is a process-model knob, not a control.
-  ansible.builtin.copy:
-    dest: "{{ ansible_env.HOME }}/.bundle/config"
-    mode: "0644"
-    content: |
+  #
+  # Replaced whole, but only a file that is exactly what this project last wrote
+  # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
+  # preflight, unless accept_user_config_overwrite=true, which copies it first.
+  # "---" has to stay the first line (see harden_bundler in action/harden.sh), so
+  # the marker is the second.
+  ansible.builtin.script: user-config.sh replace bundler
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.bundle/config"
+    SCH_UCF_BODY: |
       ---
+      # Managed by ansible-supply-chain-security
       BUNDLE_FROZEN: "true"
       BUNDLE_COOLDOWN: "{{ bundler_cooldown_days }}"
       BUNDLE_DISABLE_CHECKSUM_VALIDATION: "false"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_bundler
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_bundler.stdout_lines | default([]))"
 
 - name: Detect installed Bundler version (empty if not installed)
   # "Bundler version 2.4.20" through 2.x, a bare "4.0.24" from 4.0 (MEASURED), so

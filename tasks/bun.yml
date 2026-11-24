@@ -87,10 +87,20 @@
     mode: "0755"
 
 - name: Deploy hardened global bunfig.toml
-  ansible.builtin.template:
-    src: bunfig.toml.j2
-    dest: "{{ bun_bunfig_path }}"
-    mode: "0644"
+  # Replaced whole, but only a file that is exactly what this project last wrote
+  # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
+  # preflight, unless accept_user_config_overwrite=true, which copies it first.
+  ansible.builtin.script: user-config.sh replace bun
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ bun_bunfig_path }}"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'bunfig.toml.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_bun
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_bun.stdout_lines | default([]))"
 
 - name: Record skipped protection — bun ignoreScripts (bun older than 1.2.0)
   # MEASURED: below bun 1.2.0 the [install] ignoreScripts key is inert in the
