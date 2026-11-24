@@ -35,6 +35,8 @@ result() { # <name> <FIRED|blocked|NOT-TESTED|UNCLEAR> <detail>
     after:FIRED) echo "::error title=The attack FIRED after hardening::$1: $3"; fail=1 ;;
     after:*) echo "::error title=Not blocked by the control::$1 did not fire, but not for the reason it should: $3"; fail=1 ;;
   esac
+  # What the tool said, so that a refusal in words nobody has seen can be added.
+  if [ "$2" = UNCLEAR ] && [ -f o ]; then echo "::group::$1: the tool's output"; tail -40 o; echo "::endgroup::"; fi
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 line() { grep -iE -e "$2" "$1" 2>/dev/null | head -1; }
@@ -111,7 +113,7 @@ uv_sdist() {
   tar czf evilsd-1.0.tar.gz evilsd-1.0
   bounded 200 uv pip install --target t ./evilsd-1.0.tar.gz > o 2>&1; rc=$?
   if [ -e "$M/uv" ]; then result "uv sdist" FIRED "$(uv --version 2>/dev/null): setup.py ran"
-  elif [ $rc -ne 0 ] && grep -qE 'Building source distributions? .*is disabled|building from source is disabled' o; then result "uv sdist" blocked "$(line o 'is disabled')"
+  elif [ $rc -ne 0 ] && said=$(tr '\n' ' ' < o | sed 's/│/ /g' | tr -s ' ' | grep -oE '(Building source distributions? for [^ ]* is disabled|building from source is disabled)'); then result "uv sdist" blocked "$said"
   else result "uv sdist" UNCLEAR "rc=$rc $(tail -3 o)"; fi
 }
 
