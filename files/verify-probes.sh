@@ -825,13 +825,15 @@ fi
 #     from config.yaml was enforced (ignoreScripts and minimumReleaseAge, each
 #     with a control that ran without it).
 #   - unset prints "undefined" on every version, pnpm 11's own defaults included.
+# Bounded, because a corepack shim downloads pnpm on its first run; 90 s, because that
+# download is the slow case and a stopped one would read as a pnpm that says nothing.
 scv_pnpm_dir() { # where this pnpm reads its user config (pnpm's getConfigDir; tasks/pnpm.yml)
   if [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/pnpm' "$XDG_CONFIG_HOME"
   elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then printf '%s/Library/Preferences/pnpm' "$HOME"
   else printf '%s/.config/pnpm' "$HOME"; fi
 }
 scv_pnpm_get() { # <kebab-case key> -> the value pnpm reports from its files
-  (cd / && run_bounded 30 env -u pnpm_config_minimum_release_age -u PNPM_CONFIG_MINIMUM_RELEASE_AGE \
+  (cd / && run_bounded 90 env -u pnpm_config_minimum_release_age -u PNPM_CONFIG_MINIMUM_RELEASE_AGE \
       -u pnpm_config_ignore_scripts -u PNPM_CONFIG_IGNORE_SCRIPTS \
       -u npm_config_ignore_scripts -u NPM_CONFIG_IGNORE_SCRIPTS \
       -u npm_config_minimum_release_age -u NPM_CONFIG_MINIMUM_RELEASE_AGE \
@@ -842,7 +844,7 @@ if ! have pnpm; then
 elif command -v requested >/dev/null 2>&1 && ! requested pnpm; then
   row "N/A" - "pnpm" "pnpm installed but not in the requested ecosystems"
 else
-  pnv=$(cd / && run_bounded 30 pnpm --version 2>/dev/null </dev/null | head -1 | tr -d '\r')
+  pnv=$(cd / && run_bounded 90 pnpm --version 2>/dev/null </dev/null | head -1 | tr -d '\r')
   case "$pnv" in [0-9]*.[0-9]*) ;; *) pnv="" ;; esac
   pnM=${pnv%%.*}; pnm=${pnv#*.}; pnm=${pnm%%.*}
   pnwhere="It reads $(scv_pnpm_dir)/config.yaml (pnpm 11+) or $(scv_pnpm_dir)/rc (pnpm 10)"

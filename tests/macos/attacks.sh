@@ -139,7 +139,7 @@ cargo_stale() {
   printf 'ryu = "1"\n' >> Cargo.toml
   bounded 250 cargo build > o 2>&1; rc=$?
   if grep -q '"ryu"' Cargo.lock; then result "cargo stale lockfile" FIRED "cargo build rewrote Cargo.lock (rc=$rc)"
-  elif [ $rc -ne 0 ] && grep -q -- '--locked' o; then result "cargo stale lockfile" blocked "$(line o '--locked')"
+  elif [ $rc -ne 0 ] && grep -qE '^error: .*--locked was passed' o; then result "cargo stale lockfile" blocked "$(line o '^error: .*--locked was passed')"
   else result "cargo stale lockfile" UNCLEAR "rc=$rc $(tail -3 o)"; fi
 }
 
