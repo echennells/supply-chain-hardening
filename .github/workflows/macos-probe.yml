@@ -18,7 +18,7 @@ jobs:
       - name: Tools
         run: |
           export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-          brew install -q oven-sh/bun/bun deno uv composer >/tmp/brew.log 2>&1 || tail -5 /tmp/brew.log
+          brew install -q oven-sh/bun/bun deno uv composer go >/tmp/brew.log 2>&1 || tail -5 /tmp/brew.log
           npm install -g --silent pnpm@latest || true
           for t in node npm pnpm yarn bun deno uv python3 pip3 composer php cargo bundle gem go dotnet mvn gradle sudo; do printf 'PROBE tool | %s %s\n' "$t" "$(command -v $t || echo absent)"; done
           touch "$RUNNER_TEMP/mark"; sudo find "$HOME" -user root -not -path '*/Library/*' 2>/dev/null | sed 's/^/PROBE root-owned before | /' | head -5
@@ -47,12 +47,13 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Role
         run: |
+          set +e
           export HOMEBREW_NO_AUTO_UPDATE=1
           brew install -q ansible coreutils uv composer >/tmp/brew.log 2>&1 || tail -5 /tmp/brew.log
           export PATH="$(brew --prefix)/opt/coreutils/libexec/gnubin:$PATH" LC_ALL=en_US.UTF-8
           ./action/harden.sh --preflight 2>&1 | sed 's/^/PROBE preflight | /' | head -60
           touch "$RUNNER_TEMP/mark"
-          for i in 1 2; do ansible-playbook site.yml --limit localhost -e accept_etc_overwrite=true -e accept_user_config_overwrite=true > /tmp/apply$i.log 2>&1; echo "PROBE role apply $i | rc=$? $(grep -E '^localhost' /tmp/apply$i.log | tail -1)"; grep -E '^(fatal|failed)|FAILED!|ERROR' /tmp/apply$i.log | cut -c1-400 | sed "s/^/PROBE role apply $i | /" | head -6; grep -B1 -E '^fatal' /tmp/apply$i.log | grep TASK | sed "s/^/PROBE role apply $i | /" | head -4; done
+          for i in 1 2; do ansible-playbook site.yml --limit localhost -e accept_etc_overwrite=true -e accept_user_config_overwrite=true > /tmp/apply$i.log 2>&1; echo "PROBE role apply $i | rc=$? $(grep -E '^localhost' /tmp/apply$i.log | tail -1)"; grep -E 'fatal:|FAILED!|ERROR|\[ERROR\]' /tmp/apply$i.log | cut -c1-900 | sed "s/^/PROBE role apply $i | /" | head -6; tail -40 /tmp/apply$i.log | grep -E 'TASK|msg|stderr|fatal|Origin|Error'  | sed "s/^/PROBE role apply $i | /" | head -4; done
           sed -n '/were NOT applied/,/prerequisite/p' /tmp/apply1.log | cut -c1-1500 | sed 's/^/PROBE role notapplied | /' | head -12
           supply-chain-verify > /tmp/v.txt 2>&1; grep -E '^(GAP|WEAK|OK) ' /tmp/v.txt | cut -c1-170 | sed 's/^/PROBE role verify | /' | head -60
           bash .github/probe/mac.sh role-after
