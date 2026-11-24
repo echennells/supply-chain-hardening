@@ -2974,12 +2974,66 @@ fi
 # the newest release under a cutoff 26.3 honoured. WEAK, not GAP: the host's pip is
 # fine and upgrading pip inside the venv closes it, but an activated venv also
 # shadows the pip wrapper, so nothing else gates it.
+#
+# SUPPORTING THE GATE IS NOT HAVING ONE. From ensurepip's 26.0 the row was OK with
+# no cutoff anywhere: an unhardened HOME printed GAP for the row above and OK here
+# (issue 48, item 5). So a cutoff has to be there too, one that a pip in a venv
+# reads: the variables, PIP_CONFIG_FILE, and the user and global files are the
+# same for both, and the one that differs is the site file, $prefix/pip.conf of
+# the interpreter, which a venv replaces with its own. MEASURED (python:3.14-slim,
+# pip 26.2.2): a cutoff in /usr/local/pip.conf was reported by python3 -m pip and
+# not by the venv's pip, which then installed six 1.17.0 under a 2020 cutoff; one
+# in ~/.config/pip/pip.conf, /etc/pip.conf, PIP_CONFIG_FILE or the variable was
+# reported by both, and the venv took six 1.13.0. So pip is asked for the value,
+# and asked again by level only where that site file exists. With no pip module to
+# ask, a throwaway venv in the scratch directory answers (ensurepip is offline; it
+# installs from the wheel it carries).
+scv_pip_cutoff_in() { # stdin: pip config list -> the last uploaded-prior-to
+  sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" | tail -1
+}
+scv_pip_venv_cutoff() { # <sys.prefix> -> the cutoff a pip in a venv would read, or nothing
+  local c d
+  if scv_at_root python3 -m pip --version >/dev/null 2>&1; then
+    c=$(scv_at_root python3 -m pip config list 2>/dev/null | scv_pip_cutoff_in)
+    if [ -n "$c" ] && [ -n "$1" ] && [ -f "$1/pip.conf" ] \
+       && [ -n "$(scv_at_root python3 -m pip config list --site 2>/dev/null | scv_pip_cutoff_in)" ]; then
+      c=${PIP_UPLOADED_PRIOR_TO:-}
+      [ -n "$c" ] || [ -z "${PIP_CONFIG_FILE:-}" ] || c=$(sed -n 's/^[[:space:]]*uploaded-prior-to[[:space:]]*[=:][[:space:]]*//p' "$PIP_CONFIG_FILE" 2>/dev/null | tail -1)
+      [ -n "$c" ] || c=$(scv_at_root python3 -m pip config list --user 2>/dev/null | scv_pip_cutoff_in)
+      [ -n "$c" ] || c=$(scv_at_root python3 -m pip config list --global 2>/dev/null | scv_pip_cutoff_in)
+    fi
+  else
+    d=$(mktemp -d 2>/dev/null) || return 0
+    (cd "$d" && run_bounded 120 python3 -m venv v >/dev/null 2>&1 \
+       && cd / && "$d/v/bin/python" -m pip config list 2>/dev/null) > "$d/out" 2>/dev/null
+    c=$(scv_pip_cutoff_in < "$d/out")
+    rm -rf "$d"
+  fi
+  printf '%s' "$c"
+}
 if have python3 && { ! command -v requested >/dev/null 2>&1 || requested pip; }; then
-  pvseed=$(python3 -I -c 'import ensurepip; print(ensurepip.version())' 2>/dev/null)
+  pvseed=$(python3 -I -c 'import ensurepip, sys; print(ensurepip.version()); print(sys.prefix)' 2>/dev/null)
+  pvpre=$(printf '%s\n' "$pvseed" | sed -n 2p); pvseed=$(printf '%s\n' "$pvseed" | sed -n 1p)
   if [ -z "$pvseed" ]; then
     row "N/A" - "pip venv age gate" "this python3 has no ensurepip, so python3 -m venv cannot seed a pip here"
   elif [ "$(printf '26.0\n%s\n' "$pvseed" | sort -V | head -1)" = "26.0" ]; then
-    row OK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to"
+    pvcut=$(scv_pip_venv_cutoff "$pvpre")
+    pvnow=$(date -u +%s 2>/dev/null); pvc=$(scv_epoch "$pvcut")
+    case "$pvcut" in
+      '')
+        row GAP PARSED "pip venv age gate" \
+          "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to, but no cutoff is set in a file or variable a pip in a venv reads, so a release published minutes ago installs there" ;;
+      *Z)
+        if [ -n "$pvc" ] && [ -n "$pvnow" ] && [ "$pvc" -gt "$pvnow" ]; then
+          row GAP PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, and the cutoff it would read, $pvcut, is in the FUTURE: it admits everything published so far"
+        elif [ -z "$pvc" ] || [ -z "$pvnow" ] || [ $(( (pvnow - pvc) / 86400 )) -gt 7 ]; then
+          row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to, and would read the cutoff $pvcut, which is more than 7 days old or could not be dated here (see pip native age gate)"
+        else
+          row OK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to, and would read the cutoff $pvcut"
+        fi ;;
+      *)
+        row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut', not an absolute instant ending in Z (see pip native age gate)" ;;
+    esac
   else
     row WEAK PARSED "pip venv age gate" \
       "python3 -m venv seeds pip $pvseed from ensurepip, below the 26.0 that added uploaded-prior-to - a venv made that way is not age-gated until pip is upgraded inside it. uv venv --seed and uv pip are"

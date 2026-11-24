@@ -1098,6 +1098,83 @@ esac'
   [[ "$output" == *"seeds pip 25.3"* ]]
 }
 
+# venv_pip <effective cutoff> [cutoff in the site file] [user/global cutoff]: a
+# python3 whose ensurepip and whose own pip are 26.2.2. `pip config list` prints
+# the effective value; --site, --user and --global print theirs, as pip does.
+venv_pip() {
+  local pre="$BATS_TEST_TMPDIR/pyprefix"
+  mkdir -p "$pre"; rm -f "$pre/pip.conf"
+  [ -z "${2:-}" ] || printf '[install]\nuploaded-prior-to = %s\n' "$2" > "$pre/pip.conf"
+  stub_bin python3 'p() { [ -z "$1" ] || echo "install.uploaded-prior-to='"'"'$1'"'"'"; }
+case "$*" in
+  *"import ensurepip"*) echo 26.2.2; echo "'"$pre"'" ;;
+  "-m pip --version") echo "pip 26.2.2 from /x (python 3.14)" ;;
+  "-m pip install --help") echo "  --uploaded-prior-to <when>" ;;
+  "-m pip config list") p "'"${1:-}"'" ;;
+  "-m pip config list --site") p "'"${2:-}"'" ;;
+  "-m pip config list --user") p "'"${3:-}"'" ;;
+  "-m pip config list --global") : ;;
+  *) exit 1 ;;
+esac'
+}
+ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $ARGV[0] * 3600))' -- "$1"; }
+
+@test "pip venv: a pip that can gate and has no cutoff is a GAP, not OK" {
+  # It was OK whenever ensurepip's pip was 26.0 or newer, so an unhardened HOME
+  # printed "GAP pip native age gate" and "OK pip venv age gate" together.
+  venv_pip ""
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"*"no cutoff is set in a file or variable a pip in a venv reads"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
+@test "pip venv: a cutoff a venv's pip reads is OK; stale is WEAK, in the future a GAP" {
+  venv_pip "$(ago 72)"
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"*"would read the cutoff 20"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip "$(ago 720)"
+  run verify -- --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip "$(ago -48)"
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"*"in the FUTURE"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip P2D
+  run verify -- --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip venv age gate"*"not an absolute instant"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
+@test "pip venv: a cutoff only in the interpreter's site file does not reach a venv" {
+  # MEASURED (pip 26.2.2): $prefix/pip.conf is read by python3 -m pip and not by
+  # the pip of a venv made from it.
+  local c; c=$(ago 72)
+  venv_pip "$c" "$c" ""
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip native age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  # In the user's file as well, it does.
+  venv_pip "$c" "$c" "$c"
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  # And through the variable.
+  venv_pip "$c" "$c" ""
+  run verify PIP_UPLOADED_PRIOR_TO="$c" -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
+@test "pip venv: the real python, with no cutoff anywhere and then hardened" {
+  local v
+  v=$(python3 -I -c 'import ensurepip; print(ensurepip.version())' 2>/dev/null) || skip "this python3 has no ensurepip"
+  [ "$(printf '26.0\n%s\n' "$v" | sort -V | head -1)" = 26.0 ] || skip "ensurepip here is pip $v, below 26.0"
+  for f in /etc/pip.conf /etc/xdg/pip/pip.conf "/Library/Application Support/pip/pip.conf"; do
+    ! grep -qs uploaded-prior-to "$f" || skip "$f on this machine sets a cutoff"
+  done
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  harden ECOSYSTEMS=pip -- --emit=plain >/dev/null
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
 @test "a job holding id-token: write is told so, and one without gets no row" {
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
