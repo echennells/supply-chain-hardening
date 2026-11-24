@@ -568,6 +568,7 @@ ucf_npmrc_scan() (
         g="$g$t" d="$d$t"
         case "$g" in *[!a-z*-]*) return 1 ;; esac
         for s in $keys; do
+          # shellcheck disable=SC2254  # $g is a glob, and is meant to match as one
           case "$s" in $g) note "unsure line $n, the key $d"; return 1 ;; esac
         done
         return 1 ;;
