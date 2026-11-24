@@ -38,7 +38,7 @@ setup() { common_setup; }
   local role act kinds="npmrc pnpm-yaml pnpm-rc yarn pip uv bun bundler cargo" v p
   judge() {
     role=$(env -i PATH="$PATH" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" \
-      bash "${BATS_TEST_DIRNAME}/../../files/user-config.sh" classify $kinds | sed -n 's/^\(foreign\|blocked\) \([^ ]*\).*/\2/p' | sort) || true
+      bash "${BATS_TEST_DIRNAME}/../../files/user-config.sh" classify $kinds | sed -nE 's/^(foreign|blocked) ([^ ]*).*/\2/p' | sort) || true
     act=$(env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" CARGO_HOME="$TEST_HOME/.cargo" \
       bash "$HARDEN_SH" --preflight | sed -n "s|^  STOP  \\($TEST_HOME/[^:]*\\):.*|\\1|p" | sort) || true
     echo "role: $role"; echo "action: $act"

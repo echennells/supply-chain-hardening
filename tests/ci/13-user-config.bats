@@ -627,7 +627,6 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   plant
   lib
   local i=0 bad="$BATS_TEST_TMPDIR/bad"
-  settings | sed '1s/^/; Managed by supply-chain-harden action\n/' > "$BATS_TEST_TMPDIR/body"
   ( while [ ! -e "$BATS_TEST_TMPDIR/stop" ]; do
       grep -q SECRET-npmrc "$(f npmrc)" 2>/dev/null || { echo half >> "$bad"; }
     done ) 3>&- &
