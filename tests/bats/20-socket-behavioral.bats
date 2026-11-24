@@ -15,13 +15,15 @@ setup() {
 # binary, unauthenticated: 60 calls an hour per IP, and hosted runners share IPs.
 # MEASURED 2026-11-23: with the quota used up the API answers 403 and sfw 2.0.6
 # exits 1 with "Unable to fetch latest release" within 0.3 s; 10 of 30 sfw smoke
-# jobs that week started on a runner in that state. The role then moves sfw aside
-# and records why, which is what it should do, so the test for a working install
-# has nothing to check. Only that recorded reason skips it: an sfw that is
-# missing for any other reason (EACCES, a timeout, a bad binary, no record at
-# all) is a failure.
+# jobs that week started on a runner in that state. The role therefore puts a
+# pinned binary in the cache first, from the release's download URL, so a used-up
+# quota alone no longer leaves a host without sfw. With that URL refused as well
+# the role moves sfw aside and records both reasons, which is what it should do,
+# and the test for a working install has nothing to check. Only that record skips
+# it: an sfw that is missing for any other reason (EACCES, a timeout, a bad
+# binary, a pin that is wrong, no record at all) is a failure.
 sfw_fetch_refused() { # <log of the apply>
-  [ -f "$1" ] && grep -qE 'its runtime binary could not be fetched from GitHub \(exit 1: \[sfw\] Failed to prepare firewall binary: (Unable to fetch latest release|GET https://[^ ]+ failed with (403|429|5[0-9][0-9]))' "$1"
+  [ -f "$1" ] && grep -qE 'its runtime binary could not be fetched from GitHub \(exit 1: \[sfw\] Failed to prepare firewall binary: (Unable to fetch latest release|GET https://[^ ]+ failed with (403|429|5[0-9][0-9]))[^)]*\)[.] The pinned v[0-9.]+ was not used either: downloading it failed \((Request failed: (<urlopen error|HTTP Error (403|429|5[0-9][0-9]))|failed to create temporary content file)' "$1"
 }
 
 @test "sfw: binary is installed" {
@@ -29,29 +31,35 @@ sfw_fetch_refused() { # <log of the apply>
   if sfw_fetch_refused /var/log/ansible-run.log; then
     # Moved aside by the role, not simply absent.
     ls "$(npm prefix -g)"/bin/sfw.broken
-    skip "GitHub refused sfw's firewall binary when the image was built; the role recorded it and moved sfw aside"
+    skip "GitHub refused sfw's firewall binary, and the pinned one, when the image was built; the role recorded it and moved sfw aside"
   fi
-  echo "sfw is not on PATH, and the apply did not record a refused download"
+  echo "sfw is not on PATH, and the apply did not record two refused downloads"
   return 1
 }
 
-@test "sfw: only a recorded refusal excuses a missing sfw" {
+@test "sfw: only a recorded refusal of both downloads excuses a missing sfw" {
   local p="its runtime binary could not be fetched from GitHub" e="[sfw] Failed to prepare firewall binary:" l
+  local r="(exit 1: [sfw] Failed to prepare firewall binary: Unable to fetch latest release and no valid cached release found.)" n="The pinned v1.16.0 was not used either:"
   while IFS= read -r l; do
     printf '%s\n' "$l" > "$BATS_TEST_TMPDIR/log"
     sfw_fetch_refused "$BATS_TEST_TMPDIR/log" || { echo "not excused: $l"; return 1; }
   done <<EOF
-7. Socket Firewall - installed, but $p (exit 1: $e Unable to fetch latest release and no valid cached release found.). sfw is a shim
-7. Socket Firewall - installed, but $p (exit 1: $e GET https://release-assets.example/x failed with 503). sfw is a shim
+7. Socket Firewall - installed, but $p $r. $n downloading it failed (Request failed: <urlopen error [Errno 111] Connection refused>). sfw is a shim
+7. Socket Firewall - installed, but $p $r. $n downloading it failed (Request failed: HTTP Error 503: Service Unavailable). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 1: $e GET https://release-assets.example/x failed with 503). $n downloading it failed (failed to create temporary content file: The read operation timed out). sfw is a shim
 EOF
   while IFS= read -r l; do
     printf '%s\n' "$l" > "$BATS_TEST_TMPDIR/log"
     ! sfw_fetch_refused "$BATS_TEST_TMPDIR/log" || { echo "excused: $l"; return 1; }
   done <<EOF
 7. Socket Firewall - installed, but $p (exit 1). sfw is a shim
-7. Socket Firewall - installed, but $p (exit 1: $e EACCES: permission denied, mkdir '/x/.sfw-cache'). sfw is a shim
-7. Socket Firewall - installed, but $p (exit 1: $e GET https://release-assets.example/x failed with 404). sfw is a shim
-7. Socket Firewall - installed, but $p (exit 124: downloading latest sfw binary...). sfw is a shim
+7. Socket Firewall - installed, but $p $r. sfw is a shim
+7. Socket Firewall - installed, but $p $r. $n downloading it failed (Request failed: HTTP Error 404: Not Found). sfw is a shim
+7. Socket Firewall - installed, but $p $r. $n the download's sha256 is aaaa, not the pinned bbbb. sfw is a shim
+7. Socket Firewall - installed, but $p $r. $n no binary is pinned for linux-riscv64. sfw is a shim
+7. Socket Firewall - installed, but $p (exit 1: $e EACCES: permission denied, mkdir '/x/.sfw-cache'). $n downloading it failed (Request failed: <urlopen error timed out>). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 1: $e GET https://release-assets.example/x failed with 404). $n downloading it failed (Request failed: <urlopen error timed out>). sfw is a shim
+7. Socket Firewall - installed, but $p (exit 124: downloading latest sfw binary...). $n downloading it failed (Request failed: <urlopen error timed out>). sfw is a shim
 7. Socket Firewall - installed, but $p (exit 126: Exec format error). sfw is a shim
 TASK [Record skipped protection - Socket Firewall binary could not be fetched]
 EOF

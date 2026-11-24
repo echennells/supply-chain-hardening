@@ -725,7 +725,8 @@ pinact_version: "v5.0.0"
 
 # npm tools. npm verifies tarball integrity against the registry, so again the
 # pin is the missing half. Note sfw's npm package is a shim that downloads a
-# firewall binary at runtime, which this pin does NOT cover.
+# firewall binary at runtime, which sfw_version does NOT cover: that binary has
+# its own pin, sfw_binary_version below.
 npq_version: "3.27.4"   # GHSA-mcxv-wphc-7xjm (high): <3.27.4 could audit a different version than npm installs
 lockfile_lint_version: "5.1.0"
 # sfw must be 2.0.6 or later: the npm and cargo wrappers run it with
@@ -740,6 +741,40 @@ lockfile_lint_version: "5.1.0"
 # than 2.0.6 is replaced, and moved aside (recorded) if the replacement is
 # still too old.
 sfw_version: "2.0.6"
+
+# The firewall binary a host gets on its FIRST install of sfw.
+#
+# sfw 2.0.6 is a launcher. On first use it asks
+# https://api.github.com/repos/SocketDev/sfw-free/releases/latest which binary
+# to download, with no credentials (60 calls an hour per IP, shared on hosted
+# runners and behind NAT) and no way to give it any. MEASURED 2026-11-23: with
+# that API answering 403, sfw exits 1 within 0.3 s, the role moved it aside, and
+# npm and cargo ran unfiltered; the binary itself still downloaded from the
+# release URL.
+#
+# So when sfw is installed and its cache holds no binary, the role downloads
+# this release by that URL, checks its SHA-256, and puts it in sfw's cache, all
+# before sfw first runs (tasks/sfw_seed.yml). It never replaces a binary sfw has
+# cached: the refresh timer, and later applies, keep updating it. If the pin
+# cannot be used, sfw downloads its current release itself, as it did before,
+# and the run summary says why. A download that does not match its SHA-256 is
+# refused instead: sfw is moved aside, and fetches nothing itself.
+#
+# The digests are the ones the GitHub API lists for the release's assets:
+#   gh api repos/SocketDev/sfw-free/releases/tags/<version> \
+#     --jq '.assets[] | "\(.name) \(.digest)"'
+# and all four equal what sha256sum makes of the files at the release URL
+# (MEASURED 2026-11-23). Change the version and all four together, here and in
+# action/harden.sh (tests/ci/06-role-parity.bats compares them). The key is
+# <platform>-<arch> as sfw names its assets; a host on any other platform has
+# no pin. sfw caches a release under its NAME, which for v1.16.0 is its tag.
+sfw_binary_pin: true
+sfw_binary_version: "v1.16.0"
+sfw_binary_checksums:
+  linux-x86_64: "sha256:1f24d2628aeb3995f1f2651509e37641c7c41d07749ac68594ecb5bb2dd44d8a"
+  linux-arm64: "sha256:474cdb684e42d33d4b697dedd7d90c159d71380be0e53c496f0e7097c3617a6c"
+  macos-x86_64: "sha256:b574931bc2b3c36a9bf07ac07b9c07894f8cd314efc91bc5e4fe1c371b56adca"
+  macos-arm64: "sha256:29df049df2ef705a8ce726c6c41fe73a6034f6b1cd0d87f3f15a780d074b6d83"
 
 # zizmor, installed via `uv tool install`.
 zizmor_version: "1.29.0"

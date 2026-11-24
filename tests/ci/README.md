@@ -41,6 +41,7 @@ silently inert.
 | `09-intel-and-privilege.bats` | The `intel` input, the deprecated `install_sfw`, and what happens as root, without sudo, and in slim containers. |
 | `10-verify-json.bats` | `verify.sh --json` and the role's report fragment: the result's counts add up to the rows, `tools_seen`, the exit code, an empty host, and that every protection name starts with a tool (`protections.py`). |
 | `11-preflight.bats` | `--preflight`: writes nothing, the STOP lines (Ansible, sudo-rs, root, the files the play stops on), and that its markers, file list, classifier and affected ansible-core versions are `tasks/preflight.yml`'s. |
+| `12-sfw-binary-pin.bats` | The pinned Socket Firewall binary, with a stub launcher that caches as sfw does and a stub `curl`: used only when sfw's own fetch fails, held to its digest before it reaches sfw's cache, never put over a cached binary or through a directory another account could write, with each platform's own asset and digest, with `shasum` where there is no `sha256sum`, and with the reason in the warning when it is not used. Needs passwordless sudo; skips without it. |
 
 ## Two conventions worth knowing
 

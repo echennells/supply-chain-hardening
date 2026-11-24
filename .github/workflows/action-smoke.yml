@@ -1220,22 +1220,13 @@ jobs:
             echo "::warning::npm is at /usr/local/bin here, so this job cannot detect shadowing"
           fi
 
-      - name: Can this runner reach the GitHub API? (sfw fetches its binary through it)
-        id: ghapi
-        # The sfw shim downloads its firewall binary through the UNAUTHENTICATED
-        # GitHub API, whose quota is shared by every job on the runner's IP. When
-        # it is used up the action correctly declines to wrap npm (sfw cannot
-        # run), which is not what these assertions test. Skip them with a
-        # warning in that one case only; any other failure still fails.
+      - name: How much GitHub API quota this runner has (evidence, not a gate)
+        # sfw fetches its binary through the UNAUTHENTICATED API, whose quota is
+        # shared by every job on the runner's IP. With it used up, the action
+        # falls back to the pinned binary, so the assertions below hold either way.
         run: |
-          rem=$(curl -s https://api.github.com/rate_limit | python3 -c 'import sys,json; print(json.load(sys.stdin)["resources"]["core"]["remaining"])' 2>/dev/null || echo 0)
-          echo "unauthenticated GitHub API requests left for this runner IP: ${rem:-0}"
-          if [ "${rem:-0}" -gt 2 ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::this runner IP's unauthenticated GitHub API quota is used up, so sfw cannot fetch its binary; the sfw assertions are skipped"
-          fi
+          rem=$(curl -s https://api.github.com/rate_limit | python3 -c 'import sys,json; print(json.load(sys.stdin)["resources"]["core"]["remaining"])' 2>/dev/null || echo unknown)
+          echo "unauthenticated GitHub API requests left for this runner IP: ${rem}"
 
       - uses: ./action
         id: harden
@@ -1244,7 +1235,6 @@ jobs:
           install_sfw: true
 
       - name: The npm PATH resolves to must be our wrapper
-        if: steps.ghapi.outputs.ok == 'true'
         run: |
           resolved=$(command -v npm)
           echo "npm now resolves to: $resolved"
@@ -1254,7 +1244,6 @@ jobs:
           }
 
       - name: And the original binary was preserved next to it
-        if: steps.ghapi.outputs.ok == 'true'
         run: |
           resolved=$(command -v npm)
           test -x "${resolved}-real" || {
@@ -1263,7 +1252,6 @@ jobs:
           }
 
       - name: npm still works through the wrapper, AS THE RUNNER USER, through sfw
-        if: steps.ghapi.outputs.ok == 'true'
         # A real install, not just `npm init`. sfw keeps its cache inside its
         # own package directory, which `sudo npm install -g` makes root-owned;
         # before the action warmed it as root, every install through the
@@ -1277,8 +1265,75 @@ jobs:
           test -d node_modules/is-number && echo "npm install through sfw OK"
 
       - name: Output agrees with reality
-        if: steps.ghapi.outputs.ok == 'true'
         run: test "${{ steps.harden.outputs.sfw-installed }}" = "true"
+
+  action-sfw-pinned-floor:
+    name: 'Action: intel sfw works with the GitHub API unreachable (${{ matrix.runner }})'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every platform the pin names. It is the only place here that runs the
+        # arm64 and the macOS binaries.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    # 10 of 30 sfw jobs here in one week started on a runner whose API quota was
+    # already used up, and sfw was then missing for the whole job. Waiting for
+    # that to happen by chance proves nothing, so this job makes it happen.
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Make api.github.com unreachable for this job
+        run: |
+          uname -srm; node --version; npm --version; command -v npm
+          echo '127.0.0.1 api.github.com' | sudo tee -a /etc/hosts >/dev/null
+          if [ "$(uname -s)" = Darwin ]; then sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder; sleep 2; fi
+          if curl -s -m 10 -o /dev/null https://api.github.com/rate_limit; then
+            echo "::error::the API still answers, so this job would prove nothing"; exit 1
+          fi
+
+      - uses: ./action
+        id: harden
+        with:
+          ecosystems: npm
+          intel: sfw
+
+      - name: sfw is installed, and runs the pinned binary
+        # python3 for the paths and modes: readlink and stat differ on macOS.
+        run: |
+          test "${{ steps.harden.outputs.sfw-installed }}" = "true"
+          want=$(sed -n 's/^SFW_BINARY_VERSION="\(.*\)"$/\1/p' action/harden.sh)
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) asset=sfw-free-linux-x86_64; key=LINUX_X86_64 ;;
+            Linux-aarch64) asset=sfw-free-linux-arm64; key=LINUX_ARM64 ;;
+            Darwin-arm64) asset=sfw-free-macos-arm64; key=MACOS_ARM64 ;;
+            Darwin-x86_64) asset=sfw-free-macos-x86_64; key=MACOS_X86_64 ;;
+            *) echo "::error::no pin for this platform"; exit 1 ;;
+          esac
+          sum=$(sed -n "s/^SFW_BINARY_SHA256_$key=\"\(.*\)\"$/\1/p" action/harden.sh)
+          python3 -I - "$(command -v sfw)" "$want" "$asset" "$sum" <<'PY'
+          import hashlib, os, sys
+          sfw, want, asset, sha = sys.argv[1:]
+          pkg = os.path.dirname(os.path.dirname(os.path.realpath(sfw)))
+          latest = os.path.realpath(os.path.join(pkg, ".sfw-cache", "latest"))
+          st = os.stat(latest)
+          print("cached:", latest, "uid", st.st_uid, "mode", oct(st.st_mode & 0o7777))
+          assert latest == os.path.join(pkg, ".sfw-cache", want, asset), "not the pinned binary"
+          assert (st.st_uid, st.st_mode & 0o7777) == (0, 0o755), "not root's, or writable by others"
+          h = hashlib.sha256()
+          with open(latest, "rb") as f:
+              for b in iter(lambda: f.read(1 << 20), b""):
+                  h.update(b)
+          assert h.hexdigest() == sha, "its sha256 is not the pinned one"
+          print("pinned, root's, and its sha256 matches")
+          PY
+
+      - name: npm installs through it, as the runner user
+        run: |
+          grep -q "supply-chain-harden" "$(command -v npm)"
+          sfw true && echo "the binary runs"
+          mkdir -p /tmp/sfwproj && cd /tmp/sfwproj && npm init -y >/dev/null
+          npm install is-number@7.0.0
+          test -d node_modules/is-number && echo "npm install through the pinned sfw OK"
 
   action-verify-catches-post-hardening-shadowing:
     name: 'Verify: catches a toolchain installed AFTER hardening'
@@ -1297,22 +1352,13 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - name: Can this runner reach the GitHub API? (sfw fetches its binary through it)
-        id: ghapi
-        # The sfw shim downloads its firewall binary through the UNAUTHENTICATED
-        # GitHub API, whose quota is shared by every job on the runner's IP. When
-        # it is used up the action correctly declines to wrap npm (sfw cannot
-        # run), which is not what these assertions test. Skip them with a
-        # warning in that one case only; any other failure still fails.
+      - name: How much GitHub API quota this runner has (evidence, not a gate)
+        # sfw fetches its binary through the UNAUTHENTICATED API, whose quota is
+        # shared by every job on the runner's IP. With it used up, the action
+        # falls back to the pinned binary, so the assertions below hold either way.
         run: |
-          rem=$(curl -s https://api.github.com/rate_limit | python3 -c 'import sys,json; print(json.load(sys.stdin)["resources"]["core"]["remaining"])' 2>/dev/null || echo 0)
-          echo "unauthenticated GitHub API requests left for this runner IP: ${rem:-0}"
-          if [ "${rem:-0}" -gt 2 ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::this runner IP's unauthenticated GitHub API quota is used up, so sfw cannot fetch its binary; the sfw assertions are skipped"
-          fi
+          rem=$(curl -s https://api.github.com/rate_limit | python3 -c 'import sys,json; print(json.load(sys.stdin)["resources"]["core"]["remaining"])' 2>/dev/null || echo unknown)
+          echo "unauthenticated GitHub API requests left for this runner IP: ${rem}"
 
       - uses: ./action
         with:
@@ -1320,7 +1366,6 @@ jobs:
           install_sfw: true
 
       - name: Before — the npm wrapper is the binary PATH resolves to
-        if: steps.ghapi.outputs.ok == 'true'
         run: |
           echo "npm resolves to: $(command -v npm)"
           ./action/verify.sh --emit=plain > before.txt 2>&1 || true
@@ -1335,7 +1380,6 @@ jobs:
           node-version: '20'
 
       - name: After — the verifier must report the wrapper as shadowed
-        if: steps.ghapi.outputs.ok == 'true'
         run: |
           echo "npm now resolves to: $(command -v npm)"
           ./action/verify.sh --emit=plain > after.txt 2>&1 || true

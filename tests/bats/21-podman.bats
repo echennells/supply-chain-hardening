@@ -137,3 +137,88 @@ assert "ghcr.io" in d["transports"]["docker"], "ghcr.io not in allowlist"
   target=$(readlink /run/docker.sock 2>/dev/null || readlink /var/run/docker.sock 2>/dev/null)
   [[ "$target" =~ "podman" ]]
 }
+
+# --- what the run says when an install fails ----------------------------------
+#
+# Both installs are failed_when: false, which makes `is failed` false whatever
+# happened, so neither record fired. They look at what is in place now.
+
+POD_HOSTS=""
+pod_restore() {
+  if [ -n "$POD_HOSTS" ]; then cat "$BATS_TEST_TMPDIR/hosts.saved" > /etc/hosts; POD_HOSTS=""; fi
+  if [ -e "$BATS_TEST_TMPDIR/cosign.real" ]; then mv -f "$BATS_TEST_TMPDIR/cosign.real" /usr/local/bin/cosign; fi
+}
+teardown() { pod_restore; }
+
+pod_apply() {
+  cd "${ROLE_DIR:-/opt/ansible-supply-chain-security}"
+  run ansible-playbook site.yml --connection=local --limit localhost \
+    --tags podman -e podman_enabled=true -e verify_protections=false "$@"
+}
+
+@test "podman: a cosign that is not the pinned one is recorded, whatever the download said" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to move cosign and edit /etc/hosts"
+  [ -w /etc/hosts ] || skip "/etc/hosts is not writable here"
+  local real=0 v
+  v=$(sed -n 's/^cosign_version: *"\([^"]*\)".*/\1/p' "${ROLE_DIR:-/opt/ansible-supply-chain-security}"/defaults/main.yml)
+  [ -n "$v" ]
+  cp /etc/hosts "$BATS_TEST_TMPDIR/hosts.saved"; POD_HOSTS=1
+  printf '127.0.0.1 github.com\n127.0.0.1 release-assets.githubusercontent.com\n127.0.0.1 objects.githubusercontent.com\n' >> /etc/hosts
+
+  # CONTROL: the pinned one in place, nothing to download, no record.
+  if [ -x /usr/local/bin/cosign ]; then
+    real=1
+    pod_apply
+    echo "$output" | grep -E 'cosign —' | cut -c1-200 || true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"cosign — "* ]]
+    mv /usr/local/bin/cosign "$BATS_TEST_TMPDIR/cosign.real"
+  fi
+
+  # None, and the download fails.
+  pod_apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cosign — the pinned $v could not be installed from GitHub releases: "*"Manual container image signature verification is not available."* ]] \
+    || { echo "$output" | tail -15; return 1; }
+
+  # Another one is there.
+  printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/cosign; chmod 755 /usr/local/bin/cosign
+  pod_apply
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cosign — the pinned $v could not be installed from GitHub releases: "*"The cosign already at /usr/local/bin/cosign is not it and was left alone; do not verify signatures with it."* ]] \
+    || { echo "$output" | tail -15; return 1; }
+  [ "$(cat /usr/local/bin/cosign)" = "$(printf '#!/bin/sh\nexit 0')" ]
+  rm -f /usr/local/bin/cosign
+
+  # A --check run installs nothing, so it has nothing to report.
+  pod_apply --check
+  [[ "$output" != *"cosign — "* ]]
+  pod_restore
+  [ "$real" = 1 ] || echo "# the image had no cosign, so the control above did not run" >&3
+}
+
+@test "podman: a digest that does not match leaves cosign uninstalled, and the run says so" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to move cosign"
+  local zeros; zeros=$(printf '0%.0s' $(seq 64))
+  [ ! -x /usr/local/bin/cosign ] || mv /usr/local/bin/cosign "$BATS_TEST_TMPDIR/cosign.real"
+  pod_apply -e "{\"cosign_checksums\": {\"amd64\": \"sha256:$zeros\", \"arm64\": \"sha256:$zeros\"}}"
+  echo "$output" | grep -E 'cosign —' | cut -c1-300 || true
+  [ "$status" -eq 0 ]
+  [ ! -e /usr/local/bin/cosign ]
+  [[ "$output" == *"cosign — the pinned "*" could not be installed from GitHub releases: "*"Manual container image signature verification is not available."* ]]
+}
+
+@test "podman: a podman that is not there is recorded, whatever the install said" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  [ "$(id -u)" = 0 ] || skip "needs root to move podman"
+  local p; p=$(command -v podman)
+  # dpkg still has it installed, so apt has nothing to do and says ok.
+  mv "$p" "$BATS_TEST_TMPDIR/podman.real"; hash -r
+  pod_apply
+  mv "$BATS_TEST_TMPDIR/podman.real" "$p"; hash -r
+  echo "$output" | grep -E 'podman —' | cut -c1-200 || true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"podman — requested via podman_enabled=true but the package install FAILED"* ]]
+}

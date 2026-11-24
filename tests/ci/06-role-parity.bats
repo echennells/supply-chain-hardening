@@ -60,6 +60,55 @@ setup() { common_setup; }
   grep -q 'sfw@${SFW_NPM_VERSION}' "$root/action/harden.sh"
 }
 
+# sfw_binary_pins <defaults/main.yml or harden.sh>: "version <tag>", then one
+# "<platform>-<arch> <sha256>" line per asset, sorted, for either spelling.
+sfw_binary_pins() {
+  case "$1" in
+    *.yml)
+      sed -n 's/^sfw_binary_version: *"\(.*\)"$/version \1/p' "$1"
+      sed -n '/^sfw_binary_checksums:/,/^[^ ]*$/s/^  \([a-z0-9_-]*\): *"sha256:\([0-9a-f]*\)"$/\1 \2/p' "$1" ;;
+    *)
+      sed -n 's/^SFW_BINARY_VERSION="\(.*\)"$/version \1/p' "$1"
+      sed -n 's/^SFW_BINARY_SHA256_\([A-Z]*\)_\([A-Z0-9_]*\)="\([0-9a-f]*\)"$/\1-\2 \3/p' "$1" \
+        | while read -r k v; do printf '%s %s\n' "$(printf '%s' "$k" | tr '[:upper:]' '[:lower:]')" "$v"; done ;;
+  esac | LC_ALL=C sort
+}
+
+@test "sfw's firewall binary: role and action pin the same release, with the same digest for each asset" {
+  # The role downloads it for a host's first install and the action when sfw
+  # cannot fetch its own. Both hold the file to these digests, so a set that
+  # drifts is a surface that silently stops using the pin (or uses another).
+  local root="${BATS_TEST_DIRNAME}/../.." role act
+  role=$(sfw_binary_pins "$root/defaults/main.yml")
+  act=$(sfw_binary_pins "$root/action/harden.sh")
+  echo "role:"; echo "$role"; echo "action:"; echo "$act"
+  # The four assets, a full digest each, and the version: nothing missing that
+  # would make two empty sets equal.
+  [ "$(printf '%s\n' "$role" | grep -cE '^(linux|macos)-(x86_64|arm64) [0-9a-f]{64}$')" -eq 4 ]
+  [ "$(printf '%s\n' "$role" | grep -cE '^version v[0-9]+[.][0-9]+[.][0-9]+$')" -eq 1 ]
+  [ "$(printf '%s\n' "$role" | awk 'NF { print $2 }' | sort -u | grep -c .)" -eq 5 ]
+  [ "$role" = "$act" ]
+  # And both fetch from the same place.
+  local url='https://github.com/SocketDev/sfw-free/releases/download/'
+  grep -q "url: \"$url{{ sfw_binary_version }}/" "$root/tasks/sfw_seed.yml"
+  grep -q "url=\"$url\${SFW_BINARY_VERSION}/" "$root/action/harden.sh"
+}
+
+@test "the sfw binary pin check detects a digest that drifted and one that went missing" {
+  local root="${BATS_TEST_DIRNAME}/../.." role copy="$BATS_TEST_TMPDIR/copy.sh"
+  role=$(sfw_binary_pins "$root/defaults/main.yml")
+  sed '/^SFW_BINARY_SHA256_LINUX_ARM64=/s/="./="x/' "$root/action/harden.sh" > "$copy"
+  [ "$(sfw_binary_pins "$copy")" != "$role" ]
+  sed '/^SFW_BINARY_SHA256_LINUX_ARM64=/s/="../="00/' "$root/action/harden.sh" > "$copy"
+  [ "$(sfw_binary_pins "$copy")" != "$role" ]
+  grep -v '^SFW_BINARY_SHA256_MACOS_X86_64=' "$root/action/harden.sh" > "$copy"
+  [ "$(sfw_binary_pins "$copy")" != "$role" ]
+  sed 's/^SFW_BINARY_VERSION=.*/SFW_BINARY_VERSION="v1.15.6"/' "$root/action/harden.sh" > "$copy"
+  [ "$(sfw_binary_pins "$copy")" != "$role" ]
+  cp "$root/action/harden.sh" "$copy"
+  [ "$(sfw_binary_pins "$copy")" = "$role" ]
+}
+
 @test "nuget: role and action pin nuget.org's three repository-signing certificates" {
   # signatureValidationMode=require refuses any package whose repository
   # signature does not chain to a pinned fingerprint (NU3034), so a list that

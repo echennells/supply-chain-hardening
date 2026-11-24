@@ -80,9 +80,10 @@
   # `latest` at a script, and `sudo npm view is-number version` ran it as uid 0.
   #
   # Changing the owner back to root does not repair that. The binary may
-  # already have been replaced, so the whole cache is removed, and the warm task
-  # in socket.yml downloads it again and checks the digest. This runs before
-  # the warm, because the warm runs sfw as root, and before every root
+  # already have been replaced, so the whole cache is removed, and socket.yml
+  # fills it again: with the pinned binary, whose SHA-256 it checks
+  # (sfw_seed.yml), or with sfw's own download, whose digest sfw checks. This
+  # runs before both, because the warm runs sfw as root, and before every root
   # `npm install -g` in the play (see the top of this file). If the cache
   # cannot be removed, sfw is moved aside: root callers would otherwise keep
   # running its binary through the wrappers.

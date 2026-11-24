@@ -23,13 +23,26 @@
   register: podman_install
   failed_when: false
 
+- name: Check whether podman is there
+  # Not the install's result: failed_when: false makes `is failed` false whatever
+  # happened (MEASURED on the cosign task below), and apt gives an rc for some
+  # failures only.
+  become: true
+  ansible.builtin.shell:
+    cmd: command -v podman
+    executable: /bin/bash
+  register: podman_present
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Record skipped protection — podman (install failed)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['podman — requested via podman_enabled=true but the package install FAILED. Container registry policy is not enforced; any policy.json deployed below has no runtime to enforce it.'] }}
+      {{ (skipped_protections | default([])) + ['podman — requested via podman_enabled=true but the package install FAILED' ~ ((': ' ~ ((podman_install.msg | regex_replace('\s+', ' ') | trim)[:300])) if podman_install.msg | default('', true) | length > 0 else '') ~ '. Container registry policy is not enforced; any policy.json deployed below has no runtime to enforce it.'] }}
   when:
-    - podman_install is defined
-    - podman_install is failed or podman_install.rc | default(0) != 0
+    - not ansible_check_mode
+    - podman_present.rc | default(0) != 0
 
 - name: Create containers config directory
   become: true
@@ -79,13 +92,27 @@
   register: cosign_install
   failed_when: false
 
-- name: Record skipped protection — cosign (download failed)
+- name: Look at the cosign that is in place
+  # What is there, not what the download said: failed_when: false makes
+  # `cosign_install is failed` false whatever happened, so the record below never
+  # fired (MEASURED with github.com refused and with a wrong digest).
+  ansible.builtin.stat:
+    path: /usr/local/bin/cosign
+    checksum_algorithm: sha256
+  register: cosign_in_place
+  when:
+    - ansible_system == 'Linux'
+    - cosign_arch | length > 0
+    - not ansible_check_mode
+
+- name: Record skipped protection — cosign (the pinned one is not in place)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['cosign — download from GitHub releases failed (no egress, proxy, or upstream blip). Manual container image signature verification is not available.'] }}
+      {{ (skipped_protections | default([])) + ['cosign — the pinned ' ~ cosign_version ~ ' could not be installed from GitHub releases: ' ~ ((cosign_install.msg | default('no error given', true) | regex_replace('\s+', ' ') | trim)[:300]) ~ '. ' ~ ('The cosign already at /usr/local/bin/cosign is not it and was left alone; do not verify signatures with it.' if cosign_in_place.stat.exists else 'Manual container image signature verification is not available.')] }}
   when:
-    - cosign_install is defined
-    - cosign_install is failed
+    - cosign_in_place.stat is defined
+    - not cosign_in_place.stat.exists
+      or 'sha256:' ~ (cosign_in_place.stat.checksum | default('')) != cosign_checksums[cosign_arch]
 
 - name: Notify when cosign install was skipped (unsupported platform)
   ansible.builtin.debug:
