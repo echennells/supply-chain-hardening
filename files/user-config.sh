@@ -181,7 +181,8 @@ ucf_settings() {
     uv)        printf '%s' "\[pip\]|index-strategy = \"[a-z-]+\"|allow-insecure-host = \[\]?|  \"[A-Za-z0-9*.:_-]+\",|\]|exclude-newer = \"[0-9A-Za-z:.+ -]+\"|no-build = true|(verify|require)-hashes = true" ;;
     bun)       printf '%s' "\[install(\.security)?\]|minimumReleaseAge = [0-9]+|(exact|ignoreScripts|lifecycleScripts|frozenLockfile|saveTextLockfile) = $b|auto = \"[a-z]+\"|scanner = \"[@A-Za-z0-9_./-]+\"" ;;
     cargo)     printf '%s' "root = \"[A-Za-z0-9._/-]+\"" ;;
-    composer*) printf '%s' "\{|  \"config\": \{|    \"(secure-http|lock|scripts-are-disabled)\": true,|    \"preferred-install\": \"dist\",|    \"allow-plugins\": (true|false|\{\}),?|    \"audit\": \{|      \"abandoned\": \"[a-z]+\",?|      \"block-insecure\": $b,|      \"block-abandoned\": $b|    \},?|    \"policy\": \{|      \"cooldown\": \{|        \"period\": [0-9]+,|        \"block\": true|      \}|  \}|\}" ;;
+    composer*) # (a template's "{% endif %}" ate the line break after it, hence the closing braces)
+      printf '%s' "\{|  \"config\": \{|    \"(secure-http|lock|scripts-are-disabled)\": true,|    \"preferred-install\": \"dist\",|    \"allow-plugins\": (true|false|\{\}),?(  \})?|    \"audit\": \{|      \"abandoned\": \"[a-z]+\",?(    \},?)?(  \})?|      \"block-insecure\": $b,|      \"block-abandoned\": $b(    \},?)?(  \})?|    \},?|    \"policy\": \{|      \"cooldown\": \{|        \"period\": [0-9]+,|        \"block\": true|      \}|  \}|\}" ;;
     bundler)   printf '%s' "---|BUNDLE_(FROZEN|DEPLOYMENT|DISABLE_EXEC_LOAD|DISABLE_CHECKSUM_VALIDATION): \"$b\"|BUNDLE_COOLDOWN: \"[0-9]+\"" ;;
   esac
 }
