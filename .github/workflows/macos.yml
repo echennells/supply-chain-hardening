@@ -17,6 +17,7 @@ on:
       - 'files/**'
       - 'tasks/preflight.yml'
       - 'tests/macos/**'
+      - 'tests/lib/**'
       - '.github/workflows/macos.yml'
   pull_request:
     paths:
@@ -24,6 +25,7 @@ on:
       - 'files/**'
       - 'tasks/preflight.yml'
       - 'tests/macos/**'
+      - 'tests/lib/**'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
 
@@ -51,6 +53,13 @@ jobs:
           set -euo pipefail
           for t in deno uv composer; do command -v "$t" >/dev/null || brew install -q "$t"; done
           command -v bun >/dev/null || brew install -q oven-sh/bun/bun
+          # A go older than the newest release, which the toolchain attack names:
+          # the image's own (its tool cache), not the one Homebrew would build on.
+          if ! command -v go >/dev/null; then
+            gobin=$(ls -d "${RUNNER_TOOL_CACHE:-/nonexistent}"/go/*/*/bin 2>/dev/null | sort -V | tail -1 || true)
+            if [ -z "$gobin" ]; then brew install -q go@1.26; gobin="$(brew --prefix)/opt/go@1.26/bin"; fi
+            echo "$gobin" >> "$GITHUB_PATH"; export PATH="$gobin:$PATH"
+          fi
           # Two pnpm majors, each in a directory of its own: they read different
           # files. Pinned, so a red run is about this repo.
           npm install -g --silent --prefix "$RUNNER_TEMP/pnpm10" pnpm@10.34.9
@@ -90,7 +99,9 @@ jobs:
         run: |
           set -uo pipefail
           export PATH="$PNPM11:$PATH"
-          cd /
+          # A directory with a Cargo.lock: without one the cargo age row is a gap (no
+          # backend is installed here, and its fallback, --locked, needs a lockfile).
+          mkdir -p "$RUNNER_TEMP/crate" && cd "$RUNNER_TEMP/crate" && : > Cargo.lock
           rc=0
           "$GITHUB_WORKSPACE/action/verify.sh" --fail-on=config > "$RUNNER_TEMP/verify.txt" 2>&1 || rc=$?
           cat "$RUNNER_TEMP/verify.txt"
@@ -109,8 +120,13 @@ jobs:
 
       - name: ansible-core
         run: |
-          python3 -m venv "$RUNNER_TEMP/av"
+          # The image's python3 is newer than these releases support (3.15: ansible-core
+          # 2.20 dies importing itself), so an older one that is there as well.
+          for py in python3.13 python3.14 python3.12 python3; do command -v "$py" >/dev/null && break; done
+          "$py" --version
+          "$py" -m venv "$RUNNER_TEMP/av"
           "$RUNNER_TEMP/av/bin/pip" install -q 'ansible-core>=2.18,<2.21'
+          "$RUNNER_TEMP/av/bin/ansible-playbook" --version | head -1
           echo "$RUNNER_TEMP/av/bin" >> "$GITHUB_PATH"
 
       - name: --preflight says STOP

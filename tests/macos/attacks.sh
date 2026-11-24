@@ -37,7 +37,7 @@ result() { # <name> <FIRED|blocked|NOT-TESTED|UNCLEAR> <detail>
   esac
 }
 have() { command -v "$1" >/dev/null 2>&1; }
-line() { grep -iE "$2" "$1" 2>/dev/null | head -1; }
+line() { grep -iE -e "$2" "$1" 2>/dev/null | head -1; }
 pkg() { mkdir -p "$1"; printf '{"name":"evilpkg","version":"1.0.0","scripts":{"postinstall":"touch %s"}}\n' "$2" > "$1/package.json"; }
 
 # --- npm: a dependency's postinstall ----------------------------------------
@@ -111,7 +111,7 @@ uv_sdist() {
   tar czf evilsd-1.0.tar.gz evilsd-1.0
   bounded 200 uv pip install --target t ./evilsd-1.0.tar.gz > o 2>&1; rc=$?
   if [ -e "$M/uv" ]; then result "uv sdist" FIRED "$(uv --version 2>/dev/null): setup.py ran"
-  elif [ $rc -ne 0 ] && grep -qiE 'building (from )?source( distributions?)? is disabled|no-build|source builds? .*disabled' o; then result "uv sdist" blocked "$(line o 'disabled|no-build')"
+  elif [ $rc -ne 0 ] && grep -qE 'Building source distributions? .*is disabled|building from source is disabled' o; then result "uv sdist" blocked "$(line o 'is disabled')"
   else result "uv sdist" UNCLEAR "rc=$rc $(tail -3 o)"; fi
 }
 
