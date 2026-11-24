@@ -45,7 +45,7 @@ setup() {
   npm install /opt/test-fixtures/npm-ssh-persistence 2>/dev/null || true
   [ ! -f /tmp/marker-ssh-persistence ]
   # Double-check: no fake key in authorized_keys
-  ! grep -q "FAKE_TEST_KEY_NOT_REAL" /root/.ssh/authorized_keys 2>/dev/null
+  ! grep -q "FAKE_TEST_KEY_NOT_REAL" /root/.ssh/authorized_keys 2>/dev/null || false
   rm -rf /tmp/attack-test
 }
 

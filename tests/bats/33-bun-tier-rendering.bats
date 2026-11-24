@@ -165,7 +165,7 @@ EOF
   ansible-playbook "$playbook" >/dev/null 2>&1
   rm -f "$playbook"
   assert_valid_toml "$out"
-  ! grep -q '^\[install\.security\]' "$out"
+  ! grep -q '^\[install\.security\]' "$out" || false
   rm -f "$out"
 }
 
@@ -237,7 +237,7 @@ EOF
 @test "tier-render: 1.2.23 (last version without the key) → minimumReleaseAge OMITTED" {
   local f="$TIER_DIR/bun-1.2.23.toml"
   assert_valid_toml "$f"
-  ! grep -q "^minimumReleaseAge" "$f"
+  ! grep -q "^minimumReleaseAge" "$f" || false
   # ignoreScripts is a SEPARATE tier and is honoured here.
   grep -q "^ignoreScripts = true$" "$f"
 }

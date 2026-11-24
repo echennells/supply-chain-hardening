@@ -44,7 +44,7 @@ teardown_file() {
 @test "cargo-render: cargo_install_root='' (default) → no [install] block emitted" {
   local f="$CARGO_DIR/empty.toml"
   [ -f "$f" ]
-  ! grep -q '^\[install\]' "$f"
+  ! grep -q '^\[install\]' "$f" || false
   ! grep -q '^root = ' "$f"
 }
 
