@@ -242,7 +242,7 @@
       # npm when the wrapper is NOT present to handle it; the check is at runtime
       # so it self-corrects if the wrapper is later added or removed. yarn and
       # pnpm have no PATH wrapper, so they always need the alias.
-      if ! grep -q supply-chain-hardening /usr/local/bin/npm 2>/dev/null; then
+      if ! sed -n 2p /usr/local/bin/npm 2>/dev/null | grep -q 'supply-chain-hardening wrapper'; then
         alias npm='npq-hero'
       fi
       alias yarn='NPQ_PKG_MGR=yarn npq-hero'

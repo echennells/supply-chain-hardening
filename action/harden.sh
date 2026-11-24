@@ -227,6 +227,36 @@ version_ge() {
   return 0  # equal counts as ge
 }
 
+# is_our_wrapper <file>: whether this file is a PATH wrapper this project wrote,
+# judged by its first two lines and nothing else. Every wrapper either surface
+# has shipped opens with a shell shebang and then one of these lines (read from
+# every commit that touched action/harden.sh or templates/*-wrapper.sh.j2, and
+# v2.0.0's and v2.1.0's were generated and checked):
+#   # Managed by supply-chain-harden action     composer, bun, npm, npx
+#   # Managed by supply-chain-harden            bunx
+#   # cargo — supply-chain-harden wrapper       cargo, deno
+#   # ... — supply-chain-hardening wrapper      the role's, every tool
+# It used to be `grep -q "supply-chain-harden"` over the whole file, so a script
+# that only mentions the name read as an existing wrapper: MEASURED, a cargo
+# script with "kept in a supply-chain-hardening checkout" in a comment was left
+# unwrapped and the run ended "applied: cargo" (issue 48, item 3).
+# The first 512 bytes are enough, and a real tool is often a binary of many MB.
+is_our_wrapper() {
+  local two
+  [ -f "$1" ] || return 1
+  two=$(head -c 512 "$1" 2>/dev/null | LC_ALL=C tr -d '\000\r' | LC_ALL=C sed -n '1,2p') || return 1
+  case "$two" in
+    '#!/bin/bash'$'\n'*|'#!/bin/sh'$'\n'*) two=${two#*$'\n'} ;;
+    *) return 1 ;;
+  esac
+  case "$two" in
+    '# Managed by supply-chain-harden action'|'# Managed by supply-chain-harden') return 0 ;;
+    '# cargo — supply-chain-harden wrapper'|'# deno — supply-chain-harden wrapper') return 0 ;;
+    '# '*' — supply-chain-hardening wrapper'|'# '*' — supply-chain-hardening wrapper:'*) return 0 ;;
+  esac
+  return 1
+}
+
 # ---- --suggest: tell a repo what it needs BEFORE the first failed build ----
 #
 # WHY THIS EXISTS.
@@ -1119,7 +1149,7 @@ _pf_version() {
       # fetch a release to answer, and npm is node startup either way. A wrapper
       # this project deployed names the real binary in REAL_NPM=.
       r=$2
-      if grep -q 'supply-chain-harden' "$r" 2>/dev/null; then
+      if is_our_wrapper "$r"; then
         d=$(sed -n "s/^REAL_[A-Z]*='\([^']*\)'.*/\1/p" "$r" 2>/dev/null | head -1) || true
         [ -n "$d" ] && r=$d
       fi
@@ -1785,7 +1815,7 @@ require_privilege() {
   # (root runs it), so leave it, say whose it is, and carry on with the
   # per-user layer. A tool binary that is not our wrapper is wrapped as before.
   if [[ "${CAN_ESCALATE:-0}" -ne 1 && -f "$target" && ! -O "$target" ]] \
-     && grep -q 'supply-chain-harden' "$target" 2>/dev/null; then
+     && is_our_wrapper "$target"; then
     owner=$(ls -ld -- "$target" | awk '{print $3}')
     warn "$tool: the PATH wrapper at $target belongs to $owner, from an earlier hardening run, and is left as it is: this job has no root and no usable sudo to replace a file $owner owns. It still runs when $(id -un) calls $tool. To update it, re-run harden.sh as $owner or with sudo."
     set_eco_status "$tool" "$status" "PATH wrapper not re-deployed: the one at $target belongs to $owner and this job has no root and no usable sudo. Config-file layer still applies."
@@ -1856,6 +1886,27 @@ eco_note_of() {
     [ "${ECO_KEYS[$i]}" = "$k" ] && { printf '%s' "${ECO_NOTE[$i]}"; return 0; }
   done
   printf ''
+}
+
+# degrade_eco <tool> <status> <note>: record a layer that did not land without
+# losing what an earlier layer recorded. Notes are joined, and NONE stays NONE.
+degrade_eco() {
+  local st="$2" note="$3" cur prev
+  cur=$(eco_status_of "$1"); prev=$(eco_note_of "$1")
+  [ "$cur" = NONE ] && st=NONE
+  set_eco_status "$1" "$st" "${prev:+$prev; }$note"
+}
+
+# wrap_skipped <ecosystem> <tool> <wrapper path> [status]: our wrapper is at that
+# path and the real tool is not beside it, so there is nothing to wrap. The
+# wrapper there refuses to run ("real <tool> not found ... refusing to recurse")
+# unless it names its real tool elsewhere, as the role's npm wrapper does. Either
+# way this run deployed no wrapper. It used to warn and still end
+# "applied: <ecosystem>".
+wrap_skipped() {
+  local eco="$1" tool="$2" path="$3" st="${4:-PARTIAL}"
+  warn "$tool: a wrapper this project wrote is at $path and ${path}-real is missing, so it was left as it is and no $tool wrapper was deployed. If $tool refuses to run, reinstall it over that file and run this again."
+  degrade_eco "$eco" "$st" "$tool PATH wrapper not deployed: one is already at $path and ${path}-real is missing"
 }
 
 HARDENED=()
@@ -2415,7 +2466,10 @@ harden_composer() {
   # use-parent-dir setting) and another account can plant one.
   local composer_home=""
   if command -v composer >/dev/null 2>&1; then
-    composer_home=$(cd / && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1)
+    # A composer that cannot run answers nothing here: no PHP, or our wrapper
+    # with its composer-real gone (MEASURED: rc 127, and under pipefail that
+    # ended the whole run, silently, with every later ecosystem untouched).
+    composer_home=$(cd / && COMPOSER_ALLOW_SUPERUSER=1 composer config --global home --no-ansi --no-plugins --no-interaction 2>/dev/null | tail -1) || composer_home=""
   fi
   case "$composer_home" in
     /*)
@@ -2474,11 +2528,11 @@ harden_composer() {
 
   local wrapper_target="$real_composer"
   require_privilege composer "$wrapper_target" || { end_section; return 0; }
-  if grep -q "supply-chain-harden" "$real_composer" 2>/dev/null; then
+  if is_our_wrapper "$real_composer"; then
     if [[ -x "${real_composer}-real" ]]; then
       real_composer="${real_composer}-real"
     else
-      warn "composer wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped composer composer "$wrapper_target"
       end_section
       return 0
     fi
@@ -2920,11 +2974,11 @@ harden_bun() {
   require_privilege bun "$wrapper_target" || { end_section; return 0; }
   # If the discovered bun IS our wrapper from a prior step (re-run within
   # the same job), find the real binary at -real and re-wrap.
-  if grep -q "supply-chain-harden" "$real_bun" 2>/dev/null; then
+  if is_our_wrapper "$real_bun"; then
     if [[ -x "${real_bun}-real" ]]; then
       real_bun="${real_bun}-real"
     else
-      warn "bun wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped bun bun "$wrapper_target"
       end_section
       return 0
     fi
@@ -3199,11 +3253,11 @@ EOF
 
   local wrapper_target="$real_cargo"
   require_privilege cargo "$wrapper_target" || { end_section; return 0; }
-  if grep -q "supply-chain-harden" "$real_cargo" 2>/dev/null; then
+  if is_our_wrapper "$real_cargo"; then
     if [[ -x "${real_cargo}-real" ]]; then
       real_cargo="${real_cargo}-real"
     else
-      warn "cargo wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped cargo cargo "$wrapper_target"
       end_section
       return 0
     fi
@@ -4005,11 +4059,11 @@ harden_deno() {
     "PATH wrapper not deployed (no root/sudo). deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
     || { end_section; return 0; }
 
-  if grep -q "supply-chain-harden" "$real_deno" 2>/dev/null; then
+  if is_our_wrapper "$real_deno"; then
     if [[ -x "${real_deno}-real" ]]; then
       real_deno="${real_deno}-real"
     else
-      warn "deno wrapper present but ${real_deno}-real missing; skipping re-wrap"
+      wrap_skipped deno deno "$real_deno" NONE
       end_section
       return 0
     fi
@@ -4677,12 +4731,12 @@ sfw_ready() {
 GUARD
 )
 
-  if grep -q "supply-chain-harden" "$real_npm" 2>/dev/null; then
+  if is_our_wrapper "$real_npm"; then
     # Already wrapped in a previous run within this job — re-wrap the original.
     if [[ -x "${real_npm}-real" ]]; then
       real_npm="${real_npm}-real"
     else
-      warn "npm wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped npm npm "$wrapper_target"
       end_section
       return 0
     fi
@@ -4777,11 +4831,11 @@ EOF
     return 0
   fi
   npx_target="$real_npx"
-  if grep -q "supply-chain-harden" "$real_npx" 2>/dev/null; then
+  if is_our_wrapper "$real_npx"; then
     if [[ -x "${real_npx}-real" ]]; then
       real_npx="${real_npx}-real"
     else
-      warn "npx wrapper present at $npx_target but ${npx_target}-real missing; skipping re-wrap"
+      wrap_skipped npm npx "$npx_target"
       end_section
       return 0
     fi

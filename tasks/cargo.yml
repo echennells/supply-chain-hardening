@@ -328,7 +328,7 @@
       for p in /usr/local/bin/cargo /usr/bin/cargo; do
         [ -n "$SELF" ] && { [ "$p" = "$SELF" ] || [ "$p" -ef "$SELF" ]; } && continue
         [ -f "$p" ] && [ ! -L "$p" ] && [ -x "$p-real" ] || continue
-        grep -q 'supply-chain-harden' "$p" 2>/dev/null && echo "$p"
+        {{ sch_is_wrapper_sh }} "$p" 2>/dev/null && echo "$p"
       done
       exit 0
     executable: /bin/bash
@@ -434,7 +434,7 @@
   # nothing. The documented off-switch was dead code.
   ansible.builtin.shell:
     cmd: |
-      if grep -q 'supply-chain-hardening' '{{ cargo_check.stdout }}' 2>/dev/null; then
+      if {{ sch_is_wrapper_sh }} '{{ cargo_check.stdout }}' 2>/dev/null; then
         echo is_wrapper
       else
         echo is_real

@@ -1199,3 +1199,136 @@ exec "$@"'
   [[ "$output" != *$'\n'* ]] || { echo "more than one probe; check each: $output"; false; }
   [[ "$output" == *"RUSTUP_AUTO_INSTALL=0 "* ]]
 }
+
+# --- which file counts as our wrapper (issue 48, item 3) ---------------------
+#
+# "Already wrapped" was a grep for the project's name anywhere in the file, so a
+# script that only mentions it was left unwrapped and still reported "applied".
+
+mentions_us() { # a tool script with the project's name in it, and no wrapper
+  stub_bin "$1" '# kept in a supply-chain-hardening checkout, next to supply-chain-harden action notes
+case "${1:-}" in
+  --version|-v|version) echo "'"$1"' '"${2:-9.9.9}"'" ;;
+  *) echo "STUB:'"$1"' ARGS=[$*]" ;;
+esac'
+}
+
+@test "wrap: a tool script that only mentions this project is wrapped, not taken for a wrapper" {
+  local t
+  for t in composer bun bunx cargo deno; do mentions_us "$t"; done
+  run harden ECOSYSTEMS=composer,bun,cargo,deno -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"-real is missing"* ]] || { echo "$output"; false; }
+  for t in composer bun cargo deno; do
+    grep -q 'STUB:' "$(stub_real "$t")" || { echo "$t: the real tool was not moved to $(stub_real "$t")"; false; }
+    case "$(sed -n 2p "$TEST_BIN/$t")" in
+      '# Managed by supply-chain-harden action'|"# $t — supply-chain-harden wrapper") ;;
+      *) echo "$t was not wrapped: $(sed -n 2p "$TEST_BIN/$t")"; false ;;
+    esac
+  done
+  [ "$(sed -n 2p "$TEST_BIN/bunx")" = '# Managed by supply-chain-harden' ]
+  grep -qx 'wrappers_deployed=composer,bun,bunx,cargo,deno' "$OUT_FILE" || { cat "$OUT_FILE"; false; }
+  # A second run knows its own wrappers: nothing is wrapped twice.
+  run harden ECOSYSTEMS=composer,bun,cargo,deno -- --emit=plain
+  [ "$status" -eq 0 ]
+  for t in composer bun cargo deno; do grep -q 'STUB:' "$(stub_real "$t")"; done
+}
+
+@test "wrap: npm and npx scripts that only mention this project are wrapped with intel on" {
+  sfw_stubs
+  stub_bin npm '# kept in a supply-chain-hardening checkout
+case "$*" in
+  "install -g --ignore-scripts sfw@2.0.6") exit 0 ;;
+  "--version") echo "10.9.8" ;;
+  *) echo "STUB:npm ARGS=[$*]" ;;
+esac'
+  mentions_us npx 10.9.8
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  grep -q 'STUB:npm' "$(stub_real npm)"
+  grep -q 'STUB:npx' "$(stub_real npx)"
+  [ "$(sed -n 2p "$TEST_BIN/npm")" = '# Managed by supply-chain-harden action' ]
+  [ "$(sed -n 2p "$TEST_BIN/npx")" = '# Managed by supply-chain-harden action' ]
+}
+
+@test "wrap: a wrapper whose real tool is gone is recorded, not reported as applied" {
+  local t
+  for t in composer bun cargo deno; do stub_bin "$t"; done
+  harden ECOSYSTEMS=composer,bun,cargo,deno -- --emit=plain >/dev/null
+  for t in composer bun cargo deno; do sudo rm -f "$(stub_real "$t")"; done
+  run harden ECOSYSTEMS=composer,bun,cargo,deno -- --emit=plain
+  [ "$status" -eq 0 ]
+  for t in composer bun cargo deno; do
+    [[ "$output" == *"$t: a wrapper this project wrote is at $TEST_BIN/$t and $TEST_BIN/$t-real is missing"* ]] || { echo "$t: $output"; false; }
+  done
+  grep -qx 'ecosystems_effective=' "$OUT_FILE" || { cat "$OUT_FILE"; false; }
+  grep -qx 'ecosystems_degraded=composer,bun,cargo' "$OUT_FILE" || { cat "$OUT_FILE"; false; }
+  grep -qx 'ecosystems_ineffective=deno' "$OUT_FILE" || { cat "$OUT_FILE"; false; }
+  grep -qx 'wrappers_deployed=' "$OUT_FILE" || { cat "$OUT_FILE"; false; }
+}
+
+@test "wrap: an npm wrapper whose real npm is gone degrades npm and keeps what was said of the age gate" {
+  # npm 10.9.8 has no age gate, so npm is already INERT when the wrapper is
+  # skipped; the second record must not hide the first.
+  sfw_stubs
+  harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain >/dev/null
+  sudo rm -f "$(stub_real npm)"
+  # The wrapper refuses to run without its npm, so this run meets it as it is.
+  sudo sh -c "printf '%s\n' '#!/bin/bash' '# Managed by supply-chain-harden action' 'case \"\$*\" in --version) echo 10.9.8;; esac; exit 0' > '$TEST_BIN/npm'"
+  run harden ECOSYSTEMS=npm INSTALL_SFW=true -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"npm: a wrapper this project wrote is at $TEST_BIN/npm and $TEST_BIN/npm-real is missing"* ]] || { echo "$output"; false; }
+  grep -qx 'ecosystems_degraded=npm' "$OUT_FILE" || { cat "$OUT_FILE"; false; }
+  [[ "$output" == *"does not implement min-release-age; script blocking still applies; npm PATH wrapper not deployed"* ]]
+}
+
+@test "wrap: every wrapper either surface has shipped is recognised, by harden.sh and by the role" {
+  # One marker line per wrapper, read from every commit that touched
+  # action/harden.sh or templates/*-wrapper.sh.j2, so a host wrapped by v2.0.0 or
+  # v2.1.0 is recognised, plus what today's sources write.
+  python3 -c 'import yaml' 2>/dev/null || skip "needs python3-yaml"
+  local d="$BATS_TEST_TMPDIR/markers" root="${BATS_TEST_DIRNAME}/../.." n=0 f
+  mkdir -p "$d"
+  mk() { n=$((n + 1)); printf '%s\n%s\nexit 0\n' "$2" "$3" > "$d/$(printf %02d "$n")-$1"; }
+  while IFS= read -r l; do mk ours '#!/bin/bash' "$l"; done <<'L'
+# Managed by supply-chain-harden action
+# Managed by supply-chain-harden
+# cargo — supply-chain-harden wrapper
+# deno — supply-chain-harden wrapper
+# /usr/local/bin/bun — supply-chain-hardening wrapper
+# bunx — supply-chain-hardening wrapper
+# cargo — supply-chain-hardening wrapper
+# /usr/local/bin/composer — supply-chain-hardening wrapper
+# composer — supply-chain-hardening wrapper
+# /usr/local/bin/deno — supply-chain-hardening wrapper
+L
+  mk ours '#!/bin/sh' '# /usr/local/bin/npm — supply-chain-hardening wrapper'
+  mk ours '#!/bin/sh' '# pip3 — supply-chain-hardening wrapper: pip3 is redirected to `uv pip`'
+  # Today's heredocs and templates, so a new header cannot be added unnoticed.
+  while IFS= read -r l; do mk ours '#!/bin/bash' "$l"; done < <(grep -A1 -x '#!/bin/bash' "$root/action/harden.sh" | grep '^# ' | sort -u)
+  for f in "$root"/templates/*-wrapper.sh.j2; do mk ours "$(sed -n 1p "$f")" "$(sed -n 2p "$f")"; done
+  [ "$n" -ge 23 ] || { echo "only $n markers; did the sources move?"; false; }
+  # Not ours: the name elsewhere, a config file's marker without a shebang, the
+  # rustup argv[0] shim (a -real), another interpreter, a binary, nothing.
+  mk other '#!/bin/bash' '# kept in a supply-chain-hardening checkout'
+  printf '#!/bin/bash\necho hi\n# Managed by supply-chain-harden action\n' > "$d/90-other"
+  printf '# Managed by supply-chain-harden action\nignore-scripts=true\n' > "$d/91-other"
+  printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n' > "$d/92-other"
+  printf '#!/usr/bin/env node\n# Managed by supply-chain-harden action\n' > "$d/93-other"
+  printf '\177ELF\0\0\n# Managed by supply-chain-harden action\n' > "$d/94-other"
+  : > "$d/95-other"
+  local role bad=""
+  role=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["sch_is_wrapper_sh"])' "$root/defaults/main.yml")
+  sed -n '/^is_our_wrapper() {/,/^}/p' "$root/action/harden.sh" > "$BATS_TEST_TMPDIR/fn.sh"
+  for f in "$d"/*; do
+    local want=other a=other r=other
+    case "$f" in *-ours) want=ours ;; esac
+    if bash -c 'set -euo pipefail; . "$1"; is_our_wrapper "$2"' x "$BATS_TEST_TMPDIR/fn.sh" "$f"; then a=ours; fi
+    if bash -c "$role \"\$1\"" x "$f" 2>/dev/null; then r=ours; fi
+    [ "$a" = "$want" ] && [ "$r" = "$want" ] || bad="$bad ${f##*/}(harden.sh=$a role=$r): $(sed -n 2p "$f" | cut -c1-60);"
+  done
+  [ -z "$bad" ] || { echo "$bad"; false; }
+  # And no task still looks for the name anywhere in the file.
+  run grep -rnE "grep -q[a-zA-Z]* ['\"]?supply-chain-harden(ing)?['\"]? ['\"{\$/]" "$root/tasks" "$root/action/harden.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+}
