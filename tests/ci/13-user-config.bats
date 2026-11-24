@@ -17,6 +17,10 @@ setup() {
   common_setup
   # Every path under it, whatever the platform (pnpm's default differs on macOS).
   XDG="$TEST_HOME/.config"
+  # Only asked for a version. The real ones can take seconds each in a fresh home
+  # (a pnpm 12 here took 18 s, and corepack downloads).
+  stub_bin pnpm 'echo 11.28.13'
+  stub_bin yarn 'echo 4.18.1'
 }
 
 f() { # <kind>: where harden.sh puts it here
