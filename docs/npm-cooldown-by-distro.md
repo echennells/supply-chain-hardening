@@ -77,14 +77,14 @@ command, for a key it does not know. MEASURED on 23 releases, each key in
 | 11.10.0 to 12.2.3 | enforced | enforced | both |
 
 So the role and `action/harden.sh` leave a key out, of the npmrc files and of the
-environment, where npm would warn about it. The gate is missing either way on
+environment, where the npm in use would warn about it. The gate is missing either way on
 those versions, and both verifiers go on reporting the `GAP`. Below 11.2.0 the
 keys stay: nothing is printed, and a newer npm honours them at once.
 
-**Several npms on one host.** One that knows the key decides: the key is written
-if any npm found would enforce it, because a warning from the old one is noise
-and a missing gate in the new one is a hole. Looked at: the npm on `PATH` (the
-role's fixed locations first, as elsewhere) and any other there, and nvm, fnm,
+**Several npms on one host.** The one in use decides (the first on `PATH`; for the
+role, the first of its fixed locations, as elsewhere), unless another one found
+knows the key: then it is written, because a warning from the old one is noise and
+a missing gate in the new one is a hole. Looked at: the npms on `PATH`, and nvm, fnm,
 Volta, asdf, nodenv, mise and n under the applying user's home. An npm anywhere
 else does not count, so re-apply after installing one. With no npm, or one that
 does not say its version, both keys are written ahead of it.

@@ -117,7 +117,7 @@ npm_keys() {
   npm_keys 1 1
 }
 
-@test "npm: with several npms the key is written when any of them would enforce it" {
+@test "npm: with several npms the one in use decides, unless another would enforce the key" {
   # A warning from the old one is noise; a missing gate in the new one is a hole.
   local d
   bare_path
@@ -137,6 +137,12 @@ npm_keys() {
   printf '{\n  "name": "npm",\n  "version": "11.8.0"\n}\n' > "$TEST_HOME/$d/package.json"
   harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
   npm_keys 0 0
+  # A silent npm in use and one that warns elsewhere: nothing changes for the one in
+  # use, so the keys stay.
+  stub_npm 10.9.8
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 1 1
+  stub_npm 11.5.1
   # A second npm further down PATH counts too, read from its package.
   mkdir -p "$TEST_TMP/second/bin" "$TEST_TMP/second/lib/node_modules/npm/bin"
   printf '{\n  "name": "npm",\n  "version": "12.2.3"\n}\n' > "$TEST_TMP/second/lib/node_modules/npm/package.json"
@@ -155,8 +161,8 @@ npm_keys() {
   grep -qx 'NPM_WARNS_FROM="11.2.0"' "$root/action/harden.sh"
   grep -qx 'NPM_KNOWS_MIN_RELEASE_AGE="11.10.0"' "$root/action/harden.sh"
   grep -qx 'NPM_KNOWS_ALLOW_GIT="11.9.0"' "$root/action/harden.sh"
-  grep -q "^sch_npm_writes_min_release_age: .*select('version', '11.10.0', '>=').*select('version', '11.2.0', '>=')" "$root/defaults/main.yml"
-  grep -q "^sch_npm_writes_allow_git: .*select('version', '11.9.0', '>=').*select('version', '11.2.0', '>=')" "$root/defaults/main.yml"
+  grep -q "^sch_npm_writes_min_release_age: .*first) is version('11.2.0', '<').*select('version', '11.10.0', '>=')" "$root/defaults/main.yml"
+  grep -q "^sch_npm_writes_allow_git: .*first) is version('11.2.0', '<').*select('version', '11.9.0', '>=')" "$root/defaults/main.yml"
 }
 
 @test "pnpm: blanket script block by default, no build allowlist" {

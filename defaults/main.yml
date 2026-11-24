@@ -196,17 +196,17 @@ npm_update_notifier: false
 #   11.2.0 to 11.8.0                         warn about both keys
 #   11.9.0                                   knows allow-git, warns about min-release-age
 #   11.10.0 to 12.2.3                        know both
-# So a key is left out where the npm here would warn about it, and written
+# So a key is left out where the npm in use would warn about it, and written
 # everywhere else. Below 11.2.0 it stays in: nothing is printed, and a newer npm
 # installed later, or by another account, honours it with no re-apply. After an
-# upgrade from 11.2.0-11.9.0 a re-apply writes it. Several npms: one that knows the
-# key decides, so it is written if any npm found here would enforce it (a warning
-# from the old one is noise, a missing gate is a hole). With no npm found, or one
+# upgrade from 11.2.0-11.9.0 a re-apply writes it. Several npms: the one the role
+# finds first decides, unless another one found knows the key: then it is written (a
+# warning from the old one is noise, a missing gate in the new one is a hole). With no npm found, or one
 # that does not say its version, both are written ahead of npm, as ever. The
 # versions come from tasks/npm_versions.yml; action/harden.sh has the same rule.
 sch_npm_versions: "{{ (sch_npm_versions_probe.stdout_lines | default([], true) | select('match', '^[0-9]+[.][0-9]+[.][0-9]+$') | list) if (sch_npm_versions_probe.stdout_lines | default(['-'], true) | first) != '-' else [] }}"
-sch_npm_writes_min_release_age: "{{ (sch_npm_versions | select('version', '11.10.0', '>=') | list | length > 0) or (sch_npm_versions | select('version', '11.2.0', '>=') | list | length == 0) }}"
-sch_npm_writes_allow_git: "{{ (sch_npm_versions | select('version', '11.9.0', '>=') | list | length > 0) or (sch_npm_versions | select('version', '11.2.0', '>=') | list | length == 0) }}"
+sch_npm_writes_min_release_age: "{{ (sch_npm_versions | length == 0) or ((sch_npm_versions | first) is version('11.2.0', '<')) or (sch_npm_versions | select('version', '11.10.0', '>=') | list | length > 0) }}"
+sch_npm_writes_allow_git: "{{ (sch_npm_versions | length == 0) or ((sch_npm_versions | first) is version('11.2.0', '<')) or (sch_npm_versions | select('version', '11.9.0', '>=') | list | length > 0) }}"
 
 # Derived, not a knob: the start of a shell command (a file name follows it) that
 # is true when that file is a PATH wrapper this project wrote, from its first two

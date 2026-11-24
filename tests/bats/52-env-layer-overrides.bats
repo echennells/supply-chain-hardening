@@ -69,7 +69,8 @@ setup_file() {
       - { n: 12.2.3, v: ["12.2.3"] }
       - { n: old-and-new, v: ["11.5.1", "11.19.1"] }
       - { n: old-and-11.9.0, v: ["11.5.1", "11.9.0"] }
-      - { n: silent-and-warning, v: ["9.2.0", "11.5.1"] }
+      - { n: silent-in-use, v: ["9.2.0", "11.5.1"] }
+      - { n: warning-in-use, v: ["11.5.1", "9.2.0"] }
   tasks:
     - ansible.builtin.setup: { gather_subset: [min] }
     - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/default.sh" }
@@ -183,11 +184,12 @@ uv_line() { grep -E '^export UV_EXCLUDE_NEWER=' "$1"; }
 @test "render: min-release-age and allow-git are left out of the npmrc files and the env layer exactly where npm warns about them" {
   # MEASURED: npm 11.2.0 to 11.9.0 warn on every command about a key they do not
   # know, older npm says nothing, and allow-git is known from 11.9.0,
-  # min-release-age from 11.10.0. With several npms, one that knows the key decides.
+  # min-release-age from 11.10.0. With several npms the one in use decides, unless
+  # another one knows the key.
   needs_render npm-11.9.0.sh
   local c n want a g f
   for c in none:11 unreadable:11 9.2.0:11 10.9.8:11 11.1.0:11 11.2.0:00 11.8.0:00 11.9.0:01 11.10.0:11 12.2.3:11 \
-           old-and-new:11 old-and-11.9.0:01 silent-and-warning:00; do
+           old-and-new:11 old-and-11.9.0:01 silent-in-use:11 warning-in-use:00; do
     n=${c%:*}; want=${c##*:}
     for f in "$RENDER_DIR/npm-$n.npmrc" "$RENDER_DIR/npm-$n.etc-npmrc"; do
       a=0; g=0

@@ -1200,15 +1200,15 @@ _pf_version() {
 #   11.2.0 to 11.8.0     warn about min-release-age and allow-git
 #   11.9.0               knows allow-git, warns about min-release-age
 #   11.10.0 to 12.2.3    know both
-# So a key is left out, of the files and of the environment, where npm would warn
-# about it, and written everywhere else. Below 11.2.0 it stays in: nothing is
+# So a key is left out, of the files and of the environment, where the npm in use
+# would warn about it, and written everywhere else. Below 11.2.0 it stays in: nothing is
 # printed there, and a newer npm installed later honours it at once (the action
 # run before setup-node; apt's npm 9.2.0 next to an fnm one), so leaving it out
 # would take a gate away and spare nobody anything.
 #
-# SEVERAL NPMS. One that knows the key decides: it is written if any npm found
-# here would enforce it, because a warning from the old one is noise and a missing
-# gate is a hole. An npm in no place looked at does not count; run this again
+# SEVERAL NPMS. The one on PATH decides, unless another one found here knows the
+# key: then it is written, because a warning from the old one is noise and a missing
+# gate in the new one is a hole. An npm in no place looked at does not count; run this again
 # after installing or upgrading npm. With no npm, or one that does not say its
 # version, both keys are written, as before.
 NPM_WARNS_FROM="11.2.0"
@@ -1246,14 +1246,13 @@ npm_versions_found() {
 
 # npm_writes_key <first npm that knows the key> <version in use> <versions found>
 npm_writes_key() {
-  local v warns=0
+  local v
   [ -n "$2" ] || return 0
+  version_ge "$2" "$NPM_WARNS_FROM" || return 0
   while IFS= read -r v; do
-    [ -n "$v" ] || continue
-    if version_ge "$v" "$1"; then return 0; fi
-    if version_ge "$v" "$NPM_WARNS_FROM"; then warns=1; fi
+    if [ -n "$v" ] && version_ge "$v" "$1"; then return 0; fi
   done <<<"$3"
-  [ "$warns" = 0 ]
+  return 1
 }
 
 if [ "$SUGGEST" = "1" ]; then
