@@ -54,6 +54,10 @@ Tell the user what hardening does, unless they have already agreed to it:
 - `composer` runs with `--no-plugins`, and with `--no-scripts` except for a script named
   on the command line (`composer test`); `bundle` runs frozen.
 - Several package managers are replaced by wrappers at their current path.
+- `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.bundle/config`, the pnpm files in
+  `~/.config/pnpm`, `~/.config/pip/pip.conf` and `~/.config/uv/uv.toml` are replaced with no
+  backup, login tokens included, on the first run and every later one. **Copy them first,
+  with the user's OK.**
 - There is no single uninstall command.
 
 **Agent hosts.** If the host's job is running agents in repositories nobody vetted, ask

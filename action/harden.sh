@@ -1011,7 +1011,15 @@ preflight_report() {
   if [ "$uid" -ne 0 ]; then
     _pf_note "/root/.yarnrc.yml: not looked at (needs root). If it is there and not this project's, the role leaves it alone and says so in the run summary."
   fi
-  _pf_line "(action/harden.sh does not stop on the per-user files: it backs each one up next to itself, replaces it and warns. It writes /etc with sudo where it can.)"
+  _pf_line "(action/harden.sh does not stop on those: it backs each one up next to itself, replaces it and warns. It writes /etc with sudo where it can.)"
+  # Not a STOP, and not true of any file above: these are replaced whole, by the
+  # role and by this script, with no backup (issue 48).
+  local u=0
+  for f in "$HOME/.npmrc" "$HOME/.yarnrc.yml" "$HOME/.bunfig.toml" "$HOME/.bundle/config" "$HOME/.config/pnpm/config.yaml" "$HOME/.config/pnpm/rc" "$HOME/.config/pip/pip.conf" "$HOME/.config/uv/uv.toml"; do
+    [ -e "$f" ] || continue
+    if [ "$u" = 0 ]; then u=1; echo ""; echo "Files that are REPLACED with no backup, tokens and registries in them included. Copy them first:"; fi
+    _pf_note "$f"
+  done
 
   echo ""
   echo "Package managers here (the role configures what it finds; it installs none of them):"
