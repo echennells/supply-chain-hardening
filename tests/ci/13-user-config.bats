@@ -150,6 +150,10 @@ lib() {
   apply > "$BATS_TEST_TMPDIR/log" 2>&1
   diff <(printf '%s\n' "$before") <(snapshot_but_cutoffs)
   ! grep -E 'replaced .*not exactly|took your own|not read' "$BATS_TEST_TMPDIR/log"
+  # with the user content still there, not because it is gone
+  local k
+  grep -q SECRET-npmrc "$(f npmrc)"
+  for k in $SEVEN; do grep -q "SECRET-$k" "$(copies "$k")"; done
 }
 
 @test "user config: content that comes back every run is copied once, not once per run" {
@@ -402,8 +406,9 @@ fixture() { # <version-surface>: put its eight files where they go
            'ignore-scripts[]=false\n' 'x=1\rignore-scripts=false\r\n' '\xef\xbb\xbfignore-scripts=false\n' '\xc2\xa0ignore-scripts=false\n' \
            ' ignore-scripts = false \nfund=true\n' "'\"ignore-scripts\"'=false\n" '[s] \nignore-scripts=false\n' 'ignore-scripts#x=false\n'; do
     rm -f "$(f npmrc)"* ; n=$((n + 1))
-    printf '%b' "$c" > "$(f npmrc)"
+    { printf '//kept/:_authToken=K\n'; printf '%b' "$c"; } > "$(f npmrc)"
     ECO=npm apply >/dev/null 2>&1
+    rest | grep -qx '//kept/:_authToken=K'
     [ "$(ask ignore-scripts)" = true ] || { echo "case $n: $c: $(ask ignore-scripts)"; cat "$(f npmrc)"; return 1; }
     [ "$(ask fund)" = false ] || { echo "case $n: $c: fund $(ask fund)"; return 1; }
   done
@@ -572,6 +577,11 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; ucf_copy "$(f npmrc)" ) >/dev/null 2>&1 || true
   [ -z "$(copies npmrc)" ]
   cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  # FIXTURE CONTROL: with nothing killed, the same call does change it
+  rm -f "$BATS_TEST_TMPDIR/stub/cat" "$TEST_HOME"/.sch-*
+  npmrc_body | ucf_npmrc "$(f npmrc)" | grep -qx changed
+  ! cmp -s "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  grep -qx 'a=SECRET' "$(f npmrc)"
 }
 
 @test "user config: where the rename is impossible (a bind mount) the old bytes stay on disk until the new ones are complete" {
