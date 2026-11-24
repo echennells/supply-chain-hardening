@@ -20,7 +20,7 @@ base_path() {
   local d="$BATS_TEST_TMPDIR/base" t p
   if [ ! -d "$d" ]; then
     mkdir -p "$d"
-    for t in bash sh awk basename cat cksum cmp cp cut date diff dirname env find grep head hostname id ls mkdir od printf readlink rm sed sort stat tail tr uname wc xargs; do
+    for t in bash sh awk basename cat cksum cmp cp cut date diff dirname env find grep head hostname id ls mkdir od printf readlink rm sed sha256sum shasum sort stat tail tr uname wc xargs; do
       p=$(type -P "$t" 2>/dev/null) || continue
       case "$p" in /*) ln -s "$p" "$d/$t" ;; esac
     done
@@ -287,18 +287,25 @@ exit 0"
   grep -q "local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'" "$ROOT/action/harden.sh"
 }
 
-@test "preflight: the per-user classification is the role's, function body for function body" {
-  local role="$BATS_TEST_TMPDIR/role" act="$BATS_TEST_TMPDIR/act"
-  # The role's, from tasks/preflight.yml: its marker variable, spelled out.
-  sed -n '/classify() { # \$1 kind/,/^      }$/p' "$ROOT/tasks/preflight.yml" \
-    | sed -e "s/\"\$ours\"/'Managed by (ansible-supply-chain-security|supply-chain-harden)'/" \
-          -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/return 0/return/g' \
-    | grep -v -e '^#' -e '^classify() {' -e '^}$' > "$role"
-  sed -n '/^user_cfg_class() {/,/^}$/p' "$ROOT/action/harden.sh" \
-    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/return 0/return/g' \
-    | grep -v -e '^#' -e '^user_cfg_class() {' -e '^}$' > "$act"
-  [ -s "$role" ] && [ -s "$act" ]
+@test "preflight: the per-user classification is the role's: the same code, and the same files" {
+  # Both run the block in files/user-config.sh; the role's preflight runs that file.
+  local role="$BATS_TEST_TMPDIR/role" act="$BATS_TEST_TMPDIR/act" k
+  sed -n '/^# >>> user_config$/,/^# <<< user_config$/p' "$ROOT/files/user-config.sh" > "$role"
+  sed -n '/^# >>> user_config$/,/^# <<< user_config$/p' "$ROOT/action/harden.sh" > "$act"
+  grep -q '^user_cfg_class() {' "$role"
   diff "$role" "$act"
+  grep -q 'ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"' "$ROOT/tasks/preflight.yml"
+  # no classifier of its own is left in either
+  ! grep -nE 'classify\(\)|strict-checksums|serviceIndex' "$ROOT/tasks/preflight.yml"
+  [ "$(grep -c 'user_cfg_class()' "$ROOT/action/harden.sh")" -eq 1 ]
+  # and the role asks about every kind the block knows, once each
+  # shellcheck disable=SC1090
+  . "$role"
+  for k in cargo maven nuget $UCF_KINDS; do
+    [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE "^ +$k: \[")" -eq 1 ] || { echo "$k"; return 1; }
+    [ -n "$(HOME=/h ucf_path "$k")" ]
+  done
+  [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE '^ +[a-z-]+: \[')" -eq 11 ]
 }
 
 @test "preflight: the ansible-core versions it calls affected are the role's" {
