@@ -1010,8 +1010,8 @@ preflight_report() {
   else
     _pf_stop "ansible-playbook not found. Install ansible-core >= 2.14 for this user, or use action/harden.sh --emit=plain (narrower, see AGENTS.md)."
   fi
-  # The role's probe is `date -u -d @0`. BSD date (macOS) reads -d as "set the
-  # kernel's daylight-saving value", so there the probe is not run at all.
+  # The role's probe is `date -u -d @0`. Not on macOS, where the play stops above
+  # and BSD date reads -d as "set the kernel's daylight-saving value".
   f=$(date --version 2>/dev/null | head -1) || true
   if [ "${f#*GNU}" != "$f" ]; then
     :
@@ -1190,6 +1190,72 @@ fi
 
 if [ "$PREFLIGHT" = "1" ]; then
   preflight_report "$PREFLIGHT_REPO"
+# ---- which npm keys this host's npm takes ----
+#
+# npm prints `npm warn Unknown user config "<key>". This will stop working in the
+# next major version of npm.` on every command, for a key in any npmrc or
+# NPM_CONFIG_* variable that it does not know. MEASURED, each in ~/.npmrc, in the
+# global npmrc and in the environment:
+#   8.19.4 to 11.1.0     say nothing about a key they do not know
+#   11.2.0 to 11.8.0     warn about min-release-age and allow-git
+#   11.9.0               knows allow-git, warns about min-release-age
+#   11.10.0 to 12.2.3    know both
+# So a key is left out, of the files and of the environment, where npm would warn
+# about it, and written everywhere else. Below 11.2.0 it stays in: nothing is
+# printed there, and a newer npm installed later honours it at once (the action
+# run before setup-node; apt's npm 9.2.0 next to an fnm one), so leaving it out
+# would take a gate away and spare nobody anything.
+#
+# SEVERAL NPMS. One that knows the key decides: it is written if any npm found
+# here would enforce it, because a warning from the old one is noise and a missing
+# gate is a hole. An npm in no place looked at does not count; run this again
+# after installing or upgrading npm. With no npm, or one that does not say its
+# version, both keys are written, as before.
+NPM_WARNS_FROM="11.2.0"
+NPM_KNOWS_MIN_RELEASE_AGE="11.10.0"
+NPM_KNOWS_ALLOW_GIT="11.9.0"
+
+# npm_versions_found <version of the npm on PATH>: that, then every other npm on
+# PATH and in this user's version managers, one version per line.
+npm_versions_found() {
+  local p f
+  [ -z "$1" ] || printf '%s\n' "$1"
+  while IFS= read -r p; do
+    [ -z "$p" ] || _pf_version npm "$p"
+  done < <(type -ap npm 2>/dev/null || true)
+  # >>> npm installs
+  # The same list in tasks/npm_versions.yml (tests/ci/03-config-files.bats compares
+  # them). Versions are read from each npm's package.json: nothing is run.
+  for f in "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/lib/node_modules/npm/package.json \
+           "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "$HOME"/.local/share/fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "$HOME"/.fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "$HOME/Library/Application Support"/fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "${VOLTA_HOME:-$HOME/.volta}"/tools/image/npm/*/package.json \
+           "${VOLTA_HOME:-$HOME/.volta}"/tools/image/node/*/lib/node_modules/npm/package.json \
+           "${ASDF_DATA_DIR:-$HOME/.asdf}"/installs/nodejs/*/lib/node_modules/npm/package.json \
+           "${NODENV_ROOT:-$HOME/.nodenv}"/versions/*/lib/node_modules/npm/package.json \
+           "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/*/lib/node_modules/npm/package.json \
+           "${N_PREFIX:-/usr/local}"/n/versions/node/*/lib/node_modules/npm/package.json; do
+    [ -f "$f" ] || continue
+    sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\).*/\1/p' "$f" 2>/dev/null | head -n 1
+  done
+  # <<< npm installs
+  return 0
+}
+
+# npm_writes_key <first npm that knows the key> <version in use> <versions found>
+npm_writes_key() {
+  local v warns=0
+  [ -n "$2" ] || return 0
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if version_ge "$v" "$1"; then return 0; fi
+    if version_ge "$v" "$NPM_WARNS_FROM"; then warns=1; fi
+  done <<<"$3"
+  [ "$warns" = 0 ]
+}
+
   exit $?
 fi
 
@@ -1962,7 +2028,7 @@ set_tool_version() {
 
 harden_npm() {
   section "npm"
-  local npm_v
+  local npm_v npm_vs npm_age=true npm_git=true
   npm_v=$(detect_version npm "npm --version")
   write_env NPM_CONFIG_IGNORE_SCRIPTS  true
   write_env NPM_CONFIG_AUDIT           true
@@ -1971,12 +2037,18 @@ harden_npm() {
   write_env NPM_CONFIG_UPDATE_NOTIFIER false
   # NPM_CONFIG_MIN_RELEASE_AGE stays exported, unlike pnpm's variable (see
   # harden_pnpm), although it also outranks a project's own .npmrc in both
+  npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
+  npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
+  npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
   # directions. The files below are not always read: actions/setup-node with
   # registry-url writes its own .npmrc under RUNNER_TEMP and exports
   # NPM_CONFIG_USERCONFIG at it (src/authutil.ts, CHECKED 2026-11-22), so npm
   # skips ~/.npmrc, and a setup-node npm reads its prefix's etc/npmrc, not
   # /etc/npmrc. In that setup the env var is the only age gate npm sees.
-  write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
+  # Not where the npm here would warn about it: see npm_writes_key.
+  if [[ "$npm_age" == true ]]; then
+    write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
+  fi
   # allow-git=none needs the env form for the same reason. Written only to the
   # files below, it was not applied under setup-node's redirect: npm 11.19.1
   # reported allow-git=all there and installed a git dependency (MEASURED
@@ -1984,11 +2056,8 @@ harden_npm() {
   # is an on/off switch at its strictest value, so a project can lose nothing
   # to it; a project's own .npmrc allow-git=all no longer re-enables git
   # dependencies (the variable outranks it, MEASURED on npm 11.9.0 to 12.2.3).
-  # Version-gated: npm reads allow-git from 11.9.0, and npm 11.2.0 to 11.8.x
-  # print `npm warn Unknown env config "allow-git"` on every command when it
-  # is set (MEASURED). An npm not found yet is assumed current, as for the age
-  # gate below.
-  if [[ -z "$npm_v" ]] || version_ge "$npm_v" "11.9.0"; then
+  # Version-gated the same way (npm 11.2.0 to 11.8.x warn about it).
+  if [[ "$npm_git" == true ]]; then
     write_env NPM_CONFIG_ALLOW_GIT none
   fi
 
@@ -2008,6 +2077,8 @@ allow-git=none"
   HARDENED+=("npm")
   set_tool_version "npm" "$npm_v"
   # SAY IT HERE, NOT ONLY IN THE VERIFIER.
+  if [[ "$npm_age" != true ]]; then content=$(grep -v '^min-release-age=' <<<"$content"); fi
+  if [[ "$npm_git" != true ]]; then content=$(grep -v '^allow-git=' <<<"$content"); fi
   #
   # min-release-age landed in npm 11.10.0. Older npm ACCEPTS the key, echoes
   # it back from `npm config get`, and enforces nothing — so the line below
@@ -2018,10 +2089,16 @@ allow-git=none"
   # The version is already in hand from detect_version, so this costs nothing.
   # Leaving it to `action/verify.sh` put the truth behind an opt-in step, while
   # the mandatory tool asserted the opposite.
-  if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.9.0"; then
-    log "npm: allow-git=none written to the npmrc files, but npm $npm_v predates it (npm 11.9.0), so git dependencies still install; NPM_CONFIG_ALLOW_GIT not exported"
+  if [[ "$npm_git" != true ]]; then
+    log "npm: allow-git left out of the npmrc files and the environment: npm $npm_v predates it (npm 11.9.0) and warns about it on every command. Git dependencies still install; upgrade npm, then run this again"
+  elif [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "$NPM_KNOWS_ALLOW_GIT"; then
+    log "npm: allow-git=none written, but npm $npm_v predates it (npm 11.9.0), so git dependencies still install"
   fi
-  if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.10.0"; then
+  if [[ "$npm_age" != true ]]; then
+    warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) and warns about it on every command, so the age gate is NOT written to the npmrc files or the environment and NOT enforced. Script blocking is unaffected. Upgrade npm to 11.10 or newer, then run this again, to get it."
+    set_eco_status npm INERT "age gate not written: npm $npm_v does not implement min-release-age and warns about it on every command; script blocking still applies"
+    log "npm: ignore-scripts=true (no age gate on npm $npm_v)"
+  elif [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "$NPM_KNOWS_MIN_RELEASE_AGE"; then
     warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) — the age gate is written and NOT enforced. Script blocking is unaffected. Install npm >= 11.10 before this action (e.g. setup-node 24, or npm i -g npm@latest) to make it effective."
     set_eco_status npm INERT "age gate written but npm $npm_v does not implement min-release-age; script blocking still applies"
     log "npm: ignore-scripts=true (age gate written but INERT on npm $npm_v)"

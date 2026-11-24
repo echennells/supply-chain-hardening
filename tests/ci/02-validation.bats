@@ -39,6 +39,7 @@ setup() { common_setup; }
 @test "a sub-day age gate rounds npm UP to one day rather than to zero" {
   # 12/24 == 0 in integer division, and npm reads whole days. Rounding down
   # would silently disable the npm gate for anyone asking for a short window.
+  stub_npm 11.19.1
   run harden RELEASE_AGE_HOURS=12 ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc" "min-release-age=1"
@@ -400,16 +401,33 @@ setup() { common_setup; }
   have npm || skip "npm not installed"
   run harden ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
-  local v; v=$(npm --version)
-  case "$v" in
-    1[1-9].*|[2-9][0-9].*)
-      # A new enough npm should NOT be flagged.
-      [[ "$output" != *"does NOT implement min-release-age"* ]] ;;
-    *)
-      [[ "$output" == *"does NOT implement min-release-age"* ]]
-      [[ "$output" == *"Script blocking is unaffected"* ]]
-      assert_file_contains "$OUT_FILE" "ecosystems_degraded=npm" ;;
-  esac
+  # 11.10.0, not 11: this matched 1[1-9].* and took 11.5.1 for new enough.
+  if npm_ge 11.10.0; then
+    [[ "$output" != *"does NOT implement min-release-age"* ]]
+  else
+    [[ "$output" == *"does NOT implement min-release-age"* ]]
+    [[ "$output" == *"Script blocking is unaffected"* ]]
+    assert_file_contains "$OUT_FILE" "ecosystems_degraded=npm"
+  fi
+}
+
+@test "reporting: the npm versions around the age gate's first release are told apart" {
+  local v
+  bare_path
+  for v in 10.9.8 11.5.1 11.9.0; do
+    stub_npm "$v"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"npm $v does NOT implement min-release-age"* ]] || { echo "$v: $output"; false; }
+    grep -qx 'ecosystems_degraded=npm' "$OUT_FILE"
+  done
+  for v in 11.10.0 11.21.3 12.2.3; do
+    stub_npm "$v"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"does NOT implement min-release-age"* ]] || { echo "$v: $output"; false; }
+    grep -qx 'ecosystems_effective=npm' "$OUT_FILE"
+  done
 }
 
 @test "reporting: a fully applied ecosystem says so without noise" {

@@ -1,0 +1,58 @@
+---
+# Which npm versions are on this host. npm 11.2.0 to 11.9.0 prints a warning on
+# every command for a key it does not know, in any npmrc or NPM_CONFIG_* variable,
+# so min-release-age and allow-git are left out where the npm found would warn
+# about them and no npm found knows them. The measurement and the rule are in
+# defaults/main.yml (sch_npm_writes_min_release_age); action/harden.sh has the same
+# one (npm_writes_key).
+#
+# Imported by npm.yml, which renders the npmrc files, and by shell_env.yml, which
+# renders the env layer on every run, `--tags pnpm` included. Both ask, rather than
+# one reading the other's register: a skipped task overwrites its register.
+#
+# The first line is the npm in use, in the order npm.yml looks, or "-" when it
+# does not answer; no line at all means no npm. Both of those write the keys.
+- name: Find the version of every npm on this host (some warn about keys they do not know)
+  ansible.builtin.shell:
+    cmd: |
+      first=""
+      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
+               "$HOME"/.nvm/versions/node/*/bin/npm \
+               "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
+               "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm \
+               "$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null)"; do
+        if [ -n "$p" ] && [ -x "$p" ]; then first=$p; break; fi
+      done
+      [ -n "$first" ] || exit 0
+      v=$(cd / && "$first" --version 2>/dev/null | head -n 1)
+      case "$v" in
+        [0-9]*.[0-9]*.[0-9]*) printf '%s\n' "$v" ;;
+        *) echo "-"; exit 0 ;;
+      esac
+      for p in /usr/bin/npm /usr/local/bin/npm; do
+        if [ -x "$p" ] && [ "$p" != "$first" ]; then (cd / && "$p" --version 2>/dev/null | head -n 1); fi
+      done
+      # >>> npm installs
+      # The same list in tasks/npm_versions.yml (tests/ci/03-config-files.bats compares
+      # them). Versions are read from each npm's package.json: nothing is run.
+      for f in "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/lib/node_modules/npm/package.json \
+               "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/lib/node_modules/npm/package.json \
+               "$HOME"/.local/share/fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+               "$HOME"/.fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+               "$HOME/Library/Application Support"/fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+               "${VOLTA_HOME:-$HOME/.volta}"/tools/image/npm/*/package.json \
+               "${VOLTA_HOME:-$HOME/.volta}"/tools/image/node/*/lib/node_modules/npm/package.json \
+               "${ASDF_DATA_DIR:-$HOME/.asdf}"/installs/nodejs/*/lib/node_modules/npm/package.json \
+               "${NODENV_ROOT:-$HOME/.nodenv}"/versions/*/lib/node_modules/npm/package.json \
+               "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/*/lib/node_modules/npm/package.json \
+               "${N_PREFIX:-/usr/local}"/n/versions/node/*/lib/node_modules/npm/package.json; do
+        [ -f "$f" ] || continue
+        sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\).*/\1/p' "$f" 2>/dev/null | head -n 1
+      done
+      # <<< npm installs
+      exit 0
+    executable: /bin/bash
+  register: sch_npm_versions_probe
+  changed_when: false
+  check_mode: false
+  failed_when: false

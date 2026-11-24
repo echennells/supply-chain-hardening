@@ -289,6 +289,36 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Rewrite a file in place, keeping its mode and owner: `filter_file FILE CMD...`
 # runs CMD with FILE on stdin and writes its stdout back over FILE. Use it
+# stub_npm <version>: an npm that says it is that version and does nothing else.
+# harden.sh writes min-release-age and allow-git by the npm it finds (npm 11.2.0 to
+# 11.9.0 warns about them on every command), so a test about what those keys say
+# must not depend on the npm of the machine it runs on.
+stub_npm() { stub_bin npm "case \"\$*\" in --version) echo $1 ;; *) echo STUB ;; esac"; }
+
+# bare_path: a directory with the basic utilities and nothing else, in BARE_PATH.
+# harden.sh looks at every npm on PATH, so a test about which npm it found must
+# not have this machine's own further down.
+BARE_PATH=""
+bare_path() {
+  local d="$BATS_TEST_TMPDIR/bare" t p
+  if [ ! -d "$d" ]; then
+    mkdir -p "$d"
+    for t in bash sh awk basename cat chmod chown cksum cmp cp cut date diff dirname echo env find getconf grep head hostname id install ln ls mkdir mktemp mv od perl pgrep printf ps python3 readlink rm sed sha256sum shasum sleep sort stat sudo tail tee touch tr true uname wc xargs; do
+      p=$(type -P "$t" 2>/dev/null) || continue
+      case "$p" in /*) ln -s "$p" "$d/$t" ;; esac
+    done
+  fi
+  BARE_PATH="$TEST_BIN:$d"
+}
+
+# npm_ge <version>: the npm on PATH is at least <version>. awk, not sort -V,
+# which the macOS runners' sort may lack.
+npm_ge() {
+  awk -v a="$(npm --version 2>/dev/null)" -v b="$1" 'BEGIN { split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
+    exit 0 }'
+}
+
 # instead of `sed -i`: BSD sed on the macOS runners has no plain -i (it takes
 # the script as a backup suffix) and no \n in a replacement.
 filter_file() {

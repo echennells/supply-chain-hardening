@@ -55,10 +55,39 @@ and Ubuntu's apt npm is old enough that it can't even upgrade itself.
 
 ## After you upgrade npm
 
-The role already wrote the `min-release-age` config — a newer npm just starts
-honouring it. **Re-apply the role** (`ansible-playbook site.yml --limit
-localhost`) so the npm PATH wrapper re-discovers and re-wraps the new npm, then
-confirm with `supply-chain-verify` — the *npm age gate* row should leave `GAP`.
+**Re-apply the role** (`ansible-playbook site.yml --limit localhost`): it writes
+`min-release-age` if the old npm made it leave the key out (next section), and
+the npm PATH wrapper re-discovers and re-wraps the new npm. Then confirm with
+`supply-chain-verify` — the *npm age gate* row should leave `GAP`. Coming from
+npm 11.1 or older, the key was already there and the new npm honours it before
+the re-apply too.
+
+## npm 11.2.0 to 11.9.0
+
+npm prints `npm warn Unknown user config "<key>". This will stop working in the
+next major version of npm.` (and the same for `env` and `global`) on every
+command, for a key it does not know. MEASURED on 23 releases, each key in
+`~/.npmrc`, in the global npmrc and in the environment:
+
+| npm | `min-release-age` | `allow-git` | Written? |
+|---|---|---|---|
+| 8.19.4 to 11.1.0 | unknown, silent | unknown, silent | both |
+| 11.2.0 to 11.8.0 | unknown, **warns** | unknown, **warns** | neither |
+| 11.9.0 | unknown, **warns** | enforced | `allow-git` only |
+| 11.10.0 to 12.2.3 | enforced | enforced | both |
+
+So the role and `action/harden.sh` leave a key out, of the npmrc files and of the
+environment, where npm would warn about it. The gate is missing either way on
+those versions, and both verifiers go on reporting the `GAP`. Below 11.2.0 the
+keys stay: nothing is printed, and a newer npm honours them at once.
+
+**Several npms on one host.** One that knows the key decides: the key is written
+if any npm found would enforce it, because a warning from the old one is noise
+and a missing gate in the new one is a hole. Looked at: the npm on `PATH` (the
+role's fixed locations first, as elsewhere) and any other there, and nvm, fnm,
+Volta, asdf, nodenv, mise and n under the applying user's home. An npm anywhere
+else does not count, so re-apply after installing one. With no npm, or one that
+does not say its version, both keys are written ahead of it.
 
 Units reminder: npm's `min-release-age` is in **days** (integer); the role
 derives it from `release_age_hours`. See the units note in the README.

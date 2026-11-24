@@ -15,6 +15,8 @@ load helpers
 setup() { common_setup; }
 
 @test "the action carries every role config key that is not excluded" {
+  # A current npm: an older one leaves out keys it would warn about (both surfaces).
+  stub_npm 11.19.1
   harden -- --emit=plain >/dev/null
   run python3 "${BATS_TEST_DIRNAME}/parity.py" "$TEST_HOME"
   echo "$output"

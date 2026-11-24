@@ -101,6 +101,7 @@ setup() { common_setup; }
   run harden ECOSYSTEMS=npm,go -- --emit=plain
   [ "$status" -eq 0 ]
   # A comma inside GOPROXY is the value most likely to be mangled by quoting.
+  stub_npm 11.19.1
   run env -i bash -c "source '$ENV_FILE'; printf '%s|%s' \"\$GOPROXY\" \"\$NPM_CONFIG_MIN_RELEASE_AGE\""
   [ "$status" -eq 0 ]
   [ "$output" = "https://proxy.golang.org,direct|2" ]

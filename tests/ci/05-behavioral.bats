@@ -79,9 +79,38 @@ JSON
 @test "npm: npm reports the age gate under the key we wrote" {
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm RELEASE_AGE_HOURS=96 -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$TEST_HOME" npm config get min-release-age
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get min-release-age
   [ "$status" -eq 0 ]
-  [ "$output" = "4" ]
+  if npm_ge 11.14.0 || ! npm_ge 11.2.0; then
+    [ "$output" = "4" ]
+  elif npm_ge 11.10.0; then
+    # MEASURED on 11.10.0 to 11.13.0: npm enforces the key and prints null for it,
+    # and prints the cutoff it became as `before`.
+    [ "$output" = "null" ]
+    run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get before
+    [ "$output" != "null" ]
+  else
+    # 11.2.0 to 11.9.0 do not know the key and warn about it, so it is not written.
+    [ "$output" = "undefined" ]
+  fi
+}
+
+@test "npm: no npm command warns about a key or variable the hardening wrote" {
+  # npm 11.2.0 to 11.9.0 print `npm warn Unknown user config "min-release-age"` (or
+  # env, or global) on every command for a key they do not know. Asked of the real
+  # npm with the files and the env layer in force, and with each on its own.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  local v="npm $(npm --version 2>/dev/null)"
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  [ "$output" = true ]
+  [[ "$stderr" != *"Unknown"* ]] || { echo "$v, the files: $stderr"; false; }
+  mkdir -p "$BATS_TEST_TMPDIR/nohome"
+  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/nohome" bash -c "source '$ENV_FILE'; npm config get ignore-scripts"
+  [ "$output" = true ]
+  [[ "$stderr" != *"Unknown"* ]] || { echo "$v, the env layer: $stderr"; false; }
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; npm --version"
+  [[ "$stderr" != *"Unknown"* ]] || { echo "$v, both: $stderr"; false; }
 }
 
 # --- npm: git dependencies under setup-node's redirect ----------------------
@@ -119,14 +148,6 @@ npm_install_git_dep() {
   local -a envs=(PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_USERCONFIG="$rt/.npmrc" NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX)
   while IFS= read -r kv; do [ -n "$kv" ] && envs+=("$kv"); done < "$TEST_TMP/ghenv"
   run env -i "${envs[@]}" "$@" npm install --prefix "$proj" --no-audit --no-fund
-}
-
-# npm_ge <version>: the npm on PATH is at least <version>. awk, not sort -V,
-# which the macOS runners' sort may lack.
-npm_ge() {
-  awk -v a="$(npm --version 2>/dev/null)" -v b="$1" 'BEGIN { split(a, x, "."); split(b, y, ".")
-    for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
-    exit 0 }'
 }
 
 @test "npm: under setup-node's NPM_CONFIG_USERCONFIG, a git dependency is refused (allow-git=none from the env layer)" {

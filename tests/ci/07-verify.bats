@@ -39,6 +39,7 @@ setup() {
 
 @test "the env-layer record names a variable that did not arrive" {
   # One variable missing out of several is named, not reported as "NONE of".
+  stub_npm 11.19.1
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   grep -q '^export NPM_CONFIG_MIN_RELEASE_AGE=' "$ENV_FILE"
   run verify_sourced --emit=plain

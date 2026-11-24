@@ -1220,7 +1220,7 @@ else
 
   if ! npm_implements min-release-age; then
     unavail npm.age-gate FUNCTIONAL "npm age gate" \
-      "npm $nv does NOT implement min-release-age (added in npm 11.10.0). Our config sets it and npm echoes it back, but nothing enforces it. Only an npm upgrade closes this — re-running the hardening will not."
+      "npm $nv does NOT implement min-release-age (added in npm 11.10.0), so nothing enforces it, whatever the config says. Only an npm upgrade closes this; re-run the hardening after it, because the key is left out where npm warns about it (11.2.0 to 11.9.0)"
   else
     v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
     case "$v" in
