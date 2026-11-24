@@ -3,11 +3,11 @@
 load setup
 
 @test "composer: secure-http true" {
-  assert_file_contains "$HOME/.config/composer/config.json" "secure-http"
+  assert_file_contains "$(composer_config)" "secure-http"
 }
 
 @test "composer: preferred-install dist" {
-  assert_file_contains "$HOME/.config/composer/config.json" "dist"
+  assert_file_contains "$(composer_config)" "dist"
 }
 
 @test "bundler: BUNDLE_DISABLE_EXEC_LOAD is not set (a process-model knob, not a control)" {

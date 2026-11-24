@@ -3137,9 +3137,9 @@ fi
 #
 # Composer resolves its home as COMPOSER_HOME -> $XDG_CONFIG_HOME/composer ->
 # ~/.config/composer, and uses a legacy ~/.composer when only that one exists
-# (MEASURED on 2.2.6 and 2.10.3). harden.sh hardcodes $HOME/.config/composer,
-# so the file can land somewhere composer never reads. Never stat that path as
-# evidence - ask composer where it reads from and compare.
+# (MEASURED on 2.2.6 and 2.10.3). Both writers write $HOME/.config/composer, or
+# $HOME/.composer where only that one is there, and composer's home by its own rule.
+# Never stat a path as evidence - ask composer where it reads from and compare.
 #
 # It runs from an empty directory with --no-plugins. MEASURED on composer 2.11.2
 # before that: `composer config --global <key>` run inside a checkout loaded the
@@ -3356,10 +3356,18 @@ if have composer; then
   case "$cmaj$cmin" in *[!0-9]*|'') cmaj=""; cmin="" ;; esac
 
   # ---- 1. is OUR config the config composer is reading? --------------------
-  # cwrote is where harden.sh writes (action/harden.sh:644). It is NOT
+  # cwrote is where both writers write (ucf_composer_base). It is NOT
   # authoritative - composer resolves its own home - but the verifier has to
-  # know the writer's path in order to report the two disagreeing.
+  # know the writer's path in order to report the two disagreeing. They write
+  # ~/.composer where only that one is there, so a file there with our lines, in
+  # our indentation (composer's own is four spaces), is ours; any other is not.
   cwrote="$HOME/.config/composer/config.json"
+  if [ ! -f "$cwrote" ] && [ -f "$HOME/.composer/config.json" ] \
+     && grep -qx '    "secure-http": true,' "$HOME/.composer/config.json" \
+     && grep -qx '    "preferred-install": "dist",' "$HOME/.composer/config.json" \
+     && grep -qx '        "block": true' "$HOME/.composer/config.json"; then
+    cwrote="$HOME/.composer/config.json"
+  fi
   # The --global reads run from an empty directory: from inside a checkout,
   # composer boots that project even for --global and dispatches pre-command-run
   # to its root scripts (MEASURED, 2.2.6 -> 2.11.2, whenever COMPOSER_SKIP_SCRIPTS

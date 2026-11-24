@@ -1023,6 +1023,25 @@ esac"
   [[ "$output" == *"GAP    PARSED      composer config in effect"* ]]
 }
 
+@test "composer: where only ~/.composer is there, our config in it is OK and the user's own is a GAP" {
+  mkdir -p "$TEST_HOME/.composer"
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *--list*) echo '[home] $TEST_HOME/.composer ($TEST_HOME/.composer/config.json)'
+            echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
+  *) echo STUB ;;
+esac"
+  # an unhardened home with a config of the user's
+  printf '{\n    "config": {\n        "secure-http": true\n    }\n}\n' > "$TEST_HOME/.composer/config.json"
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
+  rm -f "$TEST_HOME/.composer/config.json"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  [ ! -e "$TEST_HOME/.config/composer" ]
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
+}
+
 @test "npm: a window shorter than the declared one is WEAK and names the env var" {
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
