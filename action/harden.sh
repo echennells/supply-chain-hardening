@@ -1672,7 +1672,7 @@ preflight_report() {
         [ "$1" != npmrc ] || { _pf_npmrc; return 0; }
         case "$(user_cfg_class "$1" "$f")" in
           ours) _pf_line "$f: exactly what this project last wrote, replaced as before" ;;
-          *) _pf_stop "$f: not exactly what this project last wrote, so it may hold a private registry or a login token. Show it to the owner; only with their agreement, -e accept_user_config_overwrite=true copies it next to itself (0600) and replaces it." ;;
+          *) _pf_stop "$f: not exactly what this project last wrote, so it may hold a private registry or a login token. Tell the owner, without printing it; only with their agreement, -e accept_user_config_overwrite=true copies it next to itself (0600) and replaces it." ;;
         esac
         return 0 ;;
     esac
