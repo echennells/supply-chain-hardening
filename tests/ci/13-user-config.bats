@@ -142,6 +142,25 @@ lib() {
   ! grep SECRET "$BATS_TEST_TMPDIR/log"
 }
 
+@test "user config: CRLF files, and files with no last newline, are copied byte for byte; one of ours saved as CRLF is noticed" {
+  local k
+  plant
+  for k in $SEVEN; do
+    awk '{ printf "%s\r\n", $0 } END { printf "# no last newline" }' "$(f "$k")" > "$BATS_TEST_TMPDIR/x.$k"
+    cat "$BATS_TEST_TMPDIR/x.$k" > "$(f "$k")"
+  done
+  apply >/dev/null 2>&1
+  for k in $SEVEN; do
+    cmp "$(copies "$k")" "$BATS_TEST_TMPDIR/x.$k" || { echo "$k"; return 1; }
+    assert_file_lacks "$(f "$k")" SECRET
+  done
+  lib
+  for k in $SEVEN; do
+    awk '{ printf "%s\r\n", $0 }' "$(f "$k")" > "$BATS_TEST_TMPDIR/x"
+    [ "$(user_cfg_class "$k" "$BATS_TEST_TMPDIR/x")" = foreign ] || { echo "$k"; return 1; }
+  done
+}
+
 @test "user config: a second run over user content changes nothing, makes no second copy, and is quiet" {
   plant
   apply >/dev/null 2>&1
