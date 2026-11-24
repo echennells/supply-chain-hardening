@@ -257,6 +257,19 @@ is_our_wrapper() {
   return 1
 }
 
+# pnpm_config_dir: the directory pnpm reads its user config from, as pnpm's own
+# getConfigDir does: $XDG_CONFIG_HOME/pnpm when that is set, on every platform;
+# ~/Library/Preferences/pnpm on macOS; ~/.config/pnpm otherwise. The same rule as
+# tasks/pnpm.yml and scv_pnpm_dir in files/verify-probes.sh. This script wrote
+# ~/.config/pnpm everywhere. MEASURED on GitHub's macos-15 (XDG_CONFIG_HOME unset):
+# pnpm 11.29.0 then ran a project's postinstall with every ecosystem hardened and
+# reported minimumReleaseAge undefined (issue 48, item 2).
+pnpm_config_dir() {
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/pnpm' "$XDG_CONFIG_HOME"
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then printf '%s/Library/Preferences/pnpm' "$HOME"
+  else printf '%s/.config/pnpm' "$HOME"; fi
+}
+
 # ---- --suggest: tell a repo what it needs BEFORE the first failed build ----
 #
 # WHY THIS EXISTS.
@@ -1911,6 +1924,7 @@ wrap_skipped() {
 
 HARDENED=()
 SFW_INSTALLED=false
+PNPM_ALLOWED=""
 
 # WRAPPERS ACTUALLY DEPLOYED, recorded for the verifier.
 #
@@ -2019,7 +2033,9 @@ allow-git=none"
 
 harden_pnpm() {
   section "pnpm"
-  mkdir -p "$HOME/.config/pnpm"
+  local pnpm_dir
+  pnpm_dir=$(pnpm_config_dir)
+  mkdir -p "$pnpm_dir"
 
   # Parse pnpm_built_dependencies input (comma-separated allowlist).
   # When non-empty: switch from blanket ignore-scripts=true to
@@ -2092,7 +2108,7 @@ harden_pnpm() {
     # default on pnpm 11 before 11.28.1 and 12 before 12.8.0 (MEASURED with
     # CI=true and an out-of-sync lockfile: the lockfile was rewritten).
     echo "verifyStoreIntegrity: true"
-  } > "$HOME/.config/pnpm/config.yaml"
+  } > "$pnpm_dir/config.yaml"
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
   # both major versions; pnpm 10 still reads this file.
@@ -2109,7 +2125,7 @@ harden_pnpm() {
     else
       echo "ignore-scripts=true"
     fi
-  } > "$HOME/.config/pnpm/rc"
+  } > "$pnpm_dir/rc"
 
   # NO pnpm_config_* VARIABLES ARE EXPORTED HERE, although the role exports two.
   # pnpm 11+ reads pnpm_config_* from the environment, and that outranks a
@@ -2137,6 +2153,11 @@ harden_pnpm() {
   # a repo's uv and composer config.
 
   HARDENED+=("pnpm")
+  # For the verifier: with an allowlist our own file says ignore-scripts=false.
+  if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
+    PNPM_ALLOWED=$(IFS=,; echo "${pnpm_allowlist[*]}")
+  fi
+  log "pnpm: config.yaml and rc in $pnpm_dir"
   local pnpm_version
   pnpm_version=$(detect_version pnpm "pnpm --version")
   set_tool_version "pnpm" "$pnpm_version"
@@ -5014,6 +5035,7 @@ emit_output sfw_installed         "$SFW_INSTALLED"
 emit_output tool_versions         "$tool_versions_json"
 emit_output env_file              "$HARDENING_ENV_FILE"
 emit_output wrappers_deployed     "$wrappers_str"
+emit_output pnpm_built_dependencies "$PNPM_ALLOWED"
 emit_output job_id                "$(job_identity)"
 
 # THE COMPLETION MARKER, AND IT MUST STAY LAST.

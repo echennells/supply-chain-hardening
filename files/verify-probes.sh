@@ -795,6 +795,129 @@ fi
 # pnpm
 # ======================================================================
 
+# --- pnpm lifecycle scripts blocked, pnpm age gate, pnpm exotic-dep blocking  [PARSED] ---
+# ONE PROBE FOR BOTH SURFACES, AND IT ASKS PNPM. The CI surface used to grep its
+# own ~/.config/pnpm/config.yaml and grade that WEAK PRESENT. MEASURED on GitHub's
+# macos-15 (no XDG_CONFIG_HOME, so pnpm reads ~/Library/Preferences/pnpm): that
+# file was one pnpm never opens, a project's postinstall RAN under pnpm 11.29.0
+# with every ecosystem hardened, and the row stayed WEAK. A file pnpm does not
+# read is never better than a GAP here.
+#
+# ASKED FROM /, NEVER FROM $PWD. In a project, pnpm 10 and 11 load its
+# .pnpmfile.cjs / .pnpmfile.mjs (or the file a `pnpmfile:` key names) and fetch
+# its configDependencies, `pnpm config get` included, and pnpm 10 tries to install
+# the pnpm a `packageManager` field names (MEASURED on 10.34.9, 11.0.0 and
+# 11.28.13; 12.21.0 did none of it). From / it reports the host's own config; what
+# a project's files do to it is the "pnpm repo config override" row below.
+#
+# WITH THE VARIABLES SET ASIDE, so a value here came from a file. The role exports
+# pnpm_config_minimum_release_age, which pnpm 11+ reads, and both surfaces export
+# NPM_CONFIG_IGNORE_SCRIPTS, which pnpm 10 reads: a shell that has them hides a
+# file nothing reads from every systemd unit, cron job and container that does not.
+#
+# WHAT THE ANSWER PROVES. MEASURED (`pnpm config get` from /, and installs):
+#   - 9.15.9 to 10.34.9 print any key in a file they read, known or not
+#     (made-up-key-xyz=7 came back as 7). minimumReleaseAge is enforced from
+#     10.16.0: 10.15.1 and older printed 2880 back and installed, and 10.16.0 and
+#     10.34.9 refused (ERR_PNPM_NO_MATURE_MATCHING_VERSION), so below 10.16.0 the
+#     version is the verdict.
+#   - 11.0.0 to 12.23.0 do not print a key they do not know, and a value printed
+#     from config.yaml was enforced (ignoreScripts and minimumReleaseAge, each
+#     with a control that ran without it).
+#   - unset prints "undefined" on every version, pnpm 11's own defaults included.
+scv_pnpm_dir() { # where this pnpm reads its user config (pnpm's getConfigDir; tasks/pnpm.yml)
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/pnpm' "$XDG_CONFIG_HOME"
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then printf '%s/Library/Preferences/pnpm' "$HOME"
+  else printf '%s/.config/pnpm' "$HOME"; fi
+}
+scv_pnpm_get() { # <kebab-case key> -> the value pnpm reports from its files
+  (cd / && run_bounded 30 env -u pnpm_config_minimum_release_age -u PNPM_CONFIG_MINIMUM_RELEASE_AGE \
+      -u pnpm_config_ignore_scripts -u PNPM_CONFIG_IGNORE_SCRIPTS \
+      -u npm_config_ignore_scripts -u NPM_CONFIG_IGNORE_SCRIPTS \
+      -u npm_config_minimum_release_age -u NPM_CONFIG_MINIMUM_RELEASE_AGE \
+      pnpm config get "$1" 2>/dev/null </dev/null) | head -1 | tr -d '\r '
+}
+if ! have pnpm; then
+  row "N/A" - "pnpm" "pnpm not installed"
+elif command -v requested >/dev/null 2>&1 && ! requested pnpm; then
+  row "N/A" - "pnpm" "pnpm installed but not in the requested ecosystems"
+else
+  pnv=$(cd / && run_bounded 30 pnpm --version 2>/dev/null </dev/null | head -1 | tr -d '\r')
+  case "$pnv" in [0-9]*.[0-9]*) ;; *) pnv="" ;; esac
+  pnM=${pnv%%.*}; pnm=${pnv#*.}; pnm=${pnm%%.*}
+  pnwhere="It reads $(scv_pnpm_dir)/config.yaml (pnpm 11+) or $(scv_pnpm_dir)/rc (pnpm 10)"
+  # The packages the operator let build: our file then says ignore-scripts=false.
+  pnallow=${SCV_PNPM_BUILT_DEPS:-}
+  if [ -z "$pnallow" ] && [ -f "${OUTPUT_FILE:-}" ]; then
+    pnallow=$(grep '^pnpm_built_dependencies=' "$OUTPUT_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)
+  fi
+
+  if [ -z "$pnv" ]; then
+    row GAP FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
+    row GAP FUNCTIONAL "pnpm age gate" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
+  else
+    pns=$(scv_pnpm_get ignore-scripts)
+    case "$pns" in
+      true)
+        row OK PARSED "pnpm lifecycle scripts blocked" "pnpm $pnv reports ignore-scripts=true" ;;
+      false)
+        if [ -n "$pnallow" ]; then
+          row WEAK PARSED "pnpm lifecycle scripts blocked" \
+            "pnpm $pnv reports ignore-scripts=false because pnpm_built_dependencies allows $pnallow: pnpm 10+ still refuses every other dependency's build script, and a project's own lifecycle scripts run"
+        else
+          row GAP PARSED "pnpm lifecycle scripts blocked" "pnpm $pnv reports ignore-scripts=false, so install scripts run. $pnwhere"
+        fi ;;
+      *)
+        row GAP PARSED "pnpm lifecycle scripts blocked" \
+          "pnpm $pnv reports ignore-scripts=${pns:-<nothing>}, so it did not read what the hardening wrote and a package's own install scripts run. $pnwhere" ;;
+    esac
+
+    pna=$(scv_pnpm_get minimum-release-age)
+    if [ "$pnM" -lt 10 ] 2>/dev/null || { [ "$pnM" = 10 ] && [ "$pnm" -lt 16 ] 2>/dev/null; }; then
+      scv_toolchain_gap pnpm.age-gate FUNCTIONAL "pnpm age gate" \
+        "pnpm $pnv does NOT implement minimumReleaseAge (added in pnpm 10.16.0): it prints the key back ('${pna:-<nothing>}') and enforces nothing. Only a pnpm upgrade closes this"
+    else
+      case "$pna" in
+        ''|undefined|null)
+          pnenv=""
+          [ "$pnM" -ge 11 ] && [ -n "${pnpm_config_minimum_release_age:-}" ] \
+            && pnenv=" pnpm_config_minimum_release_age=$pnpm_config_minimum_release_age gates this shell; a context without it (a systemd unit, cron, a container CMD) has no gate from us."
+          row GAP PARSED "pnpm age gate" "pnpm $pnv reports no minimumReleaseAge from its files, so it did not read what the hardening wrote.$pnenv $pnwhere" ;;
+        *[!0-9]*) row GAP PARSED "pnpm age gate" "pnpm $pnv reports non-numeric minimumReleaseAge='$pna'" ;;
+        0)        row GAP PARSED "pnpm age gate" "minimumReleaseAge=0 disables the gate" ;;
+        *)
+          pnw=""; pnh=$(scv_want_hours)
+          case "$pnh" in ''|*[!0-9]*) ;; *) pnw=$((pnh * 60)) ;; esac
+          if [ -n "$pnw" ] && [ "$pna" -lt "$pnw" ]; then
+            row WEAK PARSED "pnpm age gate" "pnpm $pnv reports $pna minutes, below the $pnw minutes (${pnh}h) promised here. $pnwhere"
+          else
+            row OK PARSED "pnpm age gate" "pnpm $pnv implements minimumReleaseAge and reports $pna minutes"
+          fi ;;
+      esac
+    fi
+
+    # The host surface only, as before. MEASURED with a tarball-URL dependency of a
+    # dependency: pnpm 11.0.0 to 12.23.0 refuse it by default (ERR_PNPM_EXOTIC_SUBDEP)
+    # and install it with blockExoticSubdeps false; 10.26.0 to 10.34.9 refuse it
+    # only when their rc says block-exotic-subdeps=true, which the role does not
+    # write; 10.25.0 has no such control.
+    if [ "${SCV_SURFACE:-role}" != ci ]; then
+      pne=$(scv_pnpm_get block-exotic-subdeps)
+      if [ "$pnM" -lt 10 ] 2>/dev/null || { [ "$pnM" = 10 ] && [ "$pnm" -lt 26 ] 2>/dev/null; }; then
+        scv_toolchain_gap pnpm.exotic FUNCTIONAL "pnpm exotic-dep blocking" "pnpm $pnv has no blockExoticSubdeps (pnpm 10.26.0; on by default from 11): a dependency of a dependency can come from a git, http or tarball URL"
+      elif [ "$pne" = true ]; then
+        row OK PARSED "pnpm exotic-dep blocking" "pnpm $pnv reports blockExoticSubdeps=true"
+      elif [ "$pne" = false ]; then
+        row GAP PARSED "pnpm exotic-dep blocking" "pnpm $pnv reports blockExoticSubdeps=false. $pnwhere"
+      elif [ "$pnM" -ge 11 ]; then
+        row GAP PARSED "pnpm exotic-dep blocking" "pnpm $pnv reports blockExoticSubdeps=${pne:-<nothing>}, so it did not read what the hardening wrote; pnpm 11+ refuses them by its own default, which nothing here pins. $pnwhere"
+      else
+        row GAP PARSED "pnpm exotic-dep blocking" "pnpm $pnv reports blockExoticSubdeps=${pne:-<nothing>}: a dependency of a dependency can come from a git, http or tarball URL. The role writes the key for pnpm 11+ only"
+      fi
+    fi
+  fi
+fi
+
 # --- pnpm repo config override  [PRESENT] ---
 # A project's pnpm-workspace.yaml outranks the global config.yaml both surfaces
 # write, at or below its directory (MEASURED on pnpm 10.34.9, 11.0.0, 11.28.13
@@ -2512,7 +2635,7 @@ if have uv; then
 
 # --- uv dependency-confusion gate  [PARSED] ---
       # ---- row 4: index-strategy ---------------------------------------------
-      # HONEST CAP, the pnpm precedent. FirstIndex is ALSO uv's built-in default
+      # HONEST CAP. FirstIndex is ALSO uv's built-in default
       # (MEASURED: reported with no uv.toml anywhere), so a matching readback is
       # not evidence our config was read - it can only catch a REGRESSION to
       # unsafe-best-match. Never OK on that basis.
@@ -3510,7 +3633,8 @@ if have composer; then
   # signal: MEASURED on 2.7.1, 2.8.12 and 2.10.3, composer echoes ANY audit
   # subkey verbatim with our file named as the source, including an invented
   # `audit.block-totally-fake`. Do not drop the version tier on the strength
-  # of the readback looking good - that is the pnpm situation exactly.
+  # of the readback looking good - that is pnpm 10's situation exactly (see the
+  # pnpm rows, which carry a version tier for it too).
   # audit.abandoned alone (2.7-2.8) only annotates; it does not refuse.
   # Evidence is PARSED, never FUNCTIONAL: nothing here runs an audit, and the
   # version-tier branches are a readback of `composer --version`. The role's
@@ -3827,7 +3951,7 @@ fi
 # npm_implements(): nothing can make either tool report our window back, let
 # alone prove it honours it. What CAN be observed is the wrapper's ROUTING,
 # and that is what the FUNCTIONAL rows below are about. The enforcement row is
-# capped at WEAK for the same reason the pnpm age gate is.
+# capped at WEAK: pnpm at least reports its window back, and cargo cannot.
 
 cargo_wrapper_path() {
   # ASK THE WRAPPER; DO NOT INFER FROM PATH POSITION. This was `command -v cargo`
@@ -4226,9 +4350,9 @@ else
   # ---------------------------------------------------------------- gate ----
   # CEILING: WEAK. Never OK. Everything this row can observe is either the
   # behaviour of OUR OWN wrapper or a re-read of the file WE wrote; nothing in
-  # it came from cargo or cargo-cooldown. pnpm's age gate is capped at WEAK on
-  # strictly stronger evidence (pnpm at least echoes the value back), so an OK
-  # here would be the weakest evidence in the file carrying the strongest
+  # it came from cargo or cargo-cooldown. npm's and pnpm's rows are OK because
+  # the tool reports the window back on a version measured to enforce it, so an
+  # OK here would be the weakest evidence in the file carrying the strongest
   # verdict. See notes for what would earn it.
   if [ "$crc" = 2 ]; then
     row WEAK PRESENT "cargo publish-age gate" \
@@ -4359,10 +4483,10 @@ else
           "routing verified, but the window in force is ${cwin}h while this job's harden step recorded release_age_hours=$cwant. Written by a DIFFERENT run - a restored CARGO_HOME cache, or CARGO_HOME moved between steps. Something may be gating; it is not what this job asked for"
       elif [ "$cpinned" = 1 ]; then
         row WEAK FUNCTIONAL "cargo publish-age gate" \
-          "\`cargo build\` is ROUTED through \`cargo cooldown\`, the backend at $cool answers --version, and the wrapper pins the window in the environment - OBSERVED handing it COOLDOWN_MINUTES=$cpin (${cwin}h) when the caller had exported 0, so no cooldown.toml anywhere can widen it. CAPPED AT WEAK ON PURPOSE: these are observations of OUR wrapper; cargo-cooldown never reported the window back and nothing here watched it refuse a crate - the same honest cap as the pnpm age-gate row"
+          "\`cargo build\` is ROUTED through \`cargo cooldown\`, the backend at $cool answers --version, and the wrapper pins the window in the environment - OBSERVED handing it COOLDOWN_MINUTES=$cpin (${cwin}h) when the caller had exported 0, so no cooldown.toml anywhere can widen it. CAPPED AT WEAK ON PURPOSE: these are observations of OUR wrapper; cargo-cooldown never reported the window back and nothing here watched it refuse a crate"
       else
         row WEAK FUNCTIONAL "cargo publish-age gate" \
-          "\`cargo build\` is ROUTED through \`cargo cooldown\` and the backend at $cool answers --version; window ${cage} at $ch/cooldown.toml (what it does on a violation is its own row). CAPPED AT WEAK ON PURPOSE: every fact about the window comes from re-reading the file we wrote. cargo has no config readback (\`cargo config get\` is nightly-only) and cargo-cooldown never reported the value back, so nothing here observed the gate refusing anything - the same honest cap as the pnpm age-gate row"
+          "\`cargo build\` is ROUTED through \`cargo cooldown\` and the backend at $cool answers --version; window ${cage} at $ch/cooldown.toml (what it does on a violation is its own row). CAPPED AT WEAK ON PURPOSE: every fact about the window comes from re-reading the file we wrote. cargo has no config readback (\`cargo config get\` is nightly-only) and cargo-cooldown never reported the value back, so nothing here observed the gate refusing anything"
       fi
     fi
   elif printf '%s\n' "$cdisp" | grep -qx -- '--locked'; then

@@ -1371,30 +1371,9 @@ else
   fi
 fi
 
-# ============================================================ config files ===
-# PRESENT-level only, and reported as such. These exist so a missing file is
-# visible; they are not evidence that anything enforces.
-#
-# bun, bundler and yarn used to be grep rows here and are NOT any more: the
-# shared probe body runs real `bun install` / `bundle config` / `yarn config
-# get` probes for them, and a second value-blind grep row for the same
-# protection would double-count it in the table and in every count derived
-# from it. pnpm keeps its grep-level row until a real `config get` probe exists
-# for it.
-pcfg="$HOME/.config/pnpm/config.yaml"
-if ! have pnpm; then
-  na_absent "pnpm config" "pnpm not installed"
-elif ! requested pnpm; then
-  row "N/A" BYDESIGN "pnpm config" "pnpm installed but not in the requested ecosystems"
-elif [ -f "$pcfg" ] && grep -q ignoreScripts "$pcfg" 2>/dev/null; then
-  row WEAK PRESENT "pnpm config" "ignoreScripts present in $pcfg — file contents only, not proof of enforcement"
-else
-  gap pnpm.config PRESENT "pnpm config" "ignoreScripts not found in $pcfg"
-fi
-
 # ============================================================ shared probes ==
 #
-# yarn, bun, deno, uv, pip age gates, go checksum db + toolchain, composer,
+# yarn, pnpm, bun, deno, uv, pip age gates, go checksum db + toolchain, composer,
 # cargo, bundler, maven, gradle, nuget — the same bytes the Ansible role
 # installs at /usr/local/bin/supply-chain-verify. The
 # body needs row(), have() and requested(), all defined above. It never exits.

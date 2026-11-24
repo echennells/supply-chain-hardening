@@ -68,9 +68,9 @@ setup() { common_setup; }
 @test "pnpm: blanket script block by default, no build allowlist" {
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "ignoreScripts: true"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "minimumReleaseAge: 2880"
-  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
+  assert_file_contains "$PNPM_DIR/config.yaml" "ignoreScripts: true"
+  assert_file_contains "$PNPM_DIR/config.yaml" "minimumReleaseAge: 2880"
+  assert_file_lacks "$PNPM_DIR/config.yaml" "onlyBuiltDependencies"
 }
 
 @test "pnpm: a build allowlist flips to ignoreScripts false; the list goes to the pnpm 10 rc only" {
@@ -79,16 +79,16 @@ setup() { common_setup; }
   # for a scoped name, invalid YAML.
   run harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild,@scope/native" -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "ignoreScripts: false"
-  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
-  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=esbuild'
-  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=@scope/native'
+  assert_file_contains "$PNPM_DIR/config.yaml" "ignoreScripts: false"
+  assert_file_lacks "$PNPM_DIR/config.yaml" "onlyBuiltDependencies"
+  assert_file_contains "$PNPM_DIR/rc" 'only-built-dependencies\[\]=esbuild'
+  assert_file_contains "$PNPM_DIR/rc" 'only-built-dependencies\[\]=@scope/native'
   # Valid YAML, by whichever parser this host has (macOS runners have Ruby's
   # YAML but no PyYAML). A scoped name used to be written unquoted here.
   if python3 -c "import yaml" 2>/dev/null; then
-    python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$TEST_HOME/.config/pnpm/config.yaml"
+    python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$PNPM_DIR/config.yaml"
   elif command -v ruby >/dev/null 2>&1; then
-    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$TEST_HOME/.config/pnpm/config.yaml"
+    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$PNPM_DIR/config.yaml"
   fi
 }
 
@@ -122,12 +122,12 @@ setup() { common_setup; }
   assert_file_lacks "$ENV_FILE" "pnpm_config_"
   assert_file_lacks "$ENV_FILE" "PNPM_CONFIG_"
   # The window still reaches a project that sets none, through config.yaml.
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 2880$"
+  assert_file_contains "$PNPM_DIR/config.yaml" "^minimumReleaseAge: 2880$"
   rm -f "$ENV_FILE"
   run harden ECOSYSTEMS=pnpm RELEASE_AGE_HOURS=72 -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_lacks "$ENV_FILE" "pnpm_config_"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 4320$"
+  assert_file_contains "$PNPM_DIR/config.yaml" "^minimumReleaseAge: 4320$"
 }
 
 @test "pnpm: GitHub mode writes no pnpm_config_* variable to GITHUB_ENV either" {
@@ -136,7 +136,7 @@ setup() { common_setup; }
              ECOSYSTEMS=pnpm -- --emit=github
   [ "$status" -eq 0 ]
   assert_file_lacks "$TEST_TMP/ghenv" "pnpm_config_"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 2880$"
+  assert_file_contains "$PNPM_DIR/config.yaml" "^minimumReleaseAge: 2880$"
 }
 
 @test "pnpm: pnpm_config_ignore_scripts is never exported, with or without an allowlist" {
@@ -196,8 +196,8 @@ setup() { common_setup; }
   # CI frozen-lockfile default on 11 < 11.28.1 and 12 < 12.8.0 (measured).
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "verifyStoreIntegrity: true"
-  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "preferFrozenLockfile"
+  assert_file_contains "$PNPM_DIR/config.yaml" "verifyStoreIntegrity: true"
+  assert_file_lacks "$PNPM_DIR/config.yaml" "preferFrozenLockfile"
 }
 
 @test "yarn: HTTPS-only, via an empty unsafe-HTTP allowlist" {
@@ -465,7 +465,7 @@ PY
   run harden RELEASE_AGE_HOURS=48 ECOSYSTEMS=npm,pnpm,yarn,bun -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc"                   "min-release-age=2"        # days
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "minimumReleaseAge: 2880"  # minutes
+  assert_file_contains "$PNPM_DIR/config.yaml" "minimumReleaseAge: 2880"  # minutes
   assert_file_contains "$TEST_HOME/.yarnrc.yml"              "npmMinimalAgeGate: 2880"  # minutes
   assert_file_contains "$TEST_HOME/.bunfig.toml"             "minimumReleaseAge = 172800" # seconds
 }

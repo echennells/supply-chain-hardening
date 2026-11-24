@@ -48,6 +48,11 @@ common_setup() {
   ENV_FILE="${STATE_DIR}/supply-chain-hardening.env"
   # shellcheck disable=SC2034
   OUT_FILE="${STATE_DIR}/supply-chain-hardening.outputs"
+  # Where pnpm reads its config, and so where harden.sh writes it: harden() runs
+  # with no XDG_CONFIG_HOME. See pnpm_config_dir in action/harden.sh.
+  # shellcheck disable=SC2034
+  PNPM_DIR="${TEST_HOME}/.config/pnpm"
+  [ "$(uname -s)" != Darwin ] || PNPM_DIR="${TEST_HOME}/Library/Preferences/pnpm"
 }
 
 # harden [VAR=value ...] [-- script args ...]

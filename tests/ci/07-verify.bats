@@ -1831,6 +1831,135 @@ path_without_timeout() {
   done
 }
 
+# ---- pnpm: what pnpm itself reports -------------------------------------------
+#
+# The row here was a grep of a file harden.sh wrote, graded WEAK PRESENT. MEASURED
+# on GitHub's macos-15: pnpm never opens that file there, and a project's
+# postinstall ran with everything hardened (issue 48, item 2).
+
+# pnpm_says <version> <ignore-scripts> <minimum-release-age>: an age given as ENV
+# is whatever pnpm_config_minimum_release_age says, as pnpm 11 reads it.
+pnpm_says() {
+  local age="echo '$3'"
+  [ "$3" != ENV ] || age='echo "${pnpm_config_minimum_release_age:-undefined}"'
+  stub_bin pnpm 'echo "$PWD :: $*" >> "'"$BATS_TEST_TMPDIR"'/pnpm-calls"
+case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get ignore-scripts") echo "'"$2"'" ;;
+  "config get minimum-release-age") '"$age"' ;;
+  *) echo undefined ;;
+esac'
+}
+pnpm_row() { grep -E "pnpm $1 " <<<"$output"; }
+
+@test "pnpm: the rows ask pnpm, and what it reports is PARSED evidence" {
+  pnpm_says 11.29.0 true 2880
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "OK     PARSED      "*"pnpm 11.29.0 reports ignore-scripts=true"* ]] || { echo "$output" | grep pnpm; false; }
+  [[ "$(pnpm_row 'age gate')" == "OK     PARSED      "*"pnpm 11.29.0 implements minimumReleaseAge and reports 2880 minutes"* ]] || { echo "$output" | grep pnpm; false; }
+  # A longer window is fine, a shorter one is said to be short, none is a GAP.
+  pnpm_says 11.29.0 true 600
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "WEAK   PARSED      "*"reports 600 minutes, below the 2880 minutes (48h) promised here"* ]] || { echo "$output" | grep pnpm; false; }
+  pnpm_says 11.29.0 true 0
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "GAP    PARSED      "* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: a file pnpm does not read is a GAP, whatever is in it" {
+  # Both files are on disk and correct; the stub answers as pnpm does when it
+  # reads neither ("undefined", MEASURED on 9.15.9 to 12.23.0).
+  pnpm_says 11.29.0 undefined undefined
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  assert_file_contains "$PNPM_DIR/config.yaml" "ignoreScripts: true"
+  run verify_sourced --emit=plain
+  [ "$status" -eq 1 ]
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "GAP    PARSED      "*"reports ignore-scripts=undefined"*"$PNPM_DIR/config.yaml"* ]] || { echo "$output" | grep pnpm; false; }
+  [[ "$(pnpm_row 'age gate')" == "GAP    PARSED      "*"did not read what the hardening wrote"* ]] || { echo "$output" | grep pnpm; false; }
+  # Re-running the hardening is what closes it, so it fails --fail-on=config too.
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 1 ]
+}
+
+@test "pnpm: a variable in this shell does not stand in for a file pnpm does not read" {
+  pnpm_says 11.29.0 true ENV
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  echo 'export pnpm_config_minimum_release_age=2880' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "GAP    PARSED      "*"pnpm_config_minimum_release_age=2880 gates this shell"* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: below 10.16.0 the age gate is a toolchain GAP though pnpm prints the key back" {
+  # MEASURED: 10.15.1 printed 2880 back and installed; 10.16.0 refused.
+  pnpm_says 10.15.1 true 2880
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [ "$status" -eq 1 ]
+  [[ "$(pnpm_row 'age gate')" == "GAP    FUNCTIONAL  "*"does NOT implement minimumReleaseAge"* ]] || { echo "$output" | grep pnpm; false; }
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "OK     PARSED      "* ]]
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  pnpm_says 10.16.0 true 2880
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "OK     PARSED      "* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: ignore-scripts=false is WEAK with a declared build allowlist and a GAP without one" {
+  pnpm_says 10.34.9 false 2880
+  harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild,@scope/native" -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "WEAK   PARSED      "*"pnpm_built_dependencies allows esbuild,@scope/native"* ]] || { echo "$output" | grep pnpm; false; }
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "GAP    PARSED      "*"ignore-scripts=false"* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: the rows are asked from /, never from the project (its pnpmfile would run)" {
+  pnpm_says 11.29.0 true 2880
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  rm -f "$BATS_TEST_TMPDIR/pnpm-calls"
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  ( cd "$BATS_TEST_TMPDIR/proj" && verify_sourced --emit=plain ) >/dev/null || true
+  grep -q 'config get ignore-scripts' "$BATS_TEST_TMPDIR/pnpm-calls"
+  [ "$(cut -d: -f1 "$BATS_TEST_TMPDIR/pnpm-calls" | sort -u)" = "/ " ] || { cat "$BATS_TEST_TMPDIR/pnpm-calls"; false; }
+}
+
+@test "pnpm: harden.sh writes where pnpm reads, on macOS, on Linux and with XDG_CONFIG_HOME, and the verifier agrees" {
+  # pnpm's getConfigDir: XDG_CONFIG_HOME on every platform, then
+  # ~/Library/Preferences/pnpm on macOS, then ~/.config/pnpm.
+  local os want d
+  for os in Linux Darwin; do
+    stub_bin uname 'case "${1:-}" in -s|"") echo "'"$os"'" ;; *) /usr/bin/uname "$@" ;; esac'
+    [ "$os" = Darwin ] && want=Library/Preferences/pnpm || want=.config/pnpm
+    for d in "" "$TEST_TMP/xdg-$os"; do
+      rm -rf "$TEST_HOME/.config" "$TEST_HOME/Library"
+      harden ECOSYSTEMS=pnpm ${d:+XDG_CONFIG_HOME="$d"} -- --emit=plain >/dev/null
+      if [ -n "$d" ]; then
+        assert_file_contains "$d/pnpm/config.yaml" "minimumReleaseAge: 2880"
+        assert_file_contains "$d/pnpm/rc" "minimum-release-age=2880"
+        [ ! -e "$TEST_HOME/.config/pnpm" ] && [ ! -e "$TEST_HOME/Library/Preferences/pnpm" ]
+      else
+        assert_file_contains "$TEST_HOME/$want/config.yaml" "minimumReleaseAge: 2880"
+        assert_file_contains "$TEST_HOME/$want/rc" "minimum-release-age=2880"
+        [ "$os" != Darwin ] || [ ! -e "$TEST_HOME/.config/pnpm" ]
+      fi
+      pnpm_says 11.29.0 undefined undefined
+      run verify ${d:+XDG_CONFIG_HOME="$d"} -- --emit=plain
+      [[ "$(pnpm_row 'age gate')" == *"It reads ${d:-$TEST_HOME/${want%/pnpm}}/pnpm/config.yaml"* ]] || { echo "$os '$d'"; echo "$output" | grep pnpm; false; }
+    done
+  done
+  # The role's expression names the same three directories in the same order.
+  python3 - "${BATS_TEST_DIRNAME}/../../tasks/pnpm.yml" <<'PY'
+import re, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"pnpm_config_dir: >-(.*?)\n\n", t, re.S).group(1)
+want = ["ansible_env.XDG_CONFIG_HOME ~ '/pnpm'", "ansible_env.HOME ~ '/Library/Preferences/pnpm'", "ansible_env.HOME ~ '/.config/pnpm'"]
+at = [m.index(w) for w in want]
+assert at == sorted(at), at
+PY
+}
+
 # ---- pnpm repo config override ------------------------------------------------
 #
 # A project's pnpm-workspace.yaml outranks the global config.yaml harden.sh

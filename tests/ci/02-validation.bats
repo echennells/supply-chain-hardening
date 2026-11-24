@@ -26,7 +26,7 @@ setup() { common_setup; }
   # every derived window 58 hours while the summary said 72.
   run harden RELEASE_AGE_HOURS=072 ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
-  grep -rqs 'minimum-release-age=4320\|minimumReleaseAge: 4320' "$TEST_HOME/.config/pnpm" "$TEST_HOME/.npmrc"
+  grep -rqs 'minimum-release-age=4320\|minimumReleaseAge: 4320' "$PNPM_DIR" "$TEST_HOME/.npmrc"
   run harden RELEASE_AGE_HOURS=09 ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
 }
