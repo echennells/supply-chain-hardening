@@ -128,7 +128,7 @@ The same workflow runs the role on a Mac, which has to refuse before it writes a
 ## Running tests
 
 ```bash
-make test          # build container + run all 632 tests
+make test          # build container + run all 633 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```
