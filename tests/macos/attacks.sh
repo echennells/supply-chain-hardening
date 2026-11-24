@@ -241,11 +241,19 @@ s=socketserver.TCPServer(("0.0.0.0",0),http.server.SimpleHTTPRequestHandler); op
 <artifactId>victim</artifactId><packaging>pom</packaging>
 <repositories><repository><id>http-repo</id><url>http://$ip:$port/m2</url></repository></repositories></project>
 P
-  bounded 400 mvn -B -gs "$d/empty.xml" -Dmaven.repo.local="$d/local" validate > o 2>&1; rc=$?
+  # -X: maven 3.9 skips the blocked repository and reports only Central's "could not
+  # find" (MEASURED, 3.9.16); its debug output names the mirror it put in its place.
+  # 3.10 says "Blocked mirror for repositories" by itself (MEASURED, 3.10.1).
+  bounded 400 mvn -B -X -gs "$d/empty.xml" -Dmaven.repo.local="$d/local" validate > o 2>&1; rc=$?
   if grep -q 'GET /m2/com/evil/parent' "$d/access" && [ $rc -eq 0 ]; then result "maven http repository" FIRED "the parent POM came over http ($(mvn -v 2>/dev/null | head -1))"
-  elif grep -q 'Blocked mirror for repositories: \[http-repo' o && grep -q 'central-https-only' o && ! grep -q 'GET /m2/com/evil/parent' "$d/access"; then result "maven http repository" blocked "$(line o 'Blocked mirror')"
+  elif [ $rc -ne 0 ] && ! grep -q 'GET /m2/com/evil/parent' "$d/access" \
+       && said=$(grep -oE 'central-https-only \(.*Blocked mirror for repositories: \[http-repo \(http://[^,]*|Using mirror central-https-only \([^)]*\) for http-repo \(http://[^)]*\)' o | head -1); then
+    result "maven http repository" blocked "$said"
   elif central_refused o; then result "maven http repository" NOT-TESTED "Maven Central answered 429"
-  else result "maven http repository" UNCLEAR "rc=$rc $(grep -E 'ERROR|WARN' o | head -3)"; fi
+  else
+    result "maven http repository" UNCLEAR "rc=$rc $(grep -E '^\[(ERROR|WARNING|FATAL)' o | head -3)"
+    grep -iE 'mirror|http-repo' o | head -20
+  fi
 }
 
 # --- NuGet: an unsigned package from a feed the project names -----------------
