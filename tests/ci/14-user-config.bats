@@ -796,6 +796,7 @@ JS
 }
 
 @test "root: every become that runs user-config.sh in the role says so" {
+  python3 -c 'import yaml' 2>/dev/null || skip "no python3 with PyYAML"
   python3 - "$ROOT"/tasks/*.yml <<'PY'
 import sys, yaml
 n = 0

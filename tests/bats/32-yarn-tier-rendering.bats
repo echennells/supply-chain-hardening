@@ -55,6 +55,13 @@ teardown_file() {
   rm -rf "$TIER_DIR"
 }
 
+teardown() {
+  local d
+  [ -f "$BATS_TEST_TMPDIR/roothome" ] || return 0
+  d=$(cat "$BATS_TEST_TMPDIR/roothome")
+  case "$d" in /etc/sch-roothome.??????) rm -rf -- "$d" ;; esac
+}
+
 assert_valid_yaml() {
   python3 -c "import yaml,sys; yaml.safe_load(open('$1'))" \
     || { echo "FAIL: $1 is not valid YAML" >&2; cat "$1" >&2; return 1; }
@@ -186,8 +193,10 @@ lifted = []
 for n in want:
     assert n in tasks, "task not found in tasks/yarn.yml: " + n
     t = dict(tasks[n]); t.pop("become", None)
-    if "ansible.builtin.script" in t:
-        t["ansible.builtin.script"] = sys.argv[3] + "/files/" + t["ansible.builtin.script"]
+    if "environment" in t:
+        c = dict(t["ansible.builtin.command"])
+        c["stdin"] = c["stdin"].replace("'user-config.sh'", "'" + sys.argv[3] + "/files/user-config.sh'")
+        t["ansible.builtin.command"] = c
         t["environment"] = {k: v.replace("'yarnrc.yml.j2'", "'" + sys.argv[3] + "/templates/yarnrc.yml.j2'")
                             for k, v in t["environment"].items()}
     lifted.append(t)
@@ -222,8 +231,11 @@ PLAY
 
 @test "root's ~/.yarnrc.yml: one this project did not write is left alone and listed; absent or ours, it is written" {
   require_root "renders a root-owned file"
-  local r="$BATS_TEST_TMPDIR/roothome" u="$BATS_TEST_TMPDIR/deployer"
-  mkdir -p "$r" "$u"
+  # Root's home is a directory no other account controls; in /tmp it would not be.
+  local r u="$BATS_TEST_TMPDIR/deployer"
+  r=$(mktemp -d /etc/sch-roothome.XXXXXX)
+  echo "$r" > "$BATS_TEST_TMPDIR/roothome"
+  mkdir -p "$u"
   # Root's own file: a registry and its token.
   printf 'npmRegistryServer: "https://npm.corp.invalid"\nnpmAuthToken: "tok"\n' > "$r/.yarnrc.yml"
   cp "$r/.yarnrc.yml" "$BATS_TEST_TMPDIR/before"
@@ -246,10 +258,15 @@ PLAY
   cmp "$r/.yarnrc.yml" "$BATS_TEST_TMPDIR/before"
   [[ "$output" == *"Yarn sudo coverage — $r/.yarnrc.yml exists and is not exactly"* ]]
   # One that cannot be written is listed too, and does not stop the play.
-  rm -f "$r/.yarnrc.yml"; ln -s /dev/null "$r/.yarnrc.yml"
+  rm -f "$r/.yarnrc.yml"; mkdir "$r/.yarnrc.yml"
   run yarn_root_rc_play "$r" "$u"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Yarn sudo coverage — $r/.yarnrc.yml could not be written: "*"is not a regular file"* ]] || { echo "$output"; return 1; }
+  # So is one that leads to what other accounts can write.
+  rmdir "$r/.yarnrc.yml"; ln -s /dev/null "$r/.yarnrc.yml"
+  run yarn_root_rc_play "$r" "$u"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Yarn sudo coverage — $r/.yarnrc.yml could not be written: "*"root writes only to paths no other account controls"* ]] || { echo "$output"; return 1; }
   [ -c /dev/null ]
   # None at all: written.
   rm -f "$r/.yarnrc.yml"
