@@ -123,33 +123,6 @@
   failed_when: false
   when: npm_check.rc == 0
 
-- name: Give back a global npmrc an earlier version made root's in the user's home
-  # A prefix in the home (nvm, a user prefix) or NPM_CONFIG_GLOBALCONFIG. MEASURED
-  # (d738db8): the file and the directory it is in became root's, so the user could
-  # neither edit nor remove them. Only what carries this project's marker, and never
-  # the home itself.
-  become: true
-  ansible.builtin.shell:
-    cmd: |
-      f={{ (npm_globalconfig.stdout | trim) | quote }}
-      d=$(dirname -- "$f")
-      [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %u "$f")" = 0 ] || exit 0
-      grep -q 'Managed by ansible-supply-chain-security' "$f" || exit 0
-      chown {{ ansible_user_uid }}:{{ ansible_user_gid }} "$f" && echo changed
-      [ "$d" = {{ ansible_env.HOME | quote }} ] || [ -L "$d" ] || [ "$(stat -c %u "$d")" != 0 ] \
-        || chown {{ ansible_user_uid }}:{{ ansible_user_gid }} "$d"
-    executable: /bin/bash
-  register: npm_global_given_back
-  changed_when: "'changed' in npm_global_given_back.stdout"
-  when:
-    - npm_check.rc == 0
-    - npm_globalconfig is defined
-    - npm_globalconfig.stdout | default('') | trim | length > 0
-    - (npm_globalconfig.stdout | trim) is match('^/')
-    - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
-    - (npm_globalconfig.stdout | trim).startswith(ansible_env.HOME ~ '/')
-    - ansible_user_uid | int != 0
-
 - name: Deploy hardened npmrc to npm's resolved global config path (non-apt layouts)
   # Closes the sudo / other-user gap on every layout where globalconfig is not
   # /etc/npmrc. Idempotent no-op on Debian apt (guarded out above).
