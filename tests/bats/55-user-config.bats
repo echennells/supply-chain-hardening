@@ -40,6 +40,14 @@ teardown() {
   for x in $SAVED; do
     if [ -e "$T/saved$x" ]; then cmp -s "$x" "$T/saved$x" || cp -p "$T/saved$x" "$x"; fi
   done
+  for x in /usr/bin/npm /usr/local/bin/npm; do
+    if [ -e "$T/away$x" ] || [ -L "$T/away$x" ]; then mv -f "$T/away$x" "$x"; fi
+  done
+  if [ -f "$T/kc" ]; then
+    rm -f /etc/sudoers.d/kcuser
+    userdel -r kcuser 2>/dev/null || true
+    rm -rf /home/kcuser /opt/kc-prefix /etc/kc-victim.conf /etc/kc-absent /etc/etc
+  fi
   rm -rf "$T"
 }
 
@@ -67,7 +75,7 @@ role() { # [ansible args]: output in $output, the play's status in $status
   # corepack's cache is root's (in a new home it downloads pnpm, 45 s a run), and
   # with no uv on PATH the role installs no uv tools into the home.
   run env -u XDG_CONFIG_HOME HOME="$H" COREPACK_HOME=/root/.cache/node/corepack \
-    GRADLE_USER_HOME="$H/.gradle" CARGO_HOME="$H/.cargo" ${ROLE_ENV:+"$ROLE_ENV"} \
+    GRADLE_USER_HOME="$H/.gradle" CARGO_HOME="$H/.cargo" \
     PATH="$T/bin:/usr/local/bin:/usr/bin:/bin" ansible-playbook site.yml --connection=local --limit localhost \
     --tags "${ONLY:-$TAGS}" --skip-tags npq,socket \
     -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false -e age_gate_refresh=false "$@"
@@ -247,8 +255,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
 
 @test "role: no directory that is already there changes mode or owner, the home first of all" {
   # MEASURED at d738db8: a 0750 home became 0755 (tasks/bun.yml), and every config
-  # directory of the user's with it. At 860a91c a global npmrc named in the home
-  # (NPM_CONFIG_GLOBALCONFIG) also made the home root's.
+  # directory of the user's with it.
   local d dirs="." x
   for d in .config .config/pnpm .config/pip .config/uv .config/composer .config/pypoetry .composer .bundle \
            .cargo .m2 .nuget .nuget/NuGet .gradle .gradle/init.d; do
@@ -265,7 +272,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
     [ ! -d "$d" ] || rootdirs="$rootdirs $d"
   done
   rootbefore=$(stat -c '%a %u:%g %n' $rootdirs)
-  ROLE_ENV="NPM_CONFIG_GLOBALCONFIG=$H/globalrc" ONLY=$TAGS,gradle role
+  ONLY=$TAGS,gradle role
   after=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
   rootafter=$(stat -c '%a %u:%g %n' $rootdirs)
   echo "$output" | tail -4
@@ -371,53 +378,175 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   rm -f "$c"
 }
 
-@test "role: a global npmrc in the user's home stays the user's, and one an earlier version made root's is given back" {
-  # As a user of its own, with sudo: as root there is nothing to take or give back.
-  id kcuser >/dev/null 2>&1 || useradd -m -s /bin/bash kcuser
+# kcuser: an account with sudo, as the role is meant to be run; gone with the test
+kcuser() {
+  touch "$T/kc"
+  userdel -r kcuser 2>/dev/null || true
+  rm -rf /home/kcuser
+  useradd -m -s /bin/bash kcuser
   echo 'kcuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kcuser
-  local h=/home/kcuser g=/home/kcuser/npm/etc/npmrc
-  rm -rf "$h/npm" "$h/.npmrc"; mkdir -p "$h/npm"; chown -R kcuser:kcuser "$h/npm"; chmod 700 "$h/npm"
-  asuser() {
-    run su - kcuser -c "cd $ROLE_DIR && NPM_CONFIG_GLOBALCONFIG=$g PATH=/usr/local/bin:/usr/bin:/bin ansible-playbook site.yml \
-      --connection=local --limit localhost --tags npm --skip-tags npq,socket -e podman_enabled=false -e verify_protections=false \
-      -e socket_firewall_install=false $*"
-  }
-  asuser
-  echo "$output" | tail -3
-  [ "$status" -eq 0 ]
-  [ "$(stat -c '%U %a' "$h/npm")" = 'kcuser 700' ]
-  [ "$(stat -c %U "$h/npm/etc")" = kcuser ]
+  chmod 440 /etc/sudoers.d/kcuser
+}
+
+askc() { su - kcuser -c "$1"; }
+
+askc_role() { # [ansible args]
+  run su - kcuser -c "cd $ROLE_DIR && PATH=/usr/local/bin:/usr/bin:/bin ansible-playbook site.yml \
+    --connection=local --limit localhost --tags npm --skip-tags npq,socket -e podman_enabled=false \
+    -e verify_protections=false -e socket_firewall_install=false $*"
+}
+
+# the npm kcuser has is one of its own, which says its global config is $1
+kcnpm() {
+  local b
+  for b in /usr/bin/npm /usr/local/bin/npm; do
+    if [ -e "$b" ] || [ -L "$b" ]; then mkdir -p "$T/away$(dirname "$b")"; mv -f "$b" "$T/away$b"; fi
+  done
+  askc 'mkdir -p ~/.nvm/versions/node/v99.0.0/bin'
+  cat > /home/kcuser/.nvm/versions/node/v99.0.0/bin/npm <<'EOF'
+#!/bin/sh
+case "$*" in --version) echo 11.19.1 ;; "config get globalconfig") cat /home/kcuser/where ;; esac
+EOF
+  chmod 755 /home/kcuser/.nvm/versions/node/v99.0.0/bin/npm
+  printf '%s\n' "$1" > /home/kcuser/where
+}
+
+# what is root's: owner, mode and content
+rootside() {
+  stat -c '%U:%G %a %n' / /etc /etc/npmrc /etc/passwd /etc/shadow /etc/sudoers /root /usr /usr/etc /opt 2>/dev/null
+  cksum < /etc/npmrc; cksum < /etc/passwd; cksum < /etc/shadow
+  ls -la /root | awk '{print $1, $3, $4, $NF}'
+  ls -A /etc | grep -v '^\.pwd\.lock$\|^cron\|-$' | cksum
+  stat -c '%U %a %n' /etc/kc-victim.conf && cksum < /etc/kc-victim.conf
+}
+
+@test "role: root writes npm's global config to no path of the user's choosing" {
+  kcuser
+  printf 'SECRET\n' > /etc/kc-victim.conf; chmod 600 /etc/kc-victim.conf
+  askc_role
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  local before trap
+  before=$(rootside)
+  # in the npm settings of the account: a prefix that is a link to /, one whose etc is a
+  # link to /root, a file of root's, one that is not there, and a link to one
+  askc 'mkdir -p ~/p; ln -s / ~/x; ln -s /root ~/p/etc; ln -s /etc/kc-victim.conf ~/l'
+  for trap in prefix=/home/kcuser/x prefix=/home/kcuser/p globalconfig=/etc/kc-victim.conf \
+              globalconfig=/etc/kc-absent globalconfig=/home/kcuser/l globalconfig=/home/kcuser/x/etc/npmrc; do
+    askc "printf '%s\n' '$trap' > ~/.npmrc"
+    askc_role -e accept_etc_overwrite=true
+    [ "$status" -eq 0 ] || { echo "$trap"; echo "$output" | tail -20; return 1; }
+    diff <(echo "$before") <(rootside) || { echo "$trap"; return 1; }
+    [ ! -e /etc/kc-absent ] && [ ! -e /etc/etc ] || { echo "$trap"; return 1; }
+  done
+  # and in its environment
+  run su - kcuser -c "cd $ROLE_DIR && NPM_CONFIG_PREFIX=/home/kcuser/x NPM_CONFIG_GLOBALCONFIG=/etc/kc-victim.conf PATH=/usr/local/bin:/usr/bin:/bin \
+    ansible-playbook site.yml --connection=local --limit localhost --tags npm --skip-tags npq,socket -e podman_enabled=false \
+    -e verify_protections=false -e socket_firewall_install=false -e accept_etc_overwrite=true"
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  diff <(echo "$before") <(rootside)
+  askc 'rm -f ~/.npmrc; [ ! -w /etc ] && [ ! -w /etc/npmrc ]'
+}
+
+@test "role: whatever the npm of the user says, root writes only where no other account controls the path, and the summary says what it left" {
+  kcuser
+  printf 'SECRET\n' > /etc/kc-victim.conf; chmod 600 /etc/kc-victim.conf
+  askc_role
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  local before where
+  before=$(rootside)
+  askc 'mkdir -p ~/p; ln -s / ~/x; ln -s /root ~/p/etc; ln -s /etc/kc-victim.conf ~/l'
+  mkdir -p /opt/kc-prefix/etc /opt/kc-prefix/gw/etc /opt/kc-prefix/theirs/etc; chmod 775 /opt/kc-prefix/gw
+  chown -R nobody /opt/kc-prefix/theirs
+  ln -s /etc /opt/kc-prefix/link
+  kcnpm /dev/null
+  for where in /home/kcuser/x/etc/npmrc /home/kcuser/p/etc/npmrc /home/kcuser/l /etc/kc-victim.conf /etc/kc-absent \
+               /etc/ld.so.preload /opt/kc-prefix/link/npmrc /opt/kc-prefix/gw/etc/npmrc /opt/kc-prefix/theirs/etc/npmrc \
+               /opt/kc-prefix/../../etc/npmrc /tmp/kc/etc/npmrc; do
+    echo "$where" > /home/kcuser/where
+    askc_role -e accept_etc_overwrite=true
+    [ "$status" -eq 0 ] || { echo "$where"; echo "$output" | tail -20; return 1; }
+    echo "$output" | grep -q "npm's global config — $where " || { echo "$where"; echo "$output" | tail -20; return 1; }
+    ! echo "$output" | grep SECRET || false
+    diff <(echo "$before") <(rootside) || { echo "$where"; return 1; }
+  done
+  for a in "" --check; do
+    askc_role $a
+    [ "$status" -eq 0 ] || { echo "$a"; echo "$output" | tail -20; return 1; }
+    echo "$output" | grep -q "npm's global config — /tmp/kc/etc/npmrc is in /tmp, which other accounts can write to"
+    diff <(echo "$before") <(rootside)
+  done
+  [ ! -e /etc/ld.so.preload ] && [ ! -e /etc/kc-absent ] || return 1
+  [ -z "$(find /opt/kc-prefix /tmp/kc -name 'npmrc*' 2>/dev/null)" ]
+  # the one it may
+  echo /opt/kc-prefix/new/etc/npmrc > /home/kcuser/where
+  askc_role
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  [ "$(stat -c '%U %a' /opt/kc-prefix/new/etc/npmrc /opt/kc-prefix/new/etc /opt/kc-prefix/new | tr '\n' ' ')" = 'root 644 root 755 root 755 ' ]
+  grep -q '^ignore-scripts=true' /opt/kc-prefix/new/etc/npmrc
+  ! echo "$output" | grep -q "npm's global config — " || false
+  askc_role
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
+}
+
+@test "role: a global npmrc in the user's home is written as the user, and one that is root's is left alone and named" {
+  kcuser
+  local h=/home/kcuser g=/home/kcuser/.nvm/versions/node/v99.0.0/etc/npmrc
+  kcnpm "$g"
+  chmod 700 "$h/.nvm/versions/node/v99.0.0"
+  askc_role
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  [ "$(stat -c '%U %a' "$h/.nvm/versions/node/v99.0.0")" = 'kcuser 700' ]
+  [ "$(stat -c %U "$(dirname "$g")")" = kcuser ]
   [ "$(stat -c %U "$g")" = kcuser ]
   grep -q '^ignore-scripts=true' "$g"
+  askc_role
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
   # as d738db8 left it: root's file, in root's directory
   cp /opt/test-fixtures/user-config/v2.1.0-role/npmrc "$g"
-  chown root:root "$h/npm/etc" "$g"
-  asuser --check
+  chown root:root "$(dirname "$g")" "$g"
+  cp "$g" "$T/before"
+  for a in --check ""; do
+    askc_role $a
+    [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+    echo "$output" | grep -q "npm's global config — $g belongs to another account (root)"
+    echo "$output" | grep -qF "mv $(dirname "$g") $(dirname "$g").old"
+    [ "$(stat -c %U "$(dirname "$g")" "$g" | tr '\n' ' ')" = 'root root ' ]
+    cmp "$g" "$T/before"
+  done
+  # what it says to do, which needs no root
+  askc "mv $(dirname "$g") $(dirname "$g").old"
+  askc_role
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  [ "$(stat -c %U "$g")" = root ]
-  asuser
-  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  [ "$(stat -c %U "$h/npm/etc")" = kcuser ]
-  [ "$(stat -c %U "$g")" = kcuser ]
+  [ "$(stat -c %U "$(dirname "$g")" "$g" | tr '\n' ' ')" = 'kcuser kcuser ' ]
   grep -q 'self-check sha256:' "$g"
-  asuser
-  [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
   # and the user's own is refused, then kept as a copy
   printf '//corp.example/:_authToken=SECRET\n' > "$g"; chmod 600 "$g"
-  asuser
+  askc_role
   [ "$status" -ne 0 ]
   grep -q SECRET "$g"
-  asuser -e accept_etc_overwrite=true
+  askc_role -e accept_etc_overwrite=true
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
   grep -q SECRET "$g".*~
   [ "$(stat -c '%U %a' "$g".*~)" = 'kcuser 600' ]
   # a prefix of the user's outside the home
-  rm -rf /opt/kcprefix; mkdir -p /opt/kcprefix/etc; chown -R kcuser:kcuser /opt/kcprefix
-  g=/opt/kcprefix/etc/npmrc
-  asuser
+  mkdir -p /opt/kc-prefix/etc; chown -R kcuser:kcuser /opt/kc-prefix
+  g=/opt/kc-prefix/etc/npmrc
+  echo "$g" > "$h/where"
+  askc_role
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  [ "$(stat -c %U "$g")" = kcuser ]
-  [ "$(stat -c %U /opt/kcprefix/etc)" = kcuser ]
-  rm -rf /opt/kcprefix
-  rm -f /etc/sudoers.d/kcuser; userdel -r kcuser 2>/dev/null || true
+  [ "$(stat -c %U "$g" /opt/kc-prefix/etc | tr '\n' ' ')" = 'kcuser kcuser ' ]
+}
+
+@test "role: run as root by way of sudo with a user's home, it writes none of these files" {
+  # The preflight refuses HOME=/root there; this is the HOME that sudo can keep.
+  kcuser
+  askc "printf '//registry.example/:_authToken=SECRET\n' > ~/.npmrc; ln -s /etc/kc-absent ~/.yarnrc.yml"
+  run su - kcuser -c "cd $ROLE_DIR && sudo env HOME=/home/kcuser SUDO_USER=kcuser PATH=/usr/local/bin:/usr/bin:/bin ansible-playbook site.yml \
+    --connection=local --limit localhost --tags npm,yarn --skip-tags npq,socket -e podman_enabled=false -e verify_protections=false"
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q '/home/kcuser/.npmrc is in /home/kcuser, which is not root'
+  ! echo "$output" | grep SECRET || false
+  [ "$(stat -c '%U' /home/kcuser/.npmrc)" = kcuser ]
+  [ "$(cat /home/kcuser/.npmrc)" = '//registry.example/:_authToken=SECRET' ]
+  [ ! -e /etc/kc-absent ]
 }
