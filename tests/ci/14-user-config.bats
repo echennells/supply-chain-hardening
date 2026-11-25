@@ -24,6 +24,11 @@ setup() {
   # (a pnpm 12 here took 18 s, and corepack downloads).
   stub_bin pnpm 'echo 11.28.13'
   stub_bin yarn 'echo 4.18.1'
+  # An npm that knows every key this project writes. harden.sh leaves one out where
+  # the npm it finds would warn about it (npm 11.2.0 to 11.9.0), so without this the
+  # expected block depends on the machine. Tests that ask the real npm use $PATH,
+  # which does not have this one.
+  stub_npm 11.19.1
   # The preflight looks at Maven's and NuGet's only where a tool would read them.
   stub_bin java 'echo "openjdk version 21" >&2'
   stub_bin dotnet 'echo 8.0.100'
@@ -931,13 +936,15 @@ PY
   chmod 555 "$(dirname "$(f uv)")"
   run pf
   chmod 755 "$(dirname "$(f uv)")"
-  [[ "$output" == *"STOP  $(f uv): cannot be replaced: $(dirname "$(f uv)") is not writable by"* ]] || { echo "$output"; return 1; }
+  # The directory as it really is: a Mac's TMPDIR is under /var, a link to /private/var.
+  local d; d=$(cd -P "$(dirname "$(f uv)")" && pwd -P)
+  [[ "$output" == *"STOP  $(f uv): cannot be replaced: $d is not writable by"* ]] || { echo "$output"; return 1; }
   [ "$(cat "$(f uv)")" = 'x = "SECRET"' ]
   chmod 555 "$(dirname "$(f uv)")"
   ECO=uv run apply
   chmod 755 "$(dirname "$(f uv)")"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"uv: $(f uv) cannot be replaced: $(dirname "$(f uv)") is not writable by"* ]]
+  [[ "$output" == *"uv: $(f uv) cannot be replaced: $d is not writable by"* ]]
   [ "$(cat "$(f uv)")" = 'x = "SECRET"' ]
 }
 
