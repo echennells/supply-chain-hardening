@@ -752,6 +752,11 @@ marker); otherwise merge, or stop, or copy first and say so. Recognise our own
 settings by key and value as well as by marker, and never let a range that
 depends on an end marker run to the end of the file.
 
+Where a path comes from the user's environment, home or settings, the user's
+process writes it. Root writes only to paths no other account controls: every
+part root's and writable by root alone, judged by the process that writes, and
+not once by one process for another (`ucf_roots`).
+
 ### Tool version drift across tiers
 
 Corepack 0.29.4 had a stale keyring; latest fixed pnpm@10 major-only
