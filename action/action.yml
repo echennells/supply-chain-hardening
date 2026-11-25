@@ -137,7 +137,8 @@ outputs:
     description: >-
       Ecosystems that got something but not everything — a config file written
       while the PATH wrapper it needs could not be deployed, or a setting the
-      installed tool version does not implement. Partially protected.
+      installed tool version does not implement, or npm, pnpm or yarn would not
+      say which version it is. Partially protected.
     value: ${{ steps.harden.outputs.ecosystems_degraded }}
   ecosystems-ineffective:
     description: >-
@@ -161,7 +162,8 @@ outputs:
   tool-versions:
     description: >-
       JSON map of detected tool versions per ecosystem ({"npm":"10.5.0","bun":"","composer":"2.9.8"}).
-      Empty string means the tool wasn't installed in this runner. Downstream
+      Empty string means the tool wasn't installed in this runner, or its version
+      command failed. Downstream
       steps can use this for conditional logic (e.g., skip a job that needs
       a specific composer version).
     value: ${{ steps.harden.outputs.tool_versions }}

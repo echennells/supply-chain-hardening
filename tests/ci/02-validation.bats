@@ -430,6 +430,91 @@ setup() { common_setup; }
   done
 }
 
+# The number in an error is not the tool's version. MEASURED on ef4da26: with no
+# network, corepack's yarn and pnpm print a stack trace whose first number is Node's,
+# from its path, exit 1, and both were reported "Fully applied" as 22.23.5.
+NOT_A_VERSION='/home/u/.nvm/versions/node/v22.23.5/lib/node_modules/corepack/dist/lib/corepack.cjs:13170'
+
+@test "reporting: a version is never read from a command that failed, on stderr or stdout" {
+  local t fd
+  bare_path
+  for t in npm pnpm yarn; do
+    for fd in 2 1; do
+      stub_bin "$t" "echo '$NOT_A_VERSION' >&$fd; exit 1"
+      run harden PATH="$BARE_PATH" ECOSYSTEMS="$t" -- --emit=plain
+      [ "$status" -eq 0 ]
+      [[ "$output" == *"\`$t --version\` failed or printed no version"* ]] || { echo "$t $fd: $output"; false; }
+      grep -qx "ecosystems_degraded=$t" "$OUT_FILE"
+      grep -qx 'ecosystems_effective=' "$OUT_FILE"
+      grep -qxF "tool_versions={\"$t\":\"\"}" "$OUT_FILE"
+    done
+    rm -f "$TEST_BIN/$t"
+  done
+}
+
+@test "reporting: the settings are still written for a tool whose version command failed" {
+  bare_path
+  stub_bin yarn "echo '$NOT_A_VERSION' >&2; exit 1"
+  stub_bin pnpm "echo '$NOT_A_VERSION' >&2; exit 1"
+  stub_bin npm "echo '$NOT_A_VERSION' >&2; exit 1"
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm,pnpm,yarn -- --emit=plain >/dev/null
+  grep -qx 'npmMinimalAgeGate: 2880' "$TEST_HOME/.yarnrc.yml"
+  grep -qx 'ignore-scripts=true' "$TEST_HOME/.npmrc"
+  grep -qx 'min-release-age=2' "$TEST_HOME/.npmrc"
+  grep -qx 'minimum-release-age=2880' "$PNPM_DIR/rc"
+  grep -qx 'minimumReleaseAge: 2880' "$PNPM_DIR/config.yaml"
+}
+
+@test "reporting: a number on stderr does not outrank the version on stdout" {
+  bare_path
+  stub_bin yarn 'case "${1:-}" in --version) echo "warning: 99.9.9" >&2; echo "1.22.22" ;; *) echo STUB ;; esac'
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yarn 1.22.22 is Yarn 1.x (classic)"* ]] || { echo "$output"; false; }
+  grep -qx 'ecosystems_ineffective=yarn' "$OUT_FILE"
+}
+
+@test "reporting: a tool that is not installed is not one that would not say its version" {
+  # Its settings wait for the one a later step installs, as before.
+  bare_path
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=npm,pnpm,yarn -- --emit=plain
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"failed or printed no version"* ]] || { echo "$output"; false; }
+  grep -qx 'ecosystems_effective=npm,pnpm,yarn' "$OUT_FILE"
+}
+
+@test "reporting: pnpm below 10.16 is degraded, not 'Fully applied'" {
+  # It has no minimumReleaseAge, and blocks scripts (MEASURED: 8.15.9, 9.15.9, 10.15.1).
+  local v
+  bare_path
+  for v in 8.15.9 9.15.9 10.15.1; do
+    stub_bin pnpm "case \"\${1:-}\" in --version) echo $v ;; *) echo STUB ;; esac"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=pnpm -- --emit=plain
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pnpm $v does NOT implement minimumReleaseAge"* ]] || { echo "$v: $output"; false; }
+    grep -qx 'ecosystems_degraded=pnpm' "$OUT_FILE"
+  done
+  for v in 10.16.0 10.34.9 11.29.0 12.23.0; do
+    stub_bin pnpm "case \"\${1:-}\" in --version) echo $v ;; *) echo STUB ;; esac"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=pnpm -- --emit=plain
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"does NOT implement minimumReleaseAge"* ]] || { echo "$v: $output"; false; }
+    grep -qx 'ecosystems_effective=pnpm' "$OUT_FILE"
+  done
+}
+
+@test "reporting: composer's config keys are not chosen by a number in an error" {
+  # The keys for 2.9 on an older Composer are what a wrong version would write.
+  local f="$TEST_HOME/.config/composer/config.json"
+  bare_path
+  stub_bin composer 'echo "PHP Fatal error: in /usr/lib/php/8.3.6/x.php" >&2; exit 255'
+  harden PATH="$BARE_PATH" ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  [ -f "$f" ]
+  grep -q '"allow-plugins"' "$f"
+  [ "$(grep -c '"audit"' "$f")" = 0 ] || { cat "$f"; false; }
+  grep -qxF 'tool_versions={"composer":""}' "$OUT_FILE"
+}
+
 @test "reporting: a fully applied ecosystem says so without noise" {
   run harden ECOSYSTEMS=pip -- --emit=plain
   [ "$status" -eq 0 ]

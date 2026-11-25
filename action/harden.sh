@@ -1082,8 +1082,14 @@ update-notifier=false"
 # version-tiering decisions per ecosystem.
 #
 # Defensive against tools that exit non-zero on --version (some wrappers,
-# uv-redirected pip, broken installs) because `set -e` would otherwise
-# halt the script on a benign "we couldn't detect the version" path.
+# broken installs) because `set -e` would otherwise halt the script on a
+# benign "we couldn't detect the version" path.
+#
+# Empty then, and stdout only. The first number in an error message is not the
+# tool's version. MEASURED: with no network, corepack's yarn (Node 22.23.5 under
+# ~/.nvm) exits 1 with a stack trace whose first number is Node's, in the path,
+# and yarn and pnpm were reported "Fully applied" as 22.23.5. A pyenv or nodenv shim
+# exits 127 and lists Python or Node versions (CHECKED in their source).
 detect_version() {
   local _key="$1"  # unused; documentation hook for the caller's intent
   local cmd="$2"
@@ -1098,7 +1104,7 @@ detect_version() {
   # (yarn 1.22.22, 4.1.0-4.19.0), .mvn/jvm.config (maven 3.10.0), a global.json
   # sdk "paths" entry (.NET 10.0.404) and Poetry 2.5.2's .poetry/plugins all ran
   # for --version. This reports the host's tool, which is what gets configured.
-  out=$(cd / && $cmd 2>&1 || true)
+  out=$(cd / && $cmd 2>/dev/null) || return 0
   echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
 }
 
@@ -2962,6 +2968,16 @@ degrade_eco() {
   set_eco_status "$1" "$st" "${prev:+$prev; }$note"
 }
 
+# version_unread <tool> <version> <what depends on it>: 0 when the tool is here and
+# gave no version, after recording that. Whether it implements what was written is
+# then not known, so it is not "applied". A tool that is not installed is not this:
+# its settings wait for the one a later step installs.
+version_unread() {
+  [[ -z "$2" ]] && command -v "$1" >/dev/null 2>&1 || return 1
+  warn "\`$1 --version\` failed or printed no version, so it is not known which $1 this is: $3. The settings are written. Run \`$1 --version\` to see why, then run this again."
+  degrade_eco "$1" PARTIAL "settings written, but \`$1 --version\` failed or printed no version: $3"
+}
+
 # wrap_skipped <ecosystem> <tool> <wrapper path> [status]: our wrapper is at that
 # path and the real tool is not beside it, so there is nothing to wrap. The
 # wrapper there refuses to run ("real <tool> not found ... refusing to recurse")
@@ -3080,6 +3096,8 @@ harden_npm() {
     warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) — the age gate is written and NOT enforced. Script blocking is unaffected. Install npm >= 11.10 before this action (e.g. setup-node 24, or npm i -g npm@latest) to make it effective."
     set_eco_status npm INERT "age gate written but npm $npm_v does not implement min-release-age; script blocking still applies"
     log "npm: ignore-scripts=true (age gate written but INERT on npm $npm_v)"
+  elif version_unread npm "$npm_v" "the age gate needs npm 11.10.0"; then
+    log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d written"
   else
     log "npm: ignore-scripts=true, min-release-age=${NPM_AGE_DAYS}d"
   fi
@@ -3223,6 +3241,14 @@ harden_pnpm() {
   else
     log "pnpm: ignoreScripts=true (blanket block), minimumReleaseAge=${PNPM_AGE_MINUTES}m"
   fi
+  # SAY IT HERE, NOT ONLY IN THE VERIFIER: the npm rule, for pnpm. minimumReleaseAge
+  # arrived in pnpm 10.16.0 (MEASURED, see the pnpm rows in files/verify-probes.sh).
+  if [[ -n "$pnpm_version" ]] && ! version_ge "$pnpm_version" "10.16.0"; then
+    warn "pnpm $pnpm_version does NOT implement minimumReleaseAge (added in pnpm 10.16.0): the age gate is written and NOT enforced. Script blocking still applies. Install pnpm 10.16.0 or later before this step to make it effective."
+    set_eco_status pnpm INERT "age gate written but pnpm $pnpm_version does not implement minimumReleaseAge (pnpm 10.16.0); script blocking still applies"
+  else
+    version_unread pnpm "$pnpm_version" "the age gate needs pnpm 10.16.0" || true
+  fi
   end_section
 }
 
@@ -3299,6 +3325,8 @@ harden_yarn() {
     warn "yarn $yarn_version does NOT implement npmMinimalAgeGate (added in Yarn 4.10.0) — the age gate is written and NOT enforced. enableScripts=false still applies. Install Yarn 4.10 or later before this step to make it effective."
     set_eco_status yarn INERT "age gate written but yarn $yarn_version does not implement npmMinimalAgeGate (Yarn 4.10.0); enableScripts=false still applies"
     log "yarn: enableScripts=false (age gate written but INERT on yarn $yarn_version)$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
+  elif version_unread yarn "$yarn_version" "the age gate needs Yarn 4.10.0, and Yarn 1.x (classic) reads none of these settings"; then
+    log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE} written"
   else
     log "yarn: enableScripts=false, npmMinimalAgeGate=${YARN_AGE}$([[ "$has_hardened" == "true" ]] && echo ", enableHardenedMode=true")"
   fi
