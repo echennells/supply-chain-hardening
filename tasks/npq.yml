@@ -236,17 +236,28 @@
       # Managed by ansible-supply-chain-security
       # Route npm/yarn/pnpm through npq pre-install checks
       export NPQ_DISABLE_AUTO_CONTINUE=true
-      # npm is ALSO routed through npq by the PATH wrapper at /usr/local/bin/npm
-      # (its interactive branch). Aliasing npm to npq-hero on top of that double-
-      # prompts every install: alias -> npq -> npm(wrapper) -> npq. So only alias
-      # npm when the wrapper is NOT present to handle it; the check is at runtime
-      # so it self-corrects if the wrapper is later added or removed. yarn and
-      # pnpm have no PATH wrapper, so they always need the alias.
-      if ! sed -n 2p /usr/local/bin/npm 2>/dev/null | grep -q 'supply-chain-hardening wrapper'; then
-        alias npm='npq-hero'
-      fi
-      alias yarn='NPQ_PKG_MGR=yarn npq-hero'
-      alias pnpm='NPQ_PKG_MGR=pnpm npq-hero'
+      # Only in an interactive shell on a terminal, the npm wrapper's own test for
+      # npq: there has to be somebody to answer it. Aliases are not for interactive
+      # shells alone. MEASURED (Ubuntu 24.04): dash expands them in a script, so
+      # `sh -lc 'pnpm add x'` was "Installation blocked: findings require an
+      # interactive terminal", and so was a bash that sourced this file under
+      # `shopt -s expand_aliases`, which is how some agents run their commands.
+      case $- in
+        *i*)
+          if [ -t 0 ] && [ -t 1 ]; then
+            # npm is ALSO routed through npq by the PATH wrapper at /usr/local/bin/npm
+            # (its interactive branch). Aliasing npm to npq-hero on top of that double-
+            # prompts every install: alias -> npq -> npm(wrapper) -> npq. So only alias
+            # npm when the wrapper is NOT present to handle it; the check is at runtime
+            # so it self-corrects if the wrapper is later added or removed. yarn and
+            # pnpm have no PATH wrapper, so they always need the alias.
+            if ! sed -n 2p /usr/local/bin/npm 2>/dev/null | grep -q 'supply-chain-hardening wrapper'; then
+              alias npm='npq-hero'
+            fi
+            alias yarn='NPQ_PKG_MGR=yarn npq-hero'
+            alias pnpm='NPQ_PKG_MGR=pnpm npq-hero'
+          fi ;;
+      esac
   when: npq_functional
 
 - name: Remove npq aliases when npq is non-functional
