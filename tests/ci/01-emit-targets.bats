@@ -6,6 +6,9 @@
 # failure mode that matters is a new platform quietly inheriting GitHub's
 # mechanism and appearing to work while propagating nothing.
 
+# `run --separate-stderr`: npm's warnings must not be read as its answer.
+bats_require_minimum_version 1.5.0
+
 load helpers
 
 setup() { common_setup; }
@@ -98,6 +101,7 @@ setup() { common_setup; }
 }
 
 @test "env file round-trips through source with values intact" {
+  stub_npm 11.19.1
   run harden ECOSYSTEMS=npm,go -- --emit=plain
   [ "$status" -eq 0 ]
   # A comma inside GOPROXY is the value most likely to be mangled by quoting.
@@ -135,7 +139,7 @@ setup() { common_setup; }
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
 
   # A completely fresh environment — no sourcing, no inherited variables.
-  run env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }

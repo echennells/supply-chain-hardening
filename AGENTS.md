@@ -16,7 +16,8 @@ around a control to get an install through.
 
 | Target | Use |
 |---|---|
-| A host, VM, sandbox or container image | **The Ansible role.** This is the default. |
+| A Linux host, VM, sandbox or container image | **The Ansible role.** This is the default. |
+| A Mac | `action/harden.sh --emit=plain`, below. The role refuses macOS before writing anything; applying it from a Mac to a Linux host works. |
 | GitHub Actions | The action: [action/README.md](action/README.md) |
 | Other CI | `action/harden.sh`, with worked examples in [action/examples/](action/examples/) |
 | Ansible genuinely can't be used | `action/harden.sh --emit=plain`, below |
@@ -55,7 +56,7 @@ Tell the user what hardening does, unless they have already agreed to it:
   on the command line (`composer test`); `bundle` runs frozen.
 - Several package managers are replaced by wrappers at their current path.
 - `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.bundle/config`, the pnpm files in
-  `~/.config/pnpm`, `~/.config/pip/pip.conf` and `~/.config/uv/uv.toml` are replaced with no
+  `~/.config/pnpm` (a Mac: `~/Library/Preferences/pnpm`), `~/.config/pip/pip.conf` and `~/.config/uv/uv.toml` are replaced with no
   backup, login tokens included, on the first run and every later one. **Copy them first,
   with the user's OK.**
 - There is no single uninstall command.
@@ -70,7 +71,7 @@ local package, fail) and `uv_exclude_newer_env` (a project that pins its own ear
 
 ## Apply with Ansible
 
-The role hardens what a host **already has**, so install the package managers first.
+Linux only: on a Mac the play refuses at its first task. The role hardens what a host **already has**, so install the package managers first.
 
 ```bash
 git clone https://github.com/echennells/supply-chain-hardening.git

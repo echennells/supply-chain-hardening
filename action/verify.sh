@@ -1220,7 +1220,7 @@ else
 
   if ! npm_implements min-release-age; then
     unavail npm.age-gate FUNCTIONAL "npm age gate" \
-      "npm $nv does NOT implement min-release-age (added in npm 11.10.0). Our config sets it and npm echoes it back, but nothing enforces it. Only an npm upgrade closes this — re-running the hardening will not."
+      "npm $nv does NOT implement min-release-age (added in npm 11.10.0), so nothing enforces it, whatever the config says. Only an npm upgrade closes this; re-run the hardening after it, because the key is left out where npm warns about it (11.2.0 to 11.9.0)"
   else
     v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
     case "$v" in
@@ -1371,30 +1371,9 @@ else
   fi
 fi
 
-# ============================================================ config files ===
-# PRESENT-level only, and reported as such. These exist so a missing file is
-# visible; they are not evidence that anything enforces.
-#
-# bun, bundler and yarn used to be grep rows here and are NOT any more: the
-# shared probe body runs real `bun install` / `bundle config` / `yarn config
-# get` probes for them, and a second value-blind grep row for the same
-# protection would double-count it in the table and in every count derived
-# from it. pnpm keeps its grep-level row until a real `config get` probe exists
-# for it.
-pcfg="$HOME/.config/pnpm/config.yaml"
-if ! have pnpm; then
-  na_absent "pnpm config" "pnpm not installed"
-elif ! requested pnpm; then
-  row "N/A" BYDESIGN "pnpm config" "pnpm installed but not in the requested ecosystems"
-elif [ -f "$pcfg" ] && grep -q ignoreScripts "$pcfg" 2>/dev/null; then
-  row WEAK PRESENT "pnpm config" "ignoreScripts present in $pcfg — file contents only, not proof of enforcement"
-else
-  gap pnpm.config PRESENT "pnpm config" "ignoreScripts not found in $pcfg"
-fi
-
 # ============================================================ shared probes ==
 #
-# yarn, bun, deno, uv, pip age gates, go checksum db + toolchain, composer,
+# yarn, pnpm, bun, deno, uv, pip age gates, go checksum db + toolchain, composer,
 # cargo, bundler, maven, gradle, nuget — the same bytes the Ansible role
 # installs at /usr/local/bin/supply-chain-verify. The
 # body needs row(), have() and requested(), all defined above. It never exits.

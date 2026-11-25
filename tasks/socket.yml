@@ -691,19 +691,21 @@
   # /opt/node-X/bin isn't in PATH and isn't in our static fallback list,
   # so npm_real_path comes back empty and the wrapper never deploys.
   #
-  # Better: check whether /usr/local/bin/npm IS our wrapper (has the
-  # supply-chain-hardening marker the template embeds). If yes, the
-  # original anti-recursion clean-PATH search is correct. If no
+  # Better: check whether /usr/local/bin/npm IS a wrapper this project wrote
+  # (sch_is_wrapper_sh in defaults/main.yml reads its marker line). If yes, the
+  # original anti-recursion clean-PATH search is correct, and npm-real beside it
+  # is the fallback: that is where action/harden.sh puts the npm it wraps. If no
   # (raw binary or symlink), readlink -f resolves through any symlink
   # chain and gives the canonical path — catches the /opt install case.
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      if [ -f /usr/local/bin/npm ] && grep -q "supply-chain-hardening" /usr/local/bin/npm 2>/dev/null; then
+      if [ -f /usr/local/bin/npm ] && {{ sch_is_wrapper_sh }} /usr/local/bin/npm 2>/dev/null; then
         # Wrapper already deployed — re-find the real npm to re-render
         # the wrapper. Same anti-recursion logic as before.
         CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vFx '/usr/local/bin' | tr '\n' ':' | sed 's/:$//')
-        PATH="$CLEAN_PATH" command -v npm 2>/dev/null
+        PATH="$CLEAN_PATH" command -v npm 2>/dev/null \
+          || { [ -x /usr/local/bin/npm-real ] && echo /usr/local/bin/npm-real; }
       elif [ -e /usr/local/bin/npm ]; then
         # Raw binary or symlink at /usr/local/bin/npm — follow to canonical
         # path. Handles /opt/node-X/bin/npm via /usr/local/bin/npm symlink.

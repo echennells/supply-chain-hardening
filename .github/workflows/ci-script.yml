@@ -15,13 +15,29 @@ on:
     paths:
       - 'action/**'
       - 'files/**'
+      # Read by the suite: the parity tests compare the role with the script, and
+      # 13-central-429 reads the smoke workflow and its verdict script.
+      - 'defaults/**'
+      - 'tasks/**'
+      - 'templates/**'
       - 'tests/ci/**'
+      - 'tests/lib/**'
+      - 'tests/smoke/**'
+      - '.github/workflows/action-smoke.yml'
       - '.github/workflows/ci-script.yml'
   pull_request:
     paths:
       - 'action/**'
       - 'files/**'
+      # Read by the suite: the parity tests compare the role with the script, and
+      # 13-central-429 reads the smoke workflow and its verdict script.
+      - 'defaults/**'
+      - 'tasks/**'
+      - 'templates/**'
       - 'tests/ci/**'
+      - 'tests/lib/**'
+      - 'tests/smoke/**'
+      - '.github/workflows/action-smoke.yml'
       - '.github/workflows/ci-script.yml'
   workflow_dispatch:
 
@@ -37,7 +53,9 @@ jobs:
       matrix:
         # macos-14 was retired: GitHub cancels it with "The configuration
         # 'macos-14-arm64-us-default' is not supported" (2026-11-09).
-        os: [ubuntu-24.04, macos-15]
+        # macos-15-intel since 2026-11-24: the Intel Macs differ in where Homebrew
+        # puts things and in which tools the image has.
+        os: [ubuntu-24.04, macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -67,3 +85,61 @@ jobs:
           # SC1090/SC1091: sourced paths are runtime values by design.
           # SC2016: wrapper heredocs intentionally emit literal $VAR.
           shellcheck --severity=warning --exclude=SC1090,SC1091,SC2016 action/harden.sh
+
+  # The Mac of somebody who is not a CI runner (issue 48, item 6): npm 11.5.1, which
+  # warns about keys it does not know; Apple's own /usr/bin/bundle (Bundler 1.17.2,
+  # where `bundle config get X` is a write); and no JDK, where /usr/bin/javac exists
+  # and cannot run. Everything else of the runner's is off PATH.
+  persons-mac:
+    name: "harden.sh (a person's Mac)"
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '22'
+
+      - name: npm 11.5.1, Apple's tools, uv, and a javac that cannot run
+        run: |
+          set -euo pipefail
+          npm install -g --silent --prefix "$RUNNER_TEMP/bats" bats@1.13.0
+          npm install -g --silent --prefix "$RUNNER_TEMP/npm115" npm@11.5.1
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          bin="$RUNNER_TEMP/mac/bin"; mkdir -p "$bin"
+          ln -s "$(command -v node)" "$bin/node"
+          ln -s "$RUNNER_TEMP/npm115/bin/npm" "$RUNNER_TEMP/npm115/bin/npx" "$bin/"
+          ln -s "$RUNNER_TEMP/bats/bin/bats" "$bin/bats"
+          ln -s "$HOME/.local/bin/uv" "$bin/uv"
+          for t in java javac jar; do
+            # The words and the status Apple's stubs have with no JDK installed.
+            printf '#!/bin/sh\necho "The operation couldn\xe2\x80\x99t be completed. Unable to locate a Java Runtime." >&2\nexit 1\n' > "$bin/$t"
+            chmod +x "$bin/$t"
+          done
+          echo "MACPATH=$bin:/usr/bin:/bin:/usr/sbin:/sbin" >> "$GITHUB_ENV"
+
+      - name: What the suite will find
+        run: |
+          run() { env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" TMPDIR="$TMPDIR" LANG=en_US.UTF-8 PATH="$MACPATH" "$@"; }
+          run npm --version
+          run bundle --version
+          [ "$(run npm --version 2>/dev/null)" = 11.5.1 ]
+          [ "$(run sh -c 'command -v bundle')" = /usr/bin/bundle ]
+          [[ "$(run bundle --version 2>/dev/null)" == *" 1.17."* ]]
+          ! run javac -version
+          for t in pnpm yarn bun deno go cargo composer mvn gradle dotnet; do ! run sh -c "command -v $t" || { echo "::error::$t is on PATH: not a person's Mac"; exit 1; }; done
+
+      - name: Run the suite
+        run: |
+          env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" TMPDIR="$TMPDIR" LANG=en_US.UTF-8 PATH="$MACPATH" \
+            bats --timing --print-output-on-failure tests/ci/
+
+      - name: With a sudo that would ask for a password, nothing asks
+        run: |
+          # -n fails, as it does for a person; any other call is one that prompts.
+          mkdir -p "$RUNNER_TEMP/asks"
+          printf '#!/bin/sh\ncase "$1" in -n|--version|-V) exit 1 ;; esac\necho "sudo $*" >> "%s"\nexit 1\n' "$RUNNER_TEMP/asked" > "$RUNNER_TEMP/asks/sudo"
+          chmod +x "$RUNNER_TEMP/asks/sudo"
+          env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" TMPDIR="$TMPDIR" LANG=en_US.UTF-8 PATH="$RUNNER_TEMP/asks:$MACPATH" \
+            bats --timing --print-output-on-failure tests/ci/
+          if [ -s "$RUNNER_TEMP/asked" ]; then echo "::error::the suite asked for a password:"; sort "$RUNNER_TEMP/asked" | uniq -c | head -20; exit 1; fi

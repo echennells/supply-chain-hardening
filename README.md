@@ -54,11 +54,11 @@ Each protection is delivered in up to three overlapping layers — system-wide e
 > [!WARNING]
 > **Back these up first.** Applying replaces them with no backup and no warning, login tokens included, and so does every later run ([#48](https://github.com/echennells/supply-chain-hardening/issues/48); a fix is in progress): `~/.npmrc`, `~/.yarnrc.yml`, `~/.bunfig.toml`, `~/.bundle/config`, `~/.config/pnpm/config.yaml`, `~/.config/pnpm/rc`, `~/.config/pip/pip.conf`, `~/.config/uv/uv.toml`.
 >
-> **macOS:** the role does not work there, and `harden.sh` and the Action do not harden pnpm.
+> **macOS:** the role supports Linux only and refuses a Mac before it writes anything. Use [`action/harden.sh`](AGENTS.md#apply-without-ansible) there, or the Action on a macOS runner.
 
 ### On a host (Ansible role)
 
-The role hardens the package managers a host **already has** — it does not install them. Install the toolchains you want protected first, then apply.
+Linux only. The role hardens the package managers a host **already has** — it does not install them. Install the toolchains you want protected first, then apply.
 
 ```bash
 # 1. Prerequisites: Ansible >= 2.14, plus the package managers you want hardened

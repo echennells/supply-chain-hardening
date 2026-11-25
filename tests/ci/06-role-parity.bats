@@ -15,6 +15,8 @@ load helpers
 setup() { common_setup; }
 
 @test "the action carries every role config key that is not excluded" {
+  # A current npm: an older one leaves out keys it would warn about (both surfaces).
+  stub_npm 11.19.1
   harden -- --emit=plain >/dev/null
   run python3 "${BATS_TEST_DIRNAME}/parity.py" "$TEST_HOME"
   echo "$output"
@@ -25,8 +27,8 @@ setup() { common_setup; }
   # A checker that cannot fail is worse than none — it reads as coverage.
   harden -- --emit=plain >/dev/null
   # Drop a key the role sets and the action currently carries.
-  grep -v '^ignoreScripts:' "$TEST_HOME/.config/pnpm/config.yaml" > "$TEST_HOME/.tmp" \
-    && mv "$TEST_HOME/.tmp" "$TEST_HOME/.config/pnpm/config.yaml"
+  grep -v '^ignoreScripts:' "$PNPM_DIR/config.yaml" > "$TEST_HOME/.tmp" \
+    && mv "$TEST_HOME/.tmp" "$PNPM_DIR/config.yaml"
   run python3 "${BATS_TEST_DIRNAME}/parity.py" "$TEST_HOME"
   [ "$status" -eq 1 ]
   [[ "$output" == *"ignoreScripts"* ]]

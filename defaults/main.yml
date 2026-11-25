@@ -102,8 +102,8 @@ poetry_min_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max
 # lookup('pipe', ...) runs on the controller; ansible_date_time.epoch is
 # the target's epoch. Both produce the same RFC 3339 from the same epoch
 # input, so this works correctly for remote-target apply too. Requires
-# GNU date on the controller (Linux yes; macOS controllers need
-# `brew install coreutils` for `date -u -d @...` syntax).
+# GNU date on the controller, for the `date -u -d @...` syntax; a controller
+# without it (a Mac applying to a Linux host) can pin uv_exclude_newer instead.
 #
 # The cutoff is computed at apply time. On systemd hosts a timer advances it
 # afterwards (age_gate_refresh, below); elsewhere it stays frozen until the
@@ -187,16 +187,40 @@ npm_audit: true
 npm_save_exact: true
 npm_fund: false
 npm_update_notifier: false
-# Whether the env layer exports NPM_CONFIG_ALLOW_GIT=none (allow-git=none is in
-# the npmrc files either way). Derived, not a knob: true unless the npm found at
-# apply time is older than 11.9.0, the first npm that reads allow-git. npm
-# 11.2.0 to 11.8.x print `npm warn Unknown env config "allow-git"` on every
-# command when it is set, and earlier npm ignores it (MEASURED on 10.9.8,
-# 11.1.0, 11.2.0, 11.8.0, 11.9.0, 11.10.0, 11.21.3, 12.2.3). With no npm found
-# it is true, as the npmrc files are written ahead of npm. The version comes
-# from tasks/npm.yml, or from tasks/shell_env.yml on a run scoped away from it.
-sch_npm_found_version: "{{ (npm_version_check.stdout | default(sch_env_npm_version.stdout | default(''))) | trim }}"
-sch_npm_allow_git_env: "{{ not ((sch_npm_found_version is match('^[0-9]+[.][0-9]+[.][0-9]+$')) and (sch_npm_found_version is version('11.9.0', '<'))) }}"
+# Whether min-release-age and allow-git are written, to the npmrc files and to the
+# env layer alike. Derived, not knobs. npm prints `npm warn Unknown user config
+# "<key>". This will stop working in the next major version of npm.` (env and
+# global likewise) on every command for a key it does not know. MEASURED, each in
+# ~/.npmrc, the global npmrc and the environment:
+#   8.19.4, 9.9.4, 10.9.11, 11.0.0, 11.1.0   say nothing
+#   11.2.0 to 11.8.0                         warn about both keys
+#   11.9.0                                   knows allow-git, warns about min-release-age
+#   11.10.0 to 12.2.3                        know both
+# So a key is left out where the npm in use would warn about it, and written
+# everywhere else. Below 11.2.0 it stays in: nothing is printed, and a newer npm
+# installed later, or by another account, honours it with no re-apply. After an
+# upgrade from 11.2.0-11.9.0 a re-apply writes it. Several npms: the one the role
+# finds first decides, unless another one found knows the key: then it is written (a
+# warning from the old one is noise, a missing gate in the new one is a hole). With no npm found, or one
+# that does not say its version, both are written ahead of npm, as ever. The
+# versions come from tasks/npm_versions.yml; action/harden.sh has the same rule.
+sch_npm_versions: "{{ (sch_npm_versions_probe.stdout_lines | default([], true) | select('match', '^[0-9]+[.][0-9]+[.][0-9]+$') | list) if (sch_npm_versions_probe.stdout_lines | default(['-'], true) | first) != '-' else [] }}"
+sch_npm_writes_min_release_age: "{{ (sch_npm_versions | length == 0) or ((sch_npm_versions | first) is version('11.2.0', '<')) or (sch_npm_versions | select('version', '11.10.0', '>=') | list | length > 0) }}"
+sch_npm_writes_allow_git: "{{ (sch_npm_versions | length == 0) or ((sch_npm_versions | first) is version('11.2.0', '<')) or (sch_npm_versions | select('version', '11.9.0', '>=') | list | length > 0) }}"
+
+# Derived, not a knob: the start of a shell command (a file name follows it) that
+# is true when that file is a PATH wrapper this project wrote, from its first two
+# lines alone. The same rule as is_our_wrapper in action/harden.sh, for the marker
+# line of every wrapper either surface has shipped (tests/ci/04-wrappers.bats
+# compares the two). It used to be a grep for the name anywhere in the file, so a
+# tool script that mentions it (a checkout path in a comment) was taken for an old
+# wrapper and OVERWRITTEN with no -real copy, and a wrapper action/harden.sh wrote
+# was taken for the real tool, moved over the real tool's own -real copy, and the
+# tool was gone.
+sch_is_wrapper_sh: >-
+  LC_ALL=C awk 'NR == 1 && !/^#!\/bin\/(ba)?sh\r?$/ { exit }
+  NR == 2 { ok = /^# (Managed by supply-chain-harden( action)?|(cargo|deno) — supply-chain-harden wrapper|.* — supply-chain-hardening wrapper(:.*)?)\r?$/; exit }
+  END { exit !ok }'
 
 # pip/python settings
 pip_only_binary: true

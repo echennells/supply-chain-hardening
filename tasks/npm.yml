@@ -2,6 +2,9 @@
 # npm supply chain hardening
 # Config files deployed unconditionally — ready when npm arrives
 
+- name: Find the npm versions the npmrc keys depend on
+  ansible.builtin.import_tasks: npm_versions.yml
+
 - name: Deploy hardened .npmrc (per-user)
   # Template-driven so npm_ignore_scripts / npm_audit / npm_save_exact /
   # npm_fund / npm_update_notifier actually control behavior. Previously
@@ -69,8 +72,10 @@
   failed_when: false
 
 - name: Detect the npm version (min-release-age needs npm 11.10.0)
-  # The npmrc templates write min-release-age unconditionally, so it activates
-  # the day npm is upgraded. Below 11.10.0 npm echoes the key back from
+  # The npmrc templates write min-release-age unless the npm found would warn
+  # about it on every command (11.2.0 to 11.9.0, see npm_versions.yml), so below
+  # 11.2.0 it activates the day npm is upgraded and otherwise on the next apply.
+  # Below 11.10.0 npm echoes the key back from
   # `npm config get` and enforces nothing, so without this record the summary
   # was silent about a missing age gate on every stock distro npm (MEASURED on
   # the VM matrix: Ubuntu 22.04 8.5.1, 24.04/26.04 and Debian 12/13 9.2.0,
@@ -85,7 +90,7 @@
 - name: Record skipped protection — npm age gate (npm < 11.10.0)
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ['npm publish-age gate — npm ' ~ (npm_version_check.stdout | trim) ~ ' does not implement min-release-age (added in npm 11.10.0; older npm echoes the key back and enforces nothing). The key is written and activates on upgrade; until then `npm install` accepts a release published seconds ago. See docs/npm-cooldown-by-distro.md'] }}
+      {{ (skipped_protections | default([])) + ['npm publish-age gate — npm ' ~ (npm_version_check.stdout | trim) ~ ' does not implement min-release-age (added in npm 11.10.0; older npm echoes the key back and enforces nothing). ' ~ ('The key is written and activates on upgrade' if sch_npm_writes_min_release_age | bool else 'npm 11.2.0 to 11.9.0 warns about the key on every command, so it is left out of the npmrc files and the environment: upgrade npm, then re-apply') ~ '; until then `npm install` accepts a release published seconds ago. See docs/npm-cooldown-by-distro.md'] }}
   when:
     - npm_version_check.stdout is defined
     - npm_version_check.stdout | trim is match('^[0-9]+[.][0-9]+[.][0-9]+$')

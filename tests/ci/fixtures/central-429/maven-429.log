@@ -1,0 +1,30 @@
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-site-plugin/3.22.0/maven-site-plugin-3.22.0.pom failed (attempt 2 of 4) due to status 429. Retrying in 10000 ms (due to retryInterval 5000 ms multiplied by execution count 2)...
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-site-plugin/3.22.0/maven-site-plugin-3.22.0.pom failed (attempt 3 of 4) due to status 429. Retrying in 15000 ms (due to retryInterval 5000 ms multiplied by execution count 3)...
+[WARNING] Failed to retrieve plugin descriptor for org.apache.maven.plugins:maven-site-plugin:3.22.0: Plugin org.apache.maven.plugins:maven-site-plugin:3.22.0 or one of its dependencies could not be resolved:
+	The following artifacts could not be resolved: org.apache.maven.plugins:maven-site-plugin:pom:3.22.0 (absent): Could not transfer artifact org.apache.maven.plugins:maven-site-plugin:pom:3.22.0 from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 429
+
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-metadata.xml
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/codehaus/mojo/maven-metadata.xml
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/codehaus/mojo/maven-metadata.xml failed (attempt 1 of 4) due to status 429. Retrying in 5000 ms (due to retryInterval 5000 ms multiplied by execution count 1)...
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-metadata.xml failed (attempt 1 of 4) due to status 429. Retrying in 5000 ms (due to retryInterval 5000 ms multiplied by execution count 1)...
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/codehaus/mojo/maven-metadata.xml failed (attempt 2 of 4) due to status 429. Retrying in 10000 ms (due to retryInterval 5000 ms multiplied by execution count 2)...
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-metadata.xml failed (attempt 2 of 4) due to status 429. Retrying in 10000 ms (due to retryInterval 5000 ms multiplied by execution count 2)...
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/codehaus/mojo/maven-metadata.xml failed (attempt 3 of 4) due to status 429. Retrying in 15000 ms (due to retryInterval 5000 ms multiplied by execution count 3)...
+[WARNING] GET request to https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-metadata.xml failed (attempt 3 of 4) due to status 429. Retrying in 15000 ms (due to retryInterval 5000 ms multiplied by execution count 3)...
+[WARNING] Could not transfer metadata org.apache.maven.plugins/maven-metadata.xml from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 429
+[WARNING] Could not transfer metadata org.codehaus.mojo/maven-metadata.xml from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 429
+[WARNING] org.apache.maven.plugins/maven-metadata.xml failed to transfer from https://repo.maven.apache.org/maven2 during a previous attempt. This failure was cached in the local repository and resolution will not be reattempted until the update interval of central has elapsed or updates are forced. Original error: Could not transfer metadata org.apache.maven.plugins/maven-metadata.xml from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 429
+[WARNING] org.codehaus.mojo/maven-metadata.xml failed to transfer from https://repo.maven.apache.org/maven2 during a previous attempt. This failure was cached in the local repository and resolution will not be reattempted until the update interval of central has elapsed or updates are forced. Original error: Could not transfer metadata org.codehaus.mojo/maven-metadata.xml from/to central (https://repo.maven.apache.org/maven2): HTTP Status: 429
+[INFO] ------------------------------------------------------------------------
+[ERROR] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  03:01 min
+[INFO] Finished at: 2026-11-24T04:30:04Z
+[INFO] ------------------------------------------------------------------------
+[ERROR] No plugin found for prefix 'dependency' in the current project and in the plugin groups [org.apache.maven.plugins, org.codehaus.mojo] available from the repositories [local (/home/runner/.m2/repository), central (https://repo.maven.apache.org/maven2)] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/NoPluginFoundForPrefixException

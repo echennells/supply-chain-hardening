@@ -164,3 +164,14 @@ real_binary() {
 require_root() {
   [ "$(id -u)" = 0 ] || skip "needs root: ${1:-writes root-owned files} (the container suite runs as root)"
 }
+
+# npm_warns_about <first npm that knows the key>: npm 11.2.0 to 11.9.0 prints a
+# warning on every command for a key it does not know, so the role leaves
+# min-release-age (11.10.0) and allow-git (11.9.0) out where the npm it found does
+# that. See sch_npm_writes_min_release_age in defaults/main.yml.
+npm_warns_about() {
+  local v
+  v=$(npm --version 2>/dev/null) || return 1
+  [ -n "$v" ] || return 1
+  printf '%s\n%s\n' 11.2.0 "$v" | sort -V -C && ! printf '%s\n%s\n' "$1" "$v" | sort -V -C
+}

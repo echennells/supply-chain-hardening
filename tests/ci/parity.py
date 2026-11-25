@@ -64,10 +64,14 @@ EXCLUDED = {
     ),
 }
 
+# pnpm reads another directory on macOS (pnpm_config_dir in action/harden.sh).
+PNPM_YAML = ("Library/Preferences/pnpm/config.yaml" if sys.platform == "darwin"
+             else ".config/pnpm/config.yaml")
+
 # (label, role template, file relative to the run dir, key regexes)
 PAIRS = [
     ("npm",   "templates/npmrc.j2",            ".npmrc",                   [r"^([a-z][a-z0-9-]*)\s*="]),
-    ("pnpm",  "templates/pnpm-config.yaml.j2", ".config/pnpm/config.yaml", [r"^([a-zA-Z][a-zA-Z0-9-]*)\s*:"]),
+    ("pnpm",  "templates/pnpm-config.yaml.j2", PNPM_YAML,                 [r"^([a-zA-Z][a-zA-Z0-9-]*)\s*:"]),
     ("yarn",  "templates/yarnrc.yml.j2",       ".yarnrc.yml",              [r"^([a-zA-Z][a-zA-Z0-9]*)\s*:"]),
     ("bun",   "templates/bunfig.toml.j2",      ".bunfig.toml",             [r"^([a-zA-Z][a-zA-Z0-9]*)\s*="]),
     ("pip",   "templates/pip.conf.j2",         ".config/pip/pip.conf",     [r"^([a-z][a-z0-9-]*)\s*="]),

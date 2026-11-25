@@ -181,7 +181,7 @@
 - name: Determine whether current bun binary is our wrapper or the real binary
   ansible.builtin.shell:
     cmd: |
-      if grep -q 'supply-chain-hardening' '{{ bun_binary_path.stdout }}' 2>/dev/null; then
+      if {{ sch_is_wrapper_sh }} '{{ bun_binary_path.stdout }}' 2>/dev/null; then
         echo is_wrapper
       else
         echo is_real
@@ -267,7 +267,7 @@
 - name: Determine whether current bunx binary is our wrapper or the real one
   ansible.builtin.shell:
     cmd: |
-      if grep -q 'supply-chain-hardening' '{{ bunx_binary_path.stdout }}' 2>/dev/null; then
+      if {{ sch_is_wrapper_sh }} '{{ bunx_binary_path.stdout }}' 2>/dev/null; then
         echo is_wrapper
       else
         echo is_real

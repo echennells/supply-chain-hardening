@@ -8,6 +8,8 @@ on:
       # verify.sh sources files/verify-probes.sh. Without this, a change to the
       # probes alone (#42) never ran the Action on a runner.
       - 'files/**'
+      - 'tests/smoke/**'
+      - 'tests/lib/**'
       - '.github/workflows/action-smoke.yml'
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       # verify.sh sources files/verify-probes.sh. Without this, a change to the
       # probes alone (#42) never ran the Action on a runner.
       - 'files/**'
+      - 'tests/smoke/**'
+      - 'tests/lib/**'
       - '.github/workflows/action-smoke.yml'
   workflow_dispatch:
 
@@ -632,9 +636,18 @@ jobs:
             || { echo "::error::bundle errored but not with the expected frozen-mode shape:"; echo "$output"; exit 1; }
           echo "✓ bundler BUNDLE_FROZEN correctly blocked out-of-sync lockfile"
 
-  action-maven-behavioral-https-only:
-    name: 'Action: maven mirror actually blocks HTTP-only repository'
+  # Two jobs per tool: the first runs the attack, the second is what it showed. Maven
+  # Central rate-limits GitHub's shared runner addresses, and a run it refused with
+  # a 429 says nothing about the hardening. Both jobs used to blame the hardening for
+  # that (jobs 138217056780 and 138043538056). Such a run now leaves the second job
+  # SKIPPED, neither a pass nor a fail, with a NOT TESTED warning on the first. What
+  # counts as which: tests/smoke/verdict.sh, tested on those logs in
+  # tests/ci/13-central-429.bats.
+  action-maven-https-only-attempt:
+    name: 'Action: maven on an HTTP-only repository (the attempt; the next job is the verdict)'
     runs-on: ubuntu-24.04
+    outputs:
+      verdict: ${{ steps.attempt.outputs.verdict }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -651,7 +664,8 @@ jobs:
       #   <mirrorOf>external:http:*</mirrorOf> + <blocked>true</blocked>
       # which should cause Maven to refuse any HTTP-only repo at resolve time.
       # Build a pom that declares an HTTP-only repo + attempts to resolve from it.
-      - name: mvn must refuse HTTP-only repository at resolve time
+      - name: mvn on a project with an HTTP-only repository
+        id: attempt
         run: |
           mkdir -p /tmp/maven-victim && cd /tmp/maven-victim
           cat > pom.xml <<'EOF'
@@ -676,38 +690,39 @@ jobs:
                  0 — the mirror was never exercised at all. -->
             <dependencies>
               <dependency>
-                <groupId>com.example.blocked</groupId>
+                <groupId>com.example.nowhere</groupId>
                 <artifactId>only-on-http</artifactId>
                 <version>1.0</version>
               </dependency>
             </dependencies>
           </project>
           EOF
-          set +e
-          output=$(mvn -B dependency:resolve 2>&1)
-          rc=$?
-          set -e
-          echo "$output" | tail -30
+          rc=0
+          mvn -B dependency:resolve > "$RUNNER_TEMP/mvn.log" 2>&1 || rc=$?
+          tail -30 "$RUNNER_TEMP/mvn.log"
           echo "rc=$rc"
-          # Maven prints "blocked mirror" when a repo matches a <blocked> mirror.
-          # Older Maven (<3.8.1) doesn't recognize <blocked> — fail this test
-          # there so we know our setup-java pin needs review.
-          if echo "$output" | grep -qiE "blocked.*mirror|http.*blocked|mirror.*blocked|external:http:.*blocked"; then
-            echo "✓ maven blocked HTTP-only repo via <blocked> mirror"
-            exit 0
-          fi
-          # Acceptable alternative: Maven 3.8+ refuses HTTP repos with an error
-          # about non-https. Either signal is fine.
-          if echo "$output" | grep -qiE "non.https|http url|protocol http"; then
-            echo "✓ maven rejected HTTP repo (different signal but same effect)"
-            exit 0
-          fi
-          echo "::error::maven did NOT block the HTTP repo. settings.xml may not be effective. Output above."
-          exit 1
+          v=$("$GITHUB_WORKSPACE/tests/smoke/verdict.sh" maven "$rc" "$RUNNER_TEMP/mvn.log")
+          echo "$v"
+          case "$v" in not-tested*) echo "::warning title=NOT TESTED::maven on an HTTP-only repository: ${v#not-tested }" ;; esac
 
-  action-gradle-behavioral-dynamic-version:
-    name: 'Action: gradle init script actually rejects dynamic versions'
+  action-maven-behavioral-https-only:
+    name: 'Action: maven mirror actually blocks HTTP-only repository'
+    needs: action-maven-https-only-attempt
+    if: needs.action-maven-https-only-attempt.outputs.verdict != 'not-tested'
     runs-on: ubuntu-24.04
+    steps:
+      - name: maven refused the HTTP-only repository, through the mirror the Action wrote
+        env:
+          VERDICT: ${{ needs.action-maven-https-only-attempt.outputs.verdict }}
+        run: |
+          [ "$VERDICT" = blocked ] || { echo "::error::maven did not block the HTTP repo (verdict: ${VERDICT:-none}); its output is in the attempt job"; exit 1; }
+          echo "✓ maven blocked the HTTP-only repository via the Action's <blocked> mirror"
+
+  action-gradle-dynamic-version-attempt:
+    name: 'Action: gradle on a dynamic version (the attempt; the next job is the verdict)'
+    runs-on: ubuntu-24.04
+    outputs:
+      verdict: ${{ steps.attempt.outputs.verdict }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -724,7 +739,8 @@ jobs:
       #   resolutionStrategy { failOnDynamicVersions() }
       # which should cause Gradle to reject any dynamic version selector
       # (1.+, latest.release, 1.0-SNAPSHOT, etc.).
-      - name: gradle must reject dynamic version selectors
+      - name: gradle on a dynamic version selector
+        id: attempt
         run: |
           mkdir -p /tmp/gradle-victim && cd /tmp/gradle-victim
           cat > settings.gradle.kts <<'EOF'
@@ -745,18 +761,25 @@ jobs:
             doLast { configurations.getByName("compileClasspath").resolve() }
           }
           EOF
-          set +e
-          output=$(gradle --no-daemon --init-script "$HOME/.gradle/init.gradle.kts" resolveAll 2>&1)
-          rc=$?
-          set -e
-          echo "$output" | tail -30
+          rc=0
+          gradle --no-daemon --init-script "$HOME/.gradle/init.gradle.kts" resolveAll > "$RUNNER_TEMP/gradle.log" 2>&1 || rc=$?
+          tail -30 "$RUNNER_TEMP/gradle.log"
           echo "rc=$rc"
-          if [ "$rc" = "0" ]; then
-            echo "::error::gradle resolved a dynamic version — init script did NOT block"
-            exit 1
-          fi
-          echo "$output" | grep -qiE "dynamic version|failOnDynamicVersions" \
-            || { echo "::error::gradle errored but not with the expected dynamic-version-blocked shape"; exit 1; }
+          v=$("$GITHUB_WORKSPACE/tests/smoke/verdict.sh" gradle "$rc" "$RUNNER_TEMP/gradle.log")
+          echo "$v"
+          case "$v" in not-tested*) echo "::warning title=NOT TESTED::gradle on a dynamic version: ${v#not-tested }" ;; esac
+
+  action-gradle-behavioral-dynamic-version:
+    name: 'Action: gradle init script actually rejects dynamic versions'
+    needs: action-gradle-dynamic-version-attempt
+    if: needs.action-gradle-dynamic-version-attempt.outputs.verdict != 'not-tested'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: gradle refused the dynamic version, through the init script the Action wrote
+        env:
+          VERDICT: ${{ needs.action-gradle-dynamic-version-attempt.outputs.verdict }}
+        run: |
+          [ "$VERDICT" = blocked ] || { echo "::error::gradle did not refuse the dynamic version as the init script does (verdict: ${VERDICT:-none}); its output is in the attempt job"; exit 1; }
           echo "✓ gradle init script blocked dynamic version selector"
 
   action-nuget-behavioral-cert-valid:
