@@ -89,8 +89,8 @@ load setup
     2>/dev/null || skip "systemd-run failed (container restriction)"
 
   # In a real systemd unit without EnvironmentFile, the env var is absent.
-  ! grep -qE "^NPM_CONFIG_IGNORE_SCRIPTS=" /tmp/m2-systemd-env-capture
-  ! grep -qE "^GOTOOLCHAIN=" /tmp/m2-systemd-env-capture
+  ! grep -qE "^NPM_CONFIG_IGNORE_SCRIPTS=" /tmp/m2-systemd-env-capture || false
+  ! grep -qE "^GOTOOLCHAIN=" /tmp/m2-systemd-env-capture || false
 
   rm -f /tmp/m2-systemd-env-capture
 }

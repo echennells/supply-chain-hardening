@@ -462,3 +462,18 @@ setup() { common_setup; }
     done
   fi
 }
+
+# --- the tests themselves ---------------------------------------------------
+
+@test "no assertion in either suite is one bats cannot fail (a \`! command\` that is not the last line)" {
+  command -v python3 >/dev/null || skip "python3 not installed"
+  local root; root="$(dirname "$HARDEN_SH")/.."
+  run python3 -I "$root/tests/ci/dead-assertions.py" "$root"/tests/bats/*.bats "$root"/tests/ci/*.bats
+  [ "$status" -eq 0 ] || { echo "add \`|| false\`:"; echo "$output"; return 1; }
+  # FIXTURE CONTROL: it finds one, and does not object to the two shapes that work.
+  printf '@test "x" {\n  ! true\n  ! true || false\n  ! true\n}\n' > "$BATS_TEST_TMPDIR/f.bats"
+  run python3 -I "$root/tests/ci/dead-assertions.py" "$BATS_TEST_TMPDIR/f.bats"
+  [ "$status" -eq 1 ]
+  [ "${#lines[@]}" -eq 1 ]
+  [[ "${lines[0]}" == *"f.bats:2: ! true" ]]
+}

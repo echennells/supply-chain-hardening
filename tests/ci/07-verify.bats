@@ -1770,7 +1770,7 @@ GO
   run env -i PATH="/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
   [[ "$output" == *"go checksum verification"* ]]
   # Not a substring test: "cargo not installed" contains "go not installed".
-  ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output"
+  ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output" || false
   grep -qE '^[A-Z/]+ +[A-Z-]+ +go settings persisted' <<<"$output"
 }
 

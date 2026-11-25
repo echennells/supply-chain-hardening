@@ -174,7 +174,7 @@ require_pip_dry_run() {
   # And the venv's pip is named for what it is: a python launcher, not "another
   # wrapper script" (which sent readers looking for a second security tool).
   echo "$output" | grep "pip PATH wrapper" | grep -q "an unwrapped python3 launcher"
-  ! echo "$output" | grep -q "another wrapper script"
+  ! echo "$output" | grep -q "another wrapper script" || false
   deactivate
 }
 

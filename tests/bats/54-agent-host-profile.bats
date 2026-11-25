@@ -56,7 +56,7 @@ summary() { grep -o 'agent host profile: [^"]*' "$RUN_DIR/$1/log"; }
   profile off pb.yml -i localhost,
   [ "$(resolved off)" = "RESOLVED verify_fail_on_gap=False python_safe_path=False uv_exclude_newer_env=False" ]
   [[ "$(summary off)" == "agent host profile: off (agent_host=false): verify_fail_on_gap=false, python_safe_path=false, uv_exclude_newer_env=false."* ]]
-  ! grep -q 'PYTHONSAFEPATH' "$RUN_DIR/off/env.sh"
+  ! grep -q 'PYTHONSAFEPATH' "$RUN_DIR/off/env.sh" || false
   ! grep -q '^export UV_EXCLUDE_NEWER=' "$RUN_DIR/off/env.sh"
 }
 
@@ -77,7 +77,7 @@ summary() { grep -o 'agent host profile: [^"]*' "$RUN_DIR/$1/log"; }
   profile ev pb.yml -i localhost, -e agent_host=true -e python_safe_path=false
   [ "$(resolved ev)" = "RESOLVED verify_fail_on_gap=True python_safe_path=False uv_exclude_newer_env=True" ]
   [[ "$(summary ev)" == *"python_safe_path=false (set explicitly)"* ]]
-  ! grep -q 'PYTHONSAFEPATH' "$RUN_DIR/ev/env.sh"
+  ! grep -q 'PYTHONSAFEPATH' "$RUN_DIR/ev/env.sh" || false
   grep -q '^export UV_EXCLUDE_NEWER=' "$RUN_DIR/ev/env.sh"
 }
 

@@ -102,7 +102,7 @@ load setup
   # no-build lifted for this command …
   echo "$output" | grep -qE 'no_build:[[:space:]]*None'
   # … but the age gate is NOT dropped (the --config-file footgun this avoids).
-  ! echo "$output" | grep -qE 'exclude_newer:[[:space:]]*None'
+  ! echo "$output" | grep -qE 'exclude_newer:[[:space:]]*None' || false
   # … and the scope is announced, not silent.
   echo "$output" | grep -q "no-build lifted for THIS command"
 }

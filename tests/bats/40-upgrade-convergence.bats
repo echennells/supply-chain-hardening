@@ -1314,8 +1314,8 @@ teardown() {
   # Re-rendered by THIS version: an absolute root-owned backend, no prepend.
   grep -q "^REAL_CARGO='$SYS_CARGO-real'\$" "$SYS_CARGO"
   grep -q "^COOLDOWN_EXE='$SYS_BACKEND'\$" "$SYS_CARGO"
-  ! grep -q '^COOLDOWN_BIN=' "$SYS_CARGO"
-  ! grep -q 'PATH="$COOLDOWN' "$SYS_CARGO"
+  ! grep -q '^COOLDOWN_BIN=' "$SYS_CARGO" || false
+  ! grep -q 'PATH="$COOLDOWN' "$SYS_CARGO" || false
   [ -n "$(find "$SYS_BACKEND" -user 0 -perm 0755)" ]
   # The deployer's own wrapper still names the deployer's own copy.
   grep -q "^COOLDOWN_EXE='$HOME/.cargo/bin/cargo-cooldown'\$" "$HOME/.cargo/bin/cargo"

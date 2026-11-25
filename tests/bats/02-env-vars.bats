@@ -44,7 +44,7 @@ setup() {
   # in a future npm major. The env-var age gate must use the real key.
   # NOTE: COMPOSER_NO_SCRIPTS test intentionally dropped here — that var is a
   # made-up name the role no longer emits; COMPOSER_SKIP_SCRIPTS is tested below.
-  ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/profile.d/supply-chain-hardening.sh
+  ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/profile.d/supply-chain-hardening.sh || false
   ! grep -q "NPM_CONFIG_MINIMUM_RELEASE_AGE" /etc/environment
 }
 
@@ -88,7 +88,7 @@ setup() {
   # non-interactive root run without it disables plugins and runs `sudo -K`;
   # with it, a plugin the checkout's own allow-plugins enables ran as root.
   [ -z "${COMPOSER_ALLOW_SUPERUSER+x}" ] || { echo "COMPOSER_ALLOW_SUPERUSER=$COMPOSER_ALLOW_SUPERUSER is exported" >&2; return 1; }
-  ! grep -qE '^[[:space:]]*(export[[:space:]]+)?COMPOSER_ALLOW_SUPERUSER=' /etc/profile.d/supply-chain-hardening.sh
+  ! grep -qE '^[[:space:]]*(export[[:space:]]+)?COMPOSER_ALLOW_SUPERUSER=' /etc/profile.d/supply-chain-hardening.sh || false
   ! grep -qE '^[[:space:]]*COMPOSER_ALLOW_SUPERUSER=' /etc/environment
 }
 
