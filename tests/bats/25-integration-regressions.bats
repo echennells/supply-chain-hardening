@@ -88,7 +88,7 @@ task_block() { # file, task-name substring
   # auto ever appears at play level or in the env-var layer it would undo the
   # GOTOOLCHAIN=local hardening for every user `go install` on the host — the
   # exact protection those tasks are carefully working around.
-  ! grep -qE '^\s*GOTOOLCHAIN=auto' "$ROLE_DIR"/templates/*.j2 2>/dev/null
+  ! grep -qE '^\s*GOTOOLCHAIN=auto' "$ROLE_DIR"/templates/*.j2 2>/dev/null || false
   ! grep -qE 'GOTOOLCHAIN.*auto' "$ROLE_DIR"/tasks/shell_env.yml 2>/dev/null
 }
 
@@ -261,8 +261,10 @@ jvm_only_apply() { # $1 = PATH to use
   [ "$status" -eq 0 ]
   assert_file_exists "$t/home/.gradle/init.d/supply-chain-security.gradle"
   assert_file_exists "$t/home/.m2/settings.xml"
-  ! echo "$output" | grep -q 'neither gradle nor a JDK'
-  ! echo "$output" | grep -q 'neither mvn nor a JDK'
+  # The summary's lines, not the names of the tasks that would record them: Ansible
+  # prints those when it skips them too.
+  ! echo "$output" | grep -q 'gradle init script — neither gradle nor a JDK' || false
+  ! echo "$output" | grep -q 'maven settings.xml — neither mvn nor a JDK' || false
   rm -rf "$t"
 }
 
@@ -507,7 +509,7 @@ ucfg_backup_of() {
   run ucfg_apply --tags "cargo,maven,nuget" --check
   echo "$output" | grep -E 'Refusing|fatal|PLAY RECAP' -A1 | head -6
   echo "$output" | grep -q 'Detect per-user config files this run would replace'
-  ! echo "$output" | grep -q 'Refusing to overwrite existing per-user'
+  ! echo "$output" | grep -q 'Refusing to overwrite existing per-user' || false
   run ucfg_apply --tags "$tags"
   echo "$output" | grep -E 'Refusing|fatal|PLAY RECAP' -A1 | head -6
   [ "$status" -eq 0 ]
@@ -1112,7 +1114,7 @@ EOF
   run ansible-playbook site.yml --connection=local --limit localhost \
     --check -e podman_enabled=false
   echo "$output" | tail -30
-  ! echo "$output" | grep -q "refused the probe"
+  ! echo "$output" | grep -q "refused the probe" || false
   [ "$status" -eq 0 ]
   # verify.yml does not run under --check, so the summary must not point at a
   # report "that follows" (it said so whenever verify_protections was true).

@@ -103,11 +103,11 @@ wrapper_is_ours() {
   command -v script >/dev/null 2>&1 || skip "util-linux script(1) not available"
 
   run env PATH="$STUBS:$PATH" "$WRAPPER" config get ignore-scripts
-  ! echo "$output" | grep -q "SFW_WRAPPED:"
-  ! echo "$output" | grep -q "NPQ_DIRECT:"
+  ! echo "$output" | grep -q "SFW_WRAPPED:" || false
+  ! echo "$output" | grep -q "NPQ_DIRECT:" || false
 
   run script -qec "PATH='$STUBS:$PATH' '$WRAPPER' config get ignore-scripts" /dev/null
-  ! echo "$output" | grep -q "SFW_WRAPPED:"
+  ! echo "$output" | grep -q "SFW_WRAPPED:" || false
   ! echo "$output" | grep -q "NPQ_DIRECT:"
 }
 
@@ -146,6 +146,6 @@ EOF
   echo "$output"
   # the install must reach the real npm (completed), never the loop
   echo "$output" | grep -q "REAL_NPM_DID_INSTALL:install some-package"
-  ! echo "$output" | grep -q "NPQ_LOOP"
+  ! echo "$output" | grep -q "NPQ_LOOP" || false
   [ "$(cat /tmp/npq-reentry-count 2>/dev/null || echo 99)" -le 2 ]
 }

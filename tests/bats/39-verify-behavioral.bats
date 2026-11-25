@@ -76,7 +76,7 @@ EOF
   row=$(echo "$output" | grep "yarn age gate")
   echo "$row" | grep -q "GAP"
   echo "$row" | grep -q "4.10.0"
-  ! echo "$row" | grep -q "NaN"
+  ! echo "$row" | grep -q "NaN" || false
   echo "$output" | grep "yarn lifecycle scripts blocked" | grep -q "OK"
   [ "$status" -eq 1 ]
 }
@@ -701,7 +701,7 @@ bundler_project() { # dir
   # rows discover go there; the preamble's row used to say "go not installed".
   run env -i HOME="$HOME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "$VERIFY" --verbose
   echo "$output" | grep -q "go checksum verification"
-  ! echo "$output" | grep -qE '^N/A +- +go +go not installed'
+  ! echo "$output" | grep -qE '^N/A +- +go +go not installed' || false
   # The preamble's own go row (fix/rh-go-pnpm-uv renamed it from "go module
   # integrity" to "go module mode").
   echo "$output" | grep -qE '^[A-Z/]+ +[A-Z-]+ +go module mode'
@@ -723,7 +723,7 @@ bundler_project() { # dir
   run bash -c "cd '$m' && GOTOOLCHAIN='$gv' GOPROXY=off go list 2>&1"
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "requires go >= 1.99.0"
-  ! echo "$output" | grep -qi "downloading go1.99.0"
+  ! echo "$output" | grep -qi "downloading go1.99.0" || false
   verify_from /tmp GOTOOLCHAIN="$gv"
   echo "$output" | grep "go toolchain switching" | grep -q "^OK"
   # GOPROXY=off: the verifier forces GOTOOLCHAIN=local for its own reads, but
@@ -788,7 +788,7 @@ npm_exclude_from() { # pattern
   run "$VERIFY" --verbose
   row=$(echo "$output" | grep "cargo lockfile writers routed")
   echo "$row" | grep -q "^GAP" || skip "writers are not reported ungated on this host"
-  ! echo "$row" | grep -q "SILENT"
+  ! echo "$row" | grep -q "SILENT" || false
   echo "$row" | grep -q "writes Cargo.lock and is NOT age-gated' warning"
   d="$BATS_TEST_TMPDIR/cp"; mkdir -p "$d/src"
   printf '[package]\nname = "cp"\nversion = "0.1.0"\nedition = "2021"\n' > "$d/Cargo.toml"
@@ -799,7 +799,7 @@ npm_exclude_from() { # pattern
 
 @test "verify: doc pointers are URLs, never repo-relative paths" {
   run "$VERIFY" --verbose
-  ! echo "$output" | grep -qE 'See docs/|design-principles\.md Axis|in docs/verify\.md'
+  ! echo "$output" | grep -qE 'See docs/|design-principles\.md Axis|in docs/verify\.md' || false
   if echo "$output" | grep -q "does NOT implement cooldown"; then
     echo "$output" | grep -q "https://github.com/echennells/supply-chain-hardening/blob/main/docs/composer-bundler-cooldown-by-distro.md"
   fi

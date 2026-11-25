@@ -375,7 +375,7 @@ path_stubs() {
   path_stubs
   harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
   grep -q "^COOLDOWN_EXE='$TEST_HOME/.cargo/bin/cargo-cooldown'\$" "$TEST_BIN/cargo"
-  ! grep -q 'PATH="$COOLDOWN' "$TEST_BIN/cargo"
+  ! grep -q 'PATH="$COOLDOWN' "$TEST_BIN/cargo" || false
   # HOME as the user's own: cargo searches $CARGO_HOME/bin itself, so nothing changes.
   run bash -c "cd '$(lockdir)' && HOME='$TEST_HOME' PATH='$TEST_BIN:/usr/bin:/bin' '$TEST_BIN/cargo' build"
   [[ "$output" == *"ARGS=[cooldown build"* ]]

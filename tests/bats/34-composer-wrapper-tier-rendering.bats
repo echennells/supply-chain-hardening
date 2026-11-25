@@ -82,7 +82,7 @@ teardown_file() {
   # legitimately discuss --no-plugins when explaining the flag, and a bare
   # grep matches those comments (false positive) even though the injection
   # is correctly omitted.
-  ! grep -qE '^FLAGS\+=\(--no-plugins\)$' "$f"
+  ! grep -qE '^FLAGS\+=\(--no-plugins\)$' "$f" || false
   ! grep -qE '^exec .*--no-plugins' "$f"
 }
 

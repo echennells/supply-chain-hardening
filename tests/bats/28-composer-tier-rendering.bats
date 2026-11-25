@@ -143,7 +143,7 @@ assert_has_baseline() {
   assert_valid_json "$f"
   assert_has_baseline "$f"
   grep -q '"abandoned": "fail"' "$f"
-  ! grep -q '"block-insecure"' "$f"
+  ! grep -q '"block-insecure"' "$f" || false
   ! grep -q '"block-abandoned"' "$f"
 }
 

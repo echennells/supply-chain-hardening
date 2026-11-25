@@ -182,6 +182,6 @@ EOF
   mv "${embedded}.bats-real" "$embedded"
 
   echo "doc: $doc_out"; echo "publish: $pub_out"
-  ! echo "$doc_out" | grep -q -- "--minimum-dependency-age"
+  ! echo "$doc_out" | grep -q -- "--minimum-dependency-age" || false
   ! echo "$pub_out" | grep -q -- "--minimum-dependency-age"
 }

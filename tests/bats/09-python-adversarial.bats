@@ -35,7 +35,7 @@ setup() {
   # uv should refuse (no-build) — setup.py never runs
   [ ! -f /tmp/marker-python-persistence ]
   # Double-check: no fake key in authorized_keys
-  ! grep -q "FAKE_PYTHON_TEST_KEY" /root/.ssh/authorized_keys 2>/dev/null
+  ! grep -q "FAKE_PYTHON_TEST_KEY" /root/.ssh/authorized_keys 2>/dev/null || false
   rm -rf /tmp/uv-attack-test
 }
 
