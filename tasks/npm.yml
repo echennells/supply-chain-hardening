@@ -43,8 +43,8 @@
   # config-file coverage there (ECH-149). The "Resolve npm's real global
   # config path" tasks after npm detection below deploy to the actual path on
   # those layouts. This file is kept unconditionally because it is correct on
-  # apt hosts, is also read by pnpm as its lowest-priority layer, and is
-  # harmless where inert.
+  # apt hosts and harmless where inert. pnpm does not read it on any of these
+  # (measured, see templates/etc-npmrc.j2).
   become: true
   ansible.builtin.template:
     src: etc-npmrc.j2
@@ -139,12 +139,11 @@
   # Closes the sudo / other-user gap on every layout where globalconfig is not
   # /etc/npmrc. Idempotent no-op on Debian apt (guarded out above).
   #
-  # Uses npmrc.j2 (npm-recognised keys only), NOT etc-npmrc.j2. This is the file
-  # npm reads as its global config, and npm warns `Unknown global config` about
-  # the pnpm-only keys (minimum-release-age*) on every command (ECH-196, measured
-  # npm 11.19). pnpm does not read this path — it reads /etc/npmrc, deployed above
-  # with the full key set — so emitting the pnpm keys here bought no pnpm coverage
-  # and only produced the warning. /etc/npmrc keeps them for pnpm's lowest layer.
+  # npm-recognised keys only: this is the file npm reads as its global config, and
+  # npm warns `Unknown global config` about a pnpm-only key (minimum-release-age*)
+  # on every command (ECH-196, measured npm 11.19). pnpm 9 and 10 read this path as
+  # their global config too (measured), so ignore-scripts reaches a `sudo pnpm` or
+  # another user's here, and the age gate does not.
   #
   # Replaced whole, but only a file that is exactly what this project last wrote:
   # anything else stopped the play in preflight, unless accept_etc_overwrite=true,

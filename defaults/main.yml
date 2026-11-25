@@ -415,13 +415,14 @@ sch_pnpm_exclude_json: "{{ pnpm_minimum_release_age_exclude | to_json(separators
 # included); every dependency it does not name is still refused, loudly.
 # Example: pnpm_built_dependencies: ["esbuild", "sharp"]
 #
-# IMPORTANT: this allowlist is user-scoped only. /etc/npmrc carries the
-# strict default (`ignore-scripts=true`) for sudo / other-user / cron
-# coverage. The allowlist is written to ~/.config/pnpm/rc (and its
+# IMPORTANT: this allowlist is user-scoped only. Where npm's global config is
+# <node prefix>/etc/npmrc (NodeSource, nvm, the node images; not apt npm), that
+# file carries the strict default (`ignore-scripts=true`) and pnpm 9 and 10 read
+# it for every user. The allowlist is written to ~/.config/pnpm/rc (and its
 # ignoreScripts: false to pnpm 11's ~/.config/pnpm/config.yaml) for the
 # deploying user. Consequence:
 # `sudo pnpm install` in a project requiring esbuild's postinstall will
-# hit /etc/npmrc's blanket block and the install will be broken, despite
+# hit that blanket block and the install will be broken, despite
 # the operator having configured the allowlist. This is intentional —
 # allowlists are user preferences, restrictions are system policy — but
 # it surprises users who expect the allowlist to apply system-wide. To

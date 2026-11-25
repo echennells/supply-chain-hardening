@@ -27,30 +27,20 @@ load setup
 }
 
 @test "npm: ECH-196 — npm's globalconfig carries no pnpm-only keys, so npm does not warn" {
-  # ECH-196. The role deployed etc-npmrc.j2 (npm + pnpm keys) to BOTH /etc/npmrc
-  # and npm's RESOLVED globalconfig. npm reads the globalconfig and warns
-  # `Unknown global config "minimum-release-age"` (and -strict) on EVERY command
-  # — measured npm 11.19. pnpm does not read the globalconfig path anyway (it
-  # reads /etc/npmrc), so those keys bought zero coverage and only produced the
-  # warning. The role now deploys the npm-only npmrc.j2 to the globalconfig.
+  # ECH-196. The role once wrote pnpm's keys (minimum-release-age*) to npm's
+  # resolved global config, and npm warned `Unknown global config` about them on
+  # EVERY command (measured npm 11.19). The same for /etc/npmrc, where that is
+  # npm's global config: tests/bats/01.
   gp=$(npm config get globalconfig 2>/dev/null | tr -d '\r')
   [ -n "$gp" ] || skip "npm did not report a globalconfig path"
   [ -f "$gp" ]
-
-  # On apt npm the globalconfig IS /etc/npmrc, which legitimately carries the
-  # pnpm keys for pnpm's lowest layer, and the warning is the unavoidable cost
-  # of pnpm-<=10 coverage there. The fix targets every other layout.
-  if [ "$gp" != "/etc/npmrc" ]; then
-    ! grep -qE '^minimum-release-age' "$gp"
-    # Behavioral: a plain npm command emits no unknown-config warning. Harmless
-    # on an npm too old to warn; catches the regression on one that does.
-    run npm config get registry
-    [[ "$output" != *"Unknown global config"* ]]
-  fi
-
-  # /etc/npmrc must STILL carry the pnpm keys — pnpm's lowest-layer coverage is
-  # preserved, only the npm-read globalconfig was cleaned.
-  grep -qE '^minimum-release-age-strict=' /etc/npmrc
+  # Not `! grep`: bats does not fail a test on one, and this line never could.
+  run grep -E '^minimum-release-age' "$gp"
+  [ "$status" -eq 1 ] || { echo "still there: $output"; return 1; }
+  # Behavioral: a plain npm command emits no unknown-config warning. Harmless on an
+  # npm too old to warn; catches the regression on one that does.
+  run npm config get registry
+  [[ "$output" != *"Unknown global config"* ]]
 }
 
 @test "npm: .npmrc contains allow-git=none (file-content check)" {
