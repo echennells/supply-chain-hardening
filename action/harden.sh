@@ -692,27 +692,36 @@ ucf_temp() { ( umask 077; mktemp "$(dirname -- "$1")/.sch-XXXXXX" 2>/dev/null );
 # container) it is written in place, with a copy of the old one kept until the new
 # one is complete. A subshell, for its trap.
 ucf_put() (
-  path="$1" content="$3" tmp="" bak="" own=""
+  path="$1" content="$3" tmp="" bak="" own="" kept=1
   trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
   trap 'exit 1' HUP INT TERM
+  no() { printf 'error: %s: %s\n' "$path" "$1"; exit 1; }
   # A directory that is there keeps its mode, whatever it is.
-  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || exit 1
-  real=$(ucf_real "$path") || exit 1
+  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || no "its directory cannot be made"
+  real=$(ucf_real "$path") || no "it cannot be resolved"
   mode=$(ucf_mode "$real" "$2")
   if [ -e "$real" ]; then own=$(ucf_ls "$real"); own=${own#* }; fi
-  tmp=$(ucf_temp "$real") || { tmp=""; exit 1; }
-  printf '%s' "$content" > "$tmp" 2>/dev/null || exit 1
+  tmp=$(ucf_temp "$real") || { tmp=""; no "no new file can be made in ${real%/*}"; }
+  printf '%s' "$content" > "$tmp" 2>/dev/null || no "the new content could not be written (a full disk?)"
   if [ -n "$own" ] && [ "$(id -u)" = 0 ]; then
-    chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null || exit 1
+    # Root in a container need not be able to change owners (no CAP_CHOWN), nor have
+    # this group in its user namespace. The owner has to stay; the group need not.
+    if ! chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null; then
+      kept=0
+      chown -h "${own% *}" "$tmp" 2>/dev/null \
+        || no "its owner (uid ${own% *}) cannot be kept, because this root cannot change a file's owner. Run this as that account"
+    fi
   elif [ -n "$own" ]; then
-    # A group this account is not in cannot be kept, and no other group gets what
-    # it had.
-    chgrp "${own#* }" "$tmp" 2>/dev/null || mode="${mode:0:4}---${mode:7}"
+    chgrp "${own#* }" "$tmp" 2>/dev/null || kept=0
   fi
-  ucf_chmod "$tmp" "$mode" || exit 1
+  # A group that cannot be kept: no other group gets what it had, unless everyone has.
+  if [ "$kept" = 0 ]; then
+    case "$mode" in ???????r*) ;; *) mode="${mode:0:4}---${mode:7}" ;; esac
+  fi
+  ucf_chmod "$tmp" "$mode" || no "the mode of the new file cannot be set"
   if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
-  [ -f "$real" ] && [ -w "$real" ] || exit 1
-  bak=$(ucf_copy_new "$real") || exit 1
+  [ -f "$real" ] && [ -w "$real" ] || no "it cannot be replaced or written"
+  bak=$(ucf_copy_new "$real") || no "no copy of it could be made first"
   if cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
   printf 'error: %s may be incomplete; as it was, it is at %s\n' "$path" "$bak"
   exit 1
@@ -2726,7 +2735,7 @@ write_etc() {
   # SIGPIPE-then-fail-the-pipeline when WRITE_ETC=false. `set -o pipefail`
   # would otherwise halt the script on the first ecosystem that calls
   # write_etc with WRITE_ETC=false.
-  local content dir owner
+  local content dir owner why
   content=$(cat)
   if [[ "$WRITE_ETC" != "true" ]]; then
     return 0
@@ -2767,18 +2776,31 @@ write_etc() {
   fi
   # 0755 for a directory this creates (/etc/uv) whatever the umask: under 077 it
   # was 0700, and no other account could read the uv.toml inside it.
-  $SUDO mkdir -p -m 0755 "$dir"
+  # Root is not enough where /etc is read-only (an image, a mount), and that is the
+  # same reduction in coverage as above. MEASURED (v2.1.0, `podman run --read-only`
+  # as root): the bare `tee: /etc/npmrc: Read-only file system` ended the run.
+  why=$($SUDO mkdir -p -m 0755 "$dir" 2>&1) || { etc_not_written "$path" "$why"; return 0; }
   # And converge one an earlier run left writable by others (/etc/uv after a run
   # under umask 0000, measured above). /etc itself is the system's, not ours.
   if [[ "$dir" != /etc ]]; then
     case "$(_sch_mode "$dir")" in
       ?????w*|????????w*)
-        $SUDO chmod go-w "$dir"
+        why=$($SUDO chmod go-w "$dir" 2>&1) || { etc_not_written "$path" "$why"; return 0; }
         log "removed group and other write from $dir, which an earlier run left writable by other accounts" ;;
     esac
   fi
-  echo "$content" | $SUDO tee "$path" >/dev/null
-  $SUDO chmod 644 "$path"
+  why=$(echo "$content" | $SUDO tee "$path" 2>&1 >/dev/null) || { etc_not_written "$path" "$why"; return 0; }
+  why=$($SUDO chmod 644 "$path" 2>&1) || warn "cannot set the mode of $path ($(last_reason "$why"))"
+}
+
+# last_reason <what a command printed>: the system's own words, at its end.
+last_reason() {
+  local s="${1##*$'\n'}"
+  printf '%s' "${s##*: }"
+}
+
+etc_not_written() {
+  warn "cannot write $1 ($(last_reason "$2")) — per-user config still applies, but a later \`sudo\` step will not see it"
 }
 
 # can_write <target> — can we create or replace this path, with or without
@@ -2792,8 +2814,11 @@ can_write() {
   local target="$1" dir
   dir=$(dirname "$target")
   [ -w "$dir" ] && return 0                 # ours outright — no escalation needed
-  [ "${CAN_ESCALATE:-0}" -eq 1 ] && return 0
-  return 1
+  [ "${CAN_ESCALATE:-0}" -eq 1 ] || return 1
+  # Root cannot write everywhere either: a read-only image or mount. Only a clear "no"
+  # counts, so a sudo that does not answer this is taken at its word, as before.
+  # shellcheck disable=SC2016  # $1 is the inner shell's
+  [ "$($SUDO sh -c '[ -w "$1" ] || echo no' sh "$dir" 2>/dev/null)" != no ]
 }
 
 # ucf_as_root <kind> <path>, the new body on stdin: ucf_replace, run as root with
@@ -2867,14 +2892,19 @@ put_user_cfg() {
 require_privilege() {
   local tool="$1" target="$2"
   local status="${3:-PARTIAL}"
-  local msg="${4:-PATH wrapper not deployed: no root and no usable sudo in this job (common in \`container:\` jobs on slim images). Config-file layer still applies.}"
-  local owner
+  local msg="${4:-PATH wrapper not deployed: @WHY@. Config-file layer still applies.}"
+  local owner why="no root and no usable sudo in this job (common in \`container:\` jobs on slim images)"
+  local short="this job has no root and no usable sudo"
+  if [[ "${CAN_ESCALATE:-0}" -eq 1 ]]; then
+    short="its directory is not writable, even as root (a read-only image or mount?)"
+    why=$short
+  fi
   if ! can_write "$target"; then
-    warn "$tool: cannot deploy the PATH wrapper at $target — this job has no root and no usable sudo."
+    warn "$tool: cannot deploy the PATH wrapper at $target — $short."
     # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
     # lands in neither summary list and the ecosystem disappears from the verdict
     # line while still showing in the table below it.
-    set_eco_status "$tool" "$status" "$msg"
+    set_eco_status "$tool" "$status" "${msg//@WHY@/$why}"
     return 1
   fi
   # The directory lets this account in, but the wrapper already there is
@@ -2893,6 +2923,18 @@ require_privilege() {
     return 1
   fi
   return 0
+}
+
+# move_aside <ecosystem> <path> [status] [what still applies]: the real tool to
+# <path>-real, so that a wrapper can take its place. can_write looks at the directory,
+# and a file in a writable one may not be renamed (mounted on its own, immutable). A
+# bare `mv` ended the run there, with every ecosystem after it not applied. Its own
+# output is left alone: it asks on a terminal before it replaces a read-only file.
+move_aside() {
+  $SUDO mv "$2" "$2-real" && return 0
+  warn "$1: cannot deploy the PATH wrapper at $2 — the tool there cannot be moved aside (see mv's message above)."
+  degrade_eco "$1" "${3:-PARTIAL}" "PATH wrapper not deployed: $2 cannot be moved aside. ${4:-Config-file layer still applies.}"
+  return 1
 }
 
 # subst_inplace <file> <sed-script>
@@ -3618,7 +3660,7 @@ harden_composer() {
       return 0
     fi
   else
-    $SUDO mv "$real_composer" "${real_composer}-real"
+    move_aside composer "$real_composer" || { end_section; return 0; }
     real_composer="${real_composer}-real"
   fi
 
@@ -4068,7 +4110,7 @@ harden_bun() {
     # location so PATH-resolved invocations hit the wrapper. Use sudo
     # because ~/.bun/bin is owned by the runner user but /usr/local/bin
     # isn't, and we want this to work in both cases.
-    $SUDO mv "$real_bun" "${real_bun}-real"
+    move_aside bun "$real_bun" || { end_section; return 0; }
     real_bun="${real_bun}-real"
   fi
 
@@ -4156,7 +4198,7 @@ EOF
 
   if [[ -z "$real_bunx" ]]; then
     log "bunx not found — no bunx wrapper deployed"
-  elif ! require_privilege bun "$real_bunx" PARTIAL "bunx PATH wrapper not deployed at $real_bunx: no root and no usable sudo in this job. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."; then
+  elif ! require_privilege bun "$real_bunx" PARTIAL "bunx PATH wrapper not deployed at $real_bunx: @WHY@. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."; then
     # bunx can live in a directory bun does not: bun in ~/.bun/bin, bunx in
     # /usr/local/bin. The gate above asked about bun's directory only. MEASURED
     # (v2.1.0, main 8cfc1c4): the `rm` below then died on "Permission denied",
@@ -4351,7 +4393,7 @@ EOF
     # Moved FIRST, before anything else touches this path: the wrapper is later
     # written with `cp`, and `cp` onto a symlink writes THROUGH it — into the
     # shared rustup binary, replacing rustc, rustfmt and every other proxy.
-    $SUDO mv "$real_cargo" "${real_cargo}-real"
+    move_aside cargo "$real_cargo" || { end_section; return 0; }
     real_cargo="${real_cargo}-real"
   fi
 
@@ -5142,7 +5184,7 @@ harden_deno() {
   # wrap means NONE is enforced, not PARTIAL.
   local wrapper_path="${real_deno%-real}"
   require_privilege deno "$wrapper_path" NONE \
-    "PATH wrapper not deployed (no root/sudo). deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
+    "PATH wrapper not deployed: @WHY@. deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
     || { end_section; return 0; }
 
   if is_our_wrapper "$real_deno"; then
@@ -5154,7 +5196,7 @@ harden_deno() {
       return 0
     fi
   else
-    $SUDO mv "$real_deno" "${real_deno}-real"
+    move_aside deno "$real_deno" NONE "deno has no config-file layer, so nothing gates deno on this host." || { end_section; return 0; }
     real_deno="${real_deno}-real"
   fi
   # Placeholders + sed rather than an interpolating heredoc — same reason as
@@ -5825,7 +5867,7 @@ GUARD
       return 0
     fi
   else
-    $SUDO mv "$real_npm" "${real_npm}-real"
+    move_aside npm "$real_npm" || { end_section; return 0; }
     real_npm="${real_npm}-real"
   fi
 
@@ -5927,7 +5969,7 @@ EOF
       return 0
     fi
   else
-    $SUDO mv "$real_npx" "${real_npx}-real"
+    move_aside npm "$real_npx" PARTIAL "npx goes through no wrapper." || { end_section; return 0; }
     real_npx="${real_npx}-real"
   fi
 
@@ -5985,6 +6027,10 @@ unwrap_intel_wrapper() {
     warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and cannot put the real $tool back: the wrapper names '${real:-<none>}', not an executable ${target}-real. It is left in place. Re-run with INTEL=sfw to bring it up to date, or put the real $tool back at $target."
     return 0
   fi
+  if [[ "${CAN_ESCALATE:-0}" -eq 1 ]] && ! can_write "$target"; then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw. This run has intel off, but the wrapper's directory is not writable, even as root (a read-only image or mount?), so it is left in place."
+    return 0
+  fi
   if ! can_write "$target"; then
     warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and no root and no usable sudo to remove it. It is left in place. Re-run harden.sh with sudo to remove it, or with INTEL=sfw to bring it up to date."
     return 0
@@ -5996,7 +6042,11 @@ unwrap_intel_wrapper() {
   fi
   # mv, not cp: it restores the entry the wrapping moved aside, a symlink
   # included (apt's /usr/bin/npm is one), and never writes through it.
-  $SUDO mv -f -- "$real" "$target"
+  local why
+  if ! why=$($SUDO mv -f -- "$real" "$target" 2>&1); then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw. This run has intel off, but it cannot put the real $tool back ($(last_reason "$why")), so it is left in place."
+    return 0
+  fi
   log "$tool: intel is off, so the $tool wrapper an earlier intel: sfw run left at $target was removed and the real $tool moved back"
 }
 

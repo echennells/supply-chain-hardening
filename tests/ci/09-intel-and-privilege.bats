@@ -371,6 +371,99 @@ EOF
   [[ "$output" == *"done (emit=plain)"* ]]
 }
 
+# A sudo that works and still cannot write: what root is on a read-only image or mount.
+# MEASURED (v2.1.0 and ef4da26, root in a container, the tool on a read-only mount):
+# `mv: cannot move '/opt/ro/bin/bun' ...: Read-only file system` ended the run, with
+# every ecosystem after it not applied and no summary; deno, cargo and composer too.
+weak_sudo() { stub_bin sudo '[ "${1:-}" != -n ] || shift; exec "$@"'; }
+
+@test "root that cannot write to a tool's directory: degraded, the tool left alone, the rest applied" {
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
+  local t ro what
+  weak_sudo
+  for t in bun deno cargo composer; do
+    ro="${BATS_TEST_TMPDIR}/ro-$t"
+    mkdir -p "$ro"
+    printf '#!/bin/bash\ncase "${1:-}" in --version|-v) echo "9.9.9";; *) echo THEIRS;; esac\n' > "$ro/$t"
+    chmod 755 "$ro/$t"
+    cp "$ro/$t" "${BATS_TEST_TMPDIR}/$t.before"
+    rm -f "${TEST_BIN}/$t"
+    chmod 555 "$ro"
+    run env -i PATH="${TEST_BIN}:${ro}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+      WRITE_ETC=false ECOSYSTEMS="$t,maven" bash "$HARDEN_SH" --emit=plain
+    chmod 755 "$ro"
+    [ "$status" -eq 0 ] || { echo "$t: $output"; false; }
+    [[ "$output" == *"$t: cannot deploy the PATH wrapper at $ro/$t"*"not writable, even as root"* ]] || { echo "$t: $output"; false; }
+    what=degraded; [ "$t" != deno ] || what=ineffective
+    grep -qx "ecosystems_$what=$t" "$OUT_FILE" || { echo "$t"; cat "$OUT_FILE"; false; }
+    grep -qx 'ecosystems_effective=maven' "$OUT_FILE"
+    grep -qx 'wrappers_deployed=' "$OUT_FILE"
+    cmp "$ro/$t" "${BATS_TEST_TMPDIR}/$t.before"
+    [ ! -e "$ro/$t-real" ]
+  done
+}
+
+@test "a tool that cannot be moved aside in a writable directory: degraded, left alone, the rest applied" {
+  # A file mounted on its own. MEASURED (podman, root): mv says "Device or resource busy".
+  local t what
+  stub_bin sudo '[ "${1:-}" != -n ] || shift
+if [ "${1:-}" = mv ]; then echo "mv: cannot move '"'x' to 'x-real'"': Device or resource busy" >&2; exit 1; fi
+exec "$@"'
+  for t in bun deno cargo composer; do
+    stub_bin "$t" 'case "${1:-}" in --version|-v) echo "9.9.9";; *) echo THEIRS;; esac'
+    cp "${TEST_BIN}/$t" "${BATS_TEST_TMPDIR}/$t.before"
+    run harden ECOSYSTEMS="$t,maven" -- --emit=plain
+    [ "$status" -eq 0 ] || { echo "$t: $output"; false; }
+    [[ "$output" == *"Device or resource busy"*"the tool there cannot be moved aside"* ]] || { echo "$t: $output"; false; }
+    what=degraded; [ "$t" != deno ] || what=ineffective
+    grep -qx "ecosystems_$what=$t" "$OUT_FILE" || { echo "$t"; cat "$OUT_FILE"; false; }
+    grep -qx 'ecosystems_effective=maven' "$OUT_FILE"
+    cmp "${TEST_BIN}/$t" "${BATS_TEST_TMPDIR}/$t.before"
+    rm -f "${TEST_BIN}/$t"
+  done
+}
+
+@test "an /etc that root cannot write is a warning, and the per-user config is all there" {
+  # The stub refuses every write to /etc, so nothing on this machine is touched.
+  local f
+  stub_bin sudo '[ "${1:-}" != -n ] || shift
+case "$*" in *"/etc"*) echo "tee: /etc/x: Read-only file system" >&2; exit 1 ;; esac
+exec "$@"'
+  [ "$(id -u)" -ne 0 ] || skip "running as root: there is no sudo in between to refuse"
+  stub_npm 11.19.1
+  run env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=true ECOSYSTEMS=npm,pip,uv bash "$HARDEN_SH" --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+    [[ "$output" == *"cannot write $f (Read-only file system)"* ]] || { echo "$f: $output"; false; }
+  done
+  [ -f "$TEST_HOME/.npmrc" ]
+  [ -f "$TEST_HOME/.config/pip/pip.conf" ]
+  [ -f "$TEST_HOME/.config/uv/uv.toml" ]
+  [[ "$output" == *"done (emit=plain)"* ]] || false
+}
+
+@test "a sudo that will not answer whether it can write is taken at its word, as before" {
+  [ "$(id -u)" -ne 0 ] || skip "running as root"
+  sudo -n true 2>/dev/null || skip "needs passwordless sudo to wrap binaries"
+  # allows everything but sh, the way a sudoers list of commands may
+  local real; real=$(command -v sudo)
+  stub_bin sudo "case \"\${1:-} \${2:-}\" in 'sh '*) exit 1 ;; esac
+exec '$real' \"\$@\""
+  local ro="${BATS_TEST_TMPDIR}/ro-ask"
+  mkdir -p "$ro"
+  printf '#!/bin/bash\ncase "${1:-}" in --version|-v) echo "9.9.9";; *) echo THEIRS;; esac\n' > "$ro/bun"
+  chmod 755 "$ro/bun"; chmod 555 "$ro"
+  rm -f "${TEST_BIN}/bun"
+  run env -i PATH="${TEST_BIN}:${ro}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=false ECOSYSTEMS=bun bash "$HARDEN_SH" --emit=plain
+  chmod 755 "$ro"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -q supply-chain-harden "$ro/bun"
+  [ -x "$ro/bun-real" ]
+  "$real" -n rm -f "$ro/bun" "$ro/bun-real"
+}
+
 @test "a degraded wrapper is reported in the verdict line, not only the table" {
   # A status word outside the APPLIED/PARTIAL/INERT vocabulary lands in
   # neither summary list, so the ecosystem vanishes from the one line most

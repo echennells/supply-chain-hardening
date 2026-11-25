@@ -997,6 +997,61 @@ PY
 stub() { mkdir -p "$BATS_TEST_TMPDIR/stub"; printf '#!/bin/bash\n%s\n' "$2" > "$BATS_TEST_TMPDIR/stub/$1"; chmod +x "$BATS_TEST_TMPDIR/stub/$1"; }
 npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
 
+# A root in a container without CAP_CHOWN, or whose user namespace has no such group:
+# "Operation not permitted" for owner:group. MEASURED (podman run --cap-drop CHOWN, files
+# root:nogroup; reported from an agent's VM): ef4da26 stopped on "could not write ~/.npmrc".
+root_without_chown() { # <allowed: owner|nothing>
+  stub id '[ "${1:-}" != -u ] || { echo 0; exit 0; }; exec /usr/bin/id "$@"'
+  if [ "$1" = owner ]; then stub chown 'case "$*" in *:*) exit 1 ;; esac; exit 0'; else stub chown 'exit 1'; fi
+}
+
+@test "user config: root that cannot keep a file's group writes it, and no other group gains by it" {
+  lib
+  local m want
+  root_without_chown owner
+  printf '//r/:_authToken=SECRET\n' > "$(f npmrc)"; chmod 644 "$(f npmrc)"
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) > "$BATS_TEST_TMPDIR/o" || { cat "$BATS_TEST_TMPDIR/o"; false; }
+  grep -q SECRET "$(f npmrc)"
+  grep -q '^ignore-scripts=true' "$(f npmrc)"
+  [ "$(ls -ld "$(f npmrc)" | cut -c1-10)" = -rw------- ]
+  # only its group could read it: now nobody else can. Everybody could: they still can.
+  for m in 640:-rw------- 644:-rw-r--r-- 600:-rw------- 604:-rw----r--; do
+    want=${m#*:}
+    printf 'npmAuthToken: SECRET\n' > "$(f yarn)"; chmod "${m%%:*}" "$(f yarn)"
+    ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; echo '# Managed by supply-chain-harden action' | ucf_replace yarn "$(f yarn)" ) > "$BATS_TEST_TMPDIR/o" || { cat "$BATS_TEST_TMPDIR/o"; false; }
+    [ "$(ls -ld "$(f yarn)" | cut -c1-10)" = "$want" ] || { echo "$m"; ls -l "$(f yarn)"; false; }
+  done
+}
+
+@test "user config: root that cannot keep a file's owner leaves it, and says why" {
+  lib
+  root_without_chown nothing
+  printf '//r/:_authToken=SECRET\n' > "$(f npmrc)"
+  cp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) > "$BATS_TEST_TMPDIR/o" && { cat "$BATS_TEST_TMPDIR/o"; false; }
+  cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  grep -qF "error: $(f npmrc): its owner (uid $(id -u)) cannot be kept, because this root cannot change a file's owner. Run this as that account" "$BATS_TEST_TMPDIR/o" || { cat "$BATS_TEST_TMPDIR/o"; false; }
+  [ -z "$(find "$TEST_HOME" -name '.sch-*')" ]
+}
+
+@test "user config: as root without CAP_CHOWN, for real, harden.sh finishes and keeps the token" {
+  sudo -n true 2>/dev/null || skip "no passwordless sudo"
+  command -v setpriv >/dev/null || skip "no setpriv (Linux, util-linux)"
+  local other
+  printf '//r/:_authToken=SECRET\n' > "$(f npmrc)"
+  sudo chown 0:65534 "$(f npmrc)" "$TEST_HOME"
+  # FIXTURE CONTROL: this root cannot do it
+  run sudo setpriv --bounding-set=-chown --inh-caps=-chown chown 0:65534 "$HARDEN_SH"
+  [ "$status" -ne 0 ]
+  run sudo setpriv --bounding-set=-chown --inh-caps=-chown env -i PATH="${TEST_BIN}:/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=false ECOSYSTEMS=npm,pip bash "$HARDEN_SH" --emit=plain
+  sudo chown -R "$(id -u):$(id -g)" "$TEST_HOME" "$TEST_TMP"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -q SECRET "$(f npmrc)"
+  grep -q '^ignore-scripts=true' "$(f npmrc)"
+  [ "$(ls -ld "$(f npmrc)" | cut -c1-10)" = -rw------- ]
+}
+
 @test "user config: a run killed before the rename leaves the file as it was; TERM leaves no temporary file" {
   lib
   printf 'a=SECRET\nfund=true\n' > "$(f npmrc)"

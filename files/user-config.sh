@@ -562,27 +562,36 @@ ucf_temp() { ( umask 077; mktemp "$(dirname -- "$1")/.sch-XXXXXX" 2>/dev/null );
 # container) it is written in place, with a copy of the old one kept until the new
 # one is complete. A subshell, for its trap.
 ucf_put() (
-  path="$1" content="$3" tmp="" bak="" own=""
+  path="$1" content="$3" tmp="" bak="" own="" kept=1
   trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
   trap 'exit 1' HUP INT TERM
+  no() { printf 'error: %s: %s\n' "$path" "$1"; exit 1; }
   # A directory that is there keeps its mode, whatever it is.
-  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || exit 1
-  real=$(ucf_real "$path") || exit 1
+  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || no "its directory cannot be made"
+  real=$(ucf_real "$path") || no "it cannot be resolved"
   mode=$(ucf_mode "$real" "$2")
   if [ -e "$real" ]; then own=$(ucf_ls "$real"); own=${own#* }; fi
-  tmp=$(ucf_temp "$real") || { tmp=""; exit 1; }
-  printf '%s' "$content" > "$tmp" 2>/dev/null || exit 1
+  tmp=$(ucf_temp "$real") || { tmp=""; no "no new file can be made in ${real%/*}"; }
+  printf '%s' "$content" > "$tmp" 2>/dev/null || no "the new content could not be written (a full disk?)"
   if [ -n "$own" ] && [ "$(id -u)" = 0 ]; then
-    chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null || exit 1
+    # Root in a container need not be able to change owners (no CAP_CHOWN), nor have
+    # this group in its user namespace. The owner has to stay; the group need not.
+    if ! chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null; then
+      kept=0
+      chown -h "${own% *}" "$tmp" 2>/dev/null \
+        || no "its owner (uid ${own% *}) cannot be kept, because this root cannot change a file's owner. Run this as that account"
+    fi
   elif [ -n "$own" ]; then
-    # A group this account is not in cannot be kept, and no other group gets what
-    # it had.
-    chgrp "${own#* }" "$tmp" 2>/dev/null || mode="${mode:0:4}---${mode:7}"
+    chgrp "${own#* }" "$tmp" 2>/dev/null || kept=0
   fi
-  ucf_chmod "$tmp" "$mode" || exit 1
+  # A group that cannot be kept: no other group gets what it had, unless everyone has.
+  if [ "$kept" = 0 ]; then
+    case "$mode" in ???????r*) ;; *) mode="${mode:0:4}---${mode:7}" ;; esac
+  fi
+  ucf_chmod "$tmp" "$mode" || no "the mode of the new file cannot be set"
   if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
-  [ -f "$real" ] && [ -w "$real" ] || exit 1
-  bak=$(ucf_copy_new "$real") || exit 1
+  [ -f "$real" ] && [ -w "$real" ] || no "it cannot be replaced or written"
+  bak=$(ucf_copy_new "$real") || no "no copy of it could be made first"
   if cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
   printf 'error: %s may be incomplete; as it was, it is at %s\n' "$path" "$bak"
   exit 1
