@@ -804,15 +804,15 @@ def walk(ts, f):
     for t in ts or []:
         for k in ('block', 'rescue', 'always'):
             walk(t.get(k), f)
-        cmd = str(t.get('ansible.builtin.script', ''))
-        if 'user-config.sh' not in cmd:
-            assert 'user-config.sh' not in str(t) or not t.get('become'), (f, t.get('name'))
+        if 'user-config.sh' not in str(t):
             continue
         b, e = t.get('become', False), (t.get('environment') or {}).get('SCH_UCF_ROOT')
         if b is False:
             assert e is None, (f, t['name'])
             continue
         n += 1
+        # on stdin: no file of the connecting account's is what root runs
+        assert 'ansible.builtin.script' not in t and 'user-config.sh' in t['ansible.builtin.command']['stdin'], (f, t['name'])
         if b is True:
             assert e == '1', (f, t['name'])
         else:                      # the same condition decides both
@@ -1254,7 +1254,7 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   done
   # root's own yarn file is written by the same code, as root, on both
   grep -q 'PUT_AS_ROOT=1 put_user_cfg yarn "$root_home/.yarnrc.yml"' "$HARDEN_SH"
-  [ "$(grep -c 'ansible.builtin.script: user-config.sh replace yarn$' "$ROOT/tasks/yarn.yml")" -eq 2 ]
+  [ "$(grep -cE '(script: user-config.sh|bash -s --) replace yarn$' "$ROOT/tasks/yarn.yml")" -eq 2 ]
   # no template or redirect into one of them is left
   ! grep -nE '> "\$HOME/\.(npmrc|yarnrc\.yml|bundle/config|m2|config/(pnpm|pip|composer))|> "\$(cargo|nuget)_home/(config.toml|NuGet)' "$HARDEN_SH" || false
   ! grep -nE 'dest: .*(ansible_env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config|m2)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path|config\.json|NuGet\.Config|cargo_home \}\}/config\.toml)' "$ROOT"/tasks/*.yml || false

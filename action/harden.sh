@@ -206,7 +206,7 @@ ucf_path() {
     npm-global)
       d=$(ucf_npm) || return 0
       d=$(ucf_npm_global "$d") || return 0
-      case "$d" in /etc/npmrc) ;; /*) printf '%s\n' "$d" ;; esac ;;
+      case "$d" in /etc/npmrc|*[[:cntrl:]]*) ;; /*) printf '%s\n' "$d" ;; esac ;;
   esac
 }
 

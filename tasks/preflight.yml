@@ -311,9 +311,11 @@
 
 - name: Detect a global npmrc this project did not write
   become: "{{ 'as root' in (npm_global_preflight.stdout_lines | default([])) }}"
-  ansible.builtin.script: ../files/user-config.sh classify npm-global
-  args:
-    executable: /bin/bash
+  # On stdin, like every become that runs it: the script module leaves the script in a
+  # file of the connecting account's for root to run.
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- classify npm-global
+    stdin: "{{ lookup('ansible.builtin.file', '../files/user-config.sh') }}"
   environment:
     SCH_UCF_PATH: "{{ npm_global_preflight.stdout_lines | first }}"
     SCH_UCF_ROOT: "{{ ('as root' in npm_global_preflight.stdout_lines) | ternary('1', '0') }}"

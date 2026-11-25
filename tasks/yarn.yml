@@ -107,9 +107,9 @@
 # When the role runs as root, root's home IS the deploying user's, written above.
 - name: Deploy hardened .yarnrc.yml to root's home (sudo coverage)
   become: true
-  ansible.builtin.script: user-config.sh replace yarn
-  args:
-    executable: /bin/bash
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- replace yarn
+    stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
     SCH_UCF_PATH: "{{ yarn_root_home.stdout | trim }}/.yarnrc.yml"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'yarnrc.yml.j2') }}"

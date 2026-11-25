@@ -147,9 +147,9 @@
 # When the role itself is run as root, this is the file written above.
 - name: Deploy hardened composer config.json to /root (sudo coverage)
   become: true
-  ansible.builtin.script: user-config.sh replace composer
-  args:
-    executable: /bin/bash
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- replace composer
+    stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
     HOME: /root
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'composer-config.json.j2', template_vars={'sch_body_prefix': 'x'}) }}"
@@ -188,9 +188,9 @@
 
 - name: Deploy hardened composer config.json to root's real composer home (sudo coverage)
   become: true
-  ansible.builtin.script: user-config.sh replace composer-home
-  args:
-    executable: /bin/bash
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- replace composer-home
+    stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
     HOME: /root
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'composer-config.json.j2', template_vars={'sch_body_prefix': 'x'}) }}"

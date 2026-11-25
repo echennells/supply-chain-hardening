@@ -154,9 +154,9 @@
   # and writable by root alone (ucf_no_root, judged by the process that writes). Anywhere
   # else it is left alone, and the summary says so.
   become: "{{ 'as root' in (npm_globalconfig.stdout_lines | default([])) }}"
-  ansible.builtin.script: user-config.sh replace npm-global
-  args:
-    executable: /bin/bash
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- replace npm-global
+    stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
     SCH_UCF_PATH: "{{ npm_globalconfig.stdout_lines | first }}"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
@@ -177,7 +177,7 @@
       {{ (skipped_protections | default([])) + [
            "npm's global config — " ~ (sch_ucf_npm_global.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ') | default(npm_globalconfig.stdout_lines | first, true))
            ~ '. It is what `sudo npm` and every other account get their npm settings from; your own ~/.npmrc is not affected.'
-           ~ (" If an earlier version of this role made it root's, move it aside as yourself (`mv " ~ (npm_globalconfig.stdout_lines | first | dirname) ~ ' ' ~ (npm_globalconfig.stdout_lines | first | dirname) ~ '.old`, which needs no root) and re-apply.'
+           ~ (" If an earlier version of this role made it root's, move it aside as yourself (`mv -- " ~ (npm_globalconfig.stdout_lines | first | dirname | quote) ~ ' ' ~ ((npm_globalconfig.stdout_lines | first | dirname) ~ '.old') | quote ~ '`, which needs no root) and re-apply.'
               if 'as user' in npm_globalconfig.stdout_lines else '')
          ] }}
   when:

@@ -509,7 +509,7 @@ rootside() {
     askc_role $a
     [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
     echo "$output" | grep -q "npm's global config — $g belongs to another account (root)"
-    echo "$output" | grep -qF "mv $(dirname "$g") $(dirname "$g").old"
+    echo "$output" | grep -qF "mv -- $(dirname "$g") $(dirname "$g").old"
     [ "$(stat -c %U "$(dirname "$g")" "$g" | tr '\n' ' ')" = 'root root ' ]
     cmp "$g" "$T/before"
   done
