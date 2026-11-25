@@ -2105,8 +2105,17 @@ _pf_version() {
       r=$(readlink -f "$2" 2>/dev/null) || return 0
       sed -n 's/^go\([0-9][0-9.]*\).*/\1/p' "${r%/bin/*}/VERSION" 2>/dev/null | head -1 || true ;;
     python3) detect_version python3 "python3 -V" ;;
-    # A rustup proxy would otherwise download the toolchain to answer.
-    rustc|cargo) RUSTUP_AUTO_INSTALL=0 detect_version "$t" "$t --version" ;;
+    # A rustup proxy would otherwise download the toolchain to answer. In a home with no
+    # rustup state it also writes ~/.rustup/settings.toml there (MEASURED, GitHub's
+    # macos-15-intel), and this changes nothing, so there it is not asked.
+    rustc|cargo)
+      if [ ! -f "${RUSTUP_HOME:-$HOME/.rustup}/settings.toml" ]; then
+        r=$(readlink -f "$2" 2>/dev/null) || r=$2
+        case "${r##*/}" in rustup|rustup-init) return 0 ;; esac
+        d=$(command -v rustup 2>/dev/null) || d=""
+        if [ -n "$d" ] && [ "$2" -ef "$d" ]; then return 0; fi
+      fi
+      RUSTUP_AUTO_INSTALL=0 detect_version "$t" "$t --version" ;;
     npm|pnpm|yarn)
       # From the package itself, not by running it: pnpm and yarn behind corepack
       # fetch a release to answer, and npm is node startup either way. A wrapper

@@ -103,6 +103,26 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
   [[ "$output" == *"gradle (version not read) "* ]]
 }
 
+@test "preflight: a rustup proxy is not run in a home with no rustup state, where running it writes one" {
+  # MEASURED on GitHub's macos-15-intel (Homebrew's rustup): `rustc --version` wrote
+  # ~/.rustup/settings.toml, so the preflight changed the home it was describing.
+  stub_bin rustup 'mkdir -p "${RUSTUP_HOME:-$HOME/.rustup}"; : > "${RUSTUP_HOME:-$HOME/.rustup}/settings.toml"
+echo "${0##*/} 1.95.0 (stub)"'
+  local t
+  for t in rustc cargo; do ln -sf rustup "$TEST_BIN/$t"; done
+  run preflight
+  [ ! -e "$TEST_HOME/.rustup" ]
+  [[ "$output" == *"rustc (version not read) ($TEST_BIN/rustc)"* ]]
+  # A hard link is the same proxy.
+  for t in rustc cargo; do rm -f "$TEST_BIN/$t"; ln "$TEST_BIN/rustup" "$TEST_BIN/$t"; done
+  run preflight
+  [ ! -e "$TEST_HOME/.rustup" ]
+  # FIXTURE CONTROL: with rustup's state there it is asked, so the version is shown.
+  mkdir -p "$TEST_HOME/.rustup"; : > "$TEST_HOME/.rustup/settings.toml"
+  run preflight
+  [[ "$output" == *"rustc 1.95.0 ($TEST_BIN/rustc)"* ]]
+}
+
 @test "preflight: ansible-core's version comes from its package, and nothing is started to read it" {
   # `ansible-playbook --version` creates ~/.ansible (MEASURED, 2.16.3).
   ansible_at 2.21.6
