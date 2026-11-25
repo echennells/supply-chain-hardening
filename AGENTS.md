@@ -62,7 +62,8 @@ Tell the user what hardening does, unless they have already agreed to it:
   Mac: `~/Library/Preferences/pnpm`), `pip.conf`, `uv.toml`, cargo's `config.toml`, Maven's `settings.xml`, `NuGet.Config` and Composer's `config.json`
   are replaced whole. If one is not exactly what this project last wrote, the role stops
   before changing anything; `harden.sh` copies it next to itself (0600) and says so. A
-  token or registry in it then no longer applies until the user puts it back.
+  token or registry in it then no longer applies until the user puts it back. The copy is
+  never deleted: tell the user where it is, and that it may hold a token.
 - There is no single uninstall command.
 
 **Agent hosts.** If the host's job is running agents in repositories nobody vetted, ask

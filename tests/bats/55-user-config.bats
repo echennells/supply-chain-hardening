@@ -374,7 +374,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   cmp "$c" "$T/before"
   [ "$(stat -c %a "$c")" = 600 ]
   [ "$(stat -c %a "$G")" = 644 ]                      # every account reads it
-  echo "$output" | grep -qF "$G: the file as it was is at $c"
+  echo "$output" | grep -qF "$G: the file as it was is at $c. It may hold a token or a password: delete it once"
   rm -f "$c"
 }
 

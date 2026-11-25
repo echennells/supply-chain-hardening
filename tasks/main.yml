@@ -379,7 +379,7 @@
       {% elif l is match('stock ') %}
         - {{ p }}: it was dotnet's own first-run file; a copy is at {{ l | regex_replace('^stock ', '') }}
       {% elif l is match('copy ') %}
-        - {{ p }}: the file as it was is at {{ l | regex_replace('^copy ', '') }}
+        - {{ p }}: the file as it was is at {{ l | regex_replace('^copy ', '') }}. It may hold a token or a password: delete it once you have moved what you need.
       {% endif %}
       {% endfor %}
       {% endfor %}

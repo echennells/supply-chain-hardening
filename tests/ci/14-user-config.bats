@@ -160,7 +160,7 @@ need_sudo() {
     [ "$(copies "$k" | wc -l)" -eq 1 ] || { echo "$k: $(copies "$k")"; return 1; }
     grep -q "SECRET-$k" "$(copies "$k")"
     [ "$(mode "$(copies "$k")")" = -rw------- ]
-    grep -q "replaced $(f "$k"), which was not exactly what this project last wrote.*$(copies "$k")" "$BATS_TEST_TMPDIR/log" \
+    grep -q "replaced $(f "$k"), which was not exactly what this project last wrote.*$(copies "$k")\. It may hold a token or a password: delete it once" "$BATS_TEST_TMPDIR/log" \
       || { cat "$BATS_TEST_TMPDIR/log"; return 1; }
   done
   # Paths, never contents.
@@ -359,7 +359,8 @@ fixture() { # <version-surface>: put its files where they go
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
   printf 'keep=1\rkeep2=2\n' > "$BATS_TEST_TMPDIR/mine"
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine"
-  grep -q 'took your own setting of fund, ignore-scripts, audit, save-exact, update-notifier, allow-git, min-release-age out of' "$BATS_TEST_TMPDIR/log" \
+  grep -q 'took your own setting of fund, ignore-scripts, audit, save-exact, update-notifier, allow-git, min-release-age out of' "$BATS_TEST_TMPDIR/log"
+  grep -q 'out of.*It may hold a token or a password: delete it once' "$BATS_TEST_TMPDIR/log" \
     || { cat "$BATS_TEST_TMPDIR/log"; return 1; }
   [ "$(copies npmrc | wc -l)" -eq 1 ]
   cmp "$(copies npmrc)" "$BATS_TEST_TMPDIR/orig"

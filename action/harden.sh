@@ -2828,9 +2828,9 @@ put_user_cfg() {
     exit 1
   fi
   if [[ -n "$gone" ]]; then
-    warn "npm: took your own setting of $gone out of $path, because a line after this project's block would win over it. The file as it was is at $bak"
+    warn "npm: took your own setting of $gone out of $path, because a line after this project's block would win over it. The file as it was is at $bak. It may hold a token or a password: delete it once you have moved what you need"
   elif [[ -n "$bak" ]]; then
-    warn "$tool: replaced $path, which was not exactly what this project last wrote. Any registry, token or other setting you added to it no longer applies; the previous file is at $bak"
+    warn "$tool: replaced $path, which was not exactly what this project last wrote. Any registry, token or other setting you added to it no longer applies; the previous file is at $bak. It may hold a token or a password: delete it once you have moved what you need"
   fi
   if [[ -n "$longer" ]]; then
     log "npm: kept your own $longer in $path, which is longer than this project's. It applies where NPM_CONFIG_MIN_RELEASE_AGE is not set; that variable outranks the file"
