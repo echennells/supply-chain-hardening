@@ -171,6 +171,15 @@ ucf_sum() {
   printf 'cksum:%s-%s\n' "$1" "$2"
 }
 
+# ucf_same <file or - for stdin> <file>: the same bytes. Not with cmp, which is in
+# diffutils: no image of Fedora, Arch, UBI, Rocky or Alma (minimal) has it (MEASURED).
+ucf_same() {
+  local a b
+  if [ "$1" = - ]; then a=$(ucf_sum); else a=$( { ucf_sum < "$1"; } 2>/dev/null ); fi
+  b=$( { ucf_sum < "$2"; } 2>/dev/null )
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 # ucf_body <n>: stdin without line <n> (the marker), as the checksum covers it.
 # The cutoff line supply-chain-age-gate-refresh advances in place (uv.toml and
 # pip.conf, the exact shape templates/age-gate-refresh.sh.j2 matches) counts
@@ -592,7 +601,7 @@ ucf_put() (
   if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
   [ -f "$real" ] && [ -w "$real" ] || no "it cannot be replaced or written"
   bak=$(ucf_copy_new "$real") || no "no copy of it could be made first"
-  if cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
+  if cat -- "$tmp" > "$real" && ucf_same "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
   printf 'error: %s may be incomplete; as it was, it is at %s\n' "$path" "$bak"
   exit 1
 )
@@ -603,7 +612,7 @@ ucf_put() (
 ucf_copy_new() {
   local p="$1" b tmp own n=1
   tmp=$(ucf_temp "$p") || return 1
-  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! cmp -s "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! ucf_same "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
   if [ "$(id -u)" = 0 ]; then
     own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown -h "$own" "$tmp" 2>/dev/null || true
   fi
@@ -614,7 +623,7 @@ ucf_copy_new() {
     b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)-$n"
   done
   mv -f -- "$tmp" "$b~" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-  [ -f "$b~" ] && [ ! -L "$b~" ] && cmp -s "$p" "$b~" || return 1
+  [ -f "$b~" ] && [ ! -L "$b~" ] && ucf_same "$p" "$b~" || return 1
   printf '%s\n' "$b~"
 }
 
@@ -624,7 +633,7 @@ ucf_copy_new() {
 ucf_copy() {
   local b
   for b in "$1".[0-9]*.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]@*"~"; do
-    if [ -f "$b" ] && [ ! -L "$b" ] && cmp -s "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
+    if [ -f "$b" ] && [ ! -L "$b" ] && ucf_same "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
       printf '%s\n' "$b"; return 0
     fi
   done
@@ -648,7 +657,7 @@ ucf_replace() {
   esac
   if [ -f "$path" ] && [ -r "$path" ]; then
     cls=$(user_cfg_class "$kind" "$path")
-    if [ "$cls" = ours ] && printf '%s\n' "$want" | cmp -s - "$path" \
+    if [ "$cls" = ours ] && printf '%s\n' "$want" | ucf_same - "$path" \
        && [ "$(ucf_ls "$(ucf_real "$path")" | cut -c1-10)" = "$(ucf_mode "$(ucf_real "$path")" "$m")" ]; then
       echo ok; return 0
     fi

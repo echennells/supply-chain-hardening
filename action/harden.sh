@@ -301,6 +301,15 @@ ucf_sum() {
   printf 'cksum:%s-%s\n' "$1" "$2"
 }
 
+# ucf_same <file or - for stdin> <file>: the same bytes. Not with cmp, which is in
+# diffutils: no image of Fedora, Arch, UBI, Rocky or Alma (minimal) has it (MEASURED).
+ucf_same() {
+  local a b
+  if [ "$1" = - ]; then a=$(ucf_sum); else a=$( { ucf_sum < "$1"; } 2>/dev/null ); fi
+  b=$( { ucf_sum < "$2"; } 2>/dev/null )
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 # ucf_body <n>: stdin without line <n> (the marker), as the checksum covers it.
 # The cutoff line supply-chain-age-gate-refresh advances in place (uv.toml and
 # pip.conf, the exact shape templates/age-gate-refresh.sh.j2 matches) counts
@@ -722,7 +731,7 @@ ucf_put() (
   if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
   [ -f "$real" ] && [ -w "$real" ] || no "it cannot be replaced or written"
   bak=$(ucf_copy_new "$real") || no "no copy of it could be made first"
-  if cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
+  if cat -- "$tmp" > "$real" && ucf_same "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
   printf 'error: %s may be incomplete; as it was, it is at %s\n' "$path" "$bak"
   exit 1
 )
@@ -733,7 +742,7 @@ ucf_put() (
 ucf_copy_new() {
   local p="$1" b tmp own n=1
   tmp=$(ucf_temp "$p") || return 1
-  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! cmp -s "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! ucf_same "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
   if [ "$(id -u)" = 0 ]; then
     own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown -h "$own" "$tmp" 2>/dev/null || true
   fi
@@ -744,7 +753,7 @@ ucf_copy_new() {
     b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)-$n"
   done
   mv -f -- "$tmp" "$b~" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-  [ -f "$b~" ] && [ ! -L "$b~" ] && cmp -s "$p" "$b~" || return 1
+  [ -f "$b~" ] && [ ! -L "$b~" ] && ucf_same "$p" "$b~" || return 1
   printf '%s\n' "$b~"
 }
 
@@ -754,7 +763,7 @@ ucf_copy_new() {
 ucf_copy() {
   local b
   for b in "$1".[0-9]*.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]@*"~"; do
-    if [ -f "$b" ] && [ ! -L "$b" ] && cmp -s "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
+    if [ -f "$b" ] && [ ! -L "$b" ] && ucf_same "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
       printf '%s\n' "$b"; return 0
     fi
   done
@@ -778,7 +787,7 @@ ucf_replace() {
   esac
   if [ -f "$path" ] && [ -r "$path" ]; then
     cls=$(user_cfg_class "$kind" "$path")
-    if [ "$cls" = ours ] && printf '%s\n' "$want" | cmp -s - "$path" \
+    if [ "$cls" = ours ] && printf '%s\n' "$want" | ucf_same - "$path" \
        && [ "$(ucf_ls "$(ucf_real "$path")" | cut -c1-10)" = "$(ucf_mode "$(ucf_real "$path")" "$m")" ]; then
       echo ok; return 0
     fi
@@ -1115,6 +1124,16 @@ detect_version() {
   # for --version. This reports the host's tool, which is what gets configured.
   out=$(cd / && $cmd 2>/dev/null) || return 0
   echo "$out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true
+}
+
+# trim_ws: stdin without the blanks around it. xargs is in findutils, which Amazon
+# Linux's image does not have (MEASURED: "xargs: command not found" ended every run).
+trim_ws() {
+  local s
+  if command -v xargs >/dev/null 2>&1; then xargs; return; fi
+  s=$(cat)
+  s="${s#"${s%%[![:space:]]*}"}"
+  printf '%s\n' "${s%"${s##*[![:space:]]}"}"
 }
 
 # version_ge <a> <b>: returns 0 if a >= b semver-style, 1 otherwise.
@@ -3172,7 +3191,7 @@ harden_pnpm() {
     fi
     IFS=',' read -ra _raw_pkgs <<< "$PNPM_BUILT_DEPENDENCIES"
     for pkg in "${_raw_pkgs[@]}"; do
-      pkg=$(echo "$pkg" | xargs)  # trim whitespace
+      pkg=$(echo "$pkg" | trim_ws)
       [[ -z "$pkg" ]] && continue
       # Validate: package names are letters/digits/underscore/period/hyphen/slash, optional @scope prefix.
       # Same regex as role's tasks/pnpm.yml. Reject anything else (special
@@ -6071,7 +6090,7 @@ warn_stale_cargo_wrapper() {
 
 IFS=',' read -ra REQUESTED <<< "$ECOSYSTEMS"
 for raw in "${REQUESTED[@]}"; do
-  eco=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | xargs)
+  eco=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | trim_ws)
   case "$eco" in
     npm)      harden_npm ;;
     pnpm)     harden_pnpm ;;

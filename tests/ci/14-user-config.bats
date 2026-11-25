@@ -1052,6 +1052,30 @@ root_without_chown() { # <allowed: owner|nothing>
   [ "$(ls -ld "$(f npmrc)" | cut -c1-10)" = -rw------- ]
 }
 
+@test "user config: a machine with no cmp and no xargs is like any other" {
+  # cmp: no image of Fedora, Arch, UBI, Rocky or Alma (minimal) has diffutils. MEASURED at
+  # ef4da26: "could not copy ~/.yarnrc.yml next to itself", rc 1, the rest not applied.
+  # xargs: Amazon Linux's has no findutils, and no run got anywhere (v2.1.0 too).
+  local d="$BATS_TEST_TMPDIR/few" t n
+  bare_path
+  mkdir "$d"
+  for t in "${BARE_PATH#*:}"/*; do
+    case "${t##*/}" in cmp|diff|xargs) ;; *) ln -s "$t" "$d/${t##*/}" ;; esac
+  done
+  run env -i PATH="$d" bash -c 'command -v cmp || command -v xargs'   # FIXTURE CONTROL
+  [ "$status" -ne 0 ]
+  mkdir -p "$TEST_HOME/.config/pip"
+  printf 'npmAuthToken: SECRET\n' > "$(f yarn)"
+  printf '[global]\nindex-url = https://u:SECRET@r/\n' > "$(f pip)"
+  for n in 1 2; do
+    run harden PATH="$TEST_BIN:$d" ECOSYSTEMS=' yarn , pip' -- --emit=plain
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ "$(find "$TEST_HOME" -name '*~' | wc -l | tr -d ' ')" = 2 ] || { find "$TEST_HOME" -name '*~'; false; }
+  done
+  grep -qx 'ecosystems_hardened=yarn,pip' "$OUT_FILE"
+  [ "$(grep -rl SECRET "$TEST_HOME" | wc -l | tr -d ' ')" = 2 ]
+}
+
 @test "user config: a run killed before the rename leaves the file as it was; TERM leaves no temporary file" {
   lib
   printf 'a=SECRET\nfund=true\n' > "$(f npmrc)"
