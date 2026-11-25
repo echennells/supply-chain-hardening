@@ -12,7 +12,7 @@ against throwaway `$HOME` and `$TMPDIR` directories.
 
 It runs on a Mac too, with Apple's bash 3.2, `bundle` and (missing) `javac`; nothing in
 it asks for a password, and the tests that need root skip without passwordless sudo.
-536 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
+544 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
 set up like a person's Mac (`.github/workflows/ci-script.yml`).
 
 Run it as a normal user. As root, `harden.sh` copies the cargo-cooldown it
@@ -43,7 +43,7 @@ silently inert.
 | `06-role-parity.bats` | Drift between the role and the CI script: the same policy, rendered by two implementations, compared. `parity.py` holds the deliberate differences and the reason for each. |
 | `07-verify.bats` | The verifier: the right verdict for each way hardening can be on disk and not in effect, including a checkout that hides its own weaker settings, a file pnpm does not read, and a pip cutoff that no venv would. |
 | `08-suggest.bats` | `--suggest`: the `with:` block, the same exceptions as Ansible extra vars, and repo-local config that outranks the host's, read as files (a stub of every tool proves nothing runs, a spelling the readers do not follow is never "none found", and no symlink is followed). |
-| `09-intel-and-privilege.bats` | The `intel` input, the deprecated `install_sfw`, and what happens as root, without sudo, and in slim containers. |
+| `09-intel-and-privilege.bats` | The `intel` input, the deprecated `install_sfw`, and what happens as root, without sudo, in slim containers, and where root cannot write either (a read-only image or mount). |
 | `10-verify-json.bats` | `verify.sh --json` and the role's report fragment: the result's counts add up to the rows, `tools_seen`, the exit code, an empty host, and that every protection name starts with a tool (`protections.py`). |
 | `11-preflight.bats` | `--preflight`: writes nothing, the STOP lines (a Mac, Ansible, sudo-rs, root, the files the play stops on), and that its markers, file list, classifier and affected ansible-core versions are `tasks/preflight.yml`'s. |
 | `12-sfw-binary-pin.bats` | The pinned Socket Firewall binary, with a stub launcher that caches as sfw does and a stub `curl`: used only when sfw's own fetch fails, held to its digest before it reaches sfw's cache, never put over a cached binary or through a directory another account could write, with each platform's own asset and digest, with `shasum` where there is no `sha256sum`, and with the reason in the warning when it is not used. Needs passwordless sudo; skips without it. |

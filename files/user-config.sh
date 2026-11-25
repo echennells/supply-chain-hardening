@@ -171,6 +171,15 @@ ucf_sum() {
   printf 'cksum:%s-%s\n' "$1" "$2"
 }
 
+# ucf_same <file or - for stdin> <file>: the same bytes. Not with cmp, which is in
+# diffutils: no image of Fedora, Arch, UBI, Rocky or Alma (minimal) has it (MEASURED).
+ucf_same() {
+  local a b
+  if [ "$1" = - ]; then a=$(ucf_sum); else a=$( { ucf_sum < "$1"; } 2>/dev/null ); fi
+  b=$( { ucf_sum < "$2"; } 2>/dev/null )
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 # ucf_body <n>: stdin without line <n> (the marker), as the checksum covers it.
 # The cutoff line supply-chain-age-gate-refresh advances in place (uv.toml and
 # pip.conf, the exact shape templates/age-gate-refresh.sh.j2 matches) counts
@@ -562,28 +571,37 @@ ucf_temp() { ( umask 077; mktemp "$(dirname -- "$1")/.sch-XXXXXX" 2>/dev/null );
 # container) it is written in place, with a copy of the old one kept until the new
 # one is complete. A subshell, for its trap.
 ucf_put() (
-  path="$1" content="$3" tmp="" bak="" own=""
+  path="$1" content="$3" tmp="" bak="" own="" kept=1
   trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
   trap 'exit 1' HUP INT TERM
+  no() { printf 'error: %s: %s\n' "$path" "$1"; exit 1; }
   # A directory that is there keeps its mode, whatever it is.
-  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || exit 1
-  real=$(ucf_real "$path") || exit 1
+  [ -d "$(dirname -- "$path")" ] || mkdir -p -- "$(dirname -- "$path")" 2>/dev/null || no "its directory cannot be made"
+  real=$(ucf_real "$path") || no "it cannot be resolved"
   mode=$(ucf_mode "$real" "$2")
   if [ -e "$real" ]; then own=$(ucf_ls "$real"); own=${own#* }; fi
-  tmp=$(ucf_temp "$real") || { tmp=""; exit 1; }
-  printf '%s' "$content" > "$tmp" 2>/dev/null || exit 1
+  tmp=$(ucf_temp "$real") || { tmp=""; no "no new file can be made in ${real%/*}"; }
+  printf '%s' "$content" > "$tmp" 2>/dev/null || no "the new content could not be written (a full disk?)"
   if [ -n "$own" ] && [ "$(id -u)" = 0 ]; then
-    chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null || exit 1
+    # Root in a container need not be able to change owners (no CAP_CHOWN), nor have
+    # this group in its user namespace. The owner has to stay; the group need not.
+    if ! chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null; then
+      kept=0
+      chown -h "${own% *}" "$tmp" 2>/dev/null \
+        || no "its owner (uid ${own% *}) cannot be kept, because this root cannot change a file's owner. Run this as that account"
+    fi
   elif [ -n "$own" ]; then
-    # A group this account is not in cannot be kept, and no other group gets what
-    # it had.
-    chgrp "${own#* }" "$tmp" 2>/dev/null || mode="${mode:0:4}---${mode:7}"
+    chgrp "${own#* }" "$tmp" 2>/dev/null || kept=0
   fi
-  ucf_chmod "$tmp" "$mode" || exit 1
+  # A group that cannot be kept: no other group gets what it had, unless everyone has.
+  if [ "$kept" = 0 ]; then
+    case "$mode" in ???????r*) ;; *) mode="${mode:0:4}---${mode:7}" ;; esac
+  fi
+  ucf_chmod "$tmp" "$mode" || no "the mode of the new file cannot be set"
   if mv -f -- "$tmp" "$real" 2>/dev/null; then tmp=""; exit 0; fi
-  [ -f "$real" ] && [ -w "$real" ] || exit 1
-  bak=$(ucf_copy_new "$real") || exit 1
-  if cat -- "$tmp" > "$real" && cmp -s "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
+  [ -f "$real" ] && [ -w "$real" ] || no "it cannot be replaced or written"
+  bak=$(ucf_copy_new "$real") || no "no copy of it could be made first"
+  if cat -- "$tmp" > "$real" && ucf_same "$tmp" "$real" && ucf_chmod "$real" "$mode"; then rm -f -- "$bak"; exit 0; fi
   printf 'error: %s may be incomplete; as it was, it is at %s\n' "$path" "$bak"
   exit 1
 )
@@ -594,7 +612,7 @@ ucf_put() (
 ucf_copy_new() {
   local p="$1" b tmp own n=1
   tmp=$(ucf_temp "$p") || return 1
-  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! cmp -s "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  if ! cat -- "$p" > "$tmp" 2>/dev/null || ! ucf_same "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
   if [ "$(id -u)" = 0 ]; then
     own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown -h "$own" "$tmp" 2>/dev/null || true
   fi
@@ -605,7 +623,7 @@ ucf_copy_new() {
     b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)-$n"
   done
   mv -f -- "$tmp" "$b~" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-  [ -f "$b~" ] && [ ! -L "$b~" ] && cmp -s "$p" "$b~" || return 1
+  [ -f "$b~" ] && [ ! -L "$b~" ] && ucf_same "$p" "$b~" || return 1
   printf '%s\n' "$b~"
 }
 
@@ -615,7 +633,7 @@ ucf_copy_new() {
 ucf_copy() {
   local b
   for b in "$1".[0-9]*.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]@*"~"; do
-    if [ -f "$b" ] && [ ! -L "$b" ] && cmp -s "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
+    if [ -f "$b" ] && [ ! -L "$b" ] && ucf_same "$1" "$b" && chmod 600 "$b" 2>/dev/null; then
       printf '%s\n' "$b"; return 0
     fi
   done
@@ -639,7 +657,7 @@ ucf_replace() {
   esac
   if [ -f "$path" ] && [ -r "$path" ]; then
     cls=$(user_cfg_class "$kind" "$path")
-    if [ "$cls" = ours ] && printf '%s\n' "$want" | cmp -s - "$path" \
+    if [ "$cls" = ours ] && printf '%s\n' "$want" | ucf_same - "$path" \
        && [ "$(ucf_ls "$(ucf_real "$path")" | cut -c1-10)" = "$(ucf_mode "$(ucf_real "$path")" "$m")" ]; then
       echo ok; return 0
     fi
