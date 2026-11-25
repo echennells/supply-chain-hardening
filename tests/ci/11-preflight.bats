@@ -296,7 +296,7 @@ exit 0"
   diff "$role" "$act"
   grep -q 'ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"' "$ROOT/tasks/preflight.yml"
   # no classifier of its own is left in either
-  ! grep -nE 'classify\(\)|strict-checksums|serviceIndex' "$ROOT/tasks/preflight.yml"
+  ! grep -nE 'classify\(\)|strict-checksums|serviceIndex' "$ROOT/tasks/preflight.yml" || false
   [ "$(grep -c 'user_cfg_class()' "$ROOT/action/harden.sh")" -eq 1 ]
   # and the role asks about every kind the block knows, once each
   # shellcheck disable=SC1090

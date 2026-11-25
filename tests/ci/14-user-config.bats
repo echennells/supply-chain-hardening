@@ -138,7 +138,7 @@ lib() {
       || { cat "$BATS_TEST_TMPDIR/log"; return 1; }
   done
   # Paths, never contents.
-  ! grep SECRET "$BATS_TEST_TMPDIR/log"
+  ! grep SECRET "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "user config: a token added after hardening survives the next run, in each of them" {
@@ -154,7 +154,7 @@ lib() {
     assert_file_lacks "$(f "$k")" SECRET
     grep -q "SECRET-$k" "$(copies "$k")" || { echo "$k lost"; return 1; }
   done
-  ! grep SECRET "$BATS_TEST_TMPDIR/log"
+  ! grep SECRET "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "user config: CRLF files, and files with no last newline, are copied byte for byte; one of ours saved as CRLF is noticed" {
@@ -183,7 +183,7 @@ lib() {
   before=$(snapshot_but_cutoffs)
   apply > "$BATS_TEST_TMPDIR/log" 2>&1
   diff <(printf '%s\n' "$before") <(snapshot_but_cutoffs)
-  ! grep -E 'replaced .*not exactly|took your own|not read' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'replaced .*not exactly|took your own|not read' "$BATS_TEST_TMPDIR/log" || false
   # with the user content still there, not because it is gone
   local k
   grep -q SECRET-npmrc "$(f npmrc)"
@@ -214,7 +214,7 @@ lib() {
   done
   [ "$(mode "$(f npmrc)")" = -rw------- ]
   [ "$(mode "$(f uv)")" = -rw-r--r-- ]
-  ! grep -E 'replaced .*not exactly|took your own|is 0600 now' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'replaced .*not exactly|took your own|is 0600 now' "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "user config: bunfig without XDG_CONFIG_HOME is kept the same way (~/.bunfig.toml)" {
@@ -295,7 +295,7 @@ fixture() { # <version-surface>: put its files where they go
     ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
     npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine" || { echo "$v"; cat "$(f npmrc)"; return 1; }
     [ -z "$(copies npmrc)" ]
-    ! grep SECRET "$BATS_TEST_TMPDIR/log"
+    ! grep SECRET "$BATS_TEST_TMPDIR/log" || false
   done
 }
 
@@ -306,7 +306,7 @@ fixture() { # <version-surface>: put its files where they go
   cp "$(f npmrc)" "$BATS_TEST_TMPDIR/mine"
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine"
-  ! grep -E 'took your own|may set or defeat' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'took your own|may set or defeat' "$BATS_TEST_TMPDIR/log" || false
   cp "$(f npmrc)" "$BATS_TEST_TMPDIR/once"
   ECO=npm apply >/dev/null 2>&1
   cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/once"
@@ -322,7 +322,7 @@ fixture() { # <version-surface>: put its files where they go
   cat "$BATS_TEST_TMPDIR/crlf" > "$(f npmrc)"
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine"
-  ! grep 'took your own' "$BATS_TEST_TMPDIR/log"
+  ! grep 'took your own' "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "npmrc: a user's line for one of our settings is taken out after a 0600 copy, named, and its value never printed" {
@@ -339,10 +339,10 @@ fixture() { # <version-surface>: put its files where they go
   cmp "$(copies npmrc)" "$BATS_TEST_TMPDIR/orig"
   [ "$(mode "$(copies npmrc)")" = -rw------- ]
   grep -q "$(copies npmrc)" "$BATS_TEST_TMPDIR/log"
-  ! grep SECRETVALUE "$BATS_TEST_TMPDIR/log"
+  ! grep SECRETVALUE "$BATS_TEST_TMPDIR/log" || false
   # and once only
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
-  ! grep 'took your own' "$BATS_TEST_TMPDIR/log"
+  ! grep 'took your own' "$BATS_TEST_TMPDIR/log" || false
   [ "$(copies npmrc | wc -l)" -eq 1 ]
 }
 
@@ -355,7 +355,7 @@ fixture() { # <version-surface>: put its files where they go
   echo '//registry.example/:_authToken=SECRET' > "$BATS_TEST_TMPDIR/mine"
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine"
   [ -z "$(copies npmrc)" ]
-  ! grep -E 'took your own|SECRET' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'took your own|SECRET' "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "npmrc: the same with a real npm config set" {
@@ -388,7 +388,7 @@ fixture() { # <version-surface>: put its files where they go
   ECO=npm apply > "$BATS_TEST_TMPDIR/log" 2>&1
   printf 'proxy=http://p:1\n//registry.example/:_authToken=SECRET-npmrc\n' > "$BATS_TEST_TMPDIR/mine"
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine" || { cat "$(f npmrc)"; return 1; }
-  ! grep 'took your own' "$BATS_TEST_TMPDIR/log"
+  ! grep 'took your own' "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "npmrc: a changed window is our own line changing, not the user's" {
@@ -398,7 +398,7 @@ fixture() { # <version-surface>: put its files where they go
   block | grep -qx 'min-release-age=7'
   [ "$(grep -c min-release-age "$(f npmrc)")" -eq 1 ]
   [ -z "$(copies npmrc)" ]
-  ! grep 'took your own' "$BATS_TEST_TMPDIR/log"
+  ! grep 'took your own' "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "npmrc: a key that cannot be read with certainty is kept and named, not guessed at" {
@@ -410,7 +410,7 @@ fixture() { # <version-surface>: put its files where they go
   # shellcheck disable=SC2016
   grep -qF 'line 1, a quoted key with an escape in it; line 2, the key ${...}; line 3, the key ignore-${...}; line 5, a [section] named after fund' "$BATS_TEST_TMPDIR/log" \
     || { cat "$BATS_TEST_TMPDIR/log"; return 1; }
-  ! grep -E 'SECRET|HOST|\$\{[A-Z]' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'SECRET|HOST|\$\{[A-Z]' "$BATS_TEST_TMPDIR/log" || false
 }
 
 @test "npmrc: before, which npm uses instead of min-release-age, is kept and named" {
@@ -431,7 +431,7 @@ fixture() { # <version-surface>: put its files where they go
     npmrc_is_ours_then "$BATS_TEST_TMPDIR/mine" || { echo "$v"; cat "$(f npmrc)"; return 1; }
     [ -z "$(copies npmrc)" ]
     grep -q "npm: kept your own min-release-age in $(f npmrc), which is longer than this project's" "$BATS_TEST_TMPDIR/log"
-    ! grep -E 'took your own' "$BATS_TEST_TMPDIR/log"
+    ! grep -E 'took your own' "$BATS_TEST_TMPDIR/log" || false
     # and again, the same
     cp "$(f npmrc)" "$BATS_TEST_TMPDIR/once"
     ECO=npm apply >/dev/null 2>&1
@@ -528,7 +528,7 @@ JS
   grep -q '"period": 172800' "$TEST_HOME/.composer/config.json"
   cmp "$TEST_HOME/.composer/auth.json" "$BATS_TEST_TMPDIR/auth"
   [ "$(mode "$TEST_HOME/.composer/auth.json")" = -rw------- ]
-  ! grep -E 'SECRET|not exactly' "$BATS_TEST_TMPDIR/log"
+  ! grep -E 'SECRET|not exactly' "$BATS_TEST_TMPDIR/log" || false
   # and where both are there, both stay
   mkdir -p "$TEST_HOME/.config/composer"
   harden ECOSYSTEMS=composer -- --emit=plain >/dev/null 2>&1
@@ -544,7 +544,7 @@ JS
     ECO=composer apply > "$BATS_TEST_TMPDIR/log" 2>&1
     grep -q '"secure-http": true' "$(f composer)"
     [ -z "$(copies composer)" ]
-    ! grep 'not exactly' "$BATS_TEST_TMPDIR/log"
+    ! grep 'not exactly' "$BATS_TEST_TMPDIR/log" || false
   done
   # but any setting is
   for c in '{"config": {"lock": false}}' '{"repositories": []}' '{\n  "config": {\n    "secure-http": false\n  }\n}'; do
@@ -605,7 +605,7 @@ JS
   [[ "$output" == "copy $d/.yarnrc.yml."*$'\n'changed ]] || { echo "$output"; return 1; }
   sudo grep -q SECRET "${lines[0]#copy }"
   [ "$(sudo ls -ldn "${lines[0]#copy }" | awk '{print $1, $3}' | cut -c1-12)" = '-rw------- 0' ]
-  ! sudo grep -q SECRET "$d/.yarnrc.yml"
+  ! sudo grep -q SECRET "$d/.yarnrc.yml" || false
   [ "$(sudo ls -ldn "$d/.yarnrc.yml" | cut -c1-10)" = -rw------- ]
   sudo rm -rf "$d"
 }
@@ -793,7 +793,7 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   # FIXTURE CONTROL: with nothing killed, the same call does change it
   rm -f "$BATS_TEST_TMPDIR/stub/cat" "$TEST_HOME"/.sch-*
   npmrc_body | ucf_npmrc "$(f npmrc)" | grep -qx changed
-  ! cmp -s "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"
+  ! cmp -s "$(f npmrc)" "$BATS_TEST_TMPDIR/orig" || false
   grep -qx 'a=SECRET' "$(f npmrc)"
 }
 
@@ -807,12 +807,13 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   grep -qx changed "$BATS_TEST_TMPDIR/out"
   npmrc_is_ours_then "$BATS_TEST_TMPDIR/orig"
   [ "$(mode "$(f npmrc)")" = -rw------- ]
-  [ -z "$(copies npmrc)" ] && [ -z "$(ls -A "$TEST_HOME" | grep '^\.sch-')" ]
+  [ -z "$(copies npmrc)" ]
+  [ -z "$(ls -A "$TEST_HOME" | grep '^\.sch-')" ]
   # killed half way through that write
   cp "$BATS_TEST_TMPDIR/orig" "$(f npmrc)"
   stub cat 'case "$*" in */.sch-*) head -c 5 "${@: -1}"; kill -KILL $PPID ;; *) exec /bin/cat "$@" ;; esac'
   ( PATH="$BATS_TEST_TMPDIR/stub:$PATH"; npmrc_body | ucf_npmrc "$(f npmrc)" ) >/dev/null 2>&1 || true
-  ! cmp -s "$(f npmrc)" "$BATS_TEST_TMPDIR/orig"          # the control: it was cut short
+  ! cmp -s "$(f npmrc)" "$BATS_TEST_TMPDIR/orig" || false          # the control: it was cut short
   cmp "$(copies npmrc)" "$BATS_TEST_TMPDIR/orig"
 }
 
@@ -839,7 +840,8 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
     case "$output" in *-2~) ;; *) echo "$what: $output"; return 1 ;; esac
     cmp "$output" "$(f npmrc)"
     [ "$(mode "$output")" = -rw------- ]
-    [ "$(cat "$BATS_TEST_TMPDIR/victim")" = precious ] && [ ! -e "$BATS_TEST_TMPDIR/new" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/victim")" = precious ]
+    [ ! -e "$BATS_TEST_TMPDIR/new" ]
     if [ "$what" = file ]; then [ "$(cat "$name")" = earlier ]; fi
     if [ "$what" = dir ]; then [ -z "$(ls -A "$name")" ]; fi
   done
@@ -893,10 +895,10 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   done
   # templates/age-gate-refresh.sh.j2 rewrites these two lines in place
   sed 's/^exclude-newer = ".*"$/exclude-newer = "2026-12-31T00:00:00Z"/' "$(f uv)" > "$BATS_TEST_TMPDIR/x"
-  ! cmp -s "$(f uv)" "$BATS_TEST_TMPDIR/x"
+  ! cmp -s "$(f uv)" "$BATS_TEST_TMPDIR/x" || false
   [ "$(user_cfg_class uv "$BATS_TEST_TMPDIR/x")" = ours ]
   sed 's/^uploaded-prior-to = .*$/uploaded-prior-to = 2026-12-31T00:00:00Z/' "$(f pip)" > "$BATS_TEST_TMPDIR/x"
-  ! cmp -s "$(f pip)" "$BATS_TEST_TMPDIR/x"
+  ! cmp -s "$(f pip)" "$BATS_TEST_TMPDIR/x" || false
   [ "$(user_cfg_class pip "$BATS_TEST_TMPDIR/x")" = ours ]
   # only in the shape the refresher writes, and only those lines
   sed 's/^exclude-newer = ".*"$/exclude-newer = "SECRET"/' "$(f uv)" > "$BATS_TEST_TMPDIR/x"
@@ -938,11 +940,11 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   before=$(snapshot)
   pf > "$BATS_TEST_TMPDIR/pf" || true
   diff <(printf '%s\n' "$before") <(snapshot)          # it changed nothing
-  ! grep SECRET "$BATS_TEST_TMPDIR/pf"
+  ! grep SECRET "$BATS_TEST_TMPDIR/pf" || false
   for k in $OTHERS; do
     grep -qF "STOP  $(f "$k"): not exactly what this project last wrote" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
   done
-  ! grep -F "STOP  $(f npmrc)" "$BATS_TEST_TMPDIR/pf"
+  ! grep -F "STOP  $(f npmrc)" "$BATS_TEST_TMPDIR/pf" || false
   grep -qF "note  $(f npmrc): merged, never replaced" "$BATS_TEST_TMPDIR/pf"
   grep -qF "note  $(f npmrc): except your own setting of fund, which would win over the block" "$BATS_TEST_TMPDIR/pf"
   grep -qF "note  $(f npmrc): kept, but may set or defeat one of the settings in the block: line 3, before" "$BATS_TEST_TMPDIR/pf"
@@ -954,11 +956,11 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   grep -q "other accounts could read it (-rw-r--r--); it is 0600 now" "$BATS_TEST_TMPDIR/log"
   # And after it nothing stops.
   pf > "$BATS_TEST_TMPDIR/pf" || true
-  ! grep -F "STOP  $TEST_HOME" "$BATS_TEST_TMPDIR/pf"
+  ! grep -F "STOP  $TEST_HOME" "$BATS_TEST_TMPDIR/pf" || false
   for k in $OTHERS; do
     grep -qF "$(f "$k"): exactly what this project last wrote, replaced as before" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
   done
-  ! grep 'except your own setting\|it becomes 0600' "$BATS_TEST_TMPDIR/pf"
+  ! grep 'except your own setting\|it becomes 0600' "$BATS_TEST_TMPDIR/pf" || false
 }
 
 @test "preflight: a home with none of them says each will be created" {
@@ -976,7 +978,9 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   gpf() { env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$g" TMPDIR="$TEST_TMP" bash "$HARDEN_SH" --preflight > "$BATS_TEST_TMPDIR/pf" || true; }
   gpf
   grep -qF "$g: npm's global config, not there, will be created" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
-  [ ! -e "$TEST_HOME/.npm" ] && [ -z "$(ls -A "$TEST_TMP")" ]          # asking npm wrote nothing
+  # asking npm wrote nothing
+  [ ! -e "$TEST_HOME/.npm" ]
+  [ -z "$(ls -A "$TEST_TMP")" ]
   mkdir -p "$TEST_HOME/npm"
   cp "$ROOT/tests/fixtures/user-config/v2.1.0-role/npmrc" "$g"
   gpf
@@ -986,7 +990,7 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   cp "$g" "$BATS_TEST_TMPDIR/before"
   gpf
   grep -qE "STOP  $g: npm's global config, not exactly .*accept_etc_overwrite=true" "$BATS_TEST_TMPDIR/pf"
-  ! grep SECRET "$BATS_TEST_TMPDIR/pf"
+  ! grep SECRET "$BATS_TEST_TMPDIR/pf" || false
   ECO=npm apply NPM_CONFIG_GLOBALCONFIG="$g" >/dev/null 2>&1
   cmp "$g" "$BATS_TEST_TMPDIR/before"
 }
@@ -1005,7 +1009,7 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
 @test "user config: the script parses on bash 3.2 and BSD terms (no bash 4 construct)" {
   bash -n "$ROOT/files/user-config.sh"
   ! grep -vE '^[[:space:]]*#' "$ROOT/files/user-config.sh" \
-    | grep -nE 'declare -A|mapfile|readarray|\$\{[a-z_]+(,,|\^\^)|readlink -f|sed -i|grep -P|stat -c'
+    | grep -nE 'declare -A|mapfile|readarray|\$\{[a-z_]+(,,|\^\^)|readlink -f|sed -i|grep -P|stat -c' || false
 }
 
 @test "user config: each of them is written through the shared code on both surfaces, and by nothing else" {
@@ -1020,8 +1024,8 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   grep -q 'PUT_AS_ROOT=1 put_user_cfg yarn "$root_home/.yarnrc.yml"' "$HARDEN_SH"
   [ "$(grep -c 'ansible.builtin.script: user-config.sh replace yarn$' "$ROOT/tasks/yarn.yml")" -eq 2 ]
   # no template or redirect into one of them is left
-  ! grep -nE '> "\$HOME/\.(npmrc|yarnrc\.yml|bundle/config|m2|config/(pnpm|pip|composer))|> "\$(cargo|nuget)_home/(config.toml|NuGet)' "$HARDEN_SH"
-  ! grep -nE 'dest: .*(ansible_env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config|m2)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path|config\.json|NuGet\.Config|cargo_home \}\}/config\.toml)' "$ROOT"/tasks/*.yml
+  ! grep -nE '> "\$HOME/\.(npmrc|yarnrc\.yml|bundle/config|m2|config/(pnpm|pip|composer))|> "\$(cargo|nuget)_home/(config.toml|NuGet)' "$HARDEN_SH" || false
+  ! grep -nE 'dest: .*(ansible_env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config|m2)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path|config\.json|NuGet\.Config|cargo_home \}\}/config\.toml)' "$ROOT"/tasks/*.yml || false
 }
 
 @test "user config: the role's tasks judge the same files, at the paths they write" {
@@ -1033,11 +1037,16 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
   done
   # and the role's own path expression for each is the one ucf_path gives
   HOME=/h XDG_CONFIG_HOME=/x
-  [ "$(ucf_path uv)" = /x/uv/uv.toml ] && [ "$(ucf_path bun)" = /x/.bunfig.toml ] && [ "$(ucf_path pnpm-rc)" = /x/pnpm/rc ]
+  [ "$(ucf_path uv)" = /x/uv/uv.toml ]
+  [ "$(ucf_path bun)" = /x/.bunfig.toml ]
+  [ "$(ucf_path pnpm-rc)" = /x/pnpm/rc ]
   [ "$(ucf_path pip)" = /h/.config/pip/pip.conf ]      # tasks/pip.yml does not follow XDG_CONFIG_HOME
   unset XDG_CONFIG_HOME
-  [ "$(ucf_path uv)" = /h/.config/uv/uv.toml ] && [ "$(ucf_path bun)" = /h/.bunfig.toml ]
-  [ "$(ucf_path npmrc)" = /h/.npmrc ] && [ "$(ucf_path yarn)" = /h/.yarnrc.yml ] && [ "$(ucf_path bundler)" = /h/.bundle/config ]
+  [ "$(ucf_path uv)" = /h/.config/uv/uv.toml ]
+  [ "$(ucf_path bun)" = /h/.bunfig.toml ]
+  [ "$(ucf_path npmrc)" = /h/.npmrc ]
+  [ "$(ucf_path yarn)" = /h/.yarnrc.yml ]
+  [ "$(ucf_path bundler)" = /h/.bundle/config ]
   case "$(uname -s)" in
     Darwin) [ "$(ucf_path pnpm-yaml)" = /h/Library/Preferences/pnpm/config.yaml ] ;;
     *) [ "$(ucf_path pnpm-yaml)" = /h/.config/pnpm/config.yaml ] ;;

@@ -570,7 +570,7 @@ one_backup_of() {
     > "$TEST_HOME/.nuget/NuGet/NuGet.Config"
   run harden ECOSYSTEMS=cargo,maven,nuget -- --emit=plain
   [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q 'not exactly what this project last wrote'
+  ! echo "$output" | grep -q 'not exactly what this project last wrote' || false
   [ -z "$(ls -a "$TEST_HOME/.cargo" "$TEST_HOME/.m2" | grep '~$')" ]
   [ "$(ls -a "$TEST_HOME/.nuget/NuGet" | grep -c '~$')" -eq 1 ]
   echo "$output" | grep -q "replaced dotnet's first-run"

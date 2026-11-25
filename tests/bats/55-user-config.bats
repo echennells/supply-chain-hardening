@@ -114,12 +114,12 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   echo "$output" | grep -q 'accept_user_config_overwrite=true'
   [ "$(changed)" = 0 ]
   diff <(echo "$before") <(snapshot)
-  ! echo "$output" | grep SECRET
+  ! echo "$output" | grep SECRET || false
   # --tags for one of them stops on that one only
   ONLY=yarn role
   [ "$status" -ne 0 ]
   echo "$output" | grep -qF "$(f yarn)"
-  ! echo "$output" | grep -qF "$(f uv)"
+  ! echo "$output" | grep -qF "$(f uv)" || false
 }
 
 @test "role: --check --diff with the overwrite accepted says what would happen, changes nothing and prints no line of theirs" {
@@ -131,26 +131,26 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   diff <(echo "$before") <(snapshot)
   echo "$output" | grep -qF "$(f npmrc): your own setting of fund would be taken out"
   echo "$output" | grep -qF "$(f uv): would be copied next to itself (0600) first"
-  ! echo "$output" | grep SECRET
+  ! echo "$output" | grep SECRET || false
 }
 
 @test "role: with the overwrite accepted ~/.npmrc is merged, the others are copied 0600 and replaced, nothing is lost or printed, and a second run changes nothing" {
   plant
   role -vvv --diff -e accept_user_config_overwrite=true
   [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
-  ! echo "$output" | grep SECRET
+  ! echo "$output" | grep SECRET || false
   local k before
   # ~/.npmrc: the token and the comment stay; fund, which is ours, went, after a copy
   grep -qx '//registry.example/:_authToken=SECRET-npmrc' "$(f npmrc)"
   grep -qx '# mine' "$(f npmrc)"
-  ! grep -q SECRETVALUE "$(f npmrc)"
+  ! grep -q SECRETVALUE "$(f npmrc)" || false
   grep -q 'fund=SECRETVALUE' "$(copies npmrc)"
   [ "$(stat -c %a "$(f npmrc)")" = 600 ]
   [ "$(stat -c %a "$(copies npmrc)")" = 600 ]
   head -1 "$(f npmrc)" | grep -q '^; >>> supply-chain-hardening: Managed by ansible-supply-chain-security; self-check sha256:'
   echo "$output" | grep -qF "$(f npmrc): your own setting of fund was taken out"
   for k in $OTHERS; do
-    ! grep -q SECRET "$(f "$k")"
+    ! grep -q SECRET "$(f "$k")" || false
     [ "$k" = composer ] || grep -q 'Managed by ansible-supply-chain-security; self-check sha256:' "$(f "$k")" || { echo "$k"; return 1; }
     grep -q "SECRET-$k" "$(copies "$k")" || { echo "$k lost"; return 1; }
     [ "$(stat -c %a "$(copies "$k")")" = 600 ]
@@ -239,7 +239,8 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   edited=$(env -u XDG_CONFIG_HOME HOME=/root bash "$ROLE_DIR/files/user-config.sh" classify uv pip || true)
   cp -p "$T/uv" "$uv"; cp -p "$T/pip" "$pip"
   echo "$said"; echo "class: $cls; edited: $edited"
-  [[ "$after_uv" != *2020-01-01* ]] && [[ "$after_pip" != *2020-01-01* ]]
+  [[ "$after_uv" != *2020-01-01* ]]
+  [[ "$after_pip" != *2020-01-01* ]]
   [ -z "$cls" ]
   [ "$edited" = "foreign $uv" ]
 }
@@ -258,10 +259,15 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   chmod 750 "$H"
   local before after rootbefore rootafter
   before=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
-  rootbefore=$(stat -c '%a %u:%g %n' /root /root/.config /root/.cargo /root/.composer /root/.config/composer 2>/dev/null)
+  # of root's, the ones that are there now (which depends on the tests before this one)
+  local rootdirs=""
+  for d in /root /root/.config /root/.cargo /root/.composer /root/.config/composer; do
+    [ ! -d "$d" ] || rootdirs="$rootdirs $d"
+  done
+  rootbefore=$(stat -c '%a %u:%g %n' $rootdirs)
   ROLE_ENV="NPM_CONFIG_GLOBALCONFIG=$H/globalrc" ONLY=$TAGS,gradle role
   after=$(cd "$H" && stat -c '%a %u:%g %n' $dirs)
-  rootafter=$(stat -c '%a %u:%g %n' /root /root/.config /root/.cargo /root/.composer /root/.config/composer 2>/dev/null)
+  rootafter=$(stat -c '%a %u:%g %n' $rootdirs)
   echo "$output" | tail -4
   [ "$status" -eq 0 ]
   diff <(echo "$before") <(echo "$after")
@@ -294,12 +300,12 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
   [ "$same" -eq 0 ]
   echo "$output" | grep -q "Composer sudo coverage — $r is not exactly what this project last wrote, so it was left alone"
-  ! echo "$output" | grep SECRET
+  ! echo "$output" | grep SECRET || false
   # and one this project wrote is kept up to date
   rm -f "$r"
   ONLY=composer role
   grep -q '"secure-http": true' "$r"
-  ! echo "$output" | grep -q 'Composer sudo coverage'
+  ! echo "$output" | grep -q 'Composer sudo coverage' || false
 }
 
 @test "role: a home that only has ~/.composer keeps it, and its auth.json is not touched" {
@@ -343,7 +349,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   echo "$output" | grep -q 'accept_etc_overwrite=true'
   [ "$(changed)" = 0 ]
   cmp "$G" "$T/before"
-  ! echo "$output" | grep SECRET
+  ! echo "$output" | grep SECRET || false
   # not a reason to stop a run that does not write it
   ONLY=bundler role
   [ "$status" -eq 0 ]
@@ -355,7 +361,7 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   cmp "$G" "$T/before"
   ONLY=npm role --diff -vvv -e accept_etc_overwrite=true
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  ! echo "$output" | grep SECRET
+  ! echo "$output" | grep SECRET || false
   local c
   c=$(ls "$G".*~)
   cmp "$c" "$T/before"
@@ -380,7 +386,8 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   echo "$output" | tail -3
   [ "$status" -eq 0 ]
   [ "$(stat -c '%U %a' "$h/npm")" = 'kcuser 700' ]
-  [ "$(stat -c %U "$h/npm/etc")" = kcuser ] && [ "$(stat -c %U "$g")" = kcuser ]
+  [ "$(stat -c %U "$h/npm/etc")" = kcuser ]
+  [ "$(stat -c %U "$g")" = kcuser ]
   grep -q '^ignore-scripts=true' "$g"
   # as d738db8 left it: root's file, in root's directory
   cp /opt/test-fixtures/user-config/v2.1.0-role/npmrc "$g"
@@ -390,7 +397,8 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   [ "$(stat -c %U "$g")" = root ]
   asuser
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  [ "$(stat -c %U "$h/npm/etc")" = kcuser ] && [ "$(stat -c %U "$g")" = kcuser ]
+  [ "$(stat -c %U "$h/npm/etc")" = kcuser ]
+  [ "$(stat -c %U "$g")" = kcuser ]
   grep -q 'self-check sha256:' "$g"
   asuser
   [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
@@ -408,7 +416,8 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   g=/opt/kcprefix/etc/npmrc
   asuser
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  [ "$(stat -c %U "$g")" = kcuser ] && [ "$(stat -c %U /opt/kcprefix/etc)" = kcuser ]
+  [ "$(stat -c %U "$g")" = kcuser ]
+  [ "$(stat -c %U /opt/kcprefix/etc)" = kcuser ]
   rm -rf /opt/kcprefix
   rm -f /etc/sudoers.d/kcuser; userdel -r kcuser 2>/dev/null || true
 }

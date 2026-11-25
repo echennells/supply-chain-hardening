@@ -433,7 +433,7 @@ ucfg_backup_of() {
   # the role's own files as v2.0.0 wrote them, before they carried a marker
   local fx=/opt/test-fixtures/user-config/v2.0.0-role
   [ -d "$fx" ] || fx="$ROLE_DIR/tests/fixtures/user-config/v2.0.0-role"
-  ! grep -l 'Managed by' "$fx/cargo" "$fx/maven"
+  ! grep -l 'Managed by' "$fx/cargo" "$fx/maven" || false
   cp "$fx/cargo" "$T/home/.cargo/config.toml"
   cp "$fx/maven" "$T/home/.m2/settings.xml"
   # dotnet's first-run file as SDK 8.0.134 writes it (UTF-8 BOM, no final
