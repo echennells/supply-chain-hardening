@@ -2923,7 +2923,7 @@ require_privilege() {
     # Status must be one of APPLIED / PARTIAL / INERT / NONE — an invented word
     # lands in neither summary list and the ecosystem disappears from the verdict
     # line while still showing in the table below it.
-    set_eco_status "$tool" "$status" "${msg//@WHY@/$why}"
+    degrade_eco "$tool" "$status" "${msg//@WHY@/$why}"
     return 1
   fi
   # The directory lets this account in, but the wrapper already there is
@@ -2938,7 +2938,7 @@ require_privilege() {
      && is_our_wrapper "$target"; then
     owner=$(ls -ld -- "$target" | awk '{print $3}')
     warn "$tool: the PATH wrapper at $target belongs to $owner, from an earlier hardening run, and is left as it is: this job has no root and no usable sudo to replace a file $owner owns. It still runs when $(id -un) calls $tool. To update it, re-run harden.sh as $owner or with sudo."
-    set_eco_status "$tool" "$status" "PATH wrapper not re-deployed: the one at $target belongs to $owner and this job has no root and no usable sudo. Config-file layer still applies."
+    degrade_eco "$tool" "$status" "PATH wrapper not re-deployed: the one at $target belongs to $owner and this job has no root and no usable sudo. Config-file layer still applies."
     return 1
   fi
   return 0
@@ -3029,14 +3029,15 @@ degrade_eco() {
   set_eco_status "$1" "$st" "${prev:+$prev; }$note"
 }
 
-# version_unread <tool> <version> <what depends on it>: 0 when the tool is here and
-# gave no version, after recording that. Whether it implements what was written is
+# version_unread <tool> <version> <what depends on it> [its command]: 0 when the tool
+# is here and gave no version, after recording that. Whether it implements what was written is
 # then not known, so it is not "applied". A tool that is not installed is not this:
 # its settings wait for the one a later step installs.
 version_unread() {
-  [[ -z "$2" ]] && command -v "$1" >/dev/null 2>&1 || return 1
-  warn "\`$1 --version\` failed or printed no version, so it is not known which $1 this is: $3. The settings are written. Run \`$1 --version\` to see why, then run this again."
-  degrade_eco "$1" PARTIAL "settings written, but \`$1 --version\` failed or printed no version: $3"
+  local cmd="${4:-$1}"
+  [[ -z "$2" ]] && command -v "$cmd" >/dev/null 2>&1 || return 1
+  warn "\`$cmd --version\` failed or printed no version, so it is not known which $1 this is: $3. The settings are written. Run \`$cmd --version\` to see why, then run this again."
+  degrade_eco "$1" PARTIAL "settings written, but \`$cmd --version\` failed or printed no version: $3"
 }
 
 # wrap_skipped <ecosystem> <tool> <wrapper path> [status]: our wrapper is at that
@@ -3449,7 +3450,23 @@ only-binary = :all:
 EOF
 
   HARDENED+=("pip")
-  set_tool_version "pip" "$(detect_version pip "pip --version")"
+  # A Mac or a slim image may have pip3 and no pip.
+  local pip_cmd=pip pip_version
+  command -v pip >/dev/null 2>&1 || pip_cmd=pip3
+  pip_version=$(detect_version pip "$pip_cmd --version")
+  set_tool_version "pip" "$pip_version"
+  # SAY IT HERE, NOT ONLY IN THE VERIFIER: the npm rule, for pip. An older pip takes the
+  # key and enforces nothing. The role's pip is uv pip ("uv-pip 0.13.9 from ..."), which
+  # has uv's gate and is not judged by this.
+  if [[ -n "$pip_version" ]] && ! version_ge "$pip_version" "26.0"; then
+    case "$(cd / && "$pip_cmd" --version 2>/dev/null || true)" in
+      "pip "*)
+        warn "pip $pip_version does NOT implement uploaded-prior-to (added in pip 26.0) — the age gate is written and NOT enforced. only-binary=:all: still applies. Install pip 26.0 or later before this step to make it effective."
+        degrade_eco pip INERT "age gate written but pip $pip_version does not implement uploaded-prior-to (pip 26.0); only-binary still applies" ;;
+    esac
+  else
+    version_unread pip "$pip_version" "the age gate needs pip 26.0" "$pip_cmd" || true
+  fi
   log "pip: only-binary=:all: (refuses sdist setup.py execution), uploaded-prior-to=$UV_EXCLUDE_NEWER (pip 26.0+ age gate)"
   end_section
 }
@@ -3647,6 +3664,9 @@ harden_composer() {
 
   if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.11.0"; then
     notice "composer $composer_version ignores config.policy.cooldown (MEASURED: added in 2.11.0), so the publish-age gate is written and NOT enforced on this runner. Install a current composer before this step to activate it."
+    degrade_eco composer INERT "age gate written but composer $composer_version ignores policy.cooldown (composer 2.11.0)"
+  else
+    version_unread composer "$composer_version" "the age gate needs composer 2.11.0" || true
   fi
 
   if [[ -n "$composer_version" ]] && ! version_ge "$composer_version" "2.8.6"; then
@@ -4091,6 +4111,14 @@ harden_bun() {
 
   HARDENED+=("bun")
   set_tool_version "bun" "$bun_version"
+  # The notices above, in the verdict too.
+  if [[ -n "$bun_version" ]] && ! version_ge "$bun_version" "1.2.0"; then
+    degrade_eco bun INERT "bun $bun_version reads neither ignoreScripts (bun 1.2.0) nor minimumReleaseAge (bun 1.3.0) from a bunfig"
+  elif [[ -n "$bun_version" ]] && ! version_ge "$bun_version" "1.3.0"; then
+    degrade_eco bun INERT "age gate not written: bun $bun_version has no minimumReleaseAge (bun 1.3.0); ignoreScripts still applies"
+  else
+    version_unread bun "$bun_version" "ignoreScripts needs bun 1.2.0 and the age gate bun 1.3.0" || true
+  fi
 
   # PATH wrapper at the DISCOVERED bun location (wrap in-place — same
   # pattern as deno). Critical for CI runners where bun is commonly

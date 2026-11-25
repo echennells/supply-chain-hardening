@@ -137,8 +137,8 @@ outputs:
     description: >-
       Ecosystems that got something but not everything — a config file written
       while the PATH wrapper it needs could not be deployed, or a setting the
-      installed tool version does not implement, or npm, pnpm or yarn would not
-      say which version it is. Partially protected.
+      installed tool version does not implement, or npm, pnpm, yarn, pip,
+      bun or composer would not say which version it is. Partially protected.
     value: ${{ steps.harden.outputs.ecosystems_degraded }}
   ecosystems-ineffective:
     description: >-
