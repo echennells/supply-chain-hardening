@@ -9,6 +9,9 @@
 # Each one skips when its tool is absent rather than failing, so the suite
 # stays useful on a bare checkout and gets stricter on a fuller machine.
 
+# `run --separate-stderr`: npm's warnings must not be read as its answer.
+bats_require_minimum_version 1.5.0
+
 load helpers
 
 setup() { common_setup; }
@@ -71,7 +74,8 @@ JSON
 @test "npm: the hardened npmrc is what npm actually reads" {
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  # Only the answer: npm's warnings are stderr's, and the next test's subject.
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }
@@ -79,9 +83,38 @@ JSON
 @test "npm: npm reports the age gate under the key we wrote" {
   have npm || skip "npm not installed"
   harden ECOSYSTEMS=npm RELEASE_AGE_HOURS=96 -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$TEST_HOME" npm config get min-release-age
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get min-release-age
   [ "$status" -eq 0 ]
-  [ "$output" = "4" ]
+  if npm_ge 11.14.0 || ! npm_ge 11.2.0; then
+    [ "$output" = "4" ]
+  elif npm_ge 11.10.0; then
+    # MEASURED on 11.10.0 to 11.13.0: npm enforces the key and prints null for it,
+    # and prints the cutoff it became as `before`.
+    [ "$output" = "null" ]
+    run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get before
+    [ "$output" != "null" ]
+  else
+    # 11.2.0 to 11.9.0 do not know the key and warn about it, so it is not written.
+    [ "$output" = "undefined" ]
+  fi
+}
+
+@test "npm: no npm command warns about a key or variable the hardening wrote" {
+  # npm 11.2.0 to 11.9.0 print `npm warn Unknown user config "min-release-age"` (or
+  # env, or global) on every command for a key they do not know. Asked of the real
+  # npm with the files and the env layer in force, and with each on its own.
+  have npm || skip "npm not installed"
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  local v="npm $(npm --version 2>/dev/null)"
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" npm config get ignore-scripts
+  [ "$output" = true ]
+  [[ "$stderr" != *"Unknown"* ]] || { echo "$v, the files: $stderr"; false; }
+  mkdir -p "$BATS_TEST_TMPDIR/nohome"
+  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/nohome" bash -c "source '$ENV_FILE'; npm config get ignore-scripts"
+  [ "$output" = true ]
+  [[ "$stderr" != *"Unknown"* ]] || { echo "$v, the env layer: $stderr"; false; }
+  run --separate-stderr env -i PATH="$PATH" HOME="$TEST_HOME" bash -c "source '$ENV_FILE'; npm --version"
+  [[ "$stderr" != *"Unknown"* ]] || { echo "$v, both: $stderr"; false; }
 }
 
 # --- npm: git dependencies under setup-node's redirect ----------------------
@@ -119,14 +152,6 @@ npm_install_git_dep() {
   local -a envs=(PATH="$PATH" HOME="$TEST_HOME" NPM_CONFIG_USERCONFIG="$rt/.npmrc" NODE_AUTH_TOKEN=XXXXX-XXXXX-XXXXX-XXXXX)
   while IFS= read -r kv; do [ -n "$kv" ] && envs+=("$kv"); done < "$TEST_TMP/ghenv"
   run env -i "${envs[@]}" "$@" npm install --prefix "$proj" --no-audit --no-fund
-}
-
-# npm_ge <version>: the npm on PATH is at least <version>. awk, not sort -V,
-# which the macOS runners' sort may lack.
-npm_ge() {
-  awk -v a="$(npm --version 2>/dev/null)" -v b="$1" 'BEGIN { split(a, x, "."); split(b, y, ".")
-    for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
-    exit 0 }'
 }
 
 @test "npm: under setup-node's NPM_CONFIG_USERCONFIG, a git dependency is refused (allow-git=none from the env layer)" {
@@ -207,7 +232,7 @@ TOML
   # This is the mechanism a Drone/Woodpecker step or a Dockerfile would use:
   # config files came along on disk, and the env layer is picked up by hand.
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome2" bash -c "
+  run --separate-stderr env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/cleanhome2" bash -c "
     mkdir -p '$BATS_TEST_TMPDIR/cleanhome2'
     source '$ENV_FILE'
     npm config get ignore-scripts"
@@ -217,15 +242,31 @@ TOML
 
 # --- bundler ----------------------------------------------------------------
 
+# bundle_read <key>: the arguments that ask this bundler for a key. `config get` is
+# Bundler 2.1's. Before that, macOS's /usr/bin/bundle (1.17.2) included, it parses as
+# "set the key `get` to <key>": it WRITES BUNDLE_GET to ~/.bundle/config, prints
+# nothing, and exits 0. `config <key>` reads there.
+bundle_read() {
+  local v
+  v=$(cd / && bundle --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  case "$v" in
+    0.*|1.*|2.0) printf 'config %s' "$1" ;;
+    *)           printf 'config get %s' "$1" ;;
+  esac
+}
+
 @test "bundler: bundler itself reads our age gate back" {
   # PARSED-strength: proves bundler read our file and accepted the key. Note
   # what this does NOT prove — see the next test.
   have bundle || skip "bundler not installed"
   harden ECOSYSTEMS=bundler -- --emit=plain >/dev/null
-  run env -i PATH="$PATH" HOME="$TEST_HOME" bundle config get cooldown
+  # shellcheck disable=SC2046  # two or three words, on purpose
+  run env -i PATH="$PATH" HOME="$TEST_HOME" bundle $(bundle_read cooldown)
   [ "$status" -eq 0 ]
   [[ "$output" == *"2"* ]]
   [[ "$output" == *".bundle/config"* ]]
+  # Asking wrote nothing, on any bundler.
+  assert_file_lacks "$TEST_HOME/.bundle/config" "BUNDLE_GET"
 }
 
 @test "bundler: config get echoes ANY key, so it is not evidence on its own" {
@@ -234,10 +275,12 @@ TOML
   # the file was READ, not that the setting is implemented. This test exists so
   # nobody later mistakes the test above for proof of enforcement.
   have bundle || skip "bundler not installed"
+  # shellcheck disable=SC2046
   run env -i PATH="$PATH" HOME="$TEST_HOME" \
-    BUNDLE_TOTALLY_FAKE_KEY=9 bundle config get totally_fake_key
+    BUNDLE_TOTALLY_FAKE_KEY=9 bundle $(bundle_read totally_fake_key)
   [ "$status" -eq 0 ]
   [[ "$output" == *"9"* ]]
+  assert_file_lacks "$TEST_HOME/.bundle/config" "BUNDLE_GET"
 }
 
 @test "bundler: cooldown is a real registered setting, not an echoed one" {

@@ -8,10 +8,12 @@ load setup
 }
 
 @test "npmrc: allow-git=none" {
+  if npm_warns_about 11.9.0; then skip "npm $(npm --version) warns about the key, so the role leaves it out"; fi
   assert_file_contains "$HOME/.npmrc" "allow-git=none"
 }
 
 @test "npmrc: min-release-age set" {
+  if npm_warns_about 11.10.0; then skip "npm $(npm --version) warns about the key, so the role leaves it out"; fi
   assert_file_contains "$HOME/.npmrc" "min-release-age="
 }
 
@@ -259,6 +261,7 @@ load setup
 }
 
 @test "/etc/npmrc: min-release-age set (sudo-safe npm age gate)" {
+  if npm_warns_about 11.10.0; then skip "npm $(npm --version) warns about the key, so the role leaves it out"; fi
   assert_file_contains "/etc/npmrc" "min-release-age="
 }
 

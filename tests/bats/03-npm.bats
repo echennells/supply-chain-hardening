@@ -54,6 +54,7 @@ load setup
 }
 
 @test "npm: .npmrc contains allow-git=none (file-content check)" {
+  if npm_warns_about 11.9.0; then skip "npm $(npm --version) warns about the key, so the role leaves it out"; fi
   # File-content layer only. `npm config get allow-git` returns the literal
   # value from .npmrc regardless of whether npm honors the key — so a test
   # asserting "config get returns 'none'" passes whether the key is real
@@ -110,7 +111,7 @@ npm_git_project() {
   # skips ~/.npmrc; a project .npmrc can say allow-git=all. NPM_CONFIG_ALLOW_GIT
   # outranks both (MEASURED on npm 11.9.0 to 12.2.3).
   printf '%s\n%s\n' 11.9.0 "$(npm --version 2>/dev/null)" | sort -V -C \
-    || skip "npm $(npm --version 2>/dev/null) predates allow-git (11.9.0), and the role does not export it there"
+    || skip "npm $(npm --version 2>/dev/null) predates allow-git (11.9.0), so nothing can refuse the dependency"
   command -v git >/dev/null || skip "git not installed"
   local d="$BATS_TEST_TMPDIR/gitproj" rc="$BATS_TEST_TMPDIR/redirected-npmrc"
   npm_git_project "$d"

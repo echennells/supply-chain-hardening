@@ -434,6 +434,33 @@ fixture() { # <version-surface>: put its files where they go
   ! grep -E 'SECRET|HOST|\$\{[A-Z]' "$BATS_TEST_TMPDIR/log" || false
 }
 
+@test "npmrc: a key npm would warn about is left out, an older version's line for it too, and one of the user's own stays" {
+  # npm 11.2 to 11.9 warn about a key they do not know, wherever it is. npm_writes_key
+  # in harden.sh decides; here it is the file that has to follow.
+  bare_path
+  stub_npm 11.5.1
+  local s
+  for s in v2.0.0-action v2.1.0-action v2.1.0-role; do
+    cp "$ROOT/tests/fixtures/user-config/$s/npmrc" "$(f npmrc)"
+    printf '//registry.example/:_authToken=SECRET\n' >> "$(f npmrc)"
+    harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain > "$BATS_TEST_TMPDIR/log" 2>&1
+    ! grep -E '^(min-release-age|allow-git)' "$(f npmrc)" || false
+    grep -qx 'ignore-scripts=true' "$(f npmrc)"
+    grep -q SECRET "$(f npmrc)"
+    ! grep -E 'took your own|SECRET' "$BATS_TEST_TMPDIR/log" || false
+  done
+  [ -z "$(copies npmrc)" ]
+  printf 'min-release-age=9\nallow-git=all\n' > "$(f npmrc)"
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain > "$BATS_TEST_TMPDIR/log" 2>&1
+  [ "$(grep -cxE 'min-release-age=9|allow-git=all' "$(f npmrc)")" -eq 2 ]
+  # and back, once npm knows them: then they are settings like the others
+  stub_npm 11.19.1
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain > "$BATS_TEST_TMPDIR/log" 2>&1
+  grep -q 'took your own setting of allow-git out of' "$BATS_TEST_TMPDIR/log"
+  grep -q "kept your own min-release-age" "$BATS_TEST_TMPDIR/log"
+  grep -qx 'min-release-age=2' "$(f npmrc)"
+}
+
 @test "npmrc: before, which npm uses instead of min-release-age, is kept and named" {
   # MEASURED on npm 11.19.1 and 12.2.3: with min-release-age=36500 and
   # before=<yesterday> in one file, in either order, the install goes through.

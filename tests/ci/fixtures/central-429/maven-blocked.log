@@ -1,0 +1,30 @@
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-metadata.xml (10 kB at 410 kB/s)
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/codehaus/mojo/maven-metadata.xml (20 kB at 422 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/maven-metadata.xml
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/maven-metadata.xml (1.4 kB at 54 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/3.11.0/maven-dependency-plugin-3.11.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/3.11.0/maven-dependency-plugin-3.11.0.pom (19 kB at 613 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/3.11.0/maven-dependency-plugin-3.11.0.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/3.11.0/maven-dependency-plugin-3.11.0.jar (262 kB at 6.4 MB/s)
+[INFO] 
+[INFO] ---------------------------< victim:victim >----------------------------
+[INFO] Building victim 1.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO] Loaded 24613 auto-discovered prefixes for remote repository central (prefixes-central.txt)
+[INFO] ------------------------------------------------------------------------
+[ERROR] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  2.558 s
+[INFO] Finished at: 2026-11-24T17:33:05Z
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal on project victim: Could not collect dependencies for project victim:victim:pom:1.0
+[ERROR] Failed to read artifact descriptor for com.example.blocked:only-on-http:jar:1.0
+[ERROR] 	Caused by: The following artifacts could not be resolved: com.example.blocked:only-on-http:pom:1.0 (absent): Could not transfer artifact com.example.blocked:only-on-http:pom:1.0 from/to central-https-only (https://repo.maven.apache.org/maven2): Blocked mirror for repositories: [http-repo (http://repo.example.com/maven2, default, releases+snapshots)] (additional failures: com.example.blocked:only-on-http:pom:1.0 from central: prefixes: Path com/example/blocked/only-on-http/1.0/only-on-http-1.0.pom NOT allowed from central)
+[ERROR] -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/DependencyResolutionException

@@ -138,6 +138,8 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
   done
   stub_bin sudo 'case "$1" in --version) echo "Sudo version 1.9.15" ;; -n) shift; [ "$1" = true ] ;; *) exit 1 ;; esac'
   ansible_at 2.21.6
+  # The play refuses a Mac, whatever else is right; this is about the rest.
+  stub_bin uname 'echo Linux'
   stub_bin date 'case "$*" in --version) echo "date (GNU coreutils) 9.4" ;; "-u -d @0 "*) echo 1970-01-01T00:00:00Z ;; *) exec /bin/date "$@" ;; esac'
   run preflight
   [[ "$output" == *"ansible-core 2.21.6"* ]]
@@ -150,6 +152,51 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
   [[ "$output" == *"Nothing above would stop the play"* ]]
   [[ "$output" == *"wait for their OK"* ]]
   [ "$status" -eq 0 ]
+}
+
+@test "preflight: a Mac is a STOP that names harden.sh, with no way past it; Linux is not" {
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a different report"
+  # MEASURED on hosted macos-15: the preflight cleared the host ("Nothing above
+  # would stop the play") and the play then died half way, after /etc/npmrc.
+  stub_bin sudo 'case "$1" in --version) echo "Sudo version 1.9.15" ;; -n) shift; [ "$1" = true ] ;; *) exit 1 ;; esac'
+  ansible_at 2.21.6
+  stub_bin date 'case "$*" in --version) echo "date (GNU coreutils) 9.4" ;; *) exec /bin/date "$@" ;; esac'
+  stub_bin uname 'case "${1:-}" in -s|"") echo Darwin ;; *) echo Darwin ;; esac'
+  run preflight
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"STOP  it is macOS, and the Ansible role supports Linux only"*"action/harden.sh --emit=plain"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Nothing above would stop the play"* ]]
+  # Nor does a date that is not GNU date send anyone off to install one there.
+  stub_bin date 'case "$*" in --version) echo "date: illegal option -- -" >&2; exit 1 ;; *) exec /bin/date "$@" ;; esac'
+  run preflight
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"GNU date"* && "$output" != *"coreutils"* && "$output" != *"brew"* ]] || { echo "$output"; false; }
+  # On Linux the same date is a STOP of its own, and macOS is not mentioned.
+  stub_bin uname 'echo Linux'
+  stub_bin date 'case "$*" in --version) exit 1 ;; "-u -d "*) exit 1 ;; *) exec /bin/date "$@" ;; esac'
+  run preflight
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"STOP  this machine's date is not GNU date"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"macOS"* && "$output" != *"brew"* ]] || { echo "$output"; false; }
+}
+
+@test "preflight: the role's macOS refusal is its first task, and no text sends a Mac past it" {
+  python3 -c 'import yaml' 2>/dev/null || skip "needs python3-yaml"
+  python3 - "$ROOT" <<'PY'
+import sys, yaml
+root = sys.argv[1]
+tasks = yaml.safe_load(open(root + "/tasks/preflight.yml", encoding="utf-8"))
+first = tasks[0]
+assert "ansible.builtin.fail" in first, first
+assert "ansible_system" in str(first["when"]) and "Darwin" in str(first["when"]), first["when"]
+assert "harden.sh" in first["ansible.builtin.fail"]["msg"]
+assert "become" not in first
+main = yaml.safe_load(open(root + "/tasks/main.yml", encoding="utf-8"))
+assert main[0]["ansible.builtin.include_tasks"]["file"] == "preflight.yml"
+for f in ("tasks/preflight.yml", "action/harden.sh", "defaults/main.yml"):
+    t = open(root + "/" + f, encoding="utf-8").read()
+    assert "brew install coreutils" not in t and "gnubin" not in t, f
+PY
 }
 
 @test "preflight: an Ansible below 2.14 is a STOP" {

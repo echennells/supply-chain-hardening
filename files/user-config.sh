@@ -795,8 +795,19 @@ ucf_npmrc_scan() (
     if [ "$k" = before ] && ours min-release-age; then
       note "unsure line $n, before, which npm uses instead of min-release-age"; return 1
     fi
-    ours "$k" || return 1
     if ucf_unsafe "$v"; then v=$REPLY; fi
+    if ! ours "$k"; then
+      # in a file an older version wrote whole, a key this run leaves out (npm 11.2 to
+      # 11.9 warn about one they do not know)
+      case "$old:$arr:$k=$v" in
+        :*|*:0:min-release-age=|*:0:min-release-age=*[!0-9]*) return 1 ;;
+        *:0:min-release-age=*|*:0:allow-git=none) ;;
+        *) return 1 ;;
+      esac
+      case "$seen" in *" $k "*) return 1 ;; esac
+      seen="$seen$k "
+      return 0
+    fi
     if [ "$arr" = 0 ]; then
       # the same setting the block has: nothing of the user's is lost
       case "$vals" in *"$nl$k=$v$nl"*) seen="$seen$k "; return 0 ;; esac

@@ -50,6 +50,27 @@ setup_file() {
   vars:
     env_t: "{{ role_dir }}/templates/supply-chain-env.sh.j2"
     refresh_t: "{{ role_dir }}/templates/age-gate-refresh.sh.j2"
+    npm_files:
+      - { t: supply-chain-env.sh.j2, e: sh }
+      - { t: npmrc.j2, e: npmrc }
+      - { t: etc-npmrc.j2, e: etc-npmrc }
+    # What tasks/npm_versions.yml prints: the npm in use first, then the others;
+    # "-" for one that does not say its version, nothing for none.
+    npm_hosts:
+      - { n: none, v: [] }
+      - { n: unreadable, v: ["-"] }
+      - { n: 9.2.0, v: ["9.2.0"] }
+      - { n: 10.9.8, v: ["10.9.8"] }
+      - { n: 11.1.0, v: ["11.1.0"] }
+      - { n: 11.2.0, v: ["11.2.0"] }
+      - { n: 11.8.0, v: ["11.8.0"] }
+      - { n: 11.9.0, v: ["11.9.0"] }
+      - { n: 11.10.0, v: ["11.10.0"] }
+      - { n: 12.2.3, v: ["12.2.3"] }
+      - { n: old-and-new, v: ["11.5.1", "11.19.1"] }
+      - { n: old-and-11.9.0, v: ["11.5.1", "11.9.0"] }
+      - { n: silent-in-use, v: ["9.2.0", "11.5.1"] }
+      - { n: warning-in-use, v: ["11.5.1", "9.2.0"] }
   tasks:
     - ansible.builtin.setup: { gather_subset: [min] }
     - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/default.sh" }
@@ -72,11 +93,9 @@ setup_file() {
       vars: { pnpm_minimum_release_age_exclude: ["@myorg/internal", "left-pad"] }
     - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/allow.sh" }
       vars: { pnpm_built_dependencies: ["esbuild"] }
-    - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/npm-{{ item }}.sh" }
-      vars: { npm_version_check: { stdout: "{{ item }}" } }
-      loop: ["10.9.8", "11.2.0", "11.8.0", "11.9.0", "12.2.3"]
-    - ansible.builtin.template: { src: "{{ env_t }}", dest: "{{ out }}/npm-scoped-11.8.0.sh" }
-      vars: { sch_env_npm_version: { stdout: "11.8.0" } }
+    - ansible.builtin.template: { src: "{{ role_dir }}/templates/{{ item.0.t }}", dest: "{{ out }}/npm-{{ item.1.n }}.{{ item.0.e }}" }
+      vars: { sch_npm_versions_probe: { stdout_lines: "{{ item.1.v }}" } }
+      loop: "{{ npm_files | product(npm_hosts) | list }}"
     - ansible.builtin.template: { src: "{{ refresh_t }}", dest: "{{ out }}/refresh-optin", mode: "0755" }
       vars: { uv_exclude_newer_env: true, sch_refresh_uv: true, sch_refresh_pip: true, socket_firewall_install: false }
     - ansible.builtin.template: { src: "{{ refresh_t }}", dest: "{{ out }}/refresh-default", mode: "0755" }
@@ -162,16 +181,30 @@ uv_line() { grep -E '^export UV_EXCLUDE_NEWER=' "$1"; }
   done
 }
 
-@test "render: NPM_CONFIG_ALLOW_GIT follows the npm found: out below 11.9.0 (11.2 to 11.8 warn about it), in from 11.9.0 and with no npm" {
+@test "render: min-release-age and allow-git are left out of the npmrc files and the env layer exactly where npm warns about them" {
+  # MEASURED: npm 11.2.0 to 11.9.0 warn on every command about a key they do not
+  # know, older npm says nothing, and allow-git is known from 11.9.0,
+  # min-release-age from 11.10.0. With several npms the one in use decides, unless
+  # another one knows the key.
   needs_render npm-11.9.0.sh
-  local f
-  for f in default npm-11.9.0 npm-12.2.3; do
-    grep -qx 'export NPM_CONFIG_ALLOW_GIT=none' "$RENDER_DIR/$f.sh" || { echo "$f: not exported" >&2; return 1; }
+  local c n want a g f
+  for c in none:11 unreadable:11 9.2.0:11 10.9.8:11 11.1.0:11 11.2.0:00 11.8.0:00 11.9.0:01 11.10.0:11 12.2.3:11 \
+           old-and-new:11 old-and-11.9.0:01 silent-in-use:11 warning-in-use:00; do
+    n=${c%:*}; want=${c##*:}
+    for f in "$RENDER_DIR/npm-$n.npmrc" "$RENDER_DIR/npm-$n.etc-npmrc"; do
+      a=0; g=0
+      grep -qx 'min-release-age=2' "$f" && a=1
+      grep -qx 'allow-git=none' "$f" && g=1
+      [ "$a$g" = "$want" ] || { echo "$f: min-release-age=$a allow-git=$g, expected $want" >&2; return 1; }
+      grep -qx 'ignore-scripts=true' "$f"
+    done
+    f="$RENDER_DIR/npm-$n.sh"; a=0; g=0
+    grep -qx 'export NPM_CONFIG_MIN_RELEASE_AGE=2' "$f" && a=1
+    grep -qx 'export NPM_CONFIG_ALLOW_GIT=none' "$f" && g=1
+    [ "$a$g" = "$want" ] || { echo "$f: min-release-age=$a allow-git=$g, expected $want" >&2; return 1; }
   done
-  # npm-scoped-11.8.0: a run scoped away from npm.yml, where shell_env.yml asks npm itself.
-  for f in npm-10.9.8 npm-11.2.0 npm-11.8.0 npm-scoped-11.8.0; do
-    ! grep -q 'ALLOW_GIT' "$RENDER_DIR/$f.sh" || { echo "$f: exported" >&2; return 1; }
-  done
+  # The default render is the host's own npm, through the same expressions.
+  grep -qx 'export NPM_CONFIG_IGNORE_SCRIPTS=true' "$RENDER_DIR/default.sh"
 }
 
 @test "deployed: /etc/environment has pnpm's age and empty exclude list; no UV_NO_BUILD or ignore_scripts anywhere" {

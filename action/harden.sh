@@ -925,8 +925,19 @@ ucf_npmrc_scan() (
     if [ "$k" = before ] && ours min-release-age; then
       note "unsure line $n, before, which npm uses instead of min-release-age"; return 1
     fi
-    ours "$k" || return 1
     if ucf_unsafe "$v"; then v=$REPLY; fi
+    if ! ours "$k"; then
+      # in a file an older version wrote whole, a key this run leaves out (npm 11.2 to
+      # 11.9 warn about one they do not know)
+      case "$old:$arr:$k=$v" in
+        :*|*:0:min-release-age=|*:0:min-release-age=*[!0-9]*) return 1 ;;
+        *:0:min-release-age=*|*:0:allow-git=none) ;;
+        *) return 1 ;;
+      esac
+      case "$seen" in *" $k "*) return 1 ;; esac
+      seen="$seen$k "
+      return 0
+    fi
     if [ "$arr" = 0 ]; then
       # the same setting the block has: nothing of the user's is lost
       case "$vals" in *"$nl$k=$v$nl"*) seen="$seen$k "; return 0 ;; esac
@@ -1052,16 +1063,17 @@ ucf_npmrc() {
 }
 # <<< user_config
 
-# npm_settings <days>: what goes in the npmrc files, after the marker line.
+# npm_settings <days> <min-release-age: true|false> <allow-git: true|false>: what goes in
+# the npmrc files, after the marker line. The last two as npm_writes_key says.
 npm_settings() {
   echo "; Managed by supply-chain-harden action
 ignore-scripts=true
 audit=true
 save-exact=true
 fund=false
-update-notifier=false
-min-release-age=$1
-allow-git=none"
+update-notifier=false"
+  if [[ "$2" == true ]]; then echo "min-release-age=$1"; fi
+  if [[ "$3" == true ]]; then echo "allow-git=none"; fi
 }
 
 # detect_version <key> <command>: returns the version string the command
@@ -1109,6 +1121,49 @@ version_ge() {
     if (( av < bv )); then return 1; fi
   done
   return 0  # equal counts as ge
+}
+
+# is_our_wrapper <file>: whether this file is a PATH wrapper this project wrote,
+# judged by its first two lines and nothing else. Every wrapper either surface
+# has shipped opens with a shell shebang and then one of these lines (read from
+# every commit that touched action/harden.sh or templates/*-wrapper.sh.j2, and
+# v2.0.0's and v2.1.0's were generated and checked):
+#   # Managed by supply-chain-harden action     composer, bun, npm, npx
+#   # Managed by supply-chain-harden            bunx
+#   # cargo — supply-chain-harden wrapper       cargo, deno
+#   # ... — supply-chain-hardening wrapper      the role's, every tool
+# It used to be `grep -q "supply-chain-harden"` over the whole file, so a script
+# that only mentions the name read as an existing wrapper: MEASURED, a cargo
+# script with "kept in a supply-chain-hardening checkout" in a comment was left
+# unwrapped and the run ended "applied: cargo" (issue 48, item 3).
+# The first 512 bytes are enough, and a real tool is often a binary of many MB.
+is_our_wrapper() {
+  local two
+  [ -f "$1" ] || return 1
+  two=$(head -c 512 "$1" 2>/dev/null | LC_ALL=C tr -d '\000\r' | LC_ALL=C sed -n '1,2p') || return 1
+  case "$two" in
+    '#!/bin/bash'$'\n'*|'#!/bin/sh'$'\n'*) two=${two#*$'\n'} ;;
+    *) return 1 ;;
+  esac
+  case "$two" in
+    '# Managed by supply-chain-harden action'|'# Managed by supply-chain-harden') return 0 ;;
+    '# cargo — supply-chain-harden wrapper'|'# deno — supply-chain-harden wrapper') return 0 ;;
+    '# '*' — supply-chain-hardening wrapper'|'# '*' — supply-chain-hardening wrapper:'*) return 0 ;;
+  esac
+  return 1
+}
+
+# pnpm_config_dir: the directory pnpm reads its user config from, as pnpm's own
+# getConfigDir does: $XDG_CONFIG_HOME/pnpm when that is set, on every platform;
+# ~/Library/Preferences/pnpm on macOS; ~/.config/pnpm otherwise. The same rule as
+# tasks/pnpm.yml and scv_pnpm_dir in files/verify-probes.sh. This script wrote
+# ~/.config/pnpm everywhere. MEASURED on GitHub's macos-15 (XDG_CONFIG_HOME unset):
+# pnpm 11.29.0 then ran a project's postinstall with every ecosystem hardened and
+# reported minimumReleaseAge undefined (issue 48, item 2).
+pnpm_config_dir() {
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/pnpm' "$XDG_CONFIG_HOME"
+  elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then printf '%s/Library/Preferences/pnpm' "$HOME"
+  else printf '%s/.config/pnpm' "$HOME"; fi
 }
 
 # ---- --suggest: tell a repo what it needs BEFORE the first failed build ----
@@ -1802,6 +1857,14 @@ preflight_report() {
   echo "supply-chain-hardening preflight for ${me}@$(hostname 2>/dev/null || echo this host). It reads; it changes nothing."
   echo ""
 
+  # tasks/preflight.yml refuses a macOS target first of all. This runs on the
+  # host that would be hardened, so here it is this machine.
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    echo "This machine:"
+    _pf_stop "it is macOS, and the Ansible role supports Linux only: the play refuses it before anything is written. Use action/harden.sh --emit=plain here (AGENTS.md, \"Apply without Ansible\"). Applying the role FROM a Mac to a Linux host works; run this on that host."
+    echo ""
+  fi
+
   echo "Who would run the play (as this user, without sudo or --become):"
   _pf_line "user $me (uid $uid), HOME=${HOME:-<unset>}"
   if [ -z "${HOME:-}" ]; then
@@ -1851,14 +1914,13 @@ preflight_report() {
   else
     _pf_stop "ansible-playbook not found. Install ansible-core >= 2.14 for this user, or use action/harden.sh --emit=plain (narrower, see AGENTS.md)."
   fi
-  # The role's probe is `date -u -d @0`. BSD date (macOS) reads -d as "set the
-  # kernel's daylight-saving value", so there the probe is not run at all.
+  # The role's probe is `date -u -d @0`. Not on macOS, where the play stops above
+  # and BSD date reads -d as "set the kernel's daylight-saving value".
   f=$(date --version 2>/dev/null | head -1) || true
-  if [ "${f#*GNU}" != "$f" ]; then
+  if [ "${f#*GNU}" != "$f" ] || [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     :
-  elif [ "$(uname -s 2>/dev/null)" = Darwin ] \
-       || [ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" != "1970-01-01T00:00:00Z" ]; then
-    _pf_stop "this machine's date is not GNU date, which the role's rolling uv/pip cutoff needs (macOS: brew install coreutils and put its gnubin first on PATH for this shell, or pin uv_exclude_newer to an instant)."
+  elif [ "$(date -u -d @0 +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" != "1970-01-01T00:00:00Z" ]; then
+    _pf_stop "this machine's date is not GNU date, which the role's rolling uv/pip cutoff needs (install GNU coreutils and put its date first on PATH for this shell, or pin uv_exclude_newer to an instant)."
   fi
 
   echo ""
@@ -1918,7 +1980,13 @@ preflight_report() {
   _pf_npmrc() { # ~/.npmrc is merged, so it never stops the play; say what changes in it
     case "$hours" in ""|*[!0-9]*) hours=48 ;; esac
     hours=$((10#$hours / 24)); [ "$hours" -ge 1 ] || hours=1
-    out=$(npm_settings "$hours" | UCF_DRY=1 ucf_npmrc "$f") || true
+    local npm_v npm_vs npm_age=true npm_git=true
+    npm_v=$(type -P npm 2>/dev/null) || npm_v=""
+    [ -z "$npm_v" ] || npm_v=$(_pf_version npm "$npm_v")
+    npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
+    npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
+    npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
+    out=$(npm_settings "$hours" "$npm_age" "$npm_git" | UCF_DRY=1 ucf_npmrc "$f") || true
     gone="" maybe="" longer="" mode=""
     while IFS= read -r l; do
       case "$l" in
@@ -2044,7 +2112,7 @@ _pf_version() {
       # fetch a release to answer, and npm is node startup either way. A wrapper
       # this project deployed names the real binary in REAL_NPM=.
       r=$2
-      if grep -q 'supply-chain-harden' "$r" 2>/dev/null; then
+      if is_our_wrapper "$r"; then
         d=$(sed -n "s/^REAL_[A-Z]*='\([^']*\)'.*/\1/p" "$r" 2>/dev/null | head -1) || true
         [ -n "$d" ] && r=$d
       fi
@@ -2063,6 +2131,71 @@ _pf_version() {
     *) : ;;
   esac
   return 0
+}
+
+# ---- which npm keys this host's npm takes ----
+#
+# npm prints `npm warn Unknown user config "<key>". This will stop working in the
+# next major version of npm.` on every command, for a key in any npmrc or
+# NPM_CONFIG_* variable that it does not know. MEASURED, each in ~/.npmrc, in the
+# global npmrc and in the environment:
+#   8.19.4 to 11.1.0     say nothing about a key they do not know
+#   11.2.0 to 11.8.0     warn about min-release-age and allow-git
+#   11.9.0               knows allow-git, warns about min-release-age
+#   11.10.0 to 12.2.3    know both
+# So a key is left out, of the files and of the environment, where the npm in use
+# would warn about it, and written everywhere else. Below 11.2.0 it stays in: nothing is
+# printed there, and a newer npm installed later honours it at once (the action
+# run before setup-node; apt's npm 9.2.0 next to an fnm one), so leaving it out
+# would take a gate away and spare nobody anything.
+#
+# SEVERAL NPMS. The one on PATH decides, unless another one found here knows the
+# key: then it is written, because a warning from the old one is noise and a missing
+# gate in the new one is a hole. An npm in no place looked at does not count; run this again
+# after installing or upgrading npm. With no npm, or one that does not say its
+# version, both keys are written, as before.
+NPM_WARNS_FROM="11.2.0"
+NPM_KNOWS_MIN_RELEASE_AGE="11.10.0"
+NPM_KNOWS_ALLOW_GIT="11.9.0"
+
+# npm_versions_found <version of the npm on PATH>: that, then every other npm on
+# PATH and in this user's version managers, one version per line.
+npm_versions_found() {
+  local p f
+  [ -z "$1" ] || printf '%s\n' "$1"
+  while IFS= read -r p; do
+    [ -z "$p" ] || _pf_version npm "$p"
+  done < <(type -ap npm 2>/dev/null || true)
+  # >>> npm installs
+  # The same list in tasks/npm_versions.yml (tests/ci/03-config-files.bats compares
+  # them). Versions are read from each npm's package.json: nothing is run.
+  for f in "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/lib/node_modules/npm/package.json \
+           "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "$HOME"/.local/share/fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "$HOME"/.fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "$HOME/Library/Application Support"/fnm/node-versions/*/installation/lib/node_modules/npm/package.json \
+           "${VOLTA_HOME:-$HOME/.volta}"/tools/image/npm/*/package.json \
+           "${VOLTA_HOME:-$HOME/.volta}"/tools/image/node/*/lib/node_modules/npm/package.json \
+           "${ASDF_DATA_DIR:-$HOME/.asdf}"/installs/nodejs/*/lib/node_modules/npm/package.json \
+           "${NODENV_ROOT:-$HOME/.nodenv}"/versions/*/lib/node_modules/npm/package.json \
+           "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/node/*/lib/node_modules/npm/package.json \
+           "${N_PREFIX:-/usr/local}"/n/versions/node/*/lib/node_modules/npm/package.json; do
+    [ -f "$f" ] || continue
+    sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\).*/\1/p' "$f" 2>/dev/null | head -n 1
+  done
+  # <<< npm installs
+  return 0
+}
+
+# npm_writes_key <first npm that knows the key> <version in use> <versions found>
+npm_writes_key() {
+  local v
+  [ -n "$2" ] || return 0
+  version_ge "$2" "$NPM_WARNS_FROM" || return 0
+  while IFS= read -r v; do
+    if [ -n "$v" ] && version_ge "$v" "$1"; then return 0; fi
+  done <<<"$3"
+  return 1
 }
 
 if [ "$SUGGEST" = "1" ]; then
@@ -2738,7 +2871,7 @@ require_privilege() {
   # (root runs it), so leave it, say whose it is, and carry on with the
   # per-user layer. A tool binary that is not our wrapper is wrapped as before.
   if [[ "${CAN_ESCALATE:-0}" -ne 1 && -f "$target" && ! -O "$target" ]] \
-     && grep -q 'supply-chain-harden' "$target" 2>/dev/null; then
+     && is_our_wrapper "$target"; then
     owner=$(ls -ld -- "$target" | awk '{print $3}')
     warn "$tool: the PATH wrapper at $target belongs to $owner, from an earlier hardening run, and is left as it is: this job has no root and no usable sudo to replace a file $owner owns. It still runs when $(id -un) calls $tool. To update it, re-run harden.sh as $owner or with sudo."
     set_eco_status "$tool" "$status" "PATH wrapper not re-deployed: the one at $target belongs to $owner and this job has no root and no usable sudo. Config-file layer still applies."
@@ -2811,8 +2944,30 @@ eco_note_of() {
   printf ''
 }
 
+# degrade_eco <tool> <status> <note>: record a layer that did not land without
+# losing what an earlier layer recorded. Notes are joined, and NONE stays NONE.
+degrade_eco() {
+  local st="$2" note="$3" cur prev
+  cur=$(eco_status_of "$1"); prev=$(eco_note_of "$1")
+  [ "$cur" = NONE ] && st=NONE
+  set_eco_status "$1" "$st" "${prev:+$prev; }$note"
+}
+
+# wrap_skipped <ecosystem> <tool> <wrapper path> [status]: our wrapper is at that
+# path and the real tool is not beside it, so there is nothing to wrap. The
+# wrapper there refuses to run ("real <tool> not found ... refusing to recurse")
+# unless it names its real tool elsewhere, as the role's npm wrapper does. Either
+# way this run deployed no wrapper. It used to warn and still end
+# "applied: <ecosystem>".
+wrap_skipped() {
+  local eco="$1" tool="$2" path="$3" st="${4:-PARTIAL}"
+  warn "$tool: a wrapper this project wrote is at $path and ${path}-real is missing, so it was left as it is and no $tool wrapper was deployed. If $tool refuses to run, reinstall it over that file and run this again."
+  degrade_eco "$eco" "$st" "$tool PATH wrapper not deployed: one is already at $path and ${path}-real is missing"
+}
+
 HARDENED=()
 SFW_INSTALLED=false
+PNPM_ALLOWED=""
 
 # WRAPPERS ACTUALLY DEPLOYED, recorded for the verifier.
 #
@@ -2850,8 +3005,11 @@ set_tool_version() {
 
 harden_npm() {
   section "npm"
-  local npm_v
+  local npm_v npm_vs npm_age=true npm_git=true
   npm_v=$(detect_version npm "npm --version")
+  npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
+  npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
+  npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
   write_env NPM_CONFIG_IGNORE_SCRIPTS  true
   write_env NPM_CONFIG_AUDIT           true
   write_env NPM_CONFIG_SAVE_EXACT      true
@@ -2864,7 +3022,10 @@ harden_npm() {
   # NPM_CONFIG_USERCONFIG at it (src/authutil.ts, CHECKED 2026-11-22), so npm
   # skips ~/.npmrc, and a setup-node npm reads its prefix's etc/npmrc, not
   # /etc/npmrc. In that setup the env var is the only age gate npm sees.
-  write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
+  # Not where the npm here would warn about it: see npm_writes_key.
+  if [[ "$npm_age" == true ]]; then
+    write_env NPM_CONFIG_MIN_RELEASE_AGE "$NPM_AGE_DAYS"
+  fi
   # allow-git=none needs the env form for the same reason. Written only to the
   # files below, it was not applied under setup-node's redirect: npm 11.19.1
   # reported allow-git=all there and installed a git dependency (MEASURED
@@ -2872,16 +3033,13 @@ harden_npm() {
   # is an on/off switch at its strictest value, so a project can lose nothing
   # to it; a project's own .npmrc allow-git=all no longer re-enables git
   # dependencies (the variable outranks it, MEASURED on npm 11.9.0 to 12.2.3).
-  # Version-gated: npm reads allow-git from 11.9.0, and npm 11.2.0 to 11.8.x
-  # print `npm warn Unknown env config "allow-git"` on every command when it
-  # is set (MEASURED). An npm not found yet is assumed current, as for the age
-  # gate below.
-  if [[ -z "$npm_v" ]] || version_ge "$npm_v" "11.9.0"; then
+  # Version-gated the same way (npm 11.2.0 to 11.8.x warn about it).
+  if [[ "$npm_git" == true ]]; then
     write_env NPM_CONFIG_ALLOW_GIT none
   fi
 
   local content
-  content=$(npm_settings "$NPM_AGE_DAYS")
+  content=$(npm_settings "$NPM_AGE_DAYS" "$npm_age" "$npm_git")
 
   # Merged, never replaced: it is where `npm login` keeps its token.
   put_user_cfg npmrc "$HOME/.npmrc" <<<"$content"
@@ -2900,10 +3058,16 @@ harden_npm() {
   # The version is already in hand from detect_version, so this costs nothing.
   # Leaving it to `action/verify.sh` put the truth behind an opt-in step, while
   # the mandatory tool asserted the opposite.
-  if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.9.0"; then
-    log "npm: allow-git=none written to the npmrc files, but npm $npm_v predates it (npm 11.9.0), so git dependencies still install; NPM_CONFIG_ALLOW_GIT not exported"
+  if [[ "$npm_git" != true ]]; then
+    log "npm: allow-git left out of the npmrc files and the environment: npm $npm_v predates it (npm 11.9.0) and warns about it on every command. Git dependencies still install; upgrade npm, then run this again"
+  elif [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "$NPM_KNOWS_ALLOW_GIT"; then
+    log "npm: allow-git=none written, but npm $npm_v predates it (npm 11.9.0), so git dependencies still install"
   fi
-  if [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "11.10.0"; then
+  if [[ "$npm_age" != true ]]; then
+    warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) and warns about it on every command, so the age gate is NOT written to the npmrc files or the environment and NOT enforced. Script blocking is unaffected. Upgrade npm to 11.10 or newer, then run this again, to get it."
+    set_eco_status npm INERT "age gate not written: npm $npm_v does not implement min-release-age and warns about it on every command; script blocking still applies"
+    log "npm: ignore-scripts=true (no age gate on npm $npm_v)"
+  elif [[ -n "$npm_v" ]] && ! version_ge "$npm_v" "$NPM_KNOWS_MIN_RELEASE_AGE"; then
     warn "npm $npm_v does NOT implement min-release-age (added in npm 11.10.0) — the age gate is written and NOT enforced. Script blocking is unaffected. Install npm >= 11.10 before this action (e.g. setup-node 24, or npm i -g npm@latest) to make it effective."
     set_eco_status npm INERT "age gate written but npm $npm_v does not implement min-release-age; script blocking still applies"
     log "npm: ignore-scripts=true (age gate written but INERT on npm $npm_v)"
@@ -2915,7 +3079,8 @@ harden_npm() {
 
 harden_pnpm() {
   section "pnpm"
-  mkdir -p "$HOME/.config/pnpm"
+  local pnpm_dir
+  pnpm_dir=$(pnpm_config_dir)
 
   # Parse pnpm_built_dependencies input (comma-separated allowlist).
   # When non-empty: switch from blanket ignore-scripts=true to
@@ -2988,7 +3153,7 @@ harden_pnpm() {
     # default on pnpm 11 before 11.28.1 and 12 before 12.8.0 (MEASURED with
     # CI=true and an out-of-sync lockfile: the lockfile was rewritten).
     echo "verifyStoreIntegrity: true"
-  } | put_user_cfg pnpm-yaml "$HOME/.config/pnpm/config.yaml"
+  } | put_user_cfg pnpm-yaml "$pnpm_dir/config.yaml"
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
   # both major versions; pnpm 10 still reads this file.
@@ -3005,7 +3170,7 @@ harden_pnpm() {
     else
       echo "ignore-scripts=true"
     fi
-  } | put_user_cfg pnpm-rc "$HOME/.config/pnpm/rc"
+  } | put_user_cfg pnpm-rc "$pnpm_dir/rc"
 
   # NO pnpm_config_* VARIABLES ARE EXPORTED HERE, although the role exports two.
   # pnpm 11+ reads pnpm_config_* from the environment, and that outranks a
@@ -3033,6 +3198,11 @@ harden_pnpm() {
   # a repo's uv and composer config.
 
   HARDENED+=("pnpm")
+  # For the verifier: with an allowlist our own file says ignore-scripts=false.
+  if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
+    PNPM_ALLOWED=$(IFS=,; echo "${pnpm_allowlist[*]}")
+  fi
+  log "pnpm: config.yaml and rc in $pnpm_dir"
   local pnpm_version
   pnpm_version=$(detect_version pnpm "pnpm --version")
   set_tool_version "pnpm" "$pnpm_version"
@@ -3402,11 +3572,11 @@ harden_composer() {
 
   local wrapper_target="$real_composer"
   require_privilege composer "$wrapper_target" || { end_section; return 0; }
-  if grep -q "supply-chain-harden" "$real_composer" 2>/dev/null; then
+  if is_our_wrapper "$real_composer"; then
     if [[ -x "${real_composer}-real" ]]; then
       real_composer="${real_composer}-real"
     else
-      warn "composer wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped composer composer "$wrapper_target"
       end_section
       return 0
     fi
@@ -3848,11 +4018,11 @@ harden_bun() {
   require_privilege bun "$wrapper_target" || { end_section; return 0; }
   # If the discovered bun IS our wrapper from a prior step (re-run within
   # the same job), find the real binary at -real and re-wrap.
-  if grep -q "supply-chain-harden" "$real_bun" 2>/dev/null; then
+  if is_our_wrapper "$real_bun"; then
     if [[ -x "${real_bun}-real" ]]; then
       real_bun="${real_bun}-real"
     else
-      warn "bun wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped bun bun "$wrapper_target"
       end_section
       return 0
     fi
@@ -4132,11 +4302,11 @@ EOF
 
   local wrapper_target="$real_cargo"
   require_privilege cargo "$wrapper_target" || { end_section; return 0; }
-  if grep -q "supply-chain-harden" "$real_cargo" 2>/dev/null; then
+  if is_our_wrapper "$real_cargo"; then
     if [[ -x "${real_cargo}-real" ]]; then
       real_cargo="${real_cargo}-real"
     else
-      warn "cargo wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped cargo cargo "$wrapper_target"
       end_section
       return 0
     fi
@@ -4938,11 +5108,11 @@ harden_deno() {
     "PATH wrapper not deployed (no root/sudo). deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
     || { end_section; return 0; }
 
-  if grep -q "supply-chain-harden" "$real_deno" 2>/dev/null; then
+  if is_our_wrapper "$real_deno"; then
     if [[ -x "${real_deno}-real" ]]; then
       real_deno="${real_deno}-real"
     else
-      warn "deno wrapper present but ${real_deno}-real missing; skipping re-wrap"
+      wrap_skipped deno deno "$real_deno" NONE
       end_section
       return 0
     fi
@@ -5608,12 +5778,12 @@ sfw_ready() {
 GUARD
 )
 
-  if grep -q "supply-chain-harden" "$real_npm" 2>/dev/null; then
+  if is_our_wrapper "$real_npm"; then
     # Already wrapped in a previous run within this job — re-wrap the original.
     if [[ -x "${real_npm}-real" ]]; then
       real_npm="${real_npm}-real"
     else
-      warn "npm wrapper present at $wrapper_target but ${wrapper_target}-real missing; skipping re-wrap"
+      wrap_skipped npm npm "$wrapper_target"
       end_section
       return 0
     fi
@@ -5711,11 +5881,11 @@ EOF
   # Before the re-wrap too, and not only before the first wrap: an npx wrapper an
   # earlier run as root left is not this account's to rewrite.
   require_privilege npx "$npx_target" || { end_section; return 0; }
-  if grep -q "supply-chain-harden" "$real_npx" 2>/dev/null; then
+  if is_our_wrapper "$real_npx"; then
     if [[ -x "${real_npx}-real" ]]; then
       real_npx="${real_npx}-real"
     else
-      warn "npx wrapper present at $npx_target but ${npx_target}-real missing; skipping re-wrap"
+      wrap_skipped npm npx "$npx_target"
       end_section
       return 0
     fi
@@ -5893,6 +6063,7 @@ emit_output sfw_installed         "$SFW_INSTALLED"
 emit_output tool_versions         "$tool_versions_json"
 emit_output env_file              "$HARDENING_ENV_FILE"
 emit_output wrappers_deployed     "$wrappers_str"
+emit_output pnpm_built_dependencies "$PNPM_ALLOWED"
 emit_output job_id                "$(job_identity)"
 
 # THE COMPLETION MARKER, AND IT MUST STAY LAST.

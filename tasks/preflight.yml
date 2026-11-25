@@ -4,6 +4,30 @@
 # ecosystem tag the operator chose; we want input validation even on
 # narrow runs like `--tags npm`.
 
+- name: Refuse a macOS target before anything is written
+  # The TARGET, from its gathered facts: a Mac as the controller of a Linux host
+  # is fine. First, so it comes before the sudo prompt of the checks below.
+  #
+  # MEASURED on GitHub's macos-15 (GNU date on PATH, so nothing else stopped it):
+  # the play replaced ~/.npmrc, wrote /etc/npmrc, then failed on its owner with
+  # "chgrp failed: failed to look up group root" (macOS calls gid 0 wheel), and
+  # nothing after that file ran. A group name is not the whole of it: the env
+  # layer goes to /etc/profile.d and /etc/environment, which macOS shells do not
+  # read, and the refresh timer is a systemd unit.
+  ansible.builtin.fail:
+    msg: |
+      [supply-chain-hardening] preflight: this role supports Linux, and
+      {{ inventory_hostname }} is macOS. Nothing has been changed.
+
+      On a Mac, use the script instead. It hardens the same package managers for
+      your user, and is what CI runs on macOS:
+
+          ./action/harden.sh --emit=plain     # see AGENTS.md, "Apply without Ansible"
+
+      Applying this role from a Mac to a Linux host works: give the Linux host in
+      your inventory.
+  when: ansible_system | default('') == 'Darwin'
+
 - name: Validate release_age_hours is at least 1
   ansible.builtin.assert:
     that:
@@ -171,8 +195,8 @@
 - name: Probe GNU date on the controller for the rolling uv/pip cutoff
   # defaults/main.yml computes the rolling cutoff (sch_uv_cutoff, sch_pip_cutoff) via
   #   lookup('pipe', 'date -u -d @<epoch> +%Y-%m-%dT00:00:00Z')
-  # which requires GNU date (Linux) or coreutils' `gdate` (macOS). BSD
-  # date (macOS default) lacks the `-d @<epoch>` syntax, and the lookup then
+  # which requires GNU date. BSD date (a Mac as the controller) lacks the
+  # `-d @<epoch>` syntax, and the lookup then
   # aborts the play with only "lookup_plugin.pipe(...) returned 1".
   # The lookup runs on the CONTROLLER, so the probe goes through the same
   # lookup: a command task here would probe the target instead, passing a
@@ -198,16 +222,11 @@
         {{ gnu_date_probe | indent(2) }}
 
       Fix:
-        - Linux: install coreutils (`apt install coreutils`) — usually already present.
-        - macOS: `brew install coreutils` and either:
-            * prepend the GNU prefix to PATH before running ansible:
-              `export PATH="$(brew --prefix)/opt/coreutils/libexec/gnubin:$PATH"`
-              (gives `date` GNU semantics for this shell only)
-            * OR override uv_exclude_newer to an explicit RFC 3339 string in
-              your inventory:
-              `-e 'uv_exclude_newer=2026-05-24T12:00:00Z'`
-          Do NOT symlink gdate over /usr/local/bin/date system-wide — other
-          macOS tools depend on BSD date semantics.
+        - Install GNU coreutils on the controller (`apt install coreutils`;
+          usually already present on Linux) and put its `date` first on PATH for
+          the shell you run Ansible from.
+        - OR pin the cutoff to an instant, which needs no GNU date:
+          `-e 'uv_exclude_newer=2026-05-24T12:00:00Z'`
         - To skip this check (the cutoff lookup then fails or renders a bad
           value instead): `-e skip_gnu_date_check=true` — not recommended.
   when:

@@ -336,6 +336,68 @@ restore_composer_wrapper() {
   [ "$(sha256sum < "$w-real")" = "$real_sum" ]
 }
 
+# ---- Which file the role takes for an existing wrapper (issue 48, item 3) ----
+#
+# "Is this our wrapper" was a grep for the project's name anywhere in the file.
+# A composer script that only mentions it was therefore taken for an old wrapper:
+# not moved to composer-real, and OVERWRITTEN by the wrapper. A wrapper
+# action/harden.sh wrote carries another spelling of the name, so it was taken
+# for the real composer and moved over the composer-real that held it, leaving a
+# wrapper that runs itself.
+
+COMPOSER_SAVED=""
+save_composer() {
+  COMPOSER_SAVED="$BATS_TEST_TMPDIR/composer-saved"
+  mkdir -p "$COMPOSER_SAVED"
+  cp -a "$1" "$COMPOSER_SAVED/w"
+  cp -a "$1-real" "$COMPOSER_SAVED/r"
+  COMPOSER_SAVED_AT=$1
+}
+restore_saved_composer() {
+  [ -n "$COMPOSER_SAVED" ] || return 0
+  rm -f "$COMPOSER_SAVED_AT" "$COMPOSER_SAVED_AT-real"
+  cp -a "$COMPOSER_SAVED/w" "$COMPOSER_SAVED_AT"
+  cp -a "$COMPOSER_SAVED/r" "$COMPOSER_SAVED_AT-real"
+}
+
+@test "composer: a script that only mentions this project is moved to composer-real and wrapped, not overwritten" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "replaces the root-owned composer wrapper"
+  w=$(command -v composer) || skip "composer not installed"
+  grep -q 'supply-chain-hardening wrapper' "$w" || skip "composer is not wrapped here"
+  save_composer "$w"
+  cp -a "$w-real" "$BATS_TEST_TMPDIR/composer.phar"
+  rm -f "$w" "$w-real"
+  printf '#!/bin/bash\n# kept in a supply-chain-hardening checkout\nexec "%s" "$@"\n' "$BATS_TEST_TMPDIR/composer.phar" > "$w"
+  chmod 0755 "$w"
+  run composer_apply
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; false; }
+  grep -q 'kept in a supply-chain-hardening checkout' "$w-real"
+  sed -n 2p "$w" | grep -q 'supply-chain-hardening wrapper'
+  run "$w" --version --no-ansi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Composer"* ]]
+}
+
+@test "composer: a wrapper action/harden.sh wrote is re-rendered over, and its composer-real survives" {
+  command -v ansible-playbook >/dev/null 2>&1 || skip "ansible not available"
+  require_root "replaces the root-owned composer wrapper"
+  w=$(command -v composer) || skip "composer not installed"
+  grep -q 'supply-chain-hardening wrapper' "$w" || skip "composer is not wrapped here"
+  save_composer "$w"
+  real_sum=$(sha256sum < "$w-real")
+  # The first lines action/harden.sh writes, and what its wrapper does.
+  printf '#!/bin/bash\n# Managed by supply-chain-harden action\n#\nREAL_COMPOSER='"'"'%s'"'"'\nexec "$REAL_COMPOSER" --no-scripts "$@"\n' "$w-real" > "$w"
+  chmod 0755 "$w"
+  run composer_apply
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; false; }
+  [ "$(sha256sum < "$w-real")" = "$real_sum" ]
+  sed -n 2p "$w" | grep -q 'supply-chain-hardening wrapper'
+  run timeout 60 "$w" --version --no-ansi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Composer"* ]]
+}
+
 # ---- Per-user config files the role replaces whole (CMP 4.7) ----
 #
 # $CARGO_HOME/config.toml, ~/.m2/settings.xml and NuGet.Config are replaced,
@@ -636,6 +698,7 @@ teardown() {
   restore_yarnrc
   restore_refresher
   restore_composer_wrapper
+  restore_saved_composer
 }
 
 UV_HIDDEN=""

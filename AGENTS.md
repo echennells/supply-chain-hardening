@@ -16,7 +16,8 @@ around a control to get an install through.
 
 | Target | Use |
 |---|---|
-| A host, VM, sandbox or container image | **The Ansible role.** This is the default. |
+| A Linux host, VM, sandbox or container image | **The Ansible role.** This is the default. |
+| A Mac | `action/harden.sh --emit=plain`, below. The role refuses macOS before writing anything; applying it from a Mac to a Linux host works. |
 | GitHub Actions | The action: [action/README.md](action/README.md) |
 | Other CI | `action/harden.sh`, with worked examples in [action/examples/](action/examples/) |
 | Ansible genuinely can't be used | `action/harden.sh --emit=plain`, below |
@@ -57,8 +58,8 @@ Tell the user what hardening does, unless they have already agreed to it:
 - Several package managers are replaced by wrappers at their current path.
 - `~/.npmrc` is merged: its own lines, tokens included, stay below a block of settings,
   and it ends 0600. A line that sets one of those settings is taken out after a copy.
-- `~/.yarnrc.yml`, the bunfig, `~/.bundle/config`, the pnpm files, `pip.conf`, `uv.toml`,
-  cargo's `config.toml`, Maven's `settings.xml`, `NuGet.Config` and Composer's `config.json`
+- `~/.yarnrc.yml`, the bunfig, `~/.bundle/config`, the pnpm files in `~/.config/pnpm` (a
+  Mac: `~/Library/Preferences/pnpm`), `pip.conf`, `uv.toml`, cargo's `config.toml`, Maven's `settings.xml`, `NuGet.Config` and Composer's `config.json`
   are replaced whole. If one is not exactly what this project last wrote, the role stops
   before changing anything; `harden.sh` copies it next to itself (0600) and says so. A
   token or registry in it then no longer applies until the user puts it back.
@@ -74,7 +75,7 @@ local package, fail) and `uv_exclude_newer_env` (a project that pins its own ear
 
 ## Apply with Ansible
 
-The role hardens what a host **already has**, so install the package managers first.
+Linux only: on a Mac the play refuses at its first task. The role hardens what a host **already has**, so install the package managers first.
 
 ```bash
 git clone https://github.com/echennells/supply-chain-hardening.git

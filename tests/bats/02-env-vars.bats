@@ -33,6 +33,7 @@ setup() {
 
 @test "env: NPM_CONFIG_MIN_RELEASE_AGE=2 (correct npm key; 48h gate expressed in days)" {
   # npm's config key is `min-release-age` (unit: days) → env NPM_CONFIG_MIN_RELEASE_AGE.
+  if npm_warns_about 11.10.0; then skip "npm $(npm --version) warns about the key, so the role leaves it out"; fi
   # release_age_hours=48 → npm_minimum_release_age_days=2.
   assert_env_equals NPM_CONFIG_MIN_RELEASE_AGE 2
 }
@@ -101,14 +102,14 @@ setup() {
   assert_file_contains /etc/environment "NPM_CONFIG_IGNORE_SCRIPTS=true"
 }
 
-@test "env: NPM_CONFIG_ALLOW_GIT=none in profile.d and /etc/environment exactly when the npm found reads allow-git (11.9.0+)" {
+@test "env: NPM_CONFIG_ALLOW_GIT=none in profile.d and /etc/environment unless the npm found warns about it (11.2.0 to 11.8.x)" {
   # allow-git=none is in the npmrc files too, but a redirected user config
   # (NPM_CONFIG_USERCONFIG, which actions/setup-node exports) skips ~/.npmrc.
   # npm 11.2.0 to 11.8.x warn `Unknown env config "allow-git"` on every command
-  # when it is set (MEASURED), so the role writes it for npm 11.9.0+ only. The
-  # npm on PATH here is the one the role found at apply time.
-  local v; v=$(npm --version 2>/dev/null) || skip "npm not installed"
-  if printf '%s\n%s\n' 11.9.0 "$v" | sort -V -C; then
+  # when it is set (MEASURED), so the role leaves it out there. The npm on PATH
+  # here is the one the role found at apply time.
+  command -v npm >/dev/null 2>&1 || skip "npm not installed"
+  if ! npm_warns_about 11.9.0; then
     assert_env_equals NPM_CONFIG_ALLOW_GIT none
     assert_file_contains /etc/environment '^NPM_CONFIG_ALLOW_GIT=none$'
   else
@@ -119,6 +120,7 @@ setup() {
 }
 
 @test "/etc/environment has NPM_CONFIG_MIN_RELEASE_AGE (correct key, days unit)" {
+  if npm_warns_about 11.10.0; then skip "npm $(npm --version) warns about the key, so the role leaves it out"; fi
   assert_file_contains /etc/environment "NPM_CONFIG_MIN_RELEASE_AGE=2"
 }
 

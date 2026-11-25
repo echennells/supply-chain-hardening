@@ -39,6 +39,7 @@ setup() {
 
 @test "the env-layer record names a variable that did not arrive" {
   # One variable missing out of several is named, not reported as "NONE of".
+  stub_npm 11.19.1
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   grep -q '^export NPM_CONFIG_MIN_RELEASE_AGE=' "$ENV_FILE"
   run verify_sourced --emit=plain
@@ -1116,6 +1117,90 @@ esac'
   [[ "$output" == *"seeds pip 25.3"* ]]
 }
 
+# venv_pip <effective cutoff> [cutoff in the site file] [user/global cutoff]: a
+# python3 whose ensurepip and whose own pip are 26.2.2. `pip config list` prints
+# the effective value; --site, --user and --global print theirs, as pip does.
+venv_pip() {
+  local pre="$BATS_TEST_TMPDIR/pyprefix"
+  mkdir -p "$pre"; rm -f "$pre/pip.conf"
+  [ -z "${2:-}" ] || printf '[install]\nuploaded-prior-to = %s\n' "$2" > "$pre/pip.conf"
+  stub_bin python3 'p() { [ -z "$1" ] || echo "install.uploaded-prior-to='"'"'$1'"'"'"; }
+case "$*" in
+  *"import ensurepip"*) echo 26.2.2; echo "'"$pre"'" ;;
+  "-m pip --version") echo "pip 26.2.2 from /x (python 3.14)" ;;
+  "-m pip install --help") echo "  --uploaded-prior-to <when>" ;;
+  "-m pip config list") p "'"${1:-}"'" ;;
+  "-m pip config list --site") p "'"${2:-}"'" ;;
+  "-m pip config list --user") p "'"${3:-}"'" ;;
+  "-m pip config list --global") : ;;
+  *) exit 1 ;;
+esac'
+}
+# Only pip is hardened and then checked: with no record every tool here is probed.
+# The env file is not sourced, so no PIP_UPLOADED_PRIOR_TO but what a test sets.
+pip_only() { harden ECOSYSTEMS=pip -- --emit=plain >/dev/null; }
+ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $ARGV[0] * 3600))' -- "$1"; }
+
+@test "pip venv: a pip that can gate and has no cutoff is a GAP, not OK" {
+  # It was OK whenever ensurepip's pip was 26.0 or newer, so an unhardened HOME
+  # printed "GAP pip native age gate" and "OK pip venv age gate" together.
+  venv_pip ""
+  pip_only
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip native age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"*"no cutoff is set in a file or variable a pip in a venv reads"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
+@test "pip venv: a cutoff a venv's pip reads is OK; stale is WEAK, in the future a GAP" {
+  venv_pip "$(ago 72)"
+  pip_only
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"*"would read the cutoff 20"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip "$(ago 720)"
+  run verify -- --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip "$(ago -48)"
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"*"in the FUTURE"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip P2D
+  run verify -- --emit=plain
+  [[ "$output" == *"WEAK   PARSED      pip venv age gate"*"not an absolute instant"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
+@test "pip venv: a cutoff only in the interpreter's site file does not reach a venv" {
+  # MEASURED (pip 26.2.2): $prefix/pip.conf is read by python3 -m pip and not by
+  # the pip of a venv made from it.
+  local c; c=$(ago 72)
+  venv_pip "$c" "$c" ""
+  pip_only
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip native age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  # In the user's file as well, it does.
+  venv_pip "$c" "$c" "$c"
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  # And through the variable.
+  venv_pip "$c" "$c" ""
+  run verify PIP_UPLOADED_PRIOR_TO="$c" -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
+@test "pip venv: the real python, hardened and then with no cutoff anywhere" {
+  local v
+  v=$(python3 -I -c 'import ensurepip; print(ensurepip.version())' 2>/dev/null) || skip "this python3 has no ensurepip"
+  [ "$(printf '26.0\n%s\n' "$v" | sort -V | head -1)" = 26.0 ] || skip "ensurepip here is pip $v, below 26.0"
+  for f in /etc/pip.conf /etc/xdg/pip/pip.conf "/Library/Application Support/pip/pip.conf"; do
+    ! grep -qs uploaded-prior-to "$f" || skip "$f on this machine sets a cutoff"
+  done
+  pip_only
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+  rm -f "$TEST_HOME/.config/pip/pip.conf"
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"* ]] || { echo "$output" | grep 'pip '; false; }
+}
+
 @test "a job holding id-token: write is told so, and one without gets no row" {
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
@@ -1849,6 +1934,135 @@ path_without_timeout() {
   done
 }
 
+# ---- pnpm: what pnpm itself reports -------------------------------------------
+#
+# The row here was a grep of a file harden.sh wrote, graded WEAK PRESENT. MEASURED
+# on GitHub's macos-15: pnpm never opens that file there, and a project's
+# postinstall ran with everything hardened (issue 48, item 2).
+
+# pnpm_says <version> <ignore-scripts> <minimum-release-age>: an age given as ENV
+# is whatever pnpm_config_minimum_release_age says, as pnpm 11 reads it.
+pnpm_says() {
+  local age="echo '$3'"
+  [ "$3" != ENV ] || age='echo "${pnpm_config_minimum_release_age:-undefined}"'
+  stub_bin pnpm 'echo "$PWD :: $*" >> "'"$BATS_TEST_TMPDIR"'/pnpm-calls"
+case "$*" in
+  --version) echo "'"$1"'" ;;
+  "config get ignore-scripts") echo "'"$2"'" ;;
+  "config get minimum-release-age") '"$age"' ;;
+  *) echo undefined ;;
+esac'
+}
+pnpm_row() { grep -E "pnpm $1 " <<<"$output"; }
+
+@test "pnpm: the rows ask pnpm, and what it reports is PARSED evidence" {
+  pnpm_says 11.29.0 true 2880
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "OK     PARSED      "*"pnpm 11.29.0 reports ignore-scripts=true"* ]] || { echo "$output" | grep pnpm; false; }
+  [[ "$(pnpm_row 'age gate')" == "OK     PARSED      "*"pnpm 11.29.0 implements minimumReleaseAge and reports 2880 minutes"* ]] || { echo "$output" | grep pnpm; false; }
+  # A longer window is fine, a shorter one is said to be short, none is a GAP.
+  pnpm_says 11.29.0 true 600
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "WEAK   PARSED      "*"reports 600 minutes, below the 2880 minutes (48h) promised here"* ]] || { echo "$output" | grep pnpm; false; }
+  pnpm_says 11.29.0 true 0
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "GAP    PARSED      "* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: a file pnpm does not read is a GAP, whatever is in it" {
+  # Both files are on disk and correct; the stub answers as pnpm does when it
+  # reads neither ("undefined", MEASURED on 9.15.9 to 12.23.0).
+  pnpm_says 11.29.0 undefined undefined
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  assert_file_contains "$PNPM_DIR/config.yaml" "ignoreScripts: true"
+  run verify_sourced --emit=plain
+  [ "$status" -eq 1 ]
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "GAP    PARSED      "*"reports ignore-scripts=undefined"*"$PNPM_DIR/config.yaml"* ]] || { echo "$output" | grep pnpm; false; }
+  [[ "$(pnpm_row 'age gate')" == "GAP    PARSED      "*"did not read what the hardening wrote"* ]] || { echo "$output" | grep pnpm; false; }
+  # Re-running the hardening is what closes it, so it fails --fail-on=config too.
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 1 ]
+}
+
+@test "pnpm: a variable in this shell does not stand in for a file pnpm does not read" {
+  pnpm_says 11.29.0 true ENV
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  echo 'export pnpm_config_minimum_release_age=2880' >> "$ENV_FILE"
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "GAP    PARSED      "*"pnpm_config_minimum_release_age=2880 gates this shell"* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: below 10.16.0 the age gate is a toolchain GAP though pnpm prints the key back" {
+  # MEASURED: 10.15.1 printed 2880 back and installed; 10.16.0 refused.
+  pnpm_says 10.15.1 true 2880
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [ "$status" -eq 1 ]
+  [[ "$(pnpm_row 'age gate')" == "GAP    FUNCTIONAL  "*"does NOT implement minimumReleaseAge"* ]] || { echo "$output" | grep pnpm; false; }
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "OK     PARSED      "* ]]
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  pnpm_says 10.16.0 true 2880
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'age gate')" == "OK     PARSED      "* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: ignore-scripts=false is WEAK with a declared build allowlist and a GAP without one" {
+  pnpm_says 10.34.9 false 2880
+  harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild,@scope/native" -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "WEAK   PARSED      "*"pnpm_built_dependencies allows esbuild,@scope/native"* ]] || { echo "$output" | grep pnpm; false; }
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$(pnpm_row 'lifecycle scripts blocked')" == "GAP    PARSED      "*"ignore-scripts=false"* ]] || { echo "$output" | grep pnpm; false; }
+}
+
+@test "pnpm: the rows are asked from /, never from the project (its pnpmfile would run)" {
+  pnpm_says 11.29.0 true 2880
+  harden ECOSYSTEMS=pnpm -- --emit=plain >/dev/null
+  rm -f "$BATS_TEST_TMPDIR/pnpm-calls"
+  mkdir -p "$BATS_TEST_TMPDIR/proj"
+  ( cd "$BATS_TEST_TMPDIR/proj" && verify_sourced --emit=plain ) >/dev/null || true
+  grep -q 'config get ignore-scripts' "$BATS_TEST_TMPDIR/pnpm-calls"
+  [ "$(cut -d: -f1 "$BATS_TEST_TMPDIR/pnpm-calls" | sort -u)" = "/ " ] || { cat "$BATS_TEST_TMPDIR/pnpm-calls"; false; }
+}
+
+@test "pnpm: harden.sh writes where pnpm reads, on macOS, on Linux and with XDG_CONFIG_HOME, and the verifier agrees" {
+  # pnpm's getConfigDir: XDG_CONFIG_HOME on every platform, then
+  # ~/Library/Preferences/pnpm on macOS, then ~/.config/pnpm.
+  local os want d
+  for os in Linux Darwin; do
+    stub_bin uname 'case "${1:-}" in -s|"") echo "'"$os"'" ;; *) /usr/bin/uname "$@" ;; esac'
+    [ "$os" = Darwin ] && want=Library/Preferences/pnpm || want=.config/pnpm
+    for d in "" "$TEST_TMP/xdg-$os"; do
+      rm -rf "$TEST_HOME/.config" "$TEST_HOME/Library"
+      harden ECOSYSTEMS=pnpm ${d:+XDG_CONFIG_HOME="$d"} -- --emit=plain >/dev/null
+      if [ -n "$d" ]; then
+        assert_file_contains "$d/pnpm/config.yaml" "minimumReleaseAge: 2880"
+        assert_file_contains "$d/pnpm/rc" "minimum-release-age=2880"
+        [ ! -e "$TEST_HOME/.config/pnpm" ] && [ ! -e "$TEST_HOME/Library/Preferences/pnpm" ]
+      else
+        assert_file_contains "$TEST_HOME/$want/config.yaml" "minimumReleaseAge: 2880"
+        assert_file_contains "$TEST_HOME/$want/rc" "minimum-release-age=2880"
+        [ "$os" != Darwin ] || [ ! -e "$TEST_HOME/.config/pnpm" ]
+      fi
+      pnpm_says 11.29.0 undefined undefined
+      run verify ${d:+XDG_CONFIG_HOME="$d"} -- --emit=plain
+      [[ "$(pnpm_row 'age gate')" == *"It reads ${d:-$TEST_HOME/${want%/pnpm}}/pnpm/config.yaml"* ]] || { echo "$os '$d'"; echo "$output" | grep pnpm; false; }
+    done
+  done
+  # The role's expression names the same three directories in the same order.
+  python3 - "${BATS_TEST_DIRNAME}/../../tasks/pnpm.yml" <<'PY'
+import re, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"pnpm_config_dir: >-(.*?)\n\n", t, re.S).group(1)
+want = ["ansible_env.XDG_CONFIG_HOME ~ '/pnpm'", "ansible_env.HOME ~ '/Library/Preferences/pnpm'", "ansible_env.HOME ~ '/.config/pnpm'"]
+at = [m.index(w) for w in want]
+assert at == sorted(at), at
+PY
+}
+
 # ---- pnpm repo config override ------------------------------------------------
 #
 # A project's pnpm-workspace.yaml outranks the global config.yaml harden.sh
@@ -2499,9 +2713,13 @@ FORMS
 mvn_trap() {
   local d=$1 m=$2
   mkdir -p "$d/.mvn" "$d/.mvnagent"
-  if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+  # javac that RUNS, not one that exists: without a JDK, macOS has a /usr/bin/javac
+  # that prints "Unable to locate a Java Runtime" and exits 1, which stopped every
+  # test that builds this fixture. The fallback below needs no JDK.
+  if javac -version >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
     printf 'public class A { public static void premain(String a) throws Exception { java.nio.file.Files.write(java.nio.file.Paths.get(a), "ran".getBytes()); } }\n' > "$d/.mvnagent/A.java"
-    ( cd "$d/.mvnagent" && { javac --release 8 A.java || javac A.java; } && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1
+    ( cd "$d/.mvnagent" && { javac --release 8 A.java || javac A.java; } && printf 'Premain-Class: A\n' > m.txt && jar cfm agent.jar m.txt A.class ) >/dev/null 2>&1 \
+      || rm -f "$d/.mvnagent/agent.jar"
   fi
   if [ -f "$d/.mvnagent/agent.jar" ]; then
     printf -- '-javaagent:%s/.mvnagent/agent.jar=%s\n' "$d" "$m" > "$d/.mvn/jvm.config"
@@ -2577,7 +2795,8 @@ markers() { ls "$BATS_TEST_TMPDIR/markers" 2>/dev/null | tr '\n' ' '; }
     ( cd "$d" && uv pip list ) >/dev/null 2>&1 || true
     [ -e "$mk/uv-venv-python" ] || { echo "control: uv pip list did not run the venv's python"; return 1; }
   fi
-  if command -v mvn >/dev/null 2>&1; then
+  # A maven with a JVM to start; without one no jvm.config can reach it.
+  if command -v mvn >/dev/null 2>&1 && ( cd / && mvn -v ) >/dev/null 2>&1; then
     local mo; mo=$( cd "$d/sub" && mvn -v 2>&1 ) || true
     [ -e "$mk/maven-jvm-config" ] || { echo "control: mvn -v did not apply .mvn/jvm.config ($(cat "$d/.mvn/jvm.config")); it said:"; echo "$mo" | head -8; return 1; }
   fi

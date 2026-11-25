@@ -14,6 +14,7 @@ load helpers
 setup() { common_setup; }
 
 @test "npm: scripts blocked and the age gate uses the key npm reads" {
+  stub_npm 11.19.1
   run harden ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc" "^ignore-scripts=true$"
@@ -24,53 +25,152 @@ setup() { common_setup; }
 }
 
 @test "npm: the env layer uses the live key, never the dead one" {
+  stub_npm 11.19.1
   run harden ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$ENV_FILE" "NPM_CONFIG_MIN_RELEASE_AGE=2"
   assert_file_lacks "$ENV_FILE" "NPM_CONFIG_MINIMUM_RELEASE_AGE"
 }
 
-@test "npm: allow-git=none is exported where npm reads it, and not where npm warns about it" {
-  # actions/setup-node with registry-url points NPM_CONFIG_USERCONFIG at its own
-  # .npmrc, so npm skips the ~/.npmrc above and allow-git needs the env form.
-  # npm reads it from 11.9.0; npm 11.2.0 to 11.8.x print `npm warn Unknown env
-  # config "allow-git"` on every command when it is set, and older npm ignores
-  # it (MEASURED). The npmrc keeps the key on every version.
-  local v
-  for v in 11.9.0 12.2.3 11.8.0 11.2.0 10.9.8; do
+# npm_keys <0|1 min-release-age> <0|1 allow-git> [ghenv]: what harden.sh wrote, in
+# ~/.npmrc, the env file and, given, GITHUB_ENV, all three alike.
+npm_keys() {
+  local a=0 g=0 f
+  grep -qx 'min-release-age=2' "$TEST_HOME/.npmrc" && a=1
+  grep -qx 'allow-git=none' "$TEST_HOME/.npmrc" && g=1
+  [ "$a$g" = "$1$2" ] || { echo ".npmrc: min-release-age=$a allow-git=$g, expected $1 $2"; cat "$TEST_HOME/.npmrc"; return 1; }
+  for f in "$ENV_FILE" ${3:+"$3"}; do
+    a=0; g=0
+    grep -qxE '(export )?NPM_CONFIG_MIN_RELEASE_AGE=2' "$f" && a=1
+    grep -qxE '(export )?NPM_CONFIG_ALLOW_GIT=none' "$f" && g=1
+    [ "$a$g" = "$1$2" ] || { echo "$f: min-release-age=$a allow-git=$g, expected $1 $2"; cat "$f"; return 1; }
+  done
+  # The settings no npm warns about are there either way.
+  grep -qx 'ignore-scripts=true' "$TEST_HOME/.npmrc" && grep -qx 'export NPM_CONFIG_IGNORE_SCRIPTS=true' "$ENV_FILE"
+}
+
+@test "npm: min-release-age and allow-git are left out, files and env alike, exactly where npm warns about them" {
+  # MEASURED with each key in ~/.npmrc, the global npmrc and the environment: npm
+  # 8.19.4 to 11.1.0 say nothing about a key they do not know, 11.2.0 to 11.9.0
+  # warn on every command, and allow-git is known from 11.9.0, min-release-age
+  # from 11.10.0. Below 11.2.0 the keys stay: they cost nothing there, and a newer
+  # npm installed later honours them with no re-run (the action before setup-node).
+  local v want
+  bare_path
+  for v in 9.2.0:11 10.9.8:11 11.1.0:11 11.2.0:00 11.5.1:00 11.8.0:00 11.9.0:01 11.10.0:11 11.19.1:11 12.2.3:11; do
+    want=${v#*:}; v=${v%:*}
     rm -rf "$TEST_HOME"; mkdir -p "$TEST_HOME"
-    stub_bin npm "case \"\$*\" in --version) echo $v ;; *) echo STUB ;; esac"
-    run harden ECOSYSTEMS=npm GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv-$v" \
+    stub_npm "$v"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=npm GITHUB_ACTIONS=true GITHUB_ENV="$TEST_TMP/ghenv-$v" \
                GITHUB_OUTPUT="$TEST_TMP/ghout-$v" GITHUB_STEP_SUMMARY="$TEST_TMP/ghsum-$v"
     [ "$status" -eq 0 ] || { echo "npm $v: harden rc=$status"; echo "$output"; return 1; }
-    assert_file_contains "$TEST_HOME/.npmrc" "^allow-git=none$"
+    npm_keys "${want%?}" "${want#?}" "$TEST_TMP/ghenv-$v" || { echo "npm $v"; return 1; }
+    # What is not in effect is said, with what to do about it.
     case "$v" in
-      11.9.0|12.2.3)
-        assert_file_contains "$ENV_FILE" "^export NPM_CONFIG_ALLOW_GIT=none$"
-        assert_file_contains "$TEST_TMP/ghenv-$v" "^NPM_CONFIG_ALLOW_GIT=none$" ;;
-      *)
-        assert_file_lacks "$ENV_FILE" "ALLOW_GIT"
-        assert_file_lacks "$TEST_TMP/ghenv-$v" "ALLOW_GIT"
-        [[ "$output" == *"npm $v predates it (npm 11.9.0)"* ]] || { echo "npm $v: no note that allow-git is not in effect"; echo "$output"; return 1; } ;;
+      11.2.0|11.5.1|11.8.0)
+        [[ "$output" == *"NOT written to the npmrc files or the environment"*"then run this again"* ]] || { echo "$v: $output"; return 1; }
+        [[ "$output" == *"allow-git left out of the npmrc files and the environment"* ]] || { echo "$v: $output"; return 1; } ;;
+      9.2.0|10.9.8|11.1.0)
+        [[ "$output" == *"npm $v predates it (npm 11.9.0)"* ]] || { echo "$v: $output"; return 1; }
+        [[ "$output" == *"the age gate is written and NOT enforced"* ]] || { echo "$v: $output"; return 1; } ;;
     esac
   done
 }
 
-@test "npm: with no npm version to read, allow-git=none is exported, as the age gate assumes a current npm" {
+@test "npm: an upgraded npm gets the keys on the next run, and until then the verifier says what is missing" {
+  # As the real 11.5.1 answers: "undefined" for a key it does not know and nothing sets.
+  stub_bin npm 'case "$*" in --version) echo 11.5.1 ;; *ignore-scripts*) echo true ;; *) echo undefined ;; esac'
+  bare_path
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 0 0
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    FUNCTIONAL  npm age gate"*"does NOT implement min-release-age"* ]] || { echo "$output" | grep npm; false; }
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # Upgraded, not re-run: the gate is not set, and the row says so.
+  stub_bin npm 'case "$*" in --version) echo 11.19.1 ;; *ignore-scripts*) echo true ;; *min-release-age*) echo null ;; *) echo null ;; esac'
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      npm age gate"*"implements min-release-age but reports no value"* ]] || { echo "$output" | grep npm; false; }
+  run verify_sourced --emit=plain --fail-on=config
+  [ "$status" -eq 1 ]
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 1 1
+}
+
+@test "npm: with no npm, or one whose version cannot be read, both keys are written" {
   # Hardening ahead of setup-node: the files are written for the npm that
-  # arrives later, and the variable with them.
+  # arrives later, and the variables with them.
+  bare_path
   stub_bin npm 'echo "npm: not a version"'
-  run harden ECOSYSTEMS=npm -- --emit=plain
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$ENV_FILE" "^export NPM_CONFIG_ALLOW_GIT=none$"
+  npm_keys 1 1
+  # Unreadable here, and 11.5.1 in a version manager: the one in use decides.
+  mkdir -p "$TEST_HOME/.nvm/versions/node/v24.5.0/lib/node_modules/npm"
+  printf '{\n  "name": "npm",\n  "version": "11.5.1"\n}\n' > "$TEST_HOME/.nvm/versions/node/v24.5.0/lib/node_modules/npm/package.json"
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  npm_keys 1 1
+  rm -rf "$TEST_HOME" "$TEST_BIN/npm"; mkdir -p "$TEST_HOME"
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain
+  [ "$status" -eq 0 ]
+  npm_keys 1 1
+}
+
+@test "npm: with several npms the one in use decides, unless another would enforce the key" {
+  # A warning from the old one is noise; a missing gate in the new one is a hole.
+  local d
+  bare_path
+  stub_npm 11.5.1
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 0 0
+  for d in .nvm/versions/node/v24.9.0/lib/node_modules/npm .local/share/fnm/node-versions/v24.9.0/installation/lib/node_modules/npm .volta/tools/image/npm/11.19.1; do
+    rm -rf "$TEST_HOME"; mkdir -p "$TEST_HOME/$d"
+    printf '{\n  "name": "npm",\n  "version": "11.19.1"\n}\n' > "$TEST_HOME/$d/package.json"
+    harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+    npm_keys 1 1 || { echo "$d"; return 1; }
+  done
+  # One that knows only allow-git, and one that knows neither.
+  printf '{\n  "name": "npm",\n  "version": "11.9.0"\n}\n' > "$TEST_HOME/$d/package.json"
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 0 1
+  printf '{\n  "name": "npm",\n  "version": "11.8.0"\n}\n' > "$TEST_HOME/$d/package.json"
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 0 0
+  # A silent npm in use and one that warns elsewhere: nothing changes for the one in
+  # use, so the keys stay.
+  stub_npm 10.9.8
+  harden PATH="$BARE_PATH" ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  npm_keys 1 1
+  stub_npm 11.5.1
+  # A second npm further down PATH counts too, read from its package.
+  mkdir -p "$TEST_TMP/second/bin" "$TEST_TMP/second/lib/node_modules/npm/bin"
+  printf '{\n  "name": "npm",\n  "version": "12.2.3"\n}\n' > "$TEST_TMP/second/lib/node_modules/npm/package.json"
+  printf '#!/bin/sh\necho 12.2.3\n' > "$TEST_TMP/second/lib/node_modules/npm/bin/npm-cli.js"
+  chmod +x "$TEST_TMP/second/lib/node_modules/npm/bin/npm-cli.js"
+  ln -s ../lib/node_modules/npm/bin/npm-cli.js "$TEST_TMP/second/bin/npm"
+  harden ECOSYSTEMS=npm PATH="$TEST_BIN:$TEST_TMP/second/bin:${BARE_PATH#*:}" -- --emit=plain >/dev/null
+  npm_keys 1 1
+}
+
+@test "npm: the role looks for npms in the same places, by the same thresholds" {
+  local root="${BATS_TEST_DIRNAME}/../.."
+  local norm='/# >>> npm installs/,/# <<< npm installs/{s/^[[:space:]]*//;p;}'
+  diff <(sed -n "$norm" "$root/action/harden.sh") <(sed -n "$norm" "$root/tasks/npm_versions.yml")
+  [ "$(sed -n "$norm" "$root/tasks/npm_versions.yml" | wc -l)" -gt 10 ]
+  grep -qx 'NPM_WARNS_FROM="11.2.0"' "$root/action/harden.sh"
+  grep -qx 'NPM_KNOWS_MIN_RELEASE_AGE="11.10.0"' "$root/action/harden.sh"
+  grep -qx 'NPM_KNOWS_ALLOW_GIT="11.9.0"' "$root/action/harden.sh"
+  grep -q "^sch_npm_writes_min_release_age: .*first) is version('11.2.0', '<').*select('version', '11.10.0', '>=')" "$root/defaults/main.yml"
+  grep -q "^sch_npm_writes_allow_git: .*first) is version('11.2.0', '<').*select('version', '11.9.0', '>=')" "$root/defaults/main.yml"
 }
 
 @test "pnpm: blanket script block by default, no build allowlist" {
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "ignoreScripts: true"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "minimumReleaseAge: 2880"
-  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
+  assert_file_contains "$PNPM_DIR/config.yaml" "ignoreScripts: true"
+  assert_file_contains "$PNPM_DIR/config.yaml" "minimumReleaseAge: 2880"
+  assert_file_lacks "$PNPM_DIR/config.yaml" "onlyBuiltDependencies"
 }
 
 @test "pnpm: a build allowlist flips to ignoreScripts false; the list goes to the pnpm 10 rc only" {
@@ -79,16 +179,16 @@ setup() { common_setup; }
   # for a scoped name, invalid YAML.
   run harden ECOSYSTEMS=pnpm PNPM_BUILT_DEPENDENCIES="esbuild,@scope/native" -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "ignoreScripts: false"
-  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "onlyBuiltDependencies"
-  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=esbuild'
-  assert_file_contains "$TEST_HOME/.config/pnpm/rc" 'only-built-dependencies\[\]=@scope/native'
+  assert_file_contains "$PNPM_DIR/config.yaml" "ignoreScripts: false"
+  assert_file_lacks "$PNPM_DIR/config.yaml" "onlyBuiltDependencies"
+  assert_file_contains "$PNPM_DIR/rc" 'only-built-dependencies\[\]=esbuild'
+  assert_file_contains "$PNPM_DIR/rc" 'only-built-dependencies\[\]=@scope/native'
   # Valid YAML, by whichever parser this host has (macOS runners have Ruby's
   # YAML but no PyYAML). A scoped name used to be written unquoted here.
   if python3 -c "import yaml" 2>/dev/null; then
-    python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$TEST_HOME/.config/pnpm/config.yaml"
+    python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$PNPM_DIR/config.yaml"
   elif command -v ruby >/dev/null 2>&1; then
-    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$TEST_HOME/.config/pnpm/config.yaml"
+    ruby -ryaml -e 'YAML.load_file(ARGV[0])' "$PNPM_DIR/config.yaml"
   fi
 }
 
@@ -122,12 +222,12 @@ setup() { common_setup; }
   assert_file_lacks "$ENV_FILE" "pnpm_config_"
   assert_file_lacks "$ENV_FILE" "PNPM_CONFIG_"
   # The window still reaches a project that sets none, through config.yaml.
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 2880$"
+  assert_file_contains "$PNPM_DIR/config.yaml" "^minimumReleaseAge: 2880$"
   rm -f "$ENV_FILE"
   run harden ECOSYSTEMS=pnpm RELEASE_AGE_HOURS=72 -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_lacks "$ENV_FILE" "pnpm_config_"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 4320$"
+  assert_file_contains "$PNPM_DIR/config.yaml" "^minimumReleaseAge: 4320$"
 }
 
 @test "pnpm: GitHub mode writes no pnpm_config_* variable to GITHUB_ENV either" {
@@ -136,7 +236,7 @@ setup() { common_setup; }
              ECOSYSTEMS=pnpm -- --emit=github
   [ "$status" -eq 0 ]
   assert_file_lacks "$TEST_TMP/ghenv" "pnpm_config_"
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "^minimumReleaseAge: 2880$"
+  assert_file_contains "$PNPM_DIR/config.yaml" "^minimumReleaseAge: 2880$"
 }
 
 @test "pnpm: pnpm_config_ignore_scripts is never exported, with or without an allowlist" {
@@ -196,8 +296,8 @@ setup() { common_setup; }
   # CI frozen-lockfile default on 11 < 11.28.1 and 12 < 12.8.0 (measured).
   run harden ECOSYSTEMS=pnpm -- --emit=plain
   [ "$status" -eq 0 ]
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "verifyStoreIntegrity: true"
-  assert_file_lacks "$TEST_HOME/.config/pnpm/config.yaml" "preferFrozenLockfile"
+  assert_file_contains "$PNPM_DIR/config.yaml" "verifyStoreIntegrity: true"
+  assert_file_lacks "$PNPM_DIR/config.yaml" "preferFrozenLockfile"
 }
 
 @test "yarn: HTTPS-only, via an empty unsafe-HTTP allowlist" {
@@ -462,10 +562,11 @@ PY
 @test "the age gate window propagates to every ecosystem's own unit" {
   # One knob, six different units. A conversion bug here silently weakens one
   # ecosystem while the others look right.
+  stub_npm 11.19.1
   run harden RELEASE_AGE_HOURS=48 ECOSYSTEMS=npm,pnpm,yarn,bun -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/.npmrc"                   "min-release-age=2"        # days
-  assert_file_contains "$TEST_HOME/.config/pnpm/config.yaml" "minimumReleaseAge: 2880"  # minutes
+  assert_file_contains "$PNPM_DIR/config.yaml" "minimumReleaseAge: 2880"  # minutes
   assert_file_contains "$TEST_HOME/.yarnrc.yml"              "npmMinimalAgeGate: 2880"  # minutes
   assert_file_contains "$TEST_HOME/.bunfig.toml"             "minimumReleaseAge = 172800" # seconds
 }

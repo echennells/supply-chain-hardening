@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # Acceptance check for the pnpm publish-age gate — BY BEHAVIOUR.
 #
-# supply-chain-verify can only report the pnpm age gate as WEAK: its runtime
-# probe (`pnpm config get minimum-release-age`) proves pnpm READ the value, not
-# that it ACTS on it — and pnpm, like npm, echoes back keys it doesn't
-# implement. The role has no cheap discriminator for pnpm the way it does for
-# npm, so the honest runtime verdict stays WEAK. This script supplies the proof
-# the verifier structurally won't: it applies the role's pnpm config and then
-# watches pnpm actually refuse a too-fresh version, and allow an old one.
+# supply-chain-verify's pnpm age gate row is PARSED evidence: pnpm reports our
+# value back, on a version measured to enforce it (10.16.0+). It never watches
+# pnpm refuse anything. This script supplies that: it applies the role's pnpm
+# config and then watches pnpm actually refuse a too-fresh version, and allow an
+# old one.
 #
 # It is the pnpm sibling of cargo-signoff-apt.sh. Unlike that one there is no
 # wrapper or binary to reverse — the protection is pure config — so it checks
