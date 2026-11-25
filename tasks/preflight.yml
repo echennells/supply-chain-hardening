@@ -290,114 +290,151 @@
     - etc_preflight.rc == 42
     - not (accept_etc_overwrite | default(false) | bool)
 
+# npm reads its global config from {prefix}/etc/npmrc on every layout but Debian's,
+# and tasks/npm.yml writes it there too. MEASURED (d738db8, NodeSource's
+# /usr/etc/npmrc): a registry and a token in it were gone after an apply, with no
+# copy, and --diff printed them. Resolved here, as the user, before anything is
+# changed, and judged like the files above: one that is not exactly what this project
+# last wrote, which a token added since makes it, stops the play. Where neither the user
+# nor root may write it (ucf_no_root in files/user-config.sh), tasks/npm.yml leaves it
+# alone and the summary says so; that stops nothing.
+- name: Resolve npm's global config path (before anything is changed)
+  ansible.builtin.script: ../files/user-config.sh path npm-global
+  args:
+    executable: /bin/bash
+  register: npm_global_preflight
+  changed_when: false
+  check_mode: false
+  when:
+    - "'all' in (ansible_run_tags | default(['all'])) or 'npm' in (ansible_run_tags | default(['all']))"
+    - "'npm' not in (ansible_skip_tags | default([]))"
+
+- name: Detect a global npmrc this project did not write
+  become: "{{ 'as root' in (npm_global_preflight.stdout_lines | default([])) }}"
+  # On stdin, like every become that runs this script. With pipelining on, nothing root
+  # runs for it is then in a file of the connecting account's (MEASURED on ansible-core
+  # 2.18.20 and 2.22.0; the script module leaves the script there, pipelining or not).
+  # With pipelining off, Ansible's default, it changes nothing: Ansible puts its own
+  # module file for every become task, of any role, in that account's ~/.ansible/tmp.
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- classify npm-global
+    stdin: "{{ lookup('ansible.builtin.file', '../files/user-config.sh') }}"
+  environment:
+    SCH_UCF_PATH: "{{ npm_global_preflight.stdout_lines | first }}"
+    SCH_UCF_ROOT: "{{ ('as root' in npm_global_preflight.stdout_lines) | ternary('1', '0') }}"
+  register: npm_global_class
+  changed_when: false
+  check_mode: false
+  failed_when: npm_global_class.rc | default(1) not in [0, 42]
+  when: npm_global_preflight.stdout_lines | default([]) | length > 0
+
+- name: Fail when npm's global config exists and this project did not write it
+  ansible.builtin.fail:
+    msg: |
+      [supply-chain-hardening] Refusing to overwrite npm's global config, which is
+      not exactly what this project wrote:
+
+        {{ npm_global_preflight.stdout_lines | first }}
+
+      It commonly holds a corporate registry and its token; overwriting it blindly
+      can cause dependency confusion or break installs entirely. Nothing has been
+      changed yet.
+
+      To proceed, either:
+        1. Move the file aside, then re-run; or
+        2. Set `accept_etc_overwrite=true` to overwrite it anyway (e.g.
+           `ansible-playbook site.yml -e accept_etc_overwrite=true`). It is copied
+           next to itself first (0600), as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~.
+  when:
+    - npm_global_class.stdout_lines is defined
+    - npm_global_class.stdout_lines | select('match', 'foreign ') | list | length > 0
+    - not (accept_etc_overwrite | default(false) | bool)
+
 - name: Detect per-user config files this run would replace that this project did not write
-  # The same refusal as the /etc check above, for the three per-user files the
-  # role REPLACES wholesale rather than editing: $CARGO_HOME/config.toml,
-  # ~/.m2/settings.xml and NuGet's user NuGet.Config. Each is where a private
-  # registry or mirror lives ([source.crates-io] replace-with, <mirrors>,
-  # <packageSources>), next to its credentials (credential-provider,
-  # <servers>, <packageSourceCredentials>). MEASURED (8281a6b): an apply
-  # replaced all three, left no copy, and reported nothing; the corporate
-  # mirror and the credentials were gone. With the mirror gone, an internal
-  # package name resolves against the public registry instead: dependency
-  # confusion, the case the /etc check exists for.
+  # The same refusal as the /etc check above, for the per-user files the role
+  # REPLACES wholesale: pnpm's config.yaml and rc, ~/.yarnrc.yml, pip.conf,
+  # uv.toml, bunfig, ~/.bundle/config, $CARGO_HOME/config.toml, ~/.m2/settings.xml,
+  # NuGet's user NuGet.Config and Composer's config.json. Each is where a private
+  # registry or mirror lives, next to its credentials. MEASURED (8281a6b for cargo,
+  # maven and nuget, d738db8 for the rest): an apply replaced them, left no copy, and
+  # reported nothing; the corporate mirror and the credentials were gone. With the
+  # mirror gone, an internal package name resolves against the public registry
+  # instead: dependency confusion, the case the /etc check exists for.
   #
-  # A file counts as OURS, and is replaced as before, when it carries either
-  # project's marker or is a version of what this role wrote before it had
-  # one (the role's settings.xml, NuGet.Config and cargo config carried no
-  # marker until CMP 4.7). dotnet's own first-run NuGet.Config, which lists
-  # nuget.org and nothing else, is not a choice anyone made and is replaced
-  # too; it is kept as a backup like any other file we did not write.
-  # MEASURED (apt dotnet-sdk-8.0 8.0.134, Ubuntu 24.04): the first
-  # `dotnet nuget list source` in a fresh home writes it, 205 bytes, opening
-  # with a UTF-8 byte-order mark and with no trailing newline. Without
-  # recognising it every fresh dotnet host would stop here.
+  # ~/.npmrc is merged (tasks/npm.yml), so nothing of the user's stops the play
+  # there. It is in the list only for the check that it can be written at all.
+  #
+  # What counts as this project's own is user_cfg_class in files/user-config.sh,
+  # which action/harden.sh carries too: the file exactly as it was last written, or
+  # as a version from before the checksum wrote it. A marker alone is not enough,
+  # because a token added after hardening sits in a file that carries it (MEASURED).
+  # dotnet's own first-run NuGet.Config, which lists nuget.org and nothing else, is
+  # not a choice anyone made and is replaced too, after a copy.
   #
   # Only the files THIS run would write are checked: each one's tag must be
-  # selected, and each one's tool gate (tasks/maven.yml, tasks/nuget.yml)
-  # must pass. Paths are resolved the way those task files resolve them.
-  # Keep both in step with them.
-  ansible.builtin.shell:
-    cmd: |
-      set -u
-      conflict=""
-      ours='Managed by (ansible-supply-chain-security|supply-chain-harden)'
-      classify() { # $1 kind, $2 path -> ours | stock | foreign
-        grep -qE "$ours" "$2" 2>/dev/null && { echo ours; return; }
-        case "$1" in
-          cargo)
-            head -n 1 "$2" | grep -qx '# Cargo supply-chain hardening — system defaults.' \
-              && { echo ours; return; } ;;
-          maven)
-            grep -q '<id>central-https</id>' "$2" \
-              && grep -q '<activeProfile>strict-checksums</activeProfile>' "$2" \
-              && { echo ours; return; } ;;
-          nuget)
-            grep -q 'key="signatureValidationMode" value="require"' "$2" \
-              && grep -q '<repository name="nuget.org" serviceIndex="https://api.nuget.org/v3/index.json">' "$2" \
-              && { echo ours; return; }
-            # dotnet's first-run file (see above), compared with the BOM,
-            # comments and whitespace stripped.
-            if [ "$(tr -d '\r\n' < "$2" | LC_ALL=C sed "s/^$(printf '\357\273\277')//; s/<!--[^>]*-->//g" | tr -d ' \t')" = \
-                 '<?xmlversion="1.0"encoding="utf-8"?><configuration><packageSources><addkey="nuget.org"value="https://api.nuget.org/v3/index.json"protocolVersion="3"/></packageSources></configuration>' ]; then
-              echo stock; return
-            fi ;;
-        esac
-        echo foreign
-      }
-      check() { # $1 kind, $2 path. Prints "<class> <path>" for a file not ours.
-        [ -e "$2" ] || return 0
-        c=$(classify "$1" "$2")
-        [ "$c" = ours ] && return 0
-        printf '%s %s\n' "$c" "$2"
-        [ "$c" = foreign ] && conflict=1
-        return 0
-      }
-      {% if sch_user_cfg_runs.cargo | bool %}
-      check cargo "${CARGO_HOME:-$HOME/.cargo}/config.toml"
-      {% endif %}
-      {% if sch_user_cfg_runs.maven | bool %}
-      # tasks/maven.yml's gate: mvn, or a JDK a ./mvnw build would run on
-      if command -v mvn >/dev/null 2>&1 || command -v java >/dev/null 2>&1 \
-         || { [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; }; then
-        check maven "$HOME/.m2/settings.xml"
-      fi
-      {% endif %}
-      {% if sch_user_cfg_runs.nuget | bool %}
-      # tasks/nuget.yml's gate and path (DOTNET_CLI_HOME, not HOME, when set)
-      if command -v dotnet >/dev/null 2>&1; then
-        check nuget "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config"
-      fi
-      {% endif %}
-      [ -z "$conflict" ] || exit 42
+  # selected, and each one's tool gate (tasks/maven.yml, tasks/nuget.yml) must
+  # pass. ucf_path and ucf_applies in files/user-config.sh resolve the path and the
+  # gate the way those task files do. Keep them in step.
+  #
+  # ../files/, not the bare name the other tasks use: tests/bats/38 and 50 import
+  # this file on its own, where the role's files/ is not on the search path and
+  # only the directory of this file is.
+  ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"
+  args:
     executable: /bin/bash
   vars:
     # Would this run reach the task file that writes each one? `--tags npm`
-    # must not stop on a ~/.m2/settings.xml it will never touch.
+    # must not stop on a ~/.m2/settings.xml it will never touch. The tags are
+    # those of each file's include in tasks/main.yml.
     sch_run_tags: "{{ ansible_run_tags | default(['all']) }}"
     sch_skip_tags: "{{ ansible_skip_tags | default([]) }}"
-    sch_user_cfg_runs:
-      cargo: "{{ ('all' in sch_run_tags or (sch_run_tags | intersect(['cargo', 'rust']) | length > 0)) and (sch_skip_tags | intersect(['cargo', 'rust']) | length == 0) }}"
-      maven: "{{ ('all' in sch_run_tags or (sch_run_tags | intersect(['maven', 'java']) | length > 0)) and (sch_skip_tags | intersect(['maven', 'java']) | length == 0) }}"
-      nuget: "{{ ('all' in sch_run_tags or (sch_run_tags | intersect(['nuget', 'dotnet']) | length > 0)) and (sch_skip_tags | intersect(['nuget', 'dotnet']) | length == 0) }}"
+    sch_user_cfg_tags:
+      npmrc: [npm]
+      pnpm-yaml: [pnpm]
+      pnpm-rc: [pnpm]
+      yarn: [yarn]
+      bun: [bun]
+      pip: [pip, python]
+      uv: [uv, python, pip]
+      bundler: [bundler, ruby]
+      cargo: [cargo, rust]
+      maven: [maven, java]
+      nuget: [nuget, dotnet]
+      composer: [composer, php]
+      composer-home: [composer, php]
+    sch_user_cfg_kinds: >-
+      {%- set kinds = [] -%}
+      {%- for k, t in sch_user_cfg_tags.items() -%}
+      {%- if ('all' in sch_run_tags or (sch_run_tags | intersect(t) | length > 0)) and (sch_skip_tags | intersect(t) | length == 0) -%}
+      {%- set _ = kinds.append(k) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ kinds | join(' ') }}
   register: user_cfg_preflight
   changed_when: false
   check_mode: false
   # Fail closed: a check that could not run must not read as "no conflict".
-  failed_when: user_cfg_preflight.rc not in [0, 42]
+  failed_when: user_cfg_preflight.rc | default(1) not in [0, 42]
 
-- name: Record which per-user files get a backup before they are replaced
-  # Every file this project did not write: an accepted foreign file, and
-  # dotnet's first-run NuGet.Config. The deploy tasks in cargo.yml, maven.yml
-  # and nuget.yml set `backup:` from this list.
-  ansible.builtin.set_fact:
-    sch_user_cfg_backup: "{{ user_cfg_preflight.stdout_lines | map('regex_replace', '^[a-z]+ ', '') | list }}"
+- name: Fail when a per-user config file cannot be written as it has to be
+  # Before anything is changed: one the role cannot read, does not own or cannot
+  # replace would otherwise stop the play half way through.
+  ansible.builtin.fail:
+    msg: |
+      [supply-chain-hardening] These per-user config files cannot be written:
+
+      {% for l in user_cfg_preflight.stdout_lines if l is match('blocked ') %}
+        {{ l | regex_replace('^blocked ', '') }}
+      {% endfor %}
+
+      Fix or move each one, then re-run. Nothing has been changed yet.
+  when: user_cfg_preflight.stdout_lines | select('match', 'blocked ') | list | length > 0
 
 - name: Fail when per-user config files exist that this project did not write
   ansible.builtin.fail:
     msg: |
       [supply-chain-hardening] Refusing to overwrite existing per-user config
-      files that this project did not write:
+      files that are not exactly what this project wrote:
 
       {% for l in user_cfg_preflight.stdout_lines if l is match('foreign ') %}
         {{ l | regex_replace('^foreign ', '') }}
@@ -405,19 +442,20 @@
 
       The role replaces each of these files whole; it does not merge into
       them. They commonly hold a private registry or mirror and its
-      credentials. Replacing them drops both, and an internal package name
-      then resolves against the public registry (dependency confusion).
-      Nothing has been changed yet.
+      credentials, or a login token added since the last apply. Replacing them
+      drops both, and an internal package name then resolves against the public
+      registry (dependency confusion). Nothing has been changed yet.
 
       To proceed, either:
         1. Move the files aside, then re-run; or
         2. Set `accept_user_config_overwrite=true` to replace them anyway
            (e.g. `ansible-playbook site.yml -e accept_user_config_overwrite=true`).
-           Each is backed up next to itself first, as
+           Each is backed up next to itself first (0600), as
            <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~; re-add anything you still
            need by hand.
+      (~/.npmrc is not one of them: the role merges into it.)
   when:
-    - user_cfg_preflight.rc == 42
+    - user_cfg_preflight.stdout_lines | select('match', 'foreign ') | list | length > 0
     - not (accept_user_config_overwrite | default(false) | bool)
 
 - name: Assert the pip age-gate cutoff is an absolute Z-suffixed RFC 3339 instant

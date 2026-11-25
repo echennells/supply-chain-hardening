@@ -1,0 +1,31 @@
+# Managed by ansible-supply-chain-security
+#
+# index-strategy = "first-index" closes the dependency-confusion attack
+# class: if a package exists on the primary index, uv refuses to fall
+# through to a secondary index even when the name matches. Without this,
+# extra-index-url configurations can be exploited by an attacker
+# publishing a same-named package to a public index. Universal across
+# all current uv versions.
+index-strategy = "first-index"
+
+# Empty allow-insecure-host explicitly documents intent that no host
+# gets TLS verification bypass. Override via the uv_allow_insecure_host
+# role var if you have a private registry behind a self-signed cert.
+allow-insecure-host = []
+
+# Reject packages published after this instant
+# (release_age_hours = 48 back from the clock, rounded down to midnight UTC).
+# An absolute RFC 3339 instant, not a relative span. uv reads a span (48 hours)
+# only from 0.9.17; older uv rejects it and with it this whole file, which is
+# also written to /etc/uv/uv.toml for every uv on the host. It is set at
+# apply time; where systemd runs supply-chain-age-gate-refresh.timer it is
+# advanced in place, otherwise re-apply the role to advance it.
+exclude-newer = "2026-11-22T00:00:00Z"
+
+# Force wheels only — blocks setup.py execution from source distributions.
+no-build = true
+
+[pip]
+# Verify hashes when present (lockfiles), but don't require them for
+# ad-hoc installs.
+verify-hashes = true

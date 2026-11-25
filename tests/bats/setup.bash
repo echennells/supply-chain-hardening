@@ -24,6 +24,14 @@ load_profile() {
   source /etc/profile.d/supply-chain-hardening.sh 2>/dev/null || true
 }
 
+# The composer config.json the role writes for this user: ~/.config/composer, or
+# ~/.composer where only that one was there (as in this image: composer's installer
+# makes it), because making the first would hide the second from composer.
+composer_config() {
+  if [ -f "$HOME/.config/composer/config.json" ]; then echo "$HOME/.config/composer/config.json"
+  else echo "$HOME/.composer/config.json"; fi
+}
+
 assert_file_contains() {
   local file="$1"
   local pattern="$2"

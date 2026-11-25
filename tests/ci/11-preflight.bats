@@ -20,7 +20,7 @@ base_path() {
   local d="$BATS_TEST_TMPDIR/base" t p
   if [ ! -d "$d" ]; then
     mkdir -p "$d"
-    for t in bash sh awk basename cat cksum cmp cp cut date diff dirname env find grep head hostname id ls mkdir od printf readlink rm sed sort stat tail tr uname wc xargs; do
+    for t in bash sh awk basename cat cksum cmp cp cut date diff dirname env find grep head hostname id ls mkdir od printf readlink rm sed sha256sum shasum sort stat tail tr uname wc xargs; do
       p=$(type -P "$t" 2>/dev/null) || continue
       case "$p" in /*) ln -s "$p" "$d/$t" ;; esac
     done
@@ -101,6 +101,26 @@ case \"\${1:-}\" in --version|-V|version) echo 9.9.9 ;; esac"
   [[ "$output" == *"node 9.9.9 "* ]]
   [[ "$output" == *"uv 9.9.9 "* ]]
   [[ "$output" == *"gradle (version not read) "* ]]
+}
+
+@test "preflight: a rustup proxy is not run in a home with no rustup state, where running it writes one" {
+  # MEASURED on GitHub's macos-15-intel (Homebrew's rustup): `rustc --version` wrote
+  # ~/.rustup/settings.toml, so the preflight changed the home it was describing.
+  stub_bin rustup 'mkdir -p "${RUSTUP_HOME:-$HOME/.rustup}"; : > "${RUSTUP_HOME:-$HOME/.rustup}/settings.toml"
+echo "${0##*/} 1.95.0 (stub)"'
+  local t
+  for t in rustc cargo; do ln -sf rustup "$TEST_BIN/$t"; done
+  run preflight
+  [ ! -e "$TEST_HOME/.rustup" ]
+  [[ "$output" == *"rustc (version not read) ($TEST_BIN/rustc)"* ]]
+  # A hard link is the same proxy.
+  for t in rustc cargo; do rm -f "$TEST_BIN/$t"; ln "$TEST_BIN/rustup" "$TEST_BIN/$t"; done
+  run preflight
+  [ ! -e "$TEST_HOME/.rustup" ]
+  # FIXTURE CONTROL: with rustup's state there it is asked, so the version is shown.
+  mkdir -p "$TEST_HOME/.rustup"; : > "$TEST_HOME/.rustup/settings.toml"
+  run preflight
+  [[ "$output" == *"rustc 1.95.0 ($TEST_BIN/rustc)"* ]]
 }
 
 @test "preflight: ansible-core's version comes from its package, and nothing is started to read it" {
@@ -236,11 +256,11 @@ sudo_rs_stub() {
   printf '[registries.corp]\nindex = "sparse+https://corp.invalid/"\n' > "$TEST_HOME/.cargo/config.toml"
   run preflight
   [ "$status" -eq 1 ]
-  [[ "$output" == *"STOP  $TEST_HOME/.cargo/config.toml: not written by this project"*"accept_user_config_overwrite=true"* ]]
+  [[ "$output" == *"STOP  $TEST_HOME/.cargo/config.toml: not exactly what this project last wrote"*"accept_user_config_overwrite=true"* ]]
   # Ours, by the marker the role writes first.
   printf '# Cargo supply-chain hardening — system defaults.\n[net]\nretry = 3\n' > "$TEST_HOME/.cargo/config.toml"
   run preflight
-  [[ "$output" == *"$TEST_HOME/.cargo/config.toml: written by this project"* ]]
+  [[ "$output" == *"$TEST_HOME/.cargo/config.toml: exactly what this project last wrote"* ]]
   # CARGO_HOME moves it, as the role resolves it.
   PF_ENV=(CARGO_HOME="$BATS_TEST_TMPDIR/ch")
   mkdir -p "$BATS_TEST_TMPDIR/ch"; echo 'x' > "$BATS_TEST_TMPDIR/ch/config.toml"
@@ -259,7 +279,7 @@ sudo_rs_stub() {
   [[ "$output" != *"settings.xml"* ]]
   stub_bin mvn 'echo "Apache Maven 3.9.9"'
   run preflight
-  [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not written by this project"* ]]
+  [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not exactly what this project last wrote"* ]]
 }
 
 @test "preflight: sudo is only asked whether it needs a password, never to read or run anything else" {
@@ -334,18 +354,25 @@ exit 0"
   grep -q "local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'" "$ROOT/action/harden.sh"
 }
 
-@test "preflight: the per-user classification is the role's, function body for function body" {
-  local role="$BATS_TEST_TMPDIR/role" act="$BATS_TEST_TMPDIR/act"
-  # The role's, from tasks/preflight.yml: its marker variable, spelled out.
-  sed -n '/classify() { # \$1 kind/,/^      }$/p' "$ROOT/tasks/preflight.yml" \
-    | sed -e "s/\"\$ours\"/'Managed by (ansible-supply-chain-security|supply-chain-harden)'/" \
-          -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/return 0/return/g' \
-    | grep -v -e '^#' -e '^classify() {' -e '^}$' > "$role"
-  sed -n '/^user_cfg_class() {/,/^}$/p' "$ROOT/action/harden.sh" \
-    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/return 0/return/g' \
-    | grep -v -e '^#' -e '^user_cfg_class() {' -e '^}$' > "$act"
-  [ -s "$role" ] && [ -s "$act" ]
+@test "preflight: the per-user classification is the role's: the same code, and the same files" {
+  # Both run the block in files/user-config.sh; the role's preflight runs that file.
+  local role="$BATS_TEST_TMPDIR/role" act="$BATS_TEST_TMPDIR/act" k
+  sed -n '/^# >>> user_config$/,/^# <<< user_config$/p' "$ROOT/files/user-config.sh" > "$role"
+  sed -n '/^# >>> user_config$/,/^# <<< user_config$/p' "$ROOT/action/harden.sh" > "$act"
+  grep -q '^user_cfg_class() {' "$role"
   diff "$role" "$act"
+  grep -q 'ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"' "$ROOT/tasks/preflight.yml"
+  # no classifier of its own is left in either
+  ! grep -nE 'classify\(\)|strict-checksums|serviceIndex' "$ROOT/tasks/preflight.yml" || false
+  [ "$(grep -c 'user_cfg_class()' "$ROOT/action/harden.sh")" -eq 1 ]
+  # and the role asks about every kind the block knows, once each
+  # shellcheck disable=SC1090
+  . "$role"
+  for k in $UCF_KINDS; do
+    [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE "^ +$k: \[")" -eq 1 ] || { echo "$k"; return 1; }
+    [ "$k" = composer-home ] || [ -n "$(HOME=/h ucf_path "$k")" ]
+  done
+  [ "$(sed -n '/sch_user_cfg_tags:/,/sch_user_cfg_kinds:/p' "$ROOT/tasks/preflight.yml" | grep -cE '^ +[a-z-]+: \[')" -eq 13 ]
 }
 
 @test "preflight: the ansible-core versions it calls affected are the role's" {

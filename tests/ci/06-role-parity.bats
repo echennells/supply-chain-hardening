@@ -34,6 +34,32 @@ setup() { common_setup; }
   [[ "$output" == *"ignoreScripts"* ]]
 }
 
+@test "per-user files: the role and the action judge the same files the same way" {
+  # The role's preflight runs files/user-config.sh; the action's is --preflight.
+  # Whatever one stops on, the other says it would.
+  local role act kinds="npmrc pnpm-yaml pnpm-rc yarn pip uv bun bundler cargo maven nuget composer composer-home" v p
+  judge() {
+    role=$(env -i PATH="${TEST_BIN}:$PATH" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" \
+      bash "${BATS_TEST_DIRNAME}/../../files/user-config.sh" classify $kinds | sed -nE 's/^(foreign|blocked) ([^ ]*).*/\2/p' | sort) || true
+    act=$(env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" CARGO_HOME="$TEST_HOME/.cargo" \
+      bash "$HARDEN_SH" --preflight | sed -n "s|^  STOP  \\($TEST_HOME/[^:]*\\):.*|\\1|p" | sort) || true
+    echo "role: $role"; echo "action: $act"
+    [ "$role" = "$act" ]
+  }
+  judge; [ -z "$role" ]                                         # an empty home
+  harden ECOSYSTEMS=npm,pnpm,yarn,pip,uv,bun,bundler,composer XDG_CONFIG_HOME="$TEST_HOME/.config" -- --emit=plain >/dev/null 2>&1
+  judge; [ -z "$role" ]                                         # one we hardened
+  stub_bin java 'echo 21'; stub_bin dotnet 'echo 8.0.100'
+  mkdir -p "$TEST_HOME/.cargo" "$TEST_HOME/.m2" "$TEST_HOME/.nuget/NuGet"
+  echo '[registries.corp]' > "$TEST_HOME/.cargo/config.toml"
+  echo '<settings><servers/></settings>' > "$TEST_HOME/.m2/settings.xml"
+  echo '<configuration><packageSourceCredentials/></configuration>' > "$TEST_HOME/.nuget/NuGet/NuGet.Config"
+  for p in .yarnrc.yml .config/uv/uv.toml .config/pnpm/rc .bundle/config .config/composer/config.json .npmrc; do echo '# x' >> "$TEST_HOME/$p"; done
+  rm -f "$TEST_HOME/.config/pip/pip.conf"; mkdir "$TEST_HOME/.config/pip/pip.conf"
+  judge
+  [ "$(printf '%s\n' "$role" | grep -c .)" -eq 9 ]              # not ~/.npmrc
+}
+
 @test "the env layer matches the role's exactly" {
   # 25 variables on both sides today. This is the layer most likely to drift
   # unnoticed, because an env var that is never set looks identical to one

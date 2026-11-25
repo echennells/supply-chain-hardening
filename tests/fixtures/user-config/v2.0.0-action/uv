@@ -1,0 +1,8 @@
+# Managed by supply-chain-harden action
+exclude-newer = "2026-11-22T04:53:28Z"
+no-build = true
+index-strategy = "first-index"
+allow-insecure-host = []
+
+[pip]
+verify-hashes = true

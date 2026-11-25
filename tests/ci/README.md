@@ -12,7 +12,7 @@ against throwaway `$HOME` and `$TMPDIR` directories.
 
 It runs on a Mac too, with Apple's bash 3.2, `bundle` and (missing) `javac`; nothing in
 it asks for a password, and the tests that need root skip without passwordless sudo.
-468 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
+528 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
 set up like a person's Mac (`.github/workflows/ci-script.yml`).
 
 Run it as a normal user. As root, `harden.sh` copies the cargo-cooldown it
@@ -48,6 +48,7 @@ silently inert.
 | `11-preflight.bats` | `--preflight`: writes nothing, the STOP lines (a Mac, Ansible, sudo-rs, root, the files the play stops on), and that its markers, file list, classifier and affected ansible-core versions are `tasks/preflight.yml`'s. |
 | `12-sfw-binary-pin.bats` | The pinned Socket Firewall binary, with a stub launcher that caches as sfw does and a stub `curl`: used only when sfw's own fetch fails, held to its digest before it reaches sfw's cache, never put over a cached binary or through a directory another account could write, with each platform's own asset and digest, with `shasum` where there is no `sha256sum`, and with the reason in the warning when it is not used. Needs passwordless sudo; skips without it. |
 | `13-central-429.bats` | The smoke jobs' verdict script on the real logs of two runs Maven Central refused (429) and two that were blocked: not tested, neither a pass nor a fail, and nothing else excused by a 429. |
+| `14-user-config.bats` | The per-user config files: a fake secret in each survives the first run and one added later survives the next, upgrades from the files v2.0.0 and v2.1.0 wrote on either surface (`tests/fixtures/user-config`), `~/.npmrc` merged byte for byte with npm reading the result and sending the kept token, a longer `min-release-age` kept, modes, links, unwritable files, killed runs, the self-check, Composer's home and its `auth.json`, root's yarn file as root, where root writes and where it does not, npm's global config as every account's npm reads it and in the preflight, `--preflight` saying what the run does, and the shared block being the same in `files/user-config.sh`. |
 
 ## Two conventions worth knowing
 

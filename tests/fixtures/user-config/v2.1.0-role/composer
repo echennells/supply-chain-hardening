@@ -1,0 +1,14 @@
+{
+  "config": {
+    "secure-http": true,
+    "lock": true,
+    "preferred-install": "dist",
+    "allow-plugins": {},
+    "policy": {
+      "cooldown": {
+        "period": 172800,
+        "block": true
+      }
+    }
+  }
+}

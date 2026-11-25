@@ -495,8 +495,10 @@ jobs:
       - name: composer audit tier present in config
         run: |
           # composer was just installed via upstream installer → 2.9.x → tier 1
-          grep -q '"block-insecure": true' "$HOME/.config/composer/config.json"
-          grep -q '"block-abandoned": true' "$HOME/.config/composer/config.json"
+          c="$HOME/.config/composer/config.json"
+          [ -f "$c" ] || c="$HOME/.composer/config.json"   # where only that one is there
+          grep -q '"block-insecure": true' "$c"
+          grep -q '"block-abandoned": true' "$c"
           echo "✓ tier-1 audit settings present (composer 2.9+ detected)"
 
   action-go-env-set:

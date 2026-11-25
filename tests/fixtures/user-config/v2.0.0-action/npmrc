@@ -1,0 +1,8 @@
+; Managed by supply-chain-harden action
+ignore-scripts=true
+audit=true
+save-exact=true
+fund=false
+update-notifier=false
+min-release-age=2
+allow-git=none

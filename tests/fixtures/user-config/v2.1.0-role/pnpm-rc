@@ -1,0 +1,27 @@
+; Managed by ansible-supply-chain-security
+minimum-release-age=2880
+minimum-release-age-strict=true
+; block-exotic-subdeps is deliberately NOT emitted here.
+;
+; It refuses git / http(s) / tarball-URL dependencies, and runtime
+; enforcement requires pnpm 11+. Writing it to THIS file is dead in both
+; directions:
+;   - pnpm 10 reads this file but silently ignores the key. Verified
+;     empirically against pnpm 10.34.5, which proceeded to a DNS lookup for
+;     `pnpm add https://does-not-resolve.invalid/pkg.tgz`.
+;   - pnpm 11+ enforces the key but does not read this file at all (it reads
+;     only ~/.config/pnpm/config.yaml for non-auth settings).
+; So no pnpm version exists in which this line does anything.
+;
+; The live emission is `blockExoticSubdeps: true` in pnpm-config.yaml.j2.
+; When the detected pnpm is older than 11, tasks/pnpm.yml records the gap in
+; the end-of-run "protections NOT applied" summary instead of leaving an inert
+; key behind that reads like coverage. Same principle as 111e21b (composer:
+; stop shipping fake script-blocking protection).
+; Store integrity (see defaults/main.yml): hash-check store contents against
+; the lockfile.
+verify-store-integrity=true
+; No build scripts allowed for any package — equivalent default-deny via the
+; older mechanism (works on pnpm 8-11+). To allow specific packages to run
+; build scripts, set pnpm_built_dependencies in role vars.
+ignore-scripts=true

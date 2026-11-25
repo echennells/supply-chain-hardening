@@ -1,0 +1,13 @@
+; Managed by supply-chain-harden action
+[global]
+disable-pip-version-check = true
+; pip's native age gate (pip 26.0+; accepted and inert below that). MUST be
+; under [global]: under [install] it does not cover `pip download`,
+; `pip wheel` or `pip index`.
+uploaded-prior-to = 2026-11-22T04:52:51Z
+
+[install]
+; Refuse sdists — blocks the March-2026 LiteLLM / BufferZoneCorp-class attack
+; (NOT the October-2026 LiteLLM wheel-startup-hook compromise)
+; where setup.py executes arbitrary code at install time.
+only-binary = :all:

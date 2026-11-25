@@ -1,0 +1,8 @@
+{
+  "config": {
+    "secure-http": true,
+    "lock": true,
+    "preferred-install": "dist",
+    "allow-plugins": {}
+  }
+}

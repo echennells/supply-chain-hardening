@@ -1,0 +1,8 @@
+# Managed by supply-chain-harden action
+[install]
+minimumReleaseAge = 172800
+exact = true
+ignoreScripts = true
+frozenLockfile = true
+auto = "disable"
+saveTextLockfile = true

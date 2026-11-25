@@ -1,0 +1,50 @@
+# Managed by ansible-supply-chain-security
+#
+# pnpm 11+ only reads settings from this YAML file (camelCase keys).
+# It deliberately ignores ~/.npmrc, ~/.config/pnpm/rc (the older
+# ini-format file), /etc/npmrc, and NPM_CONFIG_* environment
+# variables for non-auth settings. See
+# https://pnpm.io/settings : "Only auth and registry settings are
+# read from .npmrc files. All other settings must be configured in
+# pnpm-workspace.yaml or the global ~/.config/pnpm/config.yaml."
+#
+# This file is deployed alongside ~/.config/pnpm/rc (kept for pnpm
+# 10 and earlier) so the host stays protected across pnpm version
+# upgrades. They are NOT redundant — different pnpm majors read
+# different files.
+#
+# Build-script allowlist note: pnpm 11 rejects `onlyBuiltDependencies`
+# in this global file (warns "Move them to a project-level
+# pnpm-workspace.yaml"), and ignores `allowBuilds` here too (MEASURED:
+# 11.28.12 warns and ignores it, 12.21.0 ignores it; esbuild stayed unbuilt
+# with ERR_PNPM_IGNORED_BUILDS), so pnpm 11+ has no global allowlist: the
+# packages are named per project, as `allowBuilds` in its pnpm-workspace.yaml.
+#
+# pnpm 10+ default-DENIES every dependency build script independently of
+# ignoreScripts (the approve-builds gate; MEASURED on pnpm 10.34 / 11.28 /
+# 12.18, 2026-11-08), so `ignoreScripts: false` does NOT "run all scripts".
+#
+# What ignoreScripts decides on pnpm 11+ (MEASURED on 11.28.12 and 12.21.0,
+# 2026-11-19, a project depending on esbuild 0.25.0):
+#   true  - no dependency build runs, SILENTLY (rc=0, no message), and a
+#           project's `allowBuilds: {esbuild: true}` is silently inert too.
+#           The project's own lifecycle scripts are blocked.
+#   false - a dependency named in the project's allowBuilds builds; any other
+#           is refused loudly (ERR_PNPM_IGNORED_BUILDS, rc=1). The project's
+#           own lifecycle scripts (package.json postinstall etc.) run.
+# A project can also set `ignoreScripts: false` in its own
+# pnpm-workspace.yaml, which outranks this file (MEASURED, same versions).
+#
+# So: true by default (strictly stronger: it also blocks a build the user
+# later approves). false when pnpm_built_dependencies is non-empty, the same
+# as pnpm-rc.j2 (pnpm 10) and the GitHub Action, because an operator who set an
+# allowlist asked for approved builds to run, and under true no project's
+# allowBuilds can take effect. The names in the list only reach pnpm 10.
+ignoreScripts: true
+minimumReleaseAge: 2880
+minimumReleaseAgeStrict: true
+minimumReleaseAgeExclude: []
+blockExoticSubdeps: true
+# Store integrity (see defaults/main.yml): hash-checks the store against the
+# lockfile. Readable from this global file, unlike onlyBuiltDependencies.
+verifyStoreIntegrity: true

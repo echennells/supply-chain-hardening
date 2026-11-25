@@ -1,0 +1,30 @@
+# Managed by ansible-supply-chain-security
+# Cargo supply-chain hardening — system defaults.
+#
+# Cargo's hardening surface is narrow. The biggest gaps cargo CANNOT close:
+#   - build.rs always executes during `cargo build` / `cargo install`
+#   - proc-macro crates execute Rust code at compile time
+#   - Cargo has no equivalent of npm's --ignore-scripts
+#
+# This config sets the cargo-level knobs that actually have meaning on
+# Linux, then defers the bulk of defense to companion tools (cargo-audit,
+# cargo-vet) available as optional detection tools (cargo_audit_tools).
+#
+# What previous versions of this file got wrong:
+#   - [http] check-revoke is a Windows-only setting (CertGetCertificateChain
+#     CRL/OCSP toggle). Linux cargo ignores it. Removed.
+#   - [build] dep-info-basedir is a build-artifact path prefix, not a
+#     locking/security knob. Removed.
+
+[net]
+# Use git CLI for fetches so SSH config, proxy settings, system CA bundles,
+# and TLS material under /etc/ssl are respected. Cargo's internal libgit2
+# path ignores ~/.ssh/config — fetches of git dependencies behind a
+# corporate proxy or auth-required mirror silently fail or fall back to
+# unauthenticated paths.
+git-fetch-with-cli = true
+
+# Retry transient network failures. Not security per se, but a missing
+# retry on an interrupted crate fetch can cause CI to fall back to a
+# cached older revision in ways that mask version-pin drift.
+retry = 3

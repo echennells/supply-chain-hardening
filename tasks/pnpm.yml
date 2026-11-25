@@ -101,17 +101,21 @@
           {{ pnpm_minimum_release_age_exclude | join(', ') if pnpm_minimum_release_age_exclude | length > 0 else '(none — all packages age-gated)' }}
   when: (pnpm_built_dependencies | length + pnpm_minimum_release_age_exclude | length) > 0
 
-- name: Create pnpm config directory
-  ansible.builtin.file:
-    path: "{{ pnpm_config_dir }}"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened pnpm rc (ini format — for pnpm 10 and earlier)
-  ansible.builtin.template:
-    src: pnpm-rc.j2
-    dest: "{{ pnpm_config_dir }}/rc"
-    mode: "0644"
+  # Replaced whole, but only a file that is exactly what this project last wrote
+  # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
+  # preflight, unless accept_user_config_overwrite=true, which copies it first.
+  ansible.builtin.script: user-config.sh replace pnpm-rc
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ pnpm_config_dir }}/rc"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'pnpm-rc.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_pnpm_rc
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_pnpm_rc.stdout_lines | default([]))"
 
 - name: Detect pnpm major version (for exotic-subdep enforcement reporting)
   # blockExoticSubdeps is a pnpm 11+ control. The role emits it to config.yaml
@@ -153,7 +157,15 @@
   # the entire pnpm hardening layer is inert on pnpm 11. Verified
   # empirically: pnpm 11.1.3 ignores all four legacy sources and only
   # reads config.yaml for ignoreScripts, minimumReleaseAge, etc.
-  ansible.builtin.template:
-    src: pnpm-config.yaml.j2
-    dest: "{{ pnpm_config_dir }}/config.yaml"
-    mode: "0644"
+  # Replaced whole, under the same rule as the rc above.
+  ansible.builtin.script: user-config.sh replace pnpm-yaml
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ pnpm_config_dir }}/config.yaml"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'pnpm-config.yaml.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_pnpm_yaml
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_pnpm_yaml.stdout_lines | default([]))"

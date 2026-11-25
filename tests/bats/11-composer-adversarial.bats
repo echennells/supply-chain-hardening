@@ -34,7 +34,7 @@ audit_tier_gate() {
   v=$(composer_version)
   [ -n "$v" ] || skip "could not read the composer version"
   [ "$(printf '%s\n%s\n' "$min" "$v" | sort -V | head -1)" = "$min" ] && return 0
-  if grep -q "\"$key\"" "$HOME/.config/composer/config.json"; then
+  if grep -q "\"$key\"" "$(composer_config)"; then
     echo "FAIL: composer $v predates $key ($min), but config.json writes it" >&2
     return 1
   fi
@@ -42,11 +42,11 @@ audit_tier_gate() {
 }
 
 @test "Composer config enforces HTTPS" {
-  assert_file_contains "$HOME/.config/composer/config.json" '"secure-http": true'
+  assert_file_contains "$(composer_config)" '"secure-http": true'
 }
 
 @test "Composer config prefers dist (no VCS hooks)" {
-  assert_file_contains "$HOME/.config/composer/config.json" '"preferred-install": "dist"'
+  assert_file_contains "$(composer_config)" '"preferred-install": "dist"'
 }
 
 @test "Composer config default-denies plugin execution (allow-plugins: {})" {
@@ -56,29 +56,29 @@ audit_tier_gate() {
   # TypeError, exit 255) and the upstream fix is non-monotonic across 2.3.x, so
   # the template always emits `{}` — which denies every plugin on every version
   # tested (2.0.14 → 2.10.3). See templates/composer-config.json.j2.
-  assert_file_contains "$HOME/.config/composer/config.json" '"allow-plugins": {}'
+  assert_file_contains "$(composer_config)" '"allow-plugins": {}'
 }
 
 @test "Composer publish-age gate is deployed (enforced from 2.11.0; harmless below)" {
-  assert_file_contains "$HOME/.config/composer/config.json" '"period": 172800'
+  assert_file_contains "$(composer_config)" '"period": 172800'
 }
 
 @test "Composer audit.abandoned defaults to fail (Composer >=2.7; test env runs 2.9+)" {
   # Tier 2+ — matches Composer's own upstream default since 2.7.0.
   audit_tier_gate abandoned 2.7.0
-  assert_file_contains "$HOME/.config/composer/config.json" '"abandoned": "fail"'
+  assert_file_contains "$(composer_config)" '"abandoned": "fail"'
 }
 
 @test "Composer audit.block-insecure is enabled (Composer >=2.9 tier)" {
   # Tier 1 only — refuses updates to packages with known security advisories.
   # Test container installs Composer via upstream installer so hits Tier 1.
   audit_tier_gate block-insecure 2.9.0
-  assert_file_contains "$HOME/.config/composer/config.json" '"block-insecure": true'
+  assert_file_contains "$(composer_config)" '"block-insecure": true'
 }
 
 @test "Composer audit.block-abandoned is enabled (Composer >=2.9 tier)" {
   audit_tier_gate block-abandoned 2.9.0
-  assert_file_contains "$HOME/.config/composer/config.json" '"block-abandoned": true'
+  assert_file_contains "$(composer_config)" '"block-abandoned": true'
 }
 
 @test "composer wrapper deployed at the discovered composer path" {
@@ -133,5 +133,5 @@ audit_tier_gate() {
   # The template uses nested {% if %} blocks around commas — a regression
   # could easily leave a trailing comma or missing brace and silently break
   # every composer invocation on the host.
-  python3 -c "import json,sys; json.load(open('$HOME/.config/composer/config.json'))"
+  python3 -c "import json,sys; json.load(open('$(composer_config)'))"
 }

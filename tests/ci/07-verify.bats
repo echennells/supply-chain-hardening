@@ -1016,12 +1016,30 @@ bundler_local_layer() { echo "Set for your local app ($CHECKOUT/.bundle/config):
             echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
   *) echo STUB ;;
 esac"
-  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  harden ECOSYSTEMS=composer COMPOSER_HOME="$TEST_HOME/.composer" -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
   [[ "$output" == *"OK     PARSED      composer config in effect"* ]]
   echo '{"config":{}}' > "$TEST_HOME/.composer/config.json"
   run verify_sourced --emit=plain
   [[ "$output" == *"GAP    PARSED      composer config in effect"* ]]
+}
+
+@test "composer: where only ~/.composer is there, our config in it is OK and the user's own is a GAP" {
+  mkdir -p "$TEST_HOME/.composer"
+  stub_bin composer "case \"\$*\" in
+  *--version*) echo 'Composer version 2.11.1 2026-01-01 00:00:00' ;;
+  *--list*) echo '[home] $TEST_HOME/.composer ($TEST_HOME/.composer/config.json)'
+            echo '[secure-http] true ($TEST_HOME/.composer/config.json)' ;;
+  *) echo STUB ;;
+esac"
+  harden ECOSYSTEMS=composer -- --emit=plain >/dev/null
+  [ ! -e "$TEST_HOME/.config/composer" ]
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
+  # a config of the user's there, as composer writes it
+  printf '{\n    "config": {\n        "secure-http": true\n    }\n}\n' > "$TEST_HOME/.composer/config.json"
+  run verify_sourced --emit=plain
+  [[ "$output" == *"GAP    PARSED      composer config in effect"* ]] || { grep composer <<<"$output"; return 1; }
 }
 
 @test "npm: a window shorter than the declared one is WEAK and names the env var" {

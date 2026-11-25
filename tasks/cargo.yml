@@ -23,22 +23,23 @@
   ansible.builtin.set_fact:
     cargo_home: "{{ cargo_home_check.stdout | trim }}"
 
-- name: Create cargo config directory
-  ansible.builtin.file:
-    path: "{{ cargo_home }}"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened cargo config.toml
-  # Replaces the file whole. A config.toml this project did not write (a
-  # registry mirror, private registries, credential providers) stops the play
-  # in preflight unless accept_user_config_overwrite=true, and is backed up
-  # here first (tasks/preflight.yml, CMP 4.7).
-  ansible.builtin.template:
-    src: cargo-config.toml.j2
-    dest: "{{ cargo_home }}/config.toml"
-    mode: "0644"
-    backup: "{{ (cargo_home ~ '/config.toml') in (sch_user_cfg_backup | default([])) }}"
+  # Replaced whole, but only a file that is exactly what this project last wrote
+  # (files/user-config.sh, user_cfg_class): a marker is not enough, because a
+  # credential added after hardening sits in a file that carries one. Anything else
+  # stopped the play in preflight, unless accept_user_config_overwrite=true, which
+  # copies it first. No diff is produced here, so --diff prints none of it.
+  ansible.builtin.script: user-config.sh replace cargo
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ cargo_home }}/config.toml"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'cargo-config.toml.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_cargo
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_cargo.stdout_lines | default([]))"
 
 - name: Deploy publish-age gate config at $CARGO_HOME/cooldown.toml
   # THE load-bearing cargo protection. Cargo runs build.rs at compile time
@@ -59,13 +60,13 @@
   # Mirrors the composer /root pattern. A build run under sudo reads root's
   # CARGO_HOME, not the invoking user's, so without this the gate silently
   # does not apply to `sudo cargo build`.
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
   become: true
-  ansible.builtin.file:
-    path: /root/.cargo
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ '/root/.cargo' | quote }}
+    creates: "{{ '/root/.cargo' }}"
+    executable: /bin/bash
   when: cargo_cooldown_enforce | bool
 
 - name: Deploy publish-age gate config to /root (sudo coverage)

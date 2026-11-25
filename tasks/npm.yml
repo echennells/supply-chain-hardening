@@ -5,17 +5,32 @@
 - name: Find the npm versions the npmrc keys depend on
   ansible.builtin.import_tasks: npm_versions.yml
 
-- name: Deploy hardened .npmrc (per-user)
+- name: Merge the hardened settings into .npmrc (per-user)
+  # Merged, never replaced: this is where `npm login` keeps its token. MEASURED
+  # (d738db8, issue 48): the template task that was here dropped every line of the
+  # user's on every apply, and turned a 0600 file into 0644. files/user-config.sh
+  # puts the settings in a marked block at the top, keeps every other line, and
+  # ends the file 0600. A line of the user's for one of these settings would win
+  # over the block, so it is taken out, after a copy; the end-of-run report names
+  # the key. Never the line: no diff is produced here, so --diff prints none.
+  #
   # Template-driven so npm_ignore_scripts / npm_audit / npm_save_exact /
   # npm_fund / npm_update_notifier actually control behavior. Previously
   # this content was hardcoded inline, which made those variables
   # misleading: setting npm_ignore_scripts=false did nothing for the
   # config files (only the env var). The template now makes the variable
   # names match what they actually do.
-  ansible.builtin.template:
-    src: npmrc.j2
-    dest: "{{ ansible_env.HOME }}/.npmrc"
-    mode: "0644"
+  ansible.builtin.script: user-config.sh npmrc
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.npmrc"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_npmrc
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_npmrc.stdout_lines | default([]))"
 
 - name: Deploy hardened /etc/npmrc (correct on Debian/Ubuntu apt npm; harmless baseline elsewhere)
   # The per-user ~/.npmrc above only protects the user the role ran against.
@@ -106,30 +121,19 @@
   # resolving it once as the invoking user also fixes the sudo / other-user
   # path. (A host that sets NPM_CONFIG_GLOBALCONFIG to a per-user override is
   # out of scope — we harden npm's real default global config location.)
-  ansible.builtin.command: "{{ npm_check.stdout }} config get globalconfig"
+  #
+  # The invoking user's own settings are out of the way for it: a prefix= or
+  # globalconfig= in ~/.npmrc or the environment is not where the other accounts'
+  # npm reads (ucf_npm_global in files/user-config.sh). Prints the path, unless it
+  # is /etc/npmrc, and "as user" or "as root", who writes it.
+  ansible.builtin.script: user-config.sh path npm-global
+  args:
+    executable: /bin/bash
   register: npm_globalconfig
   changed_when: false
   check_mode: false
   failed_when: false
   when: npm_check.rc == 0
-
-- name: Ensure npm's resolved global config directory exists
-  # {prefix}/etc may not exist yet (e.g. /usr/etc on NodeSource). Skipped when
-  # globalconfig resolves to /etc/npmrc (already deployed) or to an empty /
-  # relative value.
-  become: true
-  ansible.builtin.file:
-    path: "{{ (npm_globalconfig.stdout | trim) | dirname }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  when:
-    - npm_check.rc == 0
-    - npm_globalconfig is defined
-    - npm_globalconfig.stdout | default('') | trim | length > 0
-    - (npm_globalconfig.stdout | trim) is match('^/')
-    - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
 
 - name: Deploy hardened npmrc to npm's resolved global config path (non-apt layouts)
   # Closes the sudo / other-user gap on every layout where globalconfig is not
@@ -140,19 +144,44 @@
   # on every command (ECH-196, measured npm 11.19). pnpm 9 and 10 read this path as
   # their global config too (measured), so ignore-scripts reaches a `sudo pnpm` or
   # another user's here, and the age gate does not.
-  become: true
-  ansible.builtin.template:
-    src: npmrc.j2
-    dest: "{{ npm_globalconfig.stdout | trim }}"
-    owner: root
-    group: root
-    mode: "0644"
+  #
+  # Replaced whole, but only a file that is exactly what this project last wrote:
+  # anything else stopped the play in preflight, unless accept_etc_overwrite=true,
+  # which copies it first. In the user's home, or a prefix that is the user's
+  # (linuxbrew), it is written as the user. Root writes it only where no other account
+  # controls the path, whatever the path is: no link in it, and every part of it root's
+  # and writable by root alone (ucf_no_root, judged by the process that writes). Anywhere
+  # else it is left alone, and the summary says so.
+  become: "{{ 'as root' in (npm_globalconfig.stdout_lines | default([])) }}"
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- replace npm-global
+    stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
+  environment:
+    SCH_UCF_PATH: "{{ npm_globalconfig.stdout_lines | first }}"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_etc_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+    SCH_UCF_ROOT: "{{ ('as root' in npm_globalconfig.stdout_lines) | ternary('1', '0') }}"
+  register: sch_ucf_npm_global
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_npm_global.stdout_lines | default([]))"
+  failed_when: sch_ucf_npm_global.rc | default(2) not in [0, 1]
   when:
     - npm_check.rc == 0
-    - npm_globalconfig is defined
-    - npm_globalconfig.stdout | default('') | trim | length > 0
-    - (npm_globalconfig.stdout | trim) is match('^/')
-    - (npm_globalconfig.stdout | trim) != '/etc/npmrc'
+    - npm_globalconfig.stdout_lines | default([]) | length > 0
+
+- name: Record skipped protection — npm's global config
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + [
+           "npm's global config — " ~ (sch_ucf_npm_global.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ') | default(npm_globalconfig.stdout_lines | first, true))
+           ~ '. It is what `sudo npm` and every other account get their npm settings from; your own ~/.npmrc is not affected.'
+           ~ (" If an earlier version of this role made it root's, move it aside as yourself (`mv -- " ~ (npm_globalconfig.stdout_lines | first | dirname | quote) ~ ' ' ~ ((npm_globalconfig.stdout_lines | first | dirname) ~ '.old') | quote ~ '`, which needs no root) and re-apply.'
+              if 'as user' in npm_globalconfig.stdout_lines else '')
+         ] }}
+  when:
+    - sch_ucf_npm_global is not skipped
+    - sch_ucf_npm_global.rc | default(0) != 0
 
 - name: Check that root can run npm (a per-user Node is invisible to become)
   # Same reason as tasks/socket.yml: the install runs as root, root's PATH is

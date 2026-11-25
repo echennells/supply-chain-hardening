@@ -41,7 +41,7 @@
 {%- set v = composer_detected_version | default('', true) -%}
 {%- set has_audit = v != '' and v is version('2.7.0', '>=') -%}
 {%- set has_block = v != '' and v is version('2.9.0', '>=') -%}
-{
+{{ sch_body_prefix | default('') }}{
   "config": {
     "secure-http": true,
     "lock": true,

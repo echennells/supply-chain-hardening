@@ -98,17 +98,21 @@
     - pip_age_gate_support is defined
     - (pip_age_gate_support.stdout | default('') | trim) is match('^UNSUPPORTED:')
 
-- name: Create pip config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.config/pip"
-    state: directory
-    mode: "0755"
-
 - name: Deploy hardened pip.conf as fallback
-  ansible.builtin.template:
-    src: pip.conf.j2
-    dest: "{{ ansible_env.HOME }}/.config/pip/pip.conf"
-    mode: "0644"
+  # Replaced whole, but only a file that is exactly what this project last wrote
+  # (files/user-config.sh, user_cfg_class). Anything else stopped the play in
+  # preflight, unless accept_user_config_overwrite=true, which copies it first.
+  ansible.builtin.script: user-config.sh replace pip
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.config/pip/pip.conf"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'pip.conf.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+  register: sch_ucf_pip
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_pip.stdout_lines | default([]))"
 
 - name: Deploy hardened /etc/pip.conf (system-wide; covers sudo and non-deploying users)
   # pip's config search order is global (/etc/pip.conf) → user
@@ -132,10 +136,12 @@
 # env layer.
 
 - name: Create Poetry config directory
-  ansible.builtin.file:
-    path: "{{ ansible_env.HOME }}/.config/pypoetry"
-    state: directory
-    mode: "0755"
+  # Only when it is not there: a mode on an existing directory changed it on every
+  # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
+  ansible.builtin.shell:
+    cmd: umask 022 && mkdir -p -- {{ (ansible_env.HOME ~ '/.config/pypoetry') | quote }}
+    creates: "{{ (ansible_env.HOME ~ '/.config/pypoetry') }}"
+    executable: /bin/bash
 
 - name: Deploy Poetry's publish-age gate (never over an existing config)
   # force: false because this file is the user's whole Poetry config, and appending

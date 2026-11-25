@@ -735,6 +735,28 @@ consider a re-apply hook (cron + idempotent apply, or
 systemd-path-monitor). Wrapper tests should detect the absence of the
 wrapper marker as a failure mode, not just absence of the binary.
 
+### A marker read as ownership
+
+Eight per-user config files carried our `Managed by` line and were replaced
+whole on every run. The line says who wrote the file once, not what is in it
+now: those files are where `npm login`, `bundle config set` and people put
+tokens and private registries. MEASURED (d738db8): a token appended after
+hardening was deleted by the next run, on both surfaces, with no copy and no
+message, and files with no marker went the same way. The tools edit these files
+too, and take the marker with them: `npm login` rewrites `~/.npmrc` without its
+comments, so a block found only by its markers would be written twice.
+
+**Principle**: before replacing a file in a home directory, prove it holds
+nothing that was not written by us (a checksum of what was last written, not a
+marker); otherwise merge, or stop, or copy first and say so. Recognise our own
+settings by key and value as well as by marker, and never let a range that
+depends on an end marker run to the end of the file.
+
+Where a path comes from the user's environment, home or settings, the user's
+process writes it. Root writes only to paths no other account controls: every
+part root's and writable by root alone, judged by the process that writes, and
+not once by one process for another (`ucf_roots`).
+
 ### Tool version drift across tiers
 
 Corepack 0.29.4 had a stale keyring; latest fixed pnpm@10 major-only
