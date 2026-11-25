@@ -12,7 +12,7 @@ against throwaway `$HOME` and `$TMPDIR` directories.
 
 It runs on a Mac too, with Apple's bash 3.2, `bundle` and (missing) `javac`; nothing in
 it asks for a password, and the tests that need root skip without passwordless sudo.
-528 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
+536 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
 set up like a person's Mac (`.github/workflows/ci-script.yml`).
 
 Run it as a normal user. As root, `harden.sh` copies the cargo-cooldown it
@@ -36,7 +36,7 @@ silently inert.
 | File | Covers |
 |---|---|
 | `01-emit-targets.bats` | The platform adapter. Each `--emit` target writes to its own sink and no other; the canonical env file round-trips through `source`; the shipped GitLab example's lines, read from the file, work under the Docker executor's `umask 0000`. |
-| `02-validation.bats` | Input validation and the fail-loud guards, what a run reports as applied or not (the npm versions around the age gate's first release) — rejected age windows, missing `HOME`, the skip path, unknown ecosystems, unwritable paths, and where the env file and run record may go (per-user by default; refused when the file is not ours, or any directory above it is world-writable without the sticky bit or is another user's sticky directory). |
+| `02-validation.bats` | Input validation and the fail-loud guards, what a run reports as applied or not (the npm and pnpm versions around the age gate's first release, a tool whose version command fails) — rejected age windows, missing `HOME`, the skip path, unknown ecosystems, unwritable paths, and where the env file and run record may go (per-user by default; refused when the file is not ours, or any directory above it is world-writable without the sticky bit or is another user's sticky directory). |
 | `03-config-files.bats` | Per-ecosystem config content, asserted **by key name**. npm's `min-release-age` and `allow-git` are left out, of the files and the env layer, exactly where npm warns about them, with several npms, after an upgrade, and with none. |
 | `04-wrappers.bats` | Wrapper deployment and behavior, via stub binaries that get really wrapped; which file counts as one of our wrappers (every marker either surface has shipped, by `harden.sh` and by the role), and what is recorded when one is left alone. Needs passwordless sudo; skips without it. |
 | `05-behavioral.bats` | The attacks themselves, run for real against whatever package managers are installed, and that no npm command warns about what the hardening wrote. |

@@ -1,6 +1,6 @@
 # Tests
 
-649 container tests verify the supply chain hardening works (`make test`), plus 530 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+649 container tests verify the supply chain hardening works (`make test`), plus 536 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -170,3 +170,4 @@ These are scenarios the test suite does **not** cover. They're tracked here so a
 8. **The role died half way on a Mac** — after `~/.npmrc` and `/etc/npmrc`, on a group name, while `--preflight` cleared the host. Its first task now refuses a macOS target (`50-preflight-gnu-date.bats`, and the real thing in `macos.yml`).
 9. **"Already wrapped" was a grep for the project's name** — in `harden.sh` a tool script that mentions it was left unwrapped and reported as applied; in the role it was overwritten with no copy, and a wrapper `harden.sh` had written was moved over the real composer, bun or deno. Both read the marker line now.
 10. **Two smoke jobs blamed the hardening for Maven Central's 429** — and the maven one's grep matched its own fixture's group id, so it could also read a refused run as a block. The verdict is a script tested on those runs' logs (`13-central-429.bats`).
+11. **A version was read from an error message** — `harden.sh` merged stderr into `<tool> --version`, ignored the exit status and took the first number. With no network, corepack's yarn and pnpm (Node 22.23.5 under `~/.nvm`) print a stack trace with Node's version in its path, and both were reported "Fully applied" as 22.23.5 (MEASURED); found on a Mac where corepack could not start pnpm (#48). A command that fails now gives no version, stderr is not read, and npm, pnpm or yarn that is installed but gives none is degraded, not applied. So is pnpm before 10.16.0, which has no `minimumReleaseAge` and was also "Fully applied" (`tests/ci/02-validation.bats`).
