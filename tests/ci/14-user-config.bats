@@ -632,6 +632,31 @@ JS
   sudo rm -f "$BATS_TEST_TMPDIR/y"
 }
 
+@test "npm: its global config is the one every account's npm reads, whatever this account's settings say" {
+  have npm && have node || skip "npm not installed"
+  lib
+  local real x t="$BATS_TEST_TMPDIR/trap"
+  mkdir -p "$t/etc"
+  ask() { ( export HOME="$TEST_HOME"; "$@" ); }
+  real=$(cd / && env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" "$(ucf_npm)" config get globalconfig 2>/dev/null | tail -1)
+  case "$real" in /*) ;; *) skip "npm does not say" ;; esac
+  [ "$(ask ucf_npm_global "$(ucf_npm)")" = "$real" ]
+  # the control (in a home of its own, where npm may write): npm goes where these say
+  mkdir -p "$BATS_TEST_TMPDIR/ctl"
+  for x in "prefix=$t" "globalconfig=$t/etc/npmrc"; do
+    printf '%s\n' "$x" | tee "$TEST_HOME/.npmrc" > "$BATS_TEST_TMPDIR/ctl/.npmrc"
+    [ "$(cd / && env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/ctl" "$(ucf_npm)" config get globalconfig 2>/dev/null | tail -1)" = "$t/etc/npmrc" ]
+    [ "$(ask ucf_npm_global "$(ucf_npm)")" = "$real" ]
+  done
+  rm -f "$TEST_HOME/.npmrc"
+  for x in NPM_CONFIG_PREFIX="$t" npm_config_prefix="$t" NPM_CONFIG_GLOBALCONFIG="$t/etc/npmrc" Npm_Config_GlobalConfig="$t/etc/npmrc" PREFIX="$t" DESTDIR="$t" NODE_OPTIONS=--nonsense; do
+    [ "$( export "$x"; ask ucf_npm_global "$(ucf_npm)" )" = "$real" ] || { echo "$x"; return 1; }
+  done
+  printf 'prefix=%s\n' "$t" > "$BATS_TEST_TMPDIR/rc"
+  [ "$( export NPM_CONFIG_USERCONFIG="$BATS_TEST_TMPDIR/rc"; ask ucf_npm_global "$(ucf_npm)" )" = "$real" ]
+  [ -z "$(ls -A "$TEST_HOME")" ]
+}
+
 # --------------------------------------------------------------- modes and links
 
 @test "user config: ~/.npmrc ends 0600, or tighter if it was; nothing is loosened" {

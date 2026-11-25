@@ -204,12 +204,8 @@ ucf_path() {
       d=$(ucf_composer_home)
       [ "$d" = "$(ucf_composer_base)" ] || printf '%s\n' "$d/config.json" ;;
     npm-global)
-      # Asked of npm, from /, with everything off that makes it write (MEASURED with
-      # find -newer: npm 6.14.18, 8.19.4, 9.9.4, 10.9.11, 11.2.0, 11.19.1 and 12.2.3
-      # write a log, a compile cache or an update check without this, nothing with it).
       d=$(ucf_npm) || return 0
-      d=$(cd / && npm_config_logs_max=0 npm_config_cache=/dev/null/x npm_config_update_notifier=false \
-        NODE_DISABLE_COMPILE_CACHE=1 "$d" config get globalconfig 2>/dev/null | tail -1) || return 0
+      d=$(ucf_npm_global "$d") || return 0
       case "$d" in /etc/npmrc) ;; /*) printf '%s\n' "$d" ;; esac ;;
   esac
 }
@@ -224,6 +220,24 @@ ucf_npm() {
   done
   PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
 }
+
+# ucf_npm_global <npm>: the file that npm reads as its global config. Asked of npm, from
+# /, with the settings of this account out of the way (its npmrc, the npm_config_*
+# variables in any case, and PREFIX and DESTDIR, which npm reads too): a prefix= or
+# globalconfig= there names another file than the one every other account's npm reads,
+# root's included. And with everything off that makes it write (MEASURED with find
+# -newer: npm 6.14.18, 8.19.4, 9.9.4, 10.9.11, 11.2.0, 11.19.1 and 12.2.3 write a log, a
+# compile cache or an update check without this, nothing with it).
+ucf_npm_global() (
+  cd / || exit 1
+  for v in $(env | LC_ALL=C sed -n 's/^\([Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    unset "$v"
+  done
+  unset PREFIX DESTDIR NODE_OPTIONS
+  export npm_config_userconfig=/dev/null npm_config_logs_max=0 npm_config_cache=/dev/null/x
+  export npm_config_update_notifier=false NODE_DISABLE_COMPILE_CACHE=1
+  "$1" config get globalconfig 2>/dev/null | tail -1
+)
 
 # ucf_composer_base: the directory written whether or not composer is here. Not
 # ~/.config/composer when only ~/.composer is there: composer takes the first of
