@@ -155,6 +155,7 @@
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'composer-config.json.j2', template_vars={'sch_body_prefix': 'x'}) }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "refuse"
+    SCH_UCF_ROOT: "1"
   register: sch_ucf_composer_root
   check_mode: false
   changed_when: "'changed' in (sch_ucf_composer_root.stdout_lines | default([]))"
@@ -195,6 +196,7 @@
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'composer-config.json.j2', template_vars={'sch_body_prefix': 'x'}) }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "refuse"
+    SCH_UCF_ROOT: "1"
   register: sch_ucf_composer_home_root
   check_mode: false
   changed_when: "'changed' in (sch_ucf_composer_home_root.stdout_lines | default([]))"

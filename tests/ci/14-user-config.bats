@@ -29,7 +29,14 @@ setup() {
   stub_bin dotnet 'echo 8.0.100'
 }
 
-teardown() { touch "$BATS_TEST_TMPDIR/stop"; }
+teardown() {
+  touch "$BATS_TEST_TMPDIR/stop"
+  local d
+  [ -f "$BATS_TEST_TMPDIR/rootdirs" ] || return 0
+  while read -r d; do
+    case "$d" in */sch-ucf-??????) sudo rm -rf -- "$d" ;; esac
+  done < "$BATS_TEST_TMPDIR/rootdirs"
+}
 
 f() { # <kind>: where harden.sh puts it here
   case "$1" in
@@ -119,6 +126,20 @@ lib() {
   sed -n '/^# >>> user_config$/,/^# <<< user_config$/p' "$HARDEN_SH" > "$BATS_TEST_TMPDIR/lib.sh"
   # shellcheck disable=SC1091
   . "$BATS_TEST_TMPDIR/lib.sh"
+}
+
+# rootdir: a new directory that is root's alone, for what root writes; gone with the test
+rootdir() {
+  local d
+  d=$(sudo mktemp -d "$(cd -P /etc && pwd -P)/sch-ucf-XXXXXX") || return 1
+  sudo chmod 755 "$d"
+  printf '%s\n' "$d" | tee -a "$BATS_TEST_TMPDIR/rootdirs"
+}
+
+# a root other than this account, for a test of where it writes
+need_sudo() {
+  [ "$(id -u)" != 0 ] || skip "as root there is no other account"
+  sudo -n true 2>/dev/null || skip "no passwordless sudo"
 }
 
 # ------------------------------------------------------------- nothing is lost
@@ -590,8 +611,8 @@ JS
   . "$BATS_TEST_TMPDIR/asroot.sh"
   # shellcheck disable=SC2034
   SUDO=sudo
-  local d="$BATS_TEST_TMPDIR/roothome" body
-  sudo mkdir -m 700 "$d"
+  local d body
+  d=$(rootdir)
   body=$'# Managed by supply-chain-harden action\nenableScripts: false'
   [ "$(ucf_as_root yarn "$d/.yarnrc.yml" <<<"$body")" = changed ]
   sudo head -1 "$d/.yarnrc.yml" | grep -q 'self-check sha256:'
@@ -626,10 +647,154 @@ JS
     printf '#!/bin/sh\n[ "$(id -u)" != 0 ] || touch "%s/ran-%s"\nexec /usr/bin/env -i PATH=/usr/bin:/bin %s "$@"\n' "$BATS_TEST_TMPDIR" "$t" "$t" > "$BATS_TEST_TMPDIR/evil/$t"
     chmod +x "$BATS_TEST_TMPDIR/evil/$t"
   done
+  local d
+  d=$(rootdir)
   ( PATH="$BATS_TEST_TMPDIR/evil:$PATH"; BASH_ENV="$BATS_TEST_TMPDIR/evil/bash"; export BASH_ENV
-    ucf_as_root yarn "$BATS_TEST_TMPDIR/y" <<<$'# Managed by supply-chain-harden action\na: 1' ) | grep -qx changed
+    ucf_as_root yarn "$d/y" <<<$'# Managed by supply-chain-harden action\na: 1' ) | grep -qx changed
   [ -z "$(ls "$BATS_TEST_TMPDIR" | grep '^ran-')" ] || { ls "$BATS_TEST_TMPDIR"; return 1; }
-  sudo rm -f "$BATS_TEST_TMPDIR/y"
+  sudo rm -rf "$d"
+}
+
+# ------------------------------------- where root writes, and where it does not
+
+@test "root: a path is one no other account controls, part by part" {
+  need_sudo
+  lib
+  local d n="other accounts can write to" u x
+  d=$(rootdir)
+  u=$(id -u)
+  sudo mkdir -p "$d/ok/etc" "$d/gw/etc" "$d/ow/etc" "$d/st/etc" "$d/mine/etc"
+  sudo touch "$d/ok/etc/npmrc" "$d/ok/gwfile" "$d/ok/myfile"
+  sudo chmod 775 "$d/gw"; sudo chmod 757 "$d/ow"; sudo chmod 1777 "$d/st"; sudo chmod 664 "$d/ok/gwfile"
+  sudo chown "$u" "$d/mine" "$d/ok/myfile"
+  sudo ln -s "$d/ok" "$d/abs"; sudo ln -s ../ok "$d/ok/rel"; sudo ln -s loop "$d/loop"
+  sudo ln -s "$d/mine/etc" "$d/out"; sudo ln -s ok/etc/npmrc "$d/file"
+  why() { sudo bash -c '. "$1"; shift; ucf_roots "$@"' bash "$BATS_TEST_TMPDIR/lib.sh" "$@"; }
+  sed -n '/^# >>> user_config$/,/^# <<< user_config$/p' "$ROOT/files/user-config.sh" > "$BATS_TEST_TMPDIR/lib.sh"
+  # what root may write
+  for x in "$d/ok/etc/npmrc" "$d/ok/etc/new" "$d/ok/new/deeper/npmrc"; do
+    [ -z "$(why "$x" plain)" ] || { why "$x" plain; return 1; }
+    [ -z "$(why "$x")" ]
+  done
+  # what it may not, and what it says
+  for x in gw ow st; do
+    [[ "$(why "$d/$x/etc/npmrc" plain)" == *"is in $d/$x, which $n" ]]
+    [[ "$(why "$d/$x/etc/npmrc")" == *"is in $d/$x, which $n" ]]
+    [[ "$(why "$d/$x/new")" == *"is in $d/$x, which $n" ]]
+  done
+  [ "$(why "$d/mine/etc/npmrc" plain)" = "is in $d/mine, which is not root's" ]
+  [ "$(why "$d/mine/new")" = "is in $d/mine, which is not root's" ]
+  [ "$(why "$d/ok/myfile" plain)" = "is in $d/ok/myfile, which is not root's" ]
+  [[ "$(why "$d/ok/gwfile" plain)" == *"$n" ]]
+  [ -z "$(why "$d/ok/gwfile")" ]               # in a directory of root's alone, it is only replaced
+  # a link: never in a plain path; followed elsewhere, when what it leads to is root's
+  for x in abs/etc/npmrc ok/rel/etc/npmrc loop/x out/npmrc file; do
+    [[ "$(why "$d/$x" plain)" == "goes through $d/"*", a symbolic link" ]] || { why "$d/$x" plain; return 1; }
+  done
+  [ -z "$(why "$d/abs/etc/npmrc")" ]
+  [ -z "$(why "$d/ok/rel/etc/new")" ]
+  [ -z "$(why "$d/file")" ]
+  [ "$(why "$d/out/npmrc")" = "is in $d/mine, which is not root's" ]
+  [[ "$(why "$d/loop/x")" == "goes through "*", a symbolic link" ]]
+  # and a path that is not a path
+  for x in "$d/ok/../ok/etc/npmrc" "$d//ok/etc/npmrc" "$d/./ok/npmrc" "ok/etc/npmrc" "" $'/etc/x\ny'; do
+    [ -n "$(why "$x" plain)" ] || { echo "$x"; return 1; }
+    [ -n "$(why "$x")" ]
+  done
+  # npm's global config is named as npm names it
+  no() { sudo bash -c '. "$1"; shift; ucf_no_root "$@"' bash "$BATS_TEST_TMPDIR/lib.sh" npm-global "$1"; }
+  [ -z "$(no "$d/ok/etc/npmrc")" ]
+  for x in "$d/ok/etc/new" "$d/ok/npmrc" /etc/ld.so.preload; do [[ "$(no "$x")" == "is not what npm names"* ]]; done
+  sudo rm -rf "$d"
+}
+
+@test "root: where another account controls the path nothing is read or written, and it says so" {
+  need_sudo
+  lib
+  sed -n '/^ucf_as_root() {$/,/^}$/p' "$HARDEN_SH" > "$BATS_TEST_TMPDIR/asroot.sh"
+  # shellcheck disable=SC1091
+  . "$BATS_TEST_TMPDIR/asroot.sh"
+  # shellcheck disable=SC2034
+  SUDO=sudo
+  local d body h="$BATS_TEST_TMPDIR/h" t
+  d=$(rootdir)
+  mkdir -p "$h"
+  body=$'# Managed by supply-chain-harden action\na: 1'
+  printf 'mine: 1\n' > "$h/mine"
+  printf 'SECRET\n' | sudo tee "$d/theirs" >/dev/null
+  sudo chmod 600 "$d/theirs"
+  ln -s "$d/theirs" "$h/link"; ln -s "$d" "$h/dir"; mkfifo "$h/fifo"
+  t=$(sudo ls -lanR "$d")
+  for x in mine link dir/theirs dir/new fifo new; do
+    run ucf_as_root yarn "$h/$x" <<<"$body"
+    [ "$status" -eq 1 ]
+    [[ "$output" == "error: $h/$x is in /"*"root writes only to paths no other account controls; it was left as it is" ]] || { echo "$x: $output"; return 1; }
+  done
+  [ "$(sudo ls -lanR "$d")" = "$t" ]
+  [ "$(cat "$h/mine")" = 'mine: 1' ]
+  [ "$(ls -A "$h" | tr '\n' ' ')" = 'dir fifo link mine ' ]
+  # the same through the script the role runs, for npm's global config too
+  for x in yarn npm-global; do
+    for t in "$h/new/etc/npmrc" "$h/dir/etc/npmrc"; do
+      run sudo env SCH_UCF_ROOT=1 SCH_UCF_FOREIGN=keep SCH_UCF_PATH="$t" SCH_UCF_BODY="; Managed by ansible-supply-chain-security" bash "$ROOT/files/user-config.sh" replace "$x"
+      [ "$status" -eq 1 ]
+      [[ "$output" == *"error: $t "*"root writes only to paths no other account controls"* ]] || { echo "$output"; return 1; }
+      run sudo env SCH_UCF_ROOT=1 SCH_UCF_PATH="$t" bash "$ROOT/files/user-config.sh" classify "$x"
+      [[ "$output" == "blocked $t "*"root writes only to paths no other account controls"* ]] || { echo "$output"; return 1; }
+    done
+  done
+  [ ! -e "$h/new" ]
+  # and a root that sudo made of this account, with this account's home
+  run sudo env HOME="$h" SCH_UCF_FOREIGN=keep SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" replace yarn
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"(run this as $(id -un), not as root)"* ]] || { echo "$output"; return 1; }
+  [ ! -e "$h/.yarnrc.yml" ]
+  sudo rm -rf "$d"
+}
+
+@test "root: with sudo and this account's home, harden.sh writes none of these files" {
+  need_sudo
+  printf '//registry.example/:_authToken=SECRET\n' > "$(f npmrc)"
+  cp "$(f npmrc)" "$BATS_TEST_TMPDIR/before"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$(f yarn)"
+  run sudo env -i SUDO_UID="$(id -u)" SUDO_USER="$(id -un)" PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$XDG" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=false ECOSYSTEMS=npm,yarn bash "$HARDEN_SH" --emit=plain
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -qF "$(f npmrc) is in /"
+  ! echo "$output" | grep SECRET || false
+  cmp "$(f npmrc)" "$BATS_TEST_TMPDIR/before"
+  [ -O "$(f npmrc)" ]
+  [ ! -e "$BATS_TEST_TMPDIR/elsewhere" ]
+  sudo rm -rf "$TEST_HOME" "$TEST_TMP"         # what the run kept in them is root's
+}
+
+@test "root: every become that runs user-config.sh in the role says so" {
+  python3 - "$ROOT"/tasks/*.yml <<'PY'
+import sys, yaml
+n = 0
+def walk(ts, f):
+    global n
+    for t in ts or []:
+        for k in ('block', 'rescue', 'always'):
+            walk(t.get(k), f)
+        cmd = str(t.get('ansible.builtin.script', ''))
+        if 'user-config.sh' not in cmd:
+            assert 'user-config.sh' not in str(t) or not t.get('become'), (f, t.get('name'))
+            continue
+        b, e = t.get('become', False), (t.get('environment') or {}).get('SCH_UCF_ROOT')
+        if b is False:
+            assert e is None, (f, t['name'])
+            continue
+        n += 1
+        if b is True:
+            assert e == '1', (f, t['name'])
+        else:                      # the same condition decides both
+            cond = b.strip('{} ')
+            assert e is not None and "ternary('1', '0')" in e and "'as root' in" in cond and "'as root' in" in e, (f, t['name'])
+for f in sys.argv[1:]:
+    walk(yaml.safe_load(open(f)), f)
+assert n == 5, n
+PY
 }
 
 @test "npm: its global config is the one every account's npm reads, whatever this account's settings say" {
@@ -998,26 +1163,41 @@ npmrc_body() { echo '; Managed by supply-chain-harden action'; settings; }
 }
 
 @test "preflight: npm's global config is named, and judged; action/harden.sh does not write it" {
-  have npm && have node || skip "npm not installed"
-  local g="$TEST_HOME/npm/globalrc"
-  gpf() { env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" NPM_CONFIG_GLOBALCONFIG="$g" TMPDIR="$TEST_TMP" bash "$HARDEN_SH" --preflight > "$BATS_TEST_TMPDIR/pf" || true; }
-  gpf
-  grep -qF "$g: npm's global config, not there, will be created" "$BATS_TEST_TMPDIR/pf" || { cat "$BATS_TEST_TMPDIR/pf"; return 1; }
-  # asking npm wrote nothing
-  [ ! -e "$TEST_HOME/.npm" ]
-  [ -z "$(ls -A "$TEST_TMP")" ]
-  mkdir -p "$TEST_HOME/npm"
+  # The lines of --preflight about it, for a path of this test's choosing: the one
+  # npm gives is the machine's own.
+  lib
+  local g="$TEST_HOME/npm/etc/npmrc" me
+  me=$(id -un)
+  sed -n "/^  f=\$(ucf_path npm-global)\$/,/^  # The files in a home directory/p" "$HARDEN_SH" > "$BATS_TEST_TMPDIR/pf.sh"
+  grep -q '_pf_stop' "$BATS_TEST_TMPDIR/pf.sh"
+  gpf() {
+    ( HOME="$TEST_HOME"; out=""
+      ucf_path() { printf '%s\n' "$g"; }
+      _pf_line() { echo "      $*"; }; _pf_note() { echo "NOTE  $*"; }; _pf_stop() { echo "STOP  $*"; }
+      # shellcheck disable=SC1091
+      . "$BATS_TEST_TMPDIR/pf.sh" )
+  }
+  [ "$(gpf)" = "      $g: npm's global config, not there, will be created" ]
+  mkdir -p "$TEST_HOME/npm/etc"
   cp "$ROOT/tests/fixtures/user-config/v2.1.0-role/npmrc" "$g"
-  gpf
-  grep -qF "$g: npm's global config, exactly what this project last wrote" "$BATS_TEST_TMPDIR/pf"
+  [[ "$(gpf)" == "      $g: npm's global config, exactly what this project last wrote"* ]]
   # a marker is not enough
   printf '//corp.example/:_authToken=SECRET\n' >> "$g"
-  cp "$g" "$BATS_TEST_TMPDIR/before"
-  gpf
-  grep -qE "STOP  $g: npm's global config, not exactly .*accept_etc_overwrite=true" "$BATS_TEST_TMPDIR/pf"
-  ! grep SECRET "$BATS_TEST_TMPDIR/pf" || false
-  ECO=npm apply NPM_CONFIG_GLOBALCONFIG="$g" >/dev/null 2>&1
-  cmp "$g" "$BATS_TEST_TMPDIR/before"
+  [[ "$(gpf)" == "STOP  $g: npm's global config, not exactly "*"accept_etc_overwrite=true"* ]]
+  [[ "$(gpf)" != *SECRET* ]]
+  # one the user cannot write stops nothing, and is said
+  chmod 555 "$TEST_HOME/npm/etc"
+  if [ "$(id -u)" != 0 ]; then
+    [[ "$(gpf)" == "NOTE  $g: npm's global config. It cannot be replaced: "*"lists it in the run summary." ]] || { gpf; return 1; }
+  fi
+  chmod 755 "$TEST_HOME/npm/etc"
+  # nor one that neither this account nor root alone controls
+  g=/tmp/sch-not-there/etc/npmrc
+  [[ "$(gpf)" == "NOTE  $g: npm's global config. It "*"root writes only to paths no other account controls. The role leaves it alone"* ]] || { gpf; return 1; }
+  g=/etc/ld.so.preload
+  [[ "$(gpf)" == "NOTE  $g: npm's global config. It is not what npm names its global config"* ]] || { gpf; return 1; }
+  # harden.sh itself never writes one
+  ! grep -nE 'put_user_cfg npm-global|ucf_replace npm-global' "$HARDEN_SH" || false
 }
 
 # --------------------------------------------------------- the same on both surfaces

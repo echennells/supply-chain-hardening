@@ -276,7 +276,9 @@
 # /usr/etc/npmrc): a registry and a token in it were gone after an apply, with no
 # copy, and --diff printed them. Resolved here, as the user, before anything is
 # changed, and judged like the files above: one that is not exactly what this project
-# last wrote, which a token added since makes it, stops the play.
+# last wrote, which a token added since makes it, stops the play. Where neither the user
+# nor root may write it (ucf_no_root in files/user-config.sh), tasks/npm.yml leaves it
+# alone and the summary says so; that stops nothing.
 - name: Resolve npm's global config path (before anything is changed)
   ansible.builtin.script: ../files/user-config.sh path npm-global
   args:
@@ -289,12 +291,13 @@
     - "'npm' not in (ansible_skip_tags | default([]))"
 
 - name: Detect a global npmrc this project did not write
-  become: true
+  become: "{{ 'as root' in (npm_global_preflight.stdout_lines | default([])) }}"
   ansible.builtin.script: ../files/user-config.sh classify npm-global
   args:
     executable: /bin/bash
   environment:
     SCH_UCF_PATH: "{{ npm_global_preflight.stdout_lines | first }}"
+    SCH_UCF_ROOT: "{{ ('as root' in npm_global_preflight.stdout_lines) | ternary('1', '0') }}"
   register: npm_global_class
   changed_when: false
   check_mode: false
@@ -304,13 +307,6 @@
 - name: Fail when npm's global config exists and this project did not write it
   ansible.builtin.fail:
     msg: |
-      {% for l in npm_global_class.stdout_lines if l is match('blocked ') %}
-      [supply-chain-hardening] npm's global config cannot be written:
-
-        {{ l | regex_replace('^blocked ', '') }}
-
-      Fix or move it, then re-run. Nothing has been changed yet.
-      {% else %}
       [supply-chain-hardening] Refusing to overwrite npm's global config, which is
       not exactly what this project wrote:
 
@@ -325,13 +321,10 @@
         2. Set `accept_etc_overwrite=true` to overwrite it anyway (e.g.
            `ansible-playbook site.yml -e accept_etc_overwrite=true`). It is copied
            next to itself first (0600), as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~.
-      {% endfor %}
   when:
     - npm_global_class.stdout_lines is defined
-    - >-
-      npm_global_class.stdout_lines | select('match', 'blocked ') | list | length > 0
-      or (npm_global_class.stdout_lines | select('match', 'foreign ') | list | length > 0
-          and not (accept_etc_overwrite | default(false) | bool))
+    - npm_global_class.stdout_lines | select('match', 'foreign ') | list | length > 0
+    - not (accept_etc_overwrite | default(false) | bool)
 
 - name: Detect per-user config files this run would replace that this project did not write
   # The same refusal as the /etc check above, for the per-user files the role

@@ -115,6 +115,7 @@
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'yarnrc.yml.j2') }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "refuse"
+    SCH_UCF_ROOT: "1"
   register: yarn_root_rc
   check_mode: false
   changed_when: "'changed' in (yarn_root_rc.stdout_lines | default([]))"

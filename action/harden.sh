@@ -227,8 +227,10 @@ ucf_npm() {
 # globalconfig= there names another file than the one every other account's npm reads,
 # root's included. And with everything off that makes it write (MEASURED with find
 # -newer: npm 6.14.18, 8.19.4, 9.9.4, 10.9.11, 11.2.0, 11.19.1 and 12.2.3 write a log, a
-# compile cache or an update check without this, nothing with it).
+# compile cache or an update check without this, nothing with it). Root runs no npm that
+# another account controls.
 ucf_npm_global() (
+  [ "$(id -u)" != 0 ] || [ -z "$(ucf_roots "$1")" ] || exit 0
   cd / || exit 1
   for v in $(env | LC_ALL=C sed -n 's/^\([Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[A-Za-z0-9_]*\)=.*/\1/p'); do
     unset "$v"
@@ -510,10 +512,97 @@ ucf_real() {
 
 ucf_ls() { ls -ldn -- "$1" 2>/dev/null | awk '{print substr($1, 1, 10), $3, $4}'; } # <path>: mode string, uid, gid
 
+# ---- root writes only to paths no other account controls ----
+#
+# ucf_roots <path> [plain]: why root must not write there; nothing when it may. Followed
+# part by part from /: every part that is there is root's and writable by root alone, so
+# no other account can change where the write goes, before it or while it runs. A
+# symbolic link in such a directory is root's own and is followed; with "plain" there is
+# none, the path is exactly where the file is.
+ucf_roots() {
+  local rest="${1#/}" cur="" c s n=0
+  case "$1" in
+    *[[:cntrl:]]*) echo "has a control character in it"; return 0 ;;
+    /*) ;;
+    *) echo "is not an absolute path"; return 0 ;;
+  esac
+  case "$1/" in *//*|*/./*|*/../*) echo "is not a plain path"; return 0 ;; esac
+  while :; do
+    s=$(ucf_ls "${cur:-/}")
+    case "$s" in
+      ??????????" 0 "*) ;;
+      *) echo "is in ${cur:-/}, which is not root's"; return 0 ;;
+    esac
+    case "$s" in
+      ?????w*|????????w*)
+        # root's own file, where no other account can put another in its place
+        if [ "${2:-}" = plain ] || [ -n "$rest" ] || [ ! -f "$cur" ]; then
+          echo "is in ${cur:-/}, which other accounts can write to"; return 0
+        fi ;;
+    esac
+    [ -n "$rest" ] || return 0
+    c=${rest%%/*}
+    case "$rest" in */*) rest=${rest#*/} ;; *) rest="" ;; esac
+    case "$c" in
+      ""|.) continue ;;
+      ..) cur=${cur%/*}; continue ;;
+    esac
+    if [ -L "$cur/$c" ]; then
+      n=$((n + 1))
+      if [ "${2:-}" = plain ] || [ "$n" -gt 40 ]; then echo "goes through $cur/$c, a symbolic link"; return 0; fi
+      s=$(readlink "$cur/$c") || { echo "goes through $cur/$c, a symbolic link that cannot be read"; return 0; }
+      case "$s" in /*) cur="" rest="${s#/}${rest:+/$rest}" ;; *) rest="$s${rest:+/$rest}" ;; esac
+      continue
+    fi
+    cur="$cur/$c"
+    # Not there: root makes it, in a directory only root can write to.
+    [ -e "$cur" ] || return 0
+  done
+}
+
+# ucf_no_root <kind> <path>: why root does not write that file; nothing when it may.
+ucf_no_root() {
+  local why
+  case "$1:$2" in
+    npm-global:*/etc/npmrc|npm-global:/etc/npm/npmrc) why=$(ucf_roots "$2" plain) ;;
+    npm-global:*) why="is not what npm names its global config" ;;
+    *) why=$(ucf_roots "$2") ;;
+  esac
+  [ -z "$why" ] || printf '%s, and root writes only to paths no other account controls\n' "$why"
+}
+
+# ucf_kept_out <kind> <path>: the same, for this process: nothing unless it is a root that
+# was reached from another account (UCF_ROOT=1, or sudo or doas, which say so).
+ucf_kept_out() {
+  local why
+  [ "$(id -u)" = 0 ] || return 0
+  if [ "${UCF_ROOT:-0}" = 1 ]; then ucf_no_root "$1" "$2"; return 0; fi
+  if [ "${SUDO_UID:-0}" != 0 ] || [ "${DOAS_USER:-root}" != root ]; then
+    why=$(ucf_no_root "$1" "$2")
+    [ -z "$why" ] || printf '%s (run this as %s, not as root)\n' "$why" "${SUDO_USER:-${DOAS_USER:-that account}}"
+  fi
+}
+
+# ucf_global_by <path>: "user" or "root", who writes npm's global config there: the user
+# in a home or prefix of the user's own, root anywhere else.
+ucf_global_by() {
+  local d o
+  if [ "$(id -u)" != 0 ]; then
+    case "$1" in "$HOME"/*) echo user; return 0 ;; esac
+    d=$(dirname -- "$1")
+    while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname -- "$d"); done
+    o=$(ucf_ls "$d/."); o=${o#* }
+    if [ "${o%% *}" = "$(id -u)" ]; then echo user; return 0; fi
+  fi
+  echo root
+}
+
 # ucf_blocked <kind> <path>: why that file cannot be written as it has to be;
 # nothing when it can. Judged before anything is touched.
 ucf_blocked() {
   local kind="$1" path="$2" real d u t
+  t=$(ucf_kept_out "$kind" "$path")
+  if [ -n "$t" ]; then printf '%s\n' "$t"; return 0; fi
   if [ -L "$path" ] && ! ucf_real "$path" >/dev/null; then
     echo "is a symbolic link to a path that cannot be followed"; return 0
   fi
@@ -553,7 +642,8 @@ ucf_stuck() {
   local why
   why=$(ucf_blocked "$1" "$2")
   [ -n "$why" ] || return 0
-  if [ "$1" != npmrc ] && [ -f "$2" ] && [ -r "$2" ] && [ "$(user_cfg_class "$1" "$2")" = ours ]; then return 0; fi
+  if [ "$1" != npmrc ] && [ -z "$(ucf_kept_out "$1" "$2")" ] && [ -f "$2" ] && [ -r "$2" ] \
+     && [ "$(user_cfg_class "$1" "$2")" = ours ]; then return 0; fi
   printf '%s\n' "$why"
 }
 
@@ -613,7 +703,7 @@ ucf_put() (
   tmp=$(ucf_temp "$real") || { tmp=""; exit 1; }
   printf '%s' "$content" > "$tmp" 2>/dev/null || exit 1
   if [ -n "$own" ] && [ "$(id -u)" = 0 ]; then
-    chown "${own% *}:${own#* }" "$tmp" 2>/dev/null || exit 1
+    chown -h "${own% *}:${own#* }" "$tmp" 2>/dev/null || exit 1
   elif [ -n "$own" ]; then
     # A group this account is not in cannot be kept, and no other group gets what
     # it had.
@@ -636,7 +726,7 @@ ucf_copy_new() {
   tmp=$(ucf_temp "$p") || return 1
   if ! cat -- "$p" > "$tmp" 2>/dev/null || ! cmp -s "$p" "$tmp"; then rm -f -- "$tmp"; return 1; fi
   if [ "$(id -u)" = 0 ]; then
-    own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown "$own" "$tmp" 2>/dev/null || true
+    own=$(ls -ldnL -- "$p" | awk '{print $3 ":" $4}'); chown -h "$own" "$tmp" 2>/dev/null || true
   fi
   b="$p.$$.$(date +%Y-%m-%d@%H:%M:%S)"
   while [ -e "$b~" ] || [ -L "$b~" ]; do
@@ -669,6 +759,9 @@ ucf_copy() {
 # user's settings is left alone: "refused <path>", status 42.
 ucf_replace() {
   local kind="$1" path="$2" want why bak cls=absent m=644
+  # Before anything of it is read.
+  why=$(ucf_kept_out "$kind" "$path")
+  if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
   if [ "$kind" = npm-global ] && [ "$(id -u)" = 0 ]; then m="=644"; fi
   case "$kind" in
     composer*) want=$(cat) ;;
@@ -1699,7 +1792,7 @@ _sg_print_overrides() {
 # Exit 0 when nothing above would stop the play, 1 when something would: each
 # such line starts with STOP.
 preflight_report() {
-  local repo="${1:-}" block=0 me uid f cls ver sv is_rs=0 need_pw=1 path note
+  local repo="${1:-}" block=0 me uid f cls ver sv is_rs=0 need_pw=1 path note out=""
   me=$(id -un 2>/dev/null || echo "?"); uid=$(id -u)
   local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'
   _pf_stop() { block=1; printf '  STOP  %s\n' "$*"; }
@@ -1783,7 +1876,15 @@ preflight_report() {
   # npm's global config, where that is not /etc/npmrc. action/harden.sh does not
   # write it.
   f=$(ucf_path npm-global)
-  if [ -n "$f" ] && [ ! -e "$f" ]; then
+  if [ -n "$f" ]; then
+    case "$(ucf_global_by "$f")" in
+      root) out=$(ucf_no_root npm-global "$f") ;;
+      user) out=$(ucf_stuck npm-global "$f") ;;
+    esac
+  fi
+  if [ -n "$out" ]; then
+    _pf_note "$f: npm's global config. It $out. The role leaves it alone and lists it in the run summary."
+  elif [ -n "$f" ] && [ ! -e "$f" ]; then
     _pf_line "$f: npm's global config, not there, will be created"
   elif [ -n "$f" ] && [ ! -f "$f" ]; then
     _pf_stop "$f: npm's global config, and not a regular file."
@@ -1797,7 +1898,7 @@ preflight_report() {
   # The files in a home directory. Same code as the apply (ucf_*, user_cfg_class),
   # so what is said here is what happens; which file is whose is asked of the file
   # itself, and no line of one is printed.
-  local out l gone maybe longer mode hours="$RELEASE_AGE_HOURS"
+  local l gone maybe longer mode hours="$RELEASE_AGE_HOURS"
   _pf_user_file() { # <kind>
     ucf_applies "$1" || return 0
     f=$(ucf_path "$1")
@@ -2557,7 +2658,7 @@ ucf_as_root() {
     # shellcheck disable=SC2046  # one word each: they are function names
     declare -f $(declare -F | awk '$3 ~ /^(ucf_|user_cfg_class$)/ { print $3 }')
     declare -p UCF_LINES
-    printf 'UCF_FOREIGN=keep\nucf_replace %q %q <<<%q\n' "$1" "$2" "$body"
+    printf 'umask 022\nUCF_ROOT=1 UCF_FOREIGN=keep\nucf_replace %q %q <<<%q\n' "$1" "$2" "$body"
   } | $SUDO /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/ bash
 }
 

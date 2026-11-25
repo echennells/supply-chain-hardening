@@ -120,7 +120,7 @@
   # The invoking user's own settings are out of the way for it: a prefix= or
   # globalconfig= in ~/.npmrc or the environment is not where the other accounts'
   # npm reads (ucf_npm_global in files/user-config.sh). Prints the path, unless it
-  # is /etc/npmrc, and whose directory it is in.
+  # is /etc/npmrc, and "as user" or "as root", who writes it.
   ansible.builtin.script: user-config.sh path npm-global
   args:
     executable: /bin/bash
@@ -144,11 +144,11 @@
   # Replaced whole, but only a file that is exactly what this project last wrote:
   # anything else stopped the play in preflight, unless accept_etc_overwrite=true,
   # which copies it first. In the user's home, or a prefix that is the user's
-  # (linuxbrew), it is written as the user, so it is not root's.
-  become: >-
-    {{ ansible_check_mode
-       or not ((npm_globalconfig.stdout_lines | first).startswith(ansible_env.HOME ~ '/')
-               or ('uid ' ~ ansible_user_uid) in npm_globalconfig.stdout_lines) }}
+  # (linuxbrew), it is written as the user. Root writes it only where no other account
+  # controls the path, whatever the path is: no link in it, and every part of it root's
+  # and writable by root alone (ucf_no_root, judged by the process that writes). Anywhere
+  # else it is left alone, and the summary says so.
+  become: "{{ 'as root' in (npm_globalconfig.stdout_lines | default([])) }}"
   ansible.builtin.script: user-config.sh replace npm-global
   args:
     executable: /bin/bash
@@ -157,12 +157,27 @@
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "{{ (accept_etc_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
+    SCH_UCF_ROOT: "{{ ('as root' in npm_globalconfig.stdout_lines) | ternary('1', '0') }}"
   register: sch_ucf_npm_global
   check_mode: false
   changed_when: "'changed' in (sch_ucf_npm_global.stdout_lines | default([]))"
+  failed_when: sch_ucf_npm_global.rc | default(2) not in [0, 1]
   when:
     - npm_check.rc == 0
     - npm_globalconfig.stdout_lines | default([]) | length > 0
+
+- name: Record skipped protection — npm's global config
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + [
+           "npm's global config — " ~ (sch_ucf_npm_global.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ') | default(npm_globalconfig.stdout_lines | first, true))
+           ~ '. It is what `sudo npm` and every other account get their npm settings from; your own ~/.npmrc is not affected.'
+           ~ (" If an earlier version of this role made it root's, move it aside as yourself (`mv " ~ (npm_globalconfig.stdout_lines | first | dirname) ~ ' ' ~ (npm_globalconfig.stdout_lines | first | dirname) ~ '.old`, which needs no root) and re-apply.'
+              if 'as user' in npm_globalconfig.stdout_lines else '')
+         ] }}
+  when:
+    - sch_ucf_npm_global is not skipped
+    - sch_ucf_npm_global.rc | default(0) != 0
 
 - name: Check that root can run npm (a per-user Node is invisible to become)
   # Same reason as tasks/socket.yml: the install runs as root, root's PATH is
