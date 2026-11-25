@@ -760,7 +760,7 @@ sfw_pin_preconditions() {
 # The release URL is a network dependency too. Only the role's own record that
 # the DOWNLOAD failed (no answer, or a 403, 429 or 5xx) excuses what needs it.
 skip_if_pin_unreachable() {
-  if printf '%s' "$output" | grep -qE 'The pinned v[0-9.]+ was not used either: downloading it failed [(](Request failed: (<urlopen error|HTTP Error (403|429|5[0-9][0-9]))|failed to create temporary content file)'; then
+  if printf '%s' "$output" | grep -qE 'The pinned v[0-9.]+ was not used either: downloading it failed [(](Request failed: (<urlopen error|HTTP Error (403|429|5[0-9][0-9]))|Connection failure: |failed to create temporary content file)'; then
     skip "the pinned binary could not be downloaded from GitHub's release URL${1:+; $1}"
   fi
 }

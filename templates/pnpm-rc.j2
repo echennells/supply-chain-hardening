@@ -35,8 +35,9 @@ prefer-frozen-lockfile={{ pnpm_prefer_frozen_lockfile | bool | lower }}
 {% if pnpm_built_dependencies | length > 0 %}
 ; Explicit build-script allowlist (pnpm 10; pnpm 11+ does not read this file
 ; and has no global allowlist). Listed packages may run build
-; scripts; everything else is blocked. Override /etc/npmrc's
-; ignore-scripts=true explicitly — pnpm merges config per-key, and an
+; scripts; everything else is blocked. Override the ignore-scripts=true of
+; npm's global npmrc explicitly — pnpm reads that file too where it is
+; <node prefix>/etc/npmrc, merges config per-key, and an
 ; omitted key here would let the system-wide value win (silently disabling
 ; this allowlist). The allowlist below is what actually constrains scripts.
 ignore-scripts=false
