@@ -311,8 +311,11 @@
 
 - name: Detect a global npmrc this project did not write
   become: "{{ 'as root' in (npm_global_preflight.stdout_lines | default([])) }}"
-  # On stdin, like every become that runs it: the script module leaves the script in a
-  # file of the connecting account's for root to run.
+  # On stdin, like every become that runs this script. With pipelining on, nothing root
+  # runs for it is then in a file of the connecting account's (MEASURED on ansible-core
+  # 2.18.20 and 2.22.0; the script module leaves the script there, pipelining or not).
+  # With pipelining off, Ansible's default, it changes nothing: Ansible puts its own
+  # module file for every become task, of any role, in that account's ~/.ansible/tmp.
   ansible.builtin.command:
     cmd: /bin/bash -s -- classify npm-global
     stdin: "{{ lookup('ansible.builtin.file', '../files/user-config.sh') }}"
