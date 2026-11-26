@@ -111,6 +111,9 @@ supply-chain-verify --json
 - To change the window, set `release_age_hours`. Don't set per-tool values.
 - Re-apply after installing or upgrading a package manager: some settings depend on the
   version found at apply time, and upgrades can replace wrapped binaries.
+- After an apply, tell the user that agent sessions already running on the host can keep
+  the environment they started with until they start new ones
+  ([why](docs/design-principles.md#agent-runners)).
 
 Remote hosts, single ecosystems and every tunable: [docs/configuration.md](docs/configuration.md).
 
