@@ -7,7 +7,9 @@
 #     looked up by uid (tasks/passwd_home.yml), because the JVM takes user.home
 #     from there. MEASURED (maven 3.10.2, gradle 8.14.8, temurin 21.0.13.1, as
 #     root with HOME=/tmp/h): both read /root. Not ansible_user_dir, which
-#     follows $LOGNAME/$USER; the run summary names both homes.
+#     follows $LOGNAME/$USER; the run summary names both homes;
+#   - root's sudo coverage for cargo and composer goes to root's passwd home;
+#   - "is the binary inside HOME" compares with a slash after HOME.
 #
 # The JVM tests run the real task files through include_role, with a stub java
 # for the tool gate (no JDK in the test image). They run as throwaway accounts
@@ -200,4 +202,89 @@ preflight_maven() { # extra ansible args
   grep -q 'Managed by ansible-supply-chain-security' "$D/pw/.m2/settings.xml"
   cmp "$D/home/.m2/settings.xml" "$D/home.orig"
   echo "$output" | grep -qF "maven: \$HOME is '$D/home' but the passwd home is '$D/pw'"
+}
+
+# The real "does wrapping need root" tasks from tasks/cargo.yml and tasks/bun.yml,
+# lifted by name, for a binary path and a HOME.
+wrap_become() { # <HOME> <binary path> -> "cargo=<bool> bun=<bool>"
+  local dir="$D/wb.$RANDOM"
+  mkdir -p "$dir"
+  python3 - "$ROLE_DIR/tasks/cargo.yml" "$ROLE_DIR/tasks/bun.yml" "$dir/task.json" <<'PY'
+import json, sys, yaml
+out = []
+for f, name in ((sys.argv[1], "Decide whether wrapping this cargo path needs root"),
+                (sys.argv[2], "Decide whether wrapping this bun path needs root")):
+    t = [t for t in yaml.safe_load(open(f)) if t.get("name") == name]
+    assert len(t) == 1, name
+    out += t
+json.dump(out, open(sys.argv[3], "w"))
+PY
+  cat > "$dir/play.yml" <<PLAY
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_env: { HOME: "$1" }
+    cargo_check: { rc: 0, stdout: "$2" }
+    bun_binary_path: { rc: 0, stdout: "$2" }
+  tasks:
+    - ansible.builtin.include_tasks: $dir/task.json
+    - ansible.builtin.copy:
+        content: "cargo={{ cargo_wrap_become }} bun={{ bun_wrap_become }}\n"
+        dest: $dir/out
+        mode: "0644"
+PLAY
+  ansible-playbook -i localhost, "$dir/play.yml" >"$dir/log" 2>&1 || { tail -20 "$dir/log"; return 1; }
+  cat "$dir/out"
+}
+
+@test "wrap path: a binary in a sibling directory whose name starts with HOME's is not inside HOME" {
+  run wrap_become /home/hatch /home/hatchery/.cargo/bin/x
+  [ "$status" -eq 0 ]
+  [ "$output" = "cargo=True bun=True" ]
+  # inside HOME, with and without a slash at the end of HOME
+  run wrap_become /home/hatch /home/hatch/.cargo/bin/x
+  [ "$output" = "cargo=False bun=False" ]
+  run wrap_become /home/hatch/ /home/hatch/.bun/bin/x
+  [ "$output" = "cargo=False bun=False" ]
+  # a system path
+  run wrap_become /home/hatch /usr/bin/x
+  [ "$output" = "cargo=True bun=True" ]
+}
+
+@test "root's home: cargo's and composer's sudo coverage ask passwd for it, and no task names /root" {
+  local f name
+  for f in cargo composer; do
+    name="Resolve root's home directory ($f sudo coverage)"
+    python3 - "$ROLE_DIR/tasks/$f.yml" "$name" "$D/$f.json" <<'PY'
+import json, sys, yaml
+t = [t for t in yaml.safe_load(open(sys.argv[1])) if t.get("name") == sys.argv[2]]
+assert len(t) == 1, sys.argv[2]
+t[0].pop("when", None)
+t[0]["register"] = "rh"
+json.dump(t, open(sys.argv[3], "w"))
+PY
+    printf -- '- hosts: localhost\n  connection: local\n  gather_facts: false\n  tasks:\n    - ansible.builtin.include_tasks: %s\n    - ansible.builtin.copy: { content: "{{ rh.stdout }}", dest: %s, mode: "0644" }\n' \
+      "$D/$f.json" "$D/$f.out" > "$D/$f.yml"
+    run ansible-playbook -i localhost, "$D/$f.yml"
+    [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+    [ "$(cat "$D/$f.out")" = "$(getent passwd root | cut -d: -f6)" ]
+  done
+  # every path these two files write for root comes from that lookup
+  python3 - "$ROLE_DIR/tasks/cargo.yml" "$ROLE_DIR/tasks/composer.yml" <<'PY'
+import sys, yaml
+bad = []
+def walk(o, f, where):
+    if isinstance(o, dict):
+        for k, v in o.items(): walk(v, f, where)
+    elif isinstance(o, list):
+        for v in o: walk(v, f, where)
+    elif isinstance(o, str) and "/root" in o:
+        bad.append((f, where, o[:80]))
+for f in sys.argv[1:]:
+    for t in yaml.safe_load(open(f)):
+        walk(t, f, t.get("name"))
+for b in bad: print(b)
+sys.exit(1 if bad else 0)
+PY
 }
