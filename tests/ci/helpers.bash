@@ -93,6 +93,41 @@ harden() {
     bash "$HARDEN_SH" "${args[@]}"
 }
 
+# agent_sh [VAR=value ...] <command>
+#
+# The command as an agent runner with no startup files runs it. MEASURED on an agent VM
+# on 2026-11-26 (docs/design-principles.md, "Agent runners"): every command went through
+# `/bin/bash --norc --noprofile -c "umask 0007; ..."`, with no env layer. Here the
+# environment holds HOME, PATH and TMPDIR and nothing else but what the caller names;
+# PATH is AGENT_PATH, by default TEST_BIN and then this PATH.
+agent_sh() {
+  local cmd="${!#}"
+  local -a envs=()
+  [ "$#" -lt 2 ] || envs=("${@:1:$(($# - 1))}")
+  env -i HOME="$TEST_HOME" PATH="${AGENT_PATH:-$TEST_BIN:$PATH}" TMPDIR="$TEST_TMP" \
+    ${envs[@]+"${envs[@]}"} /bin/bash --norc --noprofile -c "umask 0007; $cmd"
+}
+
+# harden_agent [VAR=value ...] [-- script args ...]
+#
+# harden.sh --home-only, started the way agent_sh starts a command. No GRADLE_USER_HOME
+# and no WRITE_ETC=false, unlike harden(): this mode has to keep out of the passwd home
+# and /etc by itself. shield_host_tools all the same, so that if it ever wrapped a tool
+# outside HOME it would be a stub of this test's.
+harden_agent() {
+  local -a envs=() args=()
+  local sep=0 a
+  for a in "$@"; do
+    if [[ "$a" == "--" ]]; then sep=1; continue; fi
+    if [[ $sep -eq 1 ]]; then args+=("$a"); else envs+=("$a"); fi
+  done
+  shield_host_tools ${envs[@]+"${envs[@]}"}
+  env -i HOME="$TEST_HOME" PATH="${AGENT_PATH:-$TEST_BIN:$PATH}" TMPDIR="$TEST_TMP" \
+    ${envs[@]+"${envs[@]}"} \
+    /bin/bash --norc --noprofile -c 'umask 0007; exec bash "$0" --home-only "$@"' \
+    "$HARDEN_SH" ${args[@]+"${args[@]}"}
+}
+
 # shield_host_tools [VAR=value ...]
 #
 # harden.sh REPLACES some tools at the path it finds them on: it moves composer,
@@ -253,7 +288,8 @@ stub_go_env() {
   local ver="${1:-go1.27.4}" minor notc=0
   minor=${ver#go1.}; minor=${minor%%.*}
   [[ "$minor" -lt 21 ]] && notc=1
-  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; touch "$f"
+  # Created when missing, never touched: a test of what a second run changes reads mtimes.
+  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; [ -e "$f" ] || : > "$f"
 notc='"$notc"'
 case "${1:-}" in
   version) echo "go version '"$ver"' linux/amd64" ;;
