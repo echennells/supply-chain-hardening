@@ -456,6 +456,11 @@ verifier reads that record:
 | impossible on this tool version | `GAP` | `N/A BYDESIGN` |
 | its tool is not installed | `N/A ABSENT` | `N/A ABSENT` |
 
+An ecosystem's own rows (npm's, bun's, pip's, cargo's and the rest) are not measured
+for an ecosystem the job did not ask for: they say `N/A BYDESIGN` whatever state the
+tool is in. The `OK` in the second column is for the rows measured either way, such as
+the PATH-wrapper rows.
+
 The `N/A` rows say which kind in the EVIDENCE column: `ABSENT` (nothing here
 to protect) or `BYDESIGN` (never requested). **When the record is missing,
 incomplete, or was written by a different job, the verifier ignores it and

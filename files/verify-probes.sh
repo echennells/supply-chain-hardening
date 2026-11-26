@@ -1426,15 +1426,20 @@ bun_global_bunfig() {
 # plain run that left bun out. Its rows then say N/A, as pip's, deno's, cargo's and
 # composer's do, and bun is not run. MEASURED before this (tests/ci, bun 1.4.4 on PATH):
 # a job that hardened only npm got three bun GAPs and a WEAK for a bun it never asked
-# to harden, a false failure under fail-on: gap. Guarded like the yarn and pnpm rows,
-# for a body sourced without it.
+# to harden, which failed it under fail-on: any (the default) and config alike. Guarded
+# like the yarn and pnpm rows, for a body sourced without it.
 bun_requested() { ! command -v requested >/dev/null 2>&1 || requested bun; }
-bun_row_na() { # protection
-  if ! bun_requested && { have bun || have bunx; }; then
-    row "N/A" - "$1" "bun installed but not in the requested ecosystems"
-  else
-    row "N/A" - "$1" "bun not installed"
-  fi
+# The N/A row of a bun row that is not measured. Absence first, as every other
+# ecosystem does: a row whose tools are all missing is "not installed" either way.
+bun_row_na() { # protection tool...
+  local p="$1" t; shift
+  for t in "$@"; do
+    if have "$t"; then
+      row "N/A" - "$p" "bun installed but not in the requested ecosystems"
+      return 0
+    fi
+  done
+  row "N/A" - "$p" "bun not installed"
 }
 
 # Which mode does this entry point run in? bun chooses between bun and bunx
@@ -1541,7 +1546,7 @@ if have bun && bun_requested; then
     fi
   fi
 else
-  bun_row_na "bun install scripts blocked"
+  bun_row_na "bun install scripts blocked" bun
 fi
 
 # --- bun install age gate  [PRESENT] ---
@@ -1657,7 +1662,7 @@ if have bun && bun_requested; then
     fi
   fi
 else
-  bun_row_na "bun install age gate"
+  bun_row_na "bun install age gate" bun
 fi
 
 # --- bun runtime auto-install blocked  [FUNCTIONAL] ---
@@ -1724,7 +1729,7 @@ if have bun && bun_requested; then
     fi
   fi
 else
-  bun_row_na "bun runtime auto-install blocked"
+  bun_row_na "bun runtime auto-install blocked" bun
 fi
 
 # --- bunx fetch-and-execute blocked  [FUNCTIONAL] ---
@@ -1767,7 +1772,7 @@ if have bun && bun_requested && bmw=$(scv_our_wrapper bun 2>/dev/null); then
 fi
 
 if { ! have bun && ! have bunx; } || ! bun_requested; then
-  bun_row_na "bunx fetch-and-execute blocked"
+  bun_row_na "bunx fetch-and-execute blocked" bun bunx
 elif ! have bunx; then
   # `bun x` is a DIFFERENT argv shape from `bun run`, which is all the runtime
   # row dispatches, so do not assert that row covers it — measure it.
