@@ -60,8 +60,8 @@ them cares which CI you are on:
    `~/.npmrc` is merged: a token, registry or scope an earlier step put there
    stays, and the file ends 0600. The others are replaced; one that is not what
    this project last wrote is copied next to itself first (0600), and the log has a
-   warning with the path (`cooldown.toml` and the gradle init script, which hold no
-   credentials, are replaced without that). No value from any of them is printed. If a later
+   warning with the path (`cooldown.toml`, which holds no credentials, is replaced
+   without that). No value from any of them is printed. If a later
    step needs a registry that was in one, put it back after this one, or pass it
    in the environment.
 2. **PATH wrappers** — bun, bunx, composer, deno, cargo, wrapped in place at

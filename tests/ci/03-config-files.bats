@@ -500,6 +500,29 @@ npm_keys() {
   [ "$(grep -c 'buildscript.configurations.all { refuseDynamic(this) }' "$TEST_HOME/.gradle/init.gradle.kts")" -eq 2 ]
 }
 
+@test "gradle: a person's own init.gradle.kts is copied before it is replaced" {
+  # Issue 48's class: the init script was overwritten with no copy and nothing said,
+  # and a person's own can hold repository credentials.
+  mkdir -p "$TEST_HOME/.gradle"
+  printf '%s\n' '// mine' 'settingsEvaluated { println("repoPassword=s3cr3t-gradle") }' > "$TEST_HOME/.gradle/init.gradle.kts"
+  run harden ECOSYSTEMS=gradle -- --emit=plain
+  [ "$status" -eq 0 ]
+  assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" 'refusing HTTP repo'
+  local copies c
+  copies=$(ls -d "$TEST_HOME/.gradle/init.gradle.kts".*~ 2>/dev/null)
+  [ "$(printf '%s\n' "$copies" | grep -c .)" -eq 1 ] || { echo "copies: [$copies]"; false; }
+  c=$copies
+  grep -q 's3cr3t-gradle' "$c" || { echo "the copy lost the user's file"; false; }
+  [[ "$(ls -ln "$c" | cut -c1-10)" == -rw------- ]] || { ls -ln "$c"; false; }
+  [[ "$output" == *"gradle: replaced"*"may hold a token"* ]] || { echo "no warning"; false; }
+  [[ "$output" != *"s3cr3t-gradle"* ]] || { echo "the secret reached the log"; false; }
+  # Ours now: a second run makes no new copy and says nothing about it.
+  run harden ECOSYSTEMS=gradle -- --emit=plain
+  [ "$status" -eq 0 ]
+  [ "$(ls -d "$TEST_HOME/.gradle/init.gradle.kts".*~ | grep -c .)" -eq 1 ] || { echo "a second copy was made"; false; }
+  [[ "$output" != *"gradle: replaced"* ]]
+}
+
 @test "maven: settings.xml enforces strict checksums (fail), matching the role" {
   # Maven's default checksum policy is 'warn' — a mismatch installs anyway. The
   # role sets checksumPolicy=fail via an active profile; the action lacked it.
