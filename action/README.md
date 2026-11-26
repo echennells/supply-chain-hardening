@@ -158,6 +158,42 @@ For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
 hardening into an image and skip the adapter question altogether.
 
+### An agent's VM: `--home-only`
+
+```bash
+./action/harden.sh --home-only        # or HOME_ONLY=true
+```
+
+For a VM where only HOME is the agent's and its runner loads no startup files
+([AGENTS.md](../AGENTS.md#an-agents-vm---home-only)). It writes the per-user config
+files under `$HOME` and nothing outside it: each path is resolved, symbolic links
+included, and checked against HOME before anything is written there. In this mode:
+
+- No `/etc` file, no env file, nothing in `$GITHUB_ENV`, `$GITHUB_OUTPUT` or
+  `$BASH_ENV` (every `--emit` target is `plain`), and no sudo, as root too, not even
+  the `sudo -n true` probe. `WRITE_ETC=true`, `intel: sfw`, `INSTALL_CARGO_COOLDOWN`,
+  `CARGO_SOCKET_FIREWALL` and `HARDENING_ENV_FILE` are ignored, and the summary says so.
+- A PATH wrapper only for a tool whose path is under HOME (`~/.bun/bin`,
+  `~/.cargo/bin`, `~/.deno/bin`, `~/.local/bin`), written in place. A tool anywhere
+  else is left as it is, and the summary says what it goes without: deno its only age
+  gate, bun and bunx `--no-install`, composer `--no-scripts`, cargo `--locked`.
+- A tool whose config path is outside HOME (`XDG_CONFIG_HOME`, `CARGO_HOME`,
+  `COMPOSER_HOME`, `DOTNET_CLI_HOME`, `POETRY_CONFIG_DIR`, `GOENV`) is not applied.
+  Neither are Gradle and Maven when HOME is not the passwd home, unless
+  `GRADLE_USER_HOME` is set and under HOME: the JVM takes `user.home` from the passwd
+  entry (measured for Gradle; for Maven it is inferred). No JVM or `dotnet` is started.
+- The pip cutoff is rounded down to midnight UTC. So is uv's, unless there is a uv and
+  every one on `PATH`, in `~/.local/bin` and in `~/.cargo/bin` is 0.9.17 or later: then
+  uv gets `exclude-newer = "<N> hours"`, which moves with the clock.
+- The run record has to be under HOME, or the run stops with exit 2 before writing
+  anything. It carries `home_only=true` and `env_layer=none`.
+- `--preflight` is refused: it asks sudo whether it needs a password.
+
+A second run on the same day changes nothing but its own run record, makes no copy,
+and prints only the summary and lines it has not printed before. Run it at the start
+of every session: nothing else moves the pip cutoff, and it puts back a config file
+another program rewrote.
+
 ## Usage
 
 ```yaml
