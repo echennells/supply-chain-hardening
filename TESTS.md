@@ -1,6 +1,6 @@
 # Tests
 
-649 container tests verify the supply chain hardening works (`make test`), plus 547 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+650 container tests verify the supply chain hardening works (`make test`), plus 547 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -12,7 +12,7 @@
 | 04-python.bats | 9 | pip-to-uv redirect, uv no-build blocks sdist, /etc/uv/uv.toml fires under empty HOME (Phase 2.2 positive check); `supply-chain-allow-build` lifts only no-build, refuses non-uv commands, and its build report lists what built, never a refusal |
 | 05-go.bats | 8 | Go env vars verified via `go env`; a vendored module builds offline from `vendor/` under the hardened env, with a FIXTURE CONTROL that `-mod=readonly` (which the role no longer writes) does not |
 | 06-js-ecosystem.bats | 8 | pnpm, yarn, bun config verification; Yarn never reads /etc/yarnrc.yml, so `sudo yarn` coverage is root's own ~/.yarnrc.yml |
-| 07-other-configs.bats | 8 | Composer, bundler, cargo, npq alias checks |
+| 07-other-configs.bats | 9 | Composer, bundler, cargo, npq alias checks |
 | 08-npm-adversarial.bats | 8 | Simulated npm supply chain attacks (incl. CLI-flag + user-config bypass attempts) |
 | 09-python-adversarial.bats | 4 | Simulated Python supply chain attacks (incl. M1 documented bypass) |
 | 10-go-adversarial.bats | 11 | Simulated Go environment poisoning |
@@ -129,7 +129,7 @@ The same workflow runs the role on a Mac, which has to refuse before it writes a
 ## Running tests
 
 ```bash
-make test          # build container + run all 649 tests
+make test          # build container + run all 650 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

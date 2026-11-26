@@ -30,6 +30,12 @@ npq_is_functional() {
   ! npq-hero --version 2>&1 | grep -qi 'npq suppressed'
 }
 
+# on_a_terminal <shell> <commands>: an interactive one, on a pty
+on_a_terminal() {
+  printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/cmds"
+  timeout 20 script -qec "$1 -ic '. $BATS_TEST_TMPDIR/cmds'" /dev/null
+}
+
 @test "npq aliases exist in profile.d (only when npq functions)" {
   if npq_is_functional; then
     assert_file_exists /etc/profile.d/npq-aliases.sh
@@ -49,22 +55,51 @@ npq_is_functional() {
   # literal `alias npm='npq-hero'` is still IN the file (inside the guard), so
   # grepping it would pass while npm double-prompts.
   npq_is_functional || skip "npq non-functional on this Node ($(node --version 2>/dev/null)); aliases intentionally not deployed"
-  local F=/etc/profile.d/npq-aliases.sh
-  if grep -q supply-chain-hardening /usr/local/bin/npm 2>/dev/null; then
-    # wrapper present: it handles npq, so sourcing must NOT leave npm aliased,
-    # and npm must resolve to the wrapper rather than npq-hero.
-    run sh -c ". $F 2>/dev/null; alias npm"
-    [ "$status" -ne 0 ] || ! echo "$output" | grep -q "npq-hero"
-    run sh -c ". $F 2>/dev/null; command -v npm"
-    echo "$output" | grep -q "/usr/local/bin/npm"
-  else
-    # no wrapper: the alias is the npq path for npm
-    run sh -c ". $F 2>/dev/null; alias npm"
-    echo "$output" | grep -q "npq-hero"
-  fi
-  # yarn/pnpm have no wrapper — always aliased through npq
-  run sh -c ". $F 2>/dev/null; alias yarn"
-  echo "$output" | grep -q "npq-hero"
+  local F=/etc/profile.d/npq-aliases.sh sh
+  for sh in sh bash; do
+    # FIXTURE CONTROL: on this pty the shell is interactive, on a terminal
+    run on_a_terminal $sh 'case $- in *i*) [ -t 0 ] && [ -t 1 ] && echo A-PERSON-IS-HERE ;; esac'
+    echo "$output" | grep -q A-PERSON-IS-HERE
+    if grep -q supply-chain-hardening /usr/local/bin/npm 2>/dev/null; then
+      # wrapper present: it handles npq, so sourcing must NOT leave npm aliased,
+      # and npm must resolve to the wrapper rather than npq-hero.
+      run on_a_terminal $sh ". $F 2>/dev/null; alias npm"
+      [ "$status" -ne 0 ] || ! echo "$output" | grep -q "npq-hero" || false
+      run on_a_terminal $sh ". $F 2>/dev/null; command -v npm"
+      echo "$output" | grep -q "/usr/local/bin/npm"
+    else
+      # no wrapper: the alias is the npq path for npm
+      run on_a_terminal $sh ". $F 2>/dev/null; alias npm"
+      echo "$output" | grep -q "npq-hero"
+    fi
+    # yarn/pnpm have no wrapper — always aliased through npq
+    run on_a_terminal $sh ". $F 2>/dev/null; alias yarn; alias pnpm"
+    echo "$output" | grep -q "NPQ_PKG_MGR=yarn npq-hero"
+    echo "$output" | grep -q "NPQ_PKG_MGR=pnpm npq-hero"
+  done
+}
+
+@test "npq: no alias in a shell nobody sits at, login shell or not" {
+  # MEASURED on the file as it was: `sh -lc 'pnpm add x'` (dash) and a bash that expands
+  # aliases were blocked: "findings require an interactive terminal". Reported by an agent.
+  npq_is_functional || skip "npq non-functional on this Node ($(node --version 2>/dev/null)); aliases intentionally not deployed"
+  local F=/etc/profile.d/npq-aliases.sh t
+  for t in npm yarn pnpm; do
+    run sh -c ". $F; alias $t"
+    [ "$status" -ne 0 ] || { echo "sh -c $t: $output"; false; }
+    run sh -lc "alias $t"
+    [ "$status" -ne 0 ] || { echo "sh -lc $t: $output"; false; }
+    run bash -c "shopt -s expand_aliases; . $F; alias $t"
+    [ "$status" -ne 0 ] || { echo "bash $t: $output"; false; }
+    run bash -lc "alias $t"
+    [ "$status" -ne 0 ] || { echo "bash -lc $t: $output"; false; }
+    # interactive by flag, with no terminal: how a shell snapshot is taken
+    run bash -c "bash -lic 'alias $t' < /dev/null 2>/dev/null"
+    ! echo "$output" | grep -q npq-hero || { echo "bash -lic $t: $output"; false; }
+  done
+  # what it exports for the npm wrapper's npq is there everywhere
+  run sh -c ". $F; echo \$NPQ_DISABLE_AUTO_CONTINUE"
+  [ "$output" = true ]
 }
 
 @test "npq: NPQ_DISABLE_AUTO_CONTINUE=true" {
