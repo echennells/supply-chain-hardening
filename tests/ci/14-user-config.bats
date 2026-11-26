@@ -840,11 +840,19 @@ PY
   real=$(cd / && env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" "$(ucf_npm)" config get globalconfig 2>/dev/null | tail -1)
   case "$real" in /*) ;; *) skip "npm does not say" ;; esac
   [ "$(ask ucf_npm_global "$(ucf_npm)")" = "$real" ]
-  # the control (in a home of its own, where npm may write): npm goes where these say
+  # the control (in a home of its own, where npm may write): npm goes where these say.
+  # Not prefix= where npm's own npmrc names the global one (Debian's npm, and the npm on
+  # Grokbot's VM, 11-25): there it is not under the prefix, and prefix= does not move it.
+  # MEASURED on npm 11.19.1 with globalconfig=/etc/npmrc in its own npmrc: prefix= left
+  # /etc/npmrc, globalconfig= moved it.
+  local pinned=""
+  [ "$(cd / && env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" "$(ucf_npm)" prefix -g 2>/dev/null | tail -1)/etc/npmrc" = "$real" ] || pinned=1
   mkdir -p "$BATS_TEST_TMPDIR/ctl"
   for x in "prefix=$t" "globalconfig=$t/etc/npmrc"; do
     printf '%s\n' "$x" | tee "$TEST_HOME/.npmrc" > "$BATS_TEST_TMPDIR/ctl/.npmrc"
-    [ "$(cd / && env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/ctl" "$(ucf_npm)" config get globalconfig 2>/dev/null | tail -1)" = "$t/etc/npmrc" ]
+    if [ -z "$pinned" ] || [ "${x%%=*}" != prefix ]; then
+      [ "$(cd / && env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR/ctl" "$(ucf_npm)" config get globalconfig 2>/dev/null | tail -1)" = "$t/etc/npmrc" ]
+    fi
     [ "$(ask ucf_npm_global "$(ucf_npm)")" = "$real" ]
   done
   rm -f "$TEST_HOME/.npmrc"

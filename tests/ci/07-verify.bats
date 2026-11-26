@@ -1575,6 +1575,11 @@ forge_record() { # a COMPLETE-looking record scoped to npm only
   # Old main: "npm PATH wrapper  not deployed ... — not required here: this job
   # hardened: npm". npm WAS hardened; the wrapper only comes with intel.
   have npm || skip "npm not installed"
+  # On a host the role hardened, its wrapper is that npm, and the row rightly reports
+  # it (Grokbot's VM, 11-25).
+  if grep -qs '^# /usr/local/bin/npm — supply-chain-hardening wrapper' "$(command -v npm)"; then
+    skip "the npm on PATH is the role's wrapper"
+  fi
   harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
   run verify_sourced --emit=plain
   local r; r=$(grep 'npm PATH wrapper' <<<"$output")
