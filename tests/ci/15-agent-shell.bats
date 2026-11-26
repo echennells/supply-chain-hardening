@@ -148,6 +148,76 @@ home_state() {
   [[ "$output" == *"ARGS=[--no-install x]"* ]]
 }
 
+# link_into_home <tool> <version line>: <tool> under TEST_HOME, in ~/.<tool>/bin, and a
+# link to it in TEST_BIN, which is outside HOME and first on PATH: the "link it onto PATH"
+# install. Prints the path of the real file.
+link_into_home() {
+  local f="$TEST_HOME/.$1/bin/$1"
+  mkdir -p "${f%/*}"
+  printf '#!/bin/bash\necho "%s"\n' "$2" > "$f"
+  chmod +x "$f"
+  rm -f "$TEST_BIN/$1"
+  ln -s "$f" "$TEST_BIN/$1"
+  printf '%s\n' "$f"
+}
+
+@test "home-only: a link outside HOME to a tool under HOME stays a link: nothing is moved or wrapped, and the run goes on" {
+  local deno bun
+  deno=$(link_into_home deno "deno 2.9.8")
+  bun=$(link_into_home bun "1.4.4")
+  cp "$deno" "$BATS_TEST_TMPDIR/deno.orig"
+  cp "$bun" "$BATS_TEST_TMPDIR/bun.orig"
+  stub_npm 10.9.4
+  run harden_agent ECOSYSTEMS=deno,bun,npm
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  local t
+  for t in deno bun; do
+    [ -L "$TEST_BIN/$t" ] || { echo "$TEST_BIN/$t is no longer a link"; ls -la "$TEST_BIN"; false; }
+    [ "$(readlink "$TEST_BIN/$t")" = "$TEST_HOME/.$t/bin/$t" ]
+    [ ! -e "$TEST_BIN/$t-real" ] && [ ! -L "$TEST_BIN/$t-real" ] || { echo "$t was moved aside outside HOME"; false; }
+    [ ! -e "$TEST_HOME/.$t/bin/$t-real" ] || { echo "$t was moved aside under HOME"; false; }
+    cmp "$TEST_HOME/.$t/bin/$t" "$BATS_TEST_TMPDIR/$t.orig"
+    [[ "$output" == *"$t: no wrapper, because $TEST_BIN/$t is outside HOME"* ]] || { echo "no line for $t"; echo "$output"; false; }
+  done
+  # npm comes after both, and is written
+  assert_file_contains "$TEST_HOME/.npmrc" "ignore-scripts=true"
+  [ "$(rec hardening_complete)" = true ]
+}
+
+@test "home-only control: a normal run DOES move that link aside and wrap it" {
+  # Without this the test above could pass with a fixture harden.sh never wraps.
+  link_into_home deno "deno 2.9.8" > /dev/null
+  run harden ECOSYSTEMS=deno -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -L "$TEST_BIN/deno-real" ]
+  [ ! -L "$TEST_BIN/deno" ]
+  [ "$(sed -n 2p "$TEST_BIN/deno")" = "# deno — supply-chain-harden wrapper" ]
+}
+
+@test "home-only: wrappers an earlier full apply left outside HOME are kept as they are, and counted" {
+  stub_bin bun 'case "${1:-}" in --version) echo 1.4.4 ;; *) echo "STUB:bun ARGS=[$*]" ;; esac'
+  stub_symlink bunx "$TEST_BIN/bun"
+  stub_bin deno 'case "${1:-}" in --version) echo "deno 2.9.8" ;; *) echo "STUB:deno ARGS=[$*]" ;; esac'
+  run harden ECOSYSTEMS=bun,deno -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(rec wrappers_deployed)" = "bun,bunx,deno" ] || { echo "the full apply did not wrap them: $(rec wrappers_deployed)"; false; }
+  local t
+  for t in bun bunx deno bun-real deno-real; do cksum < "$TEST_BIN/$t" > "$BATS_TEST_TMPDIR/$t.sum"; done
+  run harden_agent ECOSYSTEMS=bun,deno
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for t in bun bunx deno bun-real deno-real; do
+    [ "$(cksum < "$TEST_BIN/$t")" = "$(cat "$BATS_TEST_TMPDIR/$t.sum")" ] || { echo "$t was changed"; false; }
+  done
+  [ "$(rec wrappers_deployed)" = "bun,bunx,deno" ]
+  [[ ",$(rec ecosystems_effective)," == *",deno,"* ]] || { echo "deno: $(rec ecosystems_ineffective) $(rec ecosystems_degraded)"; echo "$output"; false; }
+  [[ ",$(rec ecosystems_effective)," == *",bun,"* ]]
+  [[ "$output" == *"deno: the wrapper at $TEST_BIN/deno is from an earlier apply and outside HOME, so it is left as it is and not updated"* ]]
+  [[ "$output" != *"no wrapper, because"* ]]
+  # and it is the wrapper that runs
+  run agent_sh "bun x"
+  [[ "$output" == *"ARGS=[--no-install x]"* ]]
+}
+
 # ---------------------------------------------------------------- npm ----
 
 npm_fixture() {
@@ -284,10 +354,26 @@ npm_fixture() {
 
 # --------------------------------------------------------- JVM homes ----
 
+# passwd_home: this uid's home in the account database, looked up as harden.sh's
+# uid_passwd_home does: getent, /etc/passwd, then the name's tilde (macOS keeps its
+# people's accounts in Directory Services, not /etc/passwd).
+passwd_home() {
+  local h n
+  h=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6) || h=""
+  [ -n "$h" ] || h=$(awk -F: -v u="$(id -u)" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || h=""
+  if [ -z "$h" ]; then
+    n=$(id -un 2>/dev/null) || n=""
+    if [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then eval "h=~$n"; fi
+    case "$h" in /*) ;; *) h="" ;; esac
+  fi
+  printf '%s\n' "$h"
+}
+
 @test "home-only: HOME is not the passwd home, so nothing goes to the passwd home and gradle and maven say why" {
   local pw
-  pw=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6) || pw=""
-  [ -n "$pw" ] || pw=$(awk -F: -v u="$(id -u)" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || pw=""
+  pw=$(passwd_home)
+  # On macOS too: its runners' accounts have a home there (/Users/runner).
+  [ "$(uname -s)" != Darwin ] || [ -n "$pw" ] || { echo "no home found for $(id -un) on macOS"; false; }
   stub_bin gradle
   stub_bin mvn
   local before after
@@ -371,6 +457,41 @@ getent_home() {
   run harden_agent ECOSYSTEMS=composer,nuget
   [ "$status" -eq 0 ]
   [[ "$output" == *"env layer: none, so these apply nowhere: COMPOSER_SKIP_SCRIPTS, DOTNET_NUGET_SIGNATURE_VERIFICATION"* ]]
+}
+
+# telemetry_go: a go that writes telemetry counters under $XDG_CONFIG_HOME/go on every
+# command, whatever GOENV says, as go1.24.2 did (MEASURED on Linux: `go version` with
+# GOENV under HOME wrote $XDG_CONFIG_HOME/go/telemetry/local/*.count), and logs each call.
+telemetry_go() {
+  GO_LOG="$BATS_TEST_TMPDIR/go.log"
+  stub_bin go 'echo "$*" >> "'"$BATS_TEST_TMPDIR/go.log"'"
+d="${XDG_CONFIG_HOME:-$HOME/.config}/go/telemetry/local"; mkdir -p "$d"; : > "$d/go.count"
+case "$1" in
+  version) echo "go version go1.24.2 linux/amd64" ;;
+  env) case "${2:-}" in GOENV) echo "${GOENV:-${XDG_CONFIG_HOME:-$HOME/.config}/go/env}" ;; -w) echo "${3:-}" >> "$GOENV" ;; esac ;;
+esac'
+}
+
+@test "home-only: go is not started when its telemetry would go outside HOME, though GOENV is under HOME" {
+  [ "$(uname -s)" != Darwin ] || skip "go's config directory on macOS is ~/Library/Application Support, whatever XDG_CONFIG_HOME says"
+  telemetry_go
+  local x="$BATS_TEST_TMPDIR/xdg"
+  run harden_agent GOENV="$TEST_HOME/.goenv" XDG_CONFIG_HOME="$x" ECOSYSTEMS=go
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$x" ] || { echo "written outside HOME:"; find "$x"; false; }
+  [ ! -s "$GO_LOG" ] || { echo "go was started:"; cat "$GO_LOG"; false; }
+  [[ "$output" == *"go: $x/go/telemetry is outside HOME (XDG_CONFIG_HOME), and every go command writes its telemetry counters there"* ]]
+  [[ ",$(rec ecosystems_ineffective)," == *",go,"* ]]
+}
+
+@test "home-only control: a normal run starts that go, and its counters land outside HOME" {
+  [ "$(uname -s)" != Darwin ] || skip "go's config directory on macOS is ~/Library/Application Support, whatever XDG_CONFIG_HOME says"
+  telemetry_go
+  local x="$BATS_TEST_TMPDIR/xdg"
+  run harden GOENV="$TEST_HOME/.goenv" XDG_CONFIG_HOME="$x" ECOSYSTEMS=go -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -s "$GO_LOG" ]
+  [ -e "$x/go/telemetry/local/go.count" ]
 }
 
 @test "home-only: go with no go installed is not applied, as there is no env layer to carry it" {

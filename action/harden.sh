@@ -161,11 +161,13 @@ done
 # ---- --home-only ----
 #
 # For an agent's VM, where the agent's HOME is the only place that is its own, and
-# nothing the runner starts loads an env file. MEASURED on two agent VMs on 2026-11-26
-# (docs/design-principles.md, "Agent runners"): one ran every command as root with
-# HOME=/home/hatch (passwd home /root) through `bash --norc --noprofile`, with its npm
-# and bun in a read-only image directory ahead of /usr/local/bin. The config files under
-# HOME reached its shells; an env file, /etc and a wrapper outside HOME would not have.
+# nothing the runner starts loads an env file. MEASURED on an agent VM on 2026-11-26
+# (docs/design-principles.md, "Agent runners"): it ran every command as root with
+# HOME=/home/hatch (passwd home /root) through `bash --norc --noprofile`, so no startup
+# file and no variable of the env layer; its npm and bun were in a read-only image
+# directory ahead of /usr/local/bin, so a wrapper there would not be the one it ran; and
+# npm and pip read the config files under HOME. That only HOME survives a rebuild of
+# such a VM, so that /etc is not the agent's to write, is believed, not measured.
 #
 # The promise is literal: nothing is written, moved, created or deleted outside $HOME,
 # and sudo is never run, as root too. So /etc, the env file, the platform's own files
@@ -2543,13 +2545,27 @@ sch_resolve() {
   r=$(ucf_real "$p") || return 1
   printf '%s%s\n' "${r%/}" "$rest"
 }
-# home_guard <path>: 0 when this run may write <path>. Always, except in --home-only
-# mode, where it must land in HOME or below it. Compared with a slash after HOME, so
-# /home/hatchery is not inside /home/hatch.
+# home_guard [--entry] <path>: 0 when this run may write <path>. Always, except in
+# --home-only mode, where it must land in HOME or below it. Compared with a slash after
+# HOME, so /home/hatchery is not inside /home/hatch.
+#
+# A write through the path (a redirect, tee, mkdir -p, ucf_put) lands where its links
+# lead, so by default the whole path is resolved. A rename, a removal or a new file
+# beside it (mv, rm, a wrapper in place of a tool) changes the directory entry itself,
+# so --entry resolves only the directory it is in: a link in /usr/local/bin that leads
+# into HOME is outside it.
 home_guard() {
-  local r
+  local r p
   [ "$HOME_ONLY" = true ] || return 0
-  r=$(sch_resolve "$1") || return 1
+  if [ "$1" = --entry ]; then
+    p=$2
+    case "$p" in */*) ;; *) p="./$p" ;; esac
+    case "${p##*/}" in ''|.|..) return 1 ;; esac
+    r=$(sch_resolve "${p%/*}") || return 1
+    r="${r%/}/${p##*/}"
+  else
+    r=$(sch_resolve "$1") || return 1
+  fi
   case "$r/" in "$SCH_HOME_REAL"/*) return 0 ;; esac
   return 1
 }
@@ -2744,7 +2760,8 @@ _sch_create() {
 if [ "$HOME_ONLY" = true ]; then
   # No env file: nothing an agent's runner starts would source it (see --home-only).
   HARDENING_ENV_FILE=""
-  if ! home_guard "$HARDENING_OUTPUT_FILE"; then
+  # --entry: the record is made beside itself and renamed into place (_sch_create).
+  if ! home_guard --entry "$HARDENING_OUTPUT_FILE"; then
     err "--home-only writes nothing outside HOME, and the run record would go to '$HARDENING_OUTPUT_FILE'. Set HARDENING_OUTPUT_FILE to a path under $HOME${RUNNER_TEMP:+ (RUNNER_TEMP moves the default)}."
     exit 2
   fi
@@ -3121,11 +3138,25 @@ require_privilege() {
   local msg="${4:-PATH wrapper not deployed: @WHY@. Config-file layer still applies.}"
   local owner why="no root and no usable sudo in this job (common in \`container:\` jobs on slim images)"
   local short="this job has no root and no usable sudo"
-  # --home-only: a wrapper only where the tool itself is under HOME, written in place,
-  # so whatever PATH finds the tool finds the wrapper. Nothing outside HOME is wrapped,
-  # moved or put back, and the summary says what the tool goes without.
-  if ! home_guard "$target"; then
-    degrade_eco "$tool" "$status" "${msg//@WHY@/$target is outside HOME, and --home-only writes nothing there}"
+  # --home-only: a wrapper only where the tool's own entry on PATH is under HOME,
+  # written in place, so whatever PATH finds the tool finds the wrapper. The entry, not
+  # what it links to: the tool is renamed to -real beside it and the wrapper takes its
+  # name. A wrapper of ours already there that is a link is written through, so there
+  # its target must be under HOME too. Nothing outside HOME is wrapped, moved or put
+  # back. One an earlier apply left there is kept and counted; otherwise the summary
+  # says what the tool goes without.
+  SCH_KEPT=0
+  if [[ "$HOME_ONLY" == true ]] && { ! home_guard --entry "$target" \
+       || { [[ -L "$target" ]] && is_our_wrapper "$target" && ! home_guard "$target"; }; }; then
+    if kept_wrapper "$target"; then
+      SCH_KEPT=1
+      record_wrapper "${target##*/}"
+      log "$tool: the wrapper at $target is from an earlier apply, outside HOME: left as it is and not updated"
+      unreached "${target##*/}: the wrapper at $target is from an earlier apply and outside HOME, so it is left as it is and not updated"
+      return 1
+    fi
+    why="$(outside "$target"), and --home-only writes nothing there"
+    degrade_eco "$tool" "$status" "${msg//@WHY@/$why}"
     unreached "$(wrapper_gap "$target")"
     return 1
   fi
@@ -3168,6 +3199,10 @@ require_privilege() {
 # bare `mv` ended the run there, with every ecosystem after it not applied. Its own
 # output is left alone: it asks on a terminal before it replaces a read-only file.
 move_aside() {
+  if ! home_guard --entry "$2"; then
+    degrade_eco "$1" "${3:-PARTIAL}" "PATH wrapper not deployed: $(outside "$2"), and --home-only moves nothing there. ${4:-Config-file layer still applies.}"
+    return 1
+  fi
   $SUDO mv "$2" "$2-real" && return 0
   warn "$1: cannot deploy the PATH wrapper at $2 — the tool there cannot be moved aside (see mv's message above)."
   degrade_eco "$1" "${3:-PARTIAL}" "PATH wrapper not deployed: $2 cannot be moved aside. ${4:-Config-file layer still applies.}"
@@ -3178,17 +3213,36 @@ move_aside() {
 # when exactly those bytes are there already, as a regular file of that mode, so a
 # re-run changes nothing (it used to rewrite every wrapper every run). With "replace"
 # whatever is there is removed first, so a symbolic link is replaced, not written through.
+#
+# Each step returns on failure: the callers handle it (wrapper_failed), and a function
+# called in an || list runs with set -e off.
 put_wrapper() {
   local p="$1" body
   body=$(cat)
-  if ! home_guard "$p"; then err "refusing to write a wrapper at $p: outside HOME (--home-only)"; return 1; fi
+  if ! home_guard --entry "$p" || { [ "${2:-}" != replace ] && [ -L "$p" ] && ! home_guard "$p"; }; then
+    err "refusing to write a wrapper at $p: $(outside "$p") (--home-only)"
+    return 1
+  fi
   if [ -f "$p" ] && [ ! -L "$p" ] && [ "$(_sch_mode "$p")" = "-rwxr-xr-x" ] \
      && printf '%s\n' "$body" | ucf_same - "$p"; then
     return 0
   fi
-  if [ "${2:-}" = replace ]; then $SUDO rm -f "$p"; fi
-  printf '%s\n' "$body" | $SUDO tee "$p" >/dev/null
+  if [ "${2:-}" = replace ]; then $SUDO rm -f "$p" || return 1; fi
+  printf '%s\n' "$body" | $SUDO tee "$p" >/dev/null || return 1
   $SUDO chmod 755 "$p"
+}
+
+# wrapper_failed <ecosystem> <wrapper path> <the -real this run moved there, or nothing>
+# [status] [what still applies]: the wrapper could not be written. That ends the run, as
+# it always has, except in --home-only mode: there a tool this run moved aside is put
+# back, so it still runs, and only its ecosystem is degraded.
+wrapper_failed() {
+  err "$1: could not write the PATH wrapper at $2"
+  [ "$HOME_ONLY" = true ] || exit 1
+  if [ -n "${3:-}" ] && { [ -e "$3" ] || [ -L "$3" ]; } && home_guard --entry "$2" && home_guard --entry "$3"; then
+    mv -f -- "$3" "$2" && log "$1: the real ${2##*/} is back at $2"
+  fi
+  degrade_eco "$1" "${4:-PARTIAL}" "PATH wrapper not deployed: $2 could not be written. ${5:-Config-file layer still applies.}"
 }
 
 # put_if_changed <file>: stdin to <file>, only when it differs from what is there.
@@ -3261,19 +3315,46 @@ wrapper_gap() {
     deno)     lacks="deno has no age gate at all; the wrapper is its only one" ;;
     *)        lacks="none of its wrapper's checks apply" ;;
   esac
-  printf '%s: no wrapper, because %s is outside HOME: %s' "$t" "$1" "$lacks"
+  printf '%s: no wrapper, because %s: %s' "$t" "$(outside "$1")" "$lacks"
+}
+
+# kept_wrapper <tool path>: 0 when it is a wrapper of ours (this script's or the role's)
+# whose real tool is there: <path>-real, or for bunx the real bun it names. An image
+# hardened by a full apply has these outside HOME, and --home-only keeps them as they are.
+# Both write a wrapper as a file of its own, so a link is not one, even when it leads to
+# one (a bunx linked to the bun wrapper this run just wrote).
+SCH_KEPT=0
+kept_wrapper() {
+  local r
+  [ ! -L "$1" ] && is_our_wrapper "$1" || return 1
+  [ -x "$1-real" ] && return 0
+  [ "${1##*/}" = bunx ] || return 1
+  r=$(sed -n "s/^REAL_BUN='\(.*\)'\$/\1/p" "$1" 2>/dev/null | head -n 1) || r=""
+  [ -n "$r" ] && [ -x "$r" ]
 }
 
 # uid_passwd_home: this uid's home in the passwd database, which is where the JVM takes
 # user.home from (see harden_gradle). id -u, never $USER/$LOGNAME: those are env-derived
 # and can lie in exactly the relocated-HOME containers this resolution exists for.
 # getent is missing from some minimal images, so fall back to /etc/passwd directly.
+# macOS has no getent, and its /etc/passwd lists none of the people's accounts, which
+# are in Directory Services (inferred from Apple's documentation, not run here). So
+# last, the account's name from its uid, and its home from a tilde (getpwnam, which
+# asks Directory Services), as harden_yarn does with ~root. A uid with no name has
+# no entry.
 uid_passwd_home() {
-  local uid h
+  local uid h n
   uid=$(id -u)
   h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || h=""
   if [[ -z "$h" ]]; then
     h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || h=""
+  fi
+  if [[ -z "$h" ]]; then
+    n=$(id -un 2>/dev/null) || n=""
+    if [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+      eval "h=~$n"
+      case "$h" in /*) ;; *) h="" ;; esac
+    fi
   fi
   printf '%s\n' "$h"
 }
@@ -4092,6 +4173,7 @@ harden_composer() {
 
   local wrapper_target="$real_composer"
   require_privilege composer "$wrapper_target" || { end_section; return 0; }
+  local moved=""
   if is_our_wrapper "$real_composer"; then
     if [[ -x "${real_composer}-real" ]]; then
       real_composer="${real_composer}-real"
@@ -4103,6 +4185,7 @@ harden_composer() {
   else
     move_aside composer "$real_composer" || { end_section; return 0; }
     real_composer="${real_composer}-real"
+    moved=$real_composer
   fi
 
   local inject_no_plugins=true
@@ -4380,7 +4463,7 @@ fi
 
 exec "$REAL_COMPOSER" ${FLAGS[@]+"${FLAGS[@]}"} "$@"
 EOF
-  } | put_wrapper "$wrapper_target"
+  } | put_wrapper "$wrapper_target" || { wrapper_failed composer "$wrapper_target" "$moved"; end_section; return 0; }
   local wrap_desc="--no-scripts on every invocation except a script run by name"
   if [[ "$no_scripts_is_global" != "true" ]]; then
     wrap_desc="--no-scripts on install/update/require/remove/dump-autoload/create-project/reinstall only"
@@ -4390,6 +4473,22 @@ EOF
   log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"
   record_wrapper composer
   end_section
+}
+
+# find_bunx <bun path>: bunx on PATH, else the one beside that bun; nothing when neither.
+find_bunx() {
+  local b
+  b=$(command -v bunx 2>/dev/null || true)
+  if [[ -z "$b" && -e "$(dirname "$1")/bunx" ]]; then b="$(dirname "$1")/bunx"; fi
+  printf '%s' "$b"
+}
+
+# bunx_failed <bunx> <real bun>: wrapper_failed for bunx. put_wrapper removed bunx
+# first, so in --home-only mode it comes back as what it was, a link to the real bun.
+bunx_failed() {
+  wrapper_failed bun "$1" "" PARTIAL "The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."
+  [ -e "$1" ] || [ -L "$1" ] || ln -s "$2" "$1" 2>/dev/null \
+    || warn "bunx: $1 could not be put back; reinstall bun to get bunx again"
 }
 
 harden_bun() {
@@ -4546,8 +4645,19 @@ harden_bun() {
     return 0
   fi
 
-  local wrapper_target="$real_bun"
-  require_privilege bun "$wrapper_target" || { end_section; return 0; }
+  local wrapper_target="$real_bun" moved=""
+  if ! require_privilege bun "$wrapper_target"; then
+    # --home-only kept an earlier apply's bun wrapper outside HOME: bunx is judged the
+    # same way, and is not written either.
+    if [[ "$SCH_KEPT" == 1 ]]; then
+      local kept_bunx
+      kept_bunx=$(find_bunx "$wrapper_target")
+      if [[ -n "$kept_bunx" ]] && require_privilege bun "$kept_bunx" PARTIAL "bunx PATH wrapper not deployed at $kept_bunx: @WHY@. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."; then
+        degrade_eco bun PARTIAL "bunx PATH wrapper not deployed at $kept_bunx: the bun wrapper it would run is outside HOME and was left as it is. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."
+      fi
+    fi
+    end_section; return 0
+  fi
   # If the discovered bun IS our wrapper from a prior step (re-run within
   # the same job), find the real binary at -real and re-wrap.
   if is_our_wrapper "$real_bun"; then
@@ -4565,9 +4675,10 @@ harden_bun() {
     # isn't, and we want this to work in both cases.
     move_aside bun "$real_bun" || { end_section; return 0; }
     real_bun="${real_bun}-real"
+    moved=$real_bun
   fi
 
-  cat <<EOF | put_wrapper "$wrapper_target"
+  cat <<EOF | put_wrapper "$wrapper_target" || { wrapper_failed bun "$wrapper_target" "$moved"; end_section; return 0; }
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_BUN='$real_bun'
@@ -4640,13 +4751,7 @@ EOF
   #     bun *wrapper* deployed above — re-injecting flags and losing
   #     argv[0]. So it points at the real bun binary directly.
   local real_bunx
-  real_bunx=$(command -v bunx 2>/dev/null || true)
-  if [[ -z "$real_bunx" ]]; then
-    # bunx not on PATH; try the conventional sibling of the bun we wrapped.
-    local sibling
-    sibling="$(dirname "$wrapper_target")/bunx"
-    [[ -e "$sibling" ]] && real_bunx="$sibling"
-  fi
+  real_bunx=$(find_bunx "$wrapper_target")
 
   if [[ -z "$real_bunx" ]]; then
     log "bunx not found — no bunx wrapper deployed"
@@ -4668,7 +4773,7 @@ EOF
     # No -real backup is kept: unlike bun, bunx carries no unique binary. It
     # is a symlink, and the thing it pointed at is already preserved as
     # bun-real by the wrap above.
-    cat <<EOF | put_wrapper "$real_bunx" replace
+    cat <<EOF | put_wrapper "$real_bunx" replace || { bunx_failed "$real_bunx" "$real_bun"; end_section; return 0; }
 #!/bin/bash
 # Managed by supply-chain-harden
 REAL_BUN='$real_bun'
@@ -4839,7 +4944,7 @@ EOF
     return 0
   fi
 
-  local wrapper_target="$real_cargo"
+  local wrapper_target="$real_cargo" moved=""
   require_privilege cargo "$wrapper_target" || { end_section; return 0; }
   if is_our_wrapper "$real_cargo"; then
     if [[ -x "${real_cargo}-real" ]]; then
@@ -4855,6 +4960,7 @@ EOF
     # shared rustup binary, replacing rustc, rustfmt and every other proxy.
     move_aside cargo "$real_cargo" || { end_section; return 0; }
     real_cargo="${real_cargo}-real"
+    moved=$real_cargo
   fi
 
   # ARGV[0]-SAFE BACKUP — parity with tasks/cargo.yml "Prepare cargo-real".
@@ -4887,12 +4993,17 @@ EOF
     cargo_target=$(readlink -f "$cargo_sib" 2>/dev/null || true)
   fi
   if [[ -n "$cargo_target" ]]; then
-    tmp_shim=$(sch_mktemp "$real_cargo")
-    printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$cargo_target" > "$tmp_shim"
-    chmod 0755 "$tmp_shim"
+    # --home-only: the entry it replaces, and the temporary file beside it, in HOME.
+    if ! home_guard --entry "$real_cargo" || ! tmp_shim=$(sch_mktemp "$real_cargo"); then
+      wrapper_failed cargo "$wrapper_target" "$moved"; end_section; return 0
+    fi
     # mv replaces the directory entry; it neither follows a symlink nor
     # writes into a hardlink's shared inode (the rustup binary).
-    $SUDO mv -f "$tmp_shim" "$real_cargo"
+    if ! { printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$cargo_target" > "$tmp_shim" \
+           && chmod 0755 "$tmp_shim" && $SUDO mv -f "$tmp_shim" "$real_cargo"; }; then
+      rm -f -- "$tmp_shim"
+      wrapper_failed cargo "$wrapper_target" "$moved"; end_section; return 0
+    fi
     log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
@@ -4939,7 +5050,7 @@ EOF
   # wrong silently. Straight from sed to put_wrapper, with no temporary file.
   local cargo_subst
   cargo_subst="s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_EXE__|$(sed_repl "$cooldown_exe")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
-  sed "$cargo_subst" <<'WRAPPER' | put_wrapper "$wrapper_target"
+  sed "$cargo_subst" <<'WRAPPER' | put_wrapper "$wrapper_target" || { wrapper_failed cargo "$wrapper_target" "$moved"; end_section; return 0; }
 #!/bin/bash
 # cargo — supply-chain-harden wrapper
 #
@@ -5435,18 +5546,25 @@ WRAPPER
 
 harden_go() {
   section "go"
-  # --home-only: go env -w writes GOENV, os.UserConfigDir()/go/env by default, and
-  # every go command writes its telemetry counters beside it (MEASURED, see
-  # _pf_version), so none of it runs when that is outside HOME. The default is
-  # worked out here, without starting go; go's own answer is checked again below.
-  local genv="${GOENV:-}"
-  if [[ -z "$genv" ]]; then
-    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then genv="$HOME/Library/Application Support/go/env"
-    else genv="${XDG_CONFIG_HOME:-$HOME/.config}/go/env"; fi
+  # --home-only: go env -w writes GOENV, and every go command, `go version` included,
+  # writes telemetry counters under os.UserConfigDir()/go/telemetry, where the default
+  # GOENV is too, whatever GOENV says. MEASURED, go1.24.2 on Linux: with
+  # GOENV=$HOME/.goenv and XDG_CONFIG_HOME outside HOME, `go version` wrote
+  # $XDG_CONFIG_HOME/go/telemetry/local/*.count, weekends and upload.token, and nothing
+  # in HOME. On macOS os.UserConfigDir is ~/Library/Application Support whatever
+  # XDG_CONFIG_HOME says (Go's documentation, not measured here). So go is not started
+  # at all unless both are under HOME. Worked out without starting go; go's own GOENV
+  # is checked again below.
+  local gcfg genv gvar
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then gcfg="$HOME/Library/Application Support"; gvar=""
+  else gcfg="${XDG_CONFIG_HOME:-$HOME/.config}"; gvar="${XDG_CONFIG_HOME:+XDG_CONFIG_HOME}"; fi
+  if ! home_guard "$gcfg/go/telemetry"; then
+    home_skip go "$(outside "$gcfg/go/telemetry" "$gvar"), and every go command writes its telemetry counters there"
+    end_section; return 0
   fi
+  genv="${GOENV:-$gcfg/go/env}"
+  [[ -z "${GOENV:-}" ]] || gvar=GOENV
   if ! home_guard "$genv"; then
-    local gvar=XDG_CONFIG_HOME
-    [[ -z "${GOENV:-}" ]] || gvar=GOENV
     home_skip go "$(outside "$genv" "$gvar")"; end_section; return 0
   fi
 
@@ -5674,7 +5792,7 @@ harden_deno() {
   # exact "partial config, no verdict" defect this change set fixes everywhere
   # else, and it gated AFTER the mv here. deno has no config layer, so a blocked
   # wrap means NONE is enforced, not PARTIAL.
-  local wrapper_path="${real_deno%-real}"
+  local wrapper_path="${real_deno%-real}" moved=""
   require_privilege deno "$wrapper_path" NONE \
     "PATH wrapper not deployed: @WHY@. deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
     || { end_section; return 0; }
@@ -5690,13 +5808,14 @@ harden_deno() {
   else
     move_aside deno "$real_deno" NONE "deno has no config-file layer, so nothing gates deno on this host." || { end_section; return 0; }
     real_deno="${real_deno}-real"
+    moved=$real_deno
   fi
   # Placeholders + sed rather than an interpolating heredoc — same reason as
   # the cargo wrapper: this text is dense with $ and the escaping is where
   # generated wrappers go wrong without failing loudly.
   local deno_subst
   deno_subst="s|__REAL_DENO__|$(sed_repl "$real_deno")|; s|__WRAPPER_PATH__|$(sed_repl "$wrapper_path")|; s|__MIN_AGE__|$DENO_AGE_ISO|"
-  sed "$deno_subst" <<'DENOWRAP' | put_wrapper "$wrapper_path"
+  sed "$deno_subst" <<'DENOWRAP' | put_wrapper "$wrapper_path" || { wrapper_failed deno "$wrapper_path" "$moved" NONE "deno has no config-file layer, so nothing gates deno on this host."; end_section; return 0; }
 #!/bin/bash
 # deno — supply-chain-harden wrapper
 #
@@ -6556,7 +6675,8 @@ unwrap_intel_wrapper() {
     warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and cannot put the real $tool back: the wrapper names '${real:-<none>}', not an executable ${target}-real. It is left in place. Re-run with INTEL=sfw to bring it up to date, or put the real $tool back at $target."
     return 0
   fi
-  if ! home_guard "$target" || ! home_guard "$real"; then
+  # Both entries, not what they link to: mv renames them and writes through neither.
+  if ! home_guard --entry "$target" || ! home_guard --entry "$real"; then
     warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw. It is outside HOME, and --home-only changes nothing there, so it is left in place. Run harden.sh without --home-only, with sudo, to remove it."
     return 0
   fi

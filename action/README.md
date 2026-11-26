@@ -174,11 +174,16 @@ included, and checked against HOME before anything is written there. In this mod
   the `sudo -n true` probe. `WRITE_ETC=true`, `intel: sfw`, `INSTALL_CARGO_COOLDOWN`,
   `CARGO_SOCKET_FIREWALL` and `HARDENING_ENV_FILE` are ignored, and the summary says so.
 - A PATH wrapper only for a tool whose path is under HOME (`~/.bun/bin`,
-  `~/.cargo/bin`, `~/.deno/bin`, `~/.local/bin`), written in place. A tool anywhere
-  else is left as it is, and the summary says what it goes without: deno its only age
-  gate, bun and bunx `--no-install`, composer `--no-scripts`, cargo `--locked`.
+  `~/.cargo/bin`, `~/.deno/bin`, `~/.local/bin`), written in place. The path PATH finds
+  counts, not where it links to: `/usr/local/bin/deno` linked to `~/.deno/bin/deno` is
+  outside HOME. A tool anywhere else is left as it is, and the summary says what it goes
+  without: deno its only age gate, bun and bunx `--no-install`, composer `--no-scripts`,
+  cargo `--locked`. A wrapper an earlier full apply put there is kept, not updated, and
+  counted in the run record.
 - A tool whose config path is outside HOME (`XDG_CONFIG_HOME`, `CARGO_HOME`,
-  `COMPOSER_HOME`, `DOTNET_CLI_HOME`, `POETRY_CONFIG_DIR`, `GOENV`) is not applied.
+  `COMPOSER_HOME`, `DOTNET_CLI_HOME`, `POETRY_CONFIG_DIR`, `GOENV`) is not applied. Go
+  is not even started when its user config directory, where it writes telemetry
+  counters, is outside HOME.
   Neither are Gradle and Maven when HOME is not the passwd home, unless
   `GRADLE_USER_HOME` is set and under HOME: the JVM takes `user.home` from the passwd
   entry (measured for Gradle; for Maven it is inferred). No JVM or `dotnet` is started.

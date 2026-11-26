@@ -139,8 +139,9 @@ settings by hand can read [docs/how-it-works.md](docs/how-it-works.md#setting-va
 ## An agent's VM: `--home-only`
 
 Some agent platforms give the agent a VM where only its HOME is its own: the image is
-read-only or rebuilt, and the runner starts every command in a shell that loads no
-startup file, so `/etc`, an env file and a wrapper outside HOME would not reach it
+read-only or rebuilt, so `/etc` is not the agent's to change (that only HOME survives a
+rebuild is believed, not measured), and the runner starts every command in a shell that
+loads no startup file, so an env file would not reach it
 ([why](docs/design-principles.md#agent-runners)). There, at the start of every session:
 
 ```bash
