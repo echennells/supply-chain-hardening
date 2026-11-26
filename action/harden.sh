@@ -645,14 +645,25 @@ ucf_blocked() {
 }
 
 # ucf_stuck <kind> <path>: the same, as a preflight has to judge it. A file that is
-# ours does not stop anything: the write comes only if it has to change (a shared
-# CARGO_HOME, where another account already wrote the same one).
+# ours need not stop anything: the write comes only if it has to change (a shared
+# CARGO_HOME, where another account already wrote the same one). Only where that is
+# still open, though. One from before the checksum is always written again (what is
+# written now carries one), and so is one whose mode has to change, so either stops
+# here like any other. MEASURED before this (tests/ci/14): the files v2.0.0 and v2.1.0
+# wrote, in a directory the account could not write, all passed this, so both
+# preflights cleared the host, and ucf_replace then stopped the run at that file,
+# after the ones before it. Composer's file has no marker; what is written to it is
+# the same as before.
 ucf_stuck() {
-  local why
+  local why real
   why=$(ucf_blocked "$1" "$2")
   [ -n "$why" ] || return 0
   if [ "$1" != npmrc ] && [ -z "$(ucf_kept_out "$1" "$2")" ] && [ -f "$2" ] && [ -r "$2" ] \
-     && [ "$(user_cfg_class "$1" "$2")" = ours ]; then return 0; fi
+     && [ "$(user_cfg_class "$1" "$2")" = ours ] && real=$(ucf_real "$2") \
+     && [ "$(ucf_ls "$real" | cut -c1-10)" = "$(ucf_mode "$real" 644)" ]; then
+    case "$1" in composer*) return 0 ;; esac
+    case "$(ucf_marker "$2")" in *" "?*) return 0 ;; esac
+  fi
   printf '%s\n' "$why"
 }
 
@@ -2006,7 +2017,15 @@ preflight_report() {
     if [ ! -e "$f" ]; then _pf_line "$f: not there, will be created"; return 0; fi
     [ "$1" != npmrc ] || { _pf_npmrc; return 0; }
     case "$(user_cfg_class "$1" "$f")" in
-      ours) _pf_line "$f: exactly what this project last wrote, replaced as before" ;;
+      ours)
+        # Not stuck, yet not writable: ucf_stuck leaves it to the run, which writes it
+        # only if what it writes has changed.
+        out=$(ucf_blocked "$1" "$f")
+        if [ -n "$out" ]; then
+          _pf_note "$f: exactly what this project last wrote, but it $out. A run that writes the same leaves it as it is; one that writes anything else stops at that file, after the ones before it."
+        else
+          _pf_line "$f: exactly what this project last wrote, replaced as before"
+        fi ;;
       stock) _pf_note "$f: dotnet's own first-run file; replaced without stopping, after a copy next to it (0600)." ;;
       *) _pf_stop "$f: not exactly what this project last wrote, so it may hold a private registry or a login token. Tell the owner, without printing it; only with their agreement, -e accept_user_config_overwrite=true copies it next to itself (0600) and replaces it." ;;
     esac

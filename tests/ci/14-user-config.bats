@@ -982,6 +982,58 @@ PY
   sudo rm -f "$ch/config.toml"
 }
 
+@test "user config: a file an earlier version wrote that this account cannot rewrite stops the preflight, not the run" {
+  [ "$(id -u)" -ne 0 ] || skip "running as root"
+  lib
+  local v k d out pfout
+  # Each kind whose file has a directory of its own, made read-only. The run has to
+  # write every one of them again, because what it writes now carries a checksum.
+  # (Composer's has no marker, and what is written to it is the same as before.)
+  for v in v2.0.0-action v2.0.0-role v2.1.0-action v2.1.0-role; do
+    rm -rf "$TEST_HOME"; mkdir -p "$TEST_HOME"
+    fixture "$v"
+    for k in pnpm-rc pip uv bundler cargo maven nuget; do
+      [ "$(user_cfg_class "$k" "$(f "$k")")" = ours ] || { echo "$v $k: not ours"; return 1; }
+      d=$(dirname "$(f "$k")")
+      chmod 555 "$d"
+      out=$(ucf_stuck "$k" "$(f "$k")")
+      chmod 755 "$d"
+      [[ "$out" == "cannot be replaced: "*" is not writable by "* ]] || { echo "$v $k: '$out'"; return 1; }
+    done
+  done
+  # Both preflights say so, before anything is written: harden.sh's and the role's.
+  chmod 555 "$(dirname "$(f uv)")"
+  run pf
+  pfout=$output
+  run env SCH_UCF_PATH="$(f uv)" bash "$ROOT/files/user-config.sh" classify uv
+  chmod 755 "$(dirname "$(f uv)")"
+  [[ "$pfout" == *"STOP  $(f uv): cannot be replaced: "* ]] || { echo "$pfout"; return 1; }
+  [ "$status" -eq 42 ]
+  [[ "$output" == "blocked $(f uv) cannot be replaced: "* ]] || { echo "$output"; return 1; }
+}
+
+@test "user config: this version's own file that the account cannot rewrite is left to the run, and the preflight says what that means" {
+  [ "$(id -u)" -ne 0 ] || skip "running as root"
+  lib
+  local d out
+  ECO=cargo apply >/dev/null 2>&1
+  grep -q 'self-check ' "$(f cargo)"
+  d=$(dirname "$(f cargo)")
+  chmod 555 "$d"
+  out=$(ucf_stuck cargo "$(f cargo)")
+  run pf
+  chmod 755 "$d"
+  [ -z "$out" ] || { echo "'$out'"; return 1; }
+  [[ "$output" == *"note  $(f cargo): exactly what this project last wrote, but it cannot be replaced: "*"stops at that file, after the ones before it."* ]] || { echo "$output"; return 1; }
+  ! grep -qF "$(f cargo): exactly what this project last wrote, replaced as before" <<<"$output" || false
+  # A mode the run has to change is a write it cannot skip, so that one stops here.
+  chmod 666 "$(f cargo)"
+  chmod 555 "$d"
+  out=$(ucf_stuck cargo "$(f cargo)")
+  chmod 755 "$d"
+  [[ "$out" == "cannot be replaced: "* ]] || { echo "'$out'"; return 1; }
+}
+
 @test "user config: a file another account owns is refused, and kept" {
   sudo -n true 2>/dev/null || skip "no passwordless sudo"
   [ "$(id -u)" -ne 0 ] || skip "running as root"
