@@ -435,8 +435,13 @@ row() { # status, evidence, protection, detail
   esac
   # Coverage accumulator for the reconciliation pass. Every protection name in
   # both surfaces starts with the ecosystem it belongs to, which is what makes
-  # this cheap and self-maintaining as probes are added.
-  case "$SEEN" in *" ${p%% *} "*) ;; *) SEEN="$SEEN${p%% *} " ;; esac
+  # this cheap and self-maintaining as probes are added. A "<tool> on this
+  # shell's PATH" row is about the shell, not a probe of the tool, so it does
+  # not count: a body that stopped right after it would otherwise read as covered.
+  case "$p" in
+    *" on this shell's PATH") ;;
+    *) case "$SEEN" in *" ${p%% *} "*) ;; *) SEEN="$SEEN${p%% *} " ;; esac ;;
+  esac
   return 0
 }
 

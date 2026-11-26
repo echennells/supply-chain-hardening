@@ -296,6 +296,24 @@ uv_stub() { # <dir> <version> [span]
   [ -z "$(row_of "uv on this shell's PATH")" ]
 }
 
+@test "reach: the row does not stand in for the tool's own rows in the coverage check" {
+  # A shared body that stops right after the reach rows: the record promised
+  # uv, and only "uv on this shell's PATH" names it. That is no uv probe.
+  uv_stub "$TEST_HOME/.local/bin" 0.13.9 48h
+  forge ecosystems_hardened=uv release_age_hours=48
+  local cut="$BATS_TEST_TMPDIR/probes-cut.sh"
+  awk '{ print } /^# yarn$/ { exit }' "$PROBES" > "$cut"
+  grep -q 'scv_reach_row "${scv__rt%%:\*}"' "$cut"
+  ! grep -q '^if have uv; then' "$cut" || false
+  run reach_verify SCV_PROBES="$cut" "$BARE_PATH"
+  [ -n "$(row_of "uv on this shell's PATH")" ]
+  [[ "$(row_of "uv coverage")" == "GAP    PRESENT     uv coverage"*"emitted no row for it"* ]]
+  # Control: the whole body has uv rows, so nothing is missing.
+  run reach_verify "$BARE_PATH"
+  [ -n "$(row_of "uv age gate")" ]
+  [ -z "$(row_of "uv coverage")" ]
+}
+
 @test "reach: a copy in a directory the verifier adds comes first: the row names both" {
   # uv only in ~/.local/bin, so the verifier puts ~/.local/bin first on its
   # PATH, where another poetry sits than the one this shell runs.
