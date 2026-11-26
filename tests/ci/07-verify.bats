@@ -269,6 +269,29 @@ exec '"$realpy"' "$@"'
   [[ "$output" != *"GAP    PARSED      pip native age gate"* ]]
 }
 
+@test "bun rows: a Bun on the machine fails only the jobs that hardened bun" {
+  # Like pip above. The four bun rows ran for any bun on PATH, so a job that hardened
+  # only npm on a machine with Bun got three GAPs and a WEAK for a bun it never asked
+  # to harden (its unwrapped binary, its bunx). Under fail-on: gap that failed the job.
+  stub_bin bun 'case "${1:-}" in --version|-v) echo "1.4.4";; --help) echo "Usage: bun <command> [...flags]";; *) echo STUB;; esac'
+  harden ECOSYSTEMS=npm -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  local p bad
+  for p in "bun install scripts blocked" "bun install age gate" \
+           "bun runtime auto-install blocked" "bunx fetch-and-execute blocked"; do
+    [[ "$output" == *"N/A    BYDESIGN    $p"*"not in the requested ecosystems"* ]] \
+      || { echo "not N/A BYDESIGN: $p"; false; }
+  done
+  bad=$(printf '%s\n' "$output" | grep -E '^(GAP|WEAK) +[A-Z]+ +bunx? ' || true)
+  [ -z "$bad" ] || { echo "$bad"; false; }
+
+  # The job that asked for bun still has its rows measured.
+  harden ECOSYSTEMS=bun -- --emit=plain >/dev/null
+  run verify_sourced --emit=plain
+  [[ "$output" == *"OK     FUNCTIONAL  bunx fetch-and-execute blocked"* ]] || { echo "bunx row not measured"; false; }
+  [[ "$output" != *"bun installed but not in the requested ecosystems"* ]]
+}
+
 @test "cargo publish-age gate: a repo cooldown.toml is a GAP even with the environment pinned" {
   # The pin beats a repo file only for settings that have an environment form.
   # MEASURED on cargo-cooldown 0.3.5: `[allow.global] minutes = 0` in a repo

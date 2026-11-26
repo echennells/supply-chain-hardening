@@ -1421,6 +1421,22 @@ bun_global_bunfig() {
   fi
 }
 
+# Is bun one this run asked for? Both surfaces define requested(), and it says yes
+# when there is no record; the role always expects bun, so this changes only a CI or
+# plain run that left bun out. Its rows then say N/A, as pip's, deno's, cargo's and
+# composer's do, and bun is not run. MEASURED before this (tests/ci, bun 1.4.4 on PATH):
+# a job that hardened only npm got three bun GAPs and a WEAK for a bun it never asked
+# to harden, a false failure under fail-on: gap. Guarded like the yarn and pnpm rows,
+# for a body sourced without it.
+bun_requested() { ! command -v requested >/dev/null 2>&1 || requested bun; }
+bun_row_na() { # protection
+  if ! bun_requested && { have bun || have bunx; }; then
+    row "N/A" - "$1" "bun installed but not in the requested ecosystems"
+  else
+    row "N/A" - "$1" "bun not installed"
+  fi
+}
+
 # Which mode does this entry point run in? bun chooses between bun and bunx
 # from argv[0]. `bun --help` prints "Usage: bun <command> ...", the same binary
 # invoked as bunx prints "Usage: bunx [flags] <package>...". --help is in the
@@ -1463,7 +1479,7 @@ bun_scripts_arm() {
   rm -rf "$proj"
 }
 
-if have bun; then
+if have bun && bun_requested; then
   bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bcfg=$(bun_global_bunfig)
@@ -1525,7 +1541,7 @@ if have bun; then
     fi
   fi
 else
-  row "N/A" - "bun install scripts blocked" "bun not installed"
+  bun_row_na "bun install scripts blocked"
 fi
 
 # --- bun install age gate  [PRESENT] ---
@@ -1595,7 +1611,7 @@ bunfig_implements() {
   return 1
 }
 
-if have bun; then
+if have bun && bun_requested; then
   bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bcfg=$(bun_global_bunfig)
@@ -1641,7 +1657,7 @@ if have bun; then
     fi
   fi
 else
-  row "N/A" - "bun install age gate" "bun not installed"
+  bun_row_na "bun install age gate"
 fi
 
 # --- bun runtime auto-install blocked  [FUNCTIONAL] ---
@@ -1680,7 +1696,7 @@ bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
   rm -rf "$tmp"
 }
 
-if have bun; then
+if have bun && bun_requested; then
   bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   if ! grep -q 'supply-chain-harden' "$bpath" 2>/dev/null; then
@@ -1708,7 +1724,7 @@ if have bun; then
     fi
   fi
 else
-  row "N/A" - "bun runtime auto-install blocked" "bun not installed"
+  bun_row_na "bun runtime auto-install blocked"
 fi
 
 # --- bunx fetch-and-execute blocked  [FUNCTIONAL] ---
@@ -1743,15 +1759,15 @@ bun_wrapper_dispatch() { # $1 = bun|bunx, rest = the argv to test
 # wrapper that passes any leading metadata flag through (the Action's did,
 # keying off $1 alone) hands it over without --no-install.
 bmeta_bad=""
-if have bun && bmw=$(scv_our_wrapper bun 2>/dev/null); then
+if have bun && bun_requested && bmw=$(scv_our_wrapper bun 2>/dev/null); then
   bmo=$(bun_wrapper_dispatch bun --version x some-cli)
   if [ -n "$bmo" ] && [ "$(printf '%s\n' "$bmo" | head -1)" != "--no-install" ]; then
     bmeta_bad="the bun wrapper at $bmw hands \`bun --version x some-cli\` to real bun WITHOUT --no-install first (observed argv began '$(printf '%s\n' "$bmo" | head -1)'); bun ignores the metadata flag when more follows and fetch-and-executes the package"
   fi
 fi
 
-if ! have bun && ! have bunx; then
-  row "N/A" - "bunx fetch-and-execute blocked" "bun not installed"
+if { ! have bun && ! have bunx; } || ! bun_requested; then
+  bun_row_na "bunx fetch-and-execute blocked"
 elif ! have bunx; then
   # `bun x` is a DIFFERENT argv shape from `bun run`, which is all the runtime
   # row dispatches, so do not assert that row covers it — measure it.

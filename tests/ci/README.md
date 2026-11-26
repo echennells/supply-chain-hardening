@@ -12,7 +12,7 @@ against throwaway `$HOME` and `$TMPDIR` directories.
 
 It runs on a Mac too, with Apple's bash 3.2, `bundle` and (missing) `javac`; nothing in
 it asks for a password, and the tests that need root skip without passwordless sudo.
-547 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
+548 tests; CI runs them on ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15
 set up like a person's Mac (`.github/workflows/ci-script.yml`).
 
 Run it as a normal user. As root, `harden.sh` copies the cargo-cooldown it
