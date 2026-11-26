@@ -1431,15 +1431,15 @@ bun_global_bunfig() {
 bun_requested() { ! command -v requested >/dev/null 2>&1 || requested bun; }
 # The N/A row of a bun row that is not measured. Absence first, as every other
 # ecosystem does: a row whose tools are all missing is "not installed" either way.
-bun_row_na() { # protection tool...
-  local p="$1" t; shift
-  for t in "$@"; do
+bun_row_na() { # protection tool...  ($1 itself: tests/ci/10's protection check)
+  local t
+  for t in "${@:2}"; do
     if have "$t"; then
-      row "N/A" - "$p" "bun installed but not in the requested ecosystems"
+      row "N/A" - "$1" "bun installed but not in the requested ecosystems"
       return 0
     fi
   done
-  row "N/A" - "$p" "bun not installed"
+  row "N/A" - "$1" "bun not installed"
 }
 
 # Which mode does this entry point run in? bun chooses between bun and bunx
