@@ -10,7 +10,7 @@ exactly what we intended, the tool ignored it, and the run reported success:
 | yarn `npmMinimalAgeGate` below yarn 4.10 | key does not exist; ignored in `~/.yarnrc.yml` without a word |
 | npm `MINIMUM_RELEASE_AGE` | a key npm does not read |
 | pnpm 11 | stopped reading `rc` / `npmrc` entirely |
-| pnpm 10 `block-exotic-subdeps` | accepted the key, ignored it |
+| pnpm 10 `block-exotic-subdeps` | ignored below 10.26.0; from 10.26.0 honoured only in `rc` (a direct exotic dependency is allowed by design, so `pnpm add <tarball-url>` proves nothing either way) |
 | bun `ignoreScripts` | bunfig not loaded for `bun run`; and inert in ANY bunfig below bun 1.2.0 |
 | bun `minimumReleaseAge` | key does not exist below bun 1.3.0 — accepted and ignored |
 | bun's whole bunfig | on bun 1.3.0 through 1.4.3, one bad value (a quoted `minimumReleaseAge`) makes bun reject the entire file, exit 1. bun 1.4.4 accepts a quoted duration, which the verifier reports as WEAK |
