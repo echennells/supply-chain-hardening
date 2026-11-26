@@ -8,11 +8,13 @@ and [TESTS.md](TESTS.md). The agent that later works on a hardened host has its 
 one for it; whoever runs that agent has to hand it over.
 
 **If you are asked what this project does,** answer from
-[docs/threat-model.md](docs/threat-model.md), and give the limits with the protections. It
-makes language package managers refuse fresh releases, skip install scripts and refuse
-source builds, then checks per tool that this is in force. It is not a sandbox: an agent on
-the host runs as the same user and can undo it, and it does nothing about code that runs
-after it is installed or arrives without a package manager.
+[docs/threat-model.md](docs/threat-model.md), and give the limits with the protections.
+Where the installed version supports it, most of the language package managers refuse
+releases newer than 48 hours and skip install scripts, and Python installers refuse source
+builds; Go, Maven, Gradle and NuGet get no age gate, and Cargo's and Ruby's build scripts
+still run. A verifier checks per tool what is in force. It is not a sandbox: an agent on
+the host runs as the same user and can undo it, and it does not limit code that runs after
+it is installed or that arrives without a package manager.
 
 **The short version:** run the preflight, show the user its output and wait, apply the
 Ansible role, run the verifier, and report what it says. Don't copy settings out of
@@ -183,16 +185,20 @@ Say so when it matters to the task, and whenever you describe what hardening doe
 
 - **It is not a sandbox.** Anything running as the same user can undo it, an agent
   included.
-- **It is not a malware scanner.** Socket Firewall blocks npm and Cargo packages already
-  flagged as malware. Beyond that, a malicious release older than the window installs as
-  usual, and so does a package name an agent guessed that an attacker registered long
-  ago: npq's reputation checks run only in an interactive terminal, never for an agent.
+- **It is not a malware scanner.** Where Socket Firewall runs (on by default in the role
+  with a system-wide Node 20 or later, opt-in in the Action), it blocks npm and Cargo
+  packages already flagged as malware. Beyond that, a malicious release older than the
+  window installs as usual, and so does a package name an agent guessed that an attacker
+  registered long ago: npq's reputation checks need a terminal, which most agents lack.
 - **It does not limit code that runs.** Once installed, a package's code runs with the
   user's privileges when it is imported, run or built. Cargo's `build.rs` and Ruby's
   `extconf.rb` run whenever the crate or gem is built.
-- **A repo can switch off some gates.** Run the verifier inside it to see which.
+- **A repo can switch off some gates.** Run the verifier inside it, and
+  `action/harden.sh --preflight=<repo>`, to see which; the verifier does not report a
+  project `bunfig.toml`, `.cargo/config.toml` or `rust-toolchain.toml`.
 - **Some installs have no age gate here:** Go, Maven, Gradle and NuGet, `gem install`
-  below RubyGems 4.1.0, PDM, and container image pulls (pin digests rather than tags).
+  below RubyGems 4.1.0, `cargo install` and `cargo add`, Yarn 1.x, PDM, and container
+  image pulls (pin digests rather than tags).
 - **A cloned repo's agent config can run code** with no package manager involved, for
   example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`. Headless
   `claude -p` and Agent SDK runs show no trust prompt; see

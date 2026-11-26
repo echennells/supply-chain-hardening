@@ -20,7 +20,7 @@ GAP    FUNCTIONAL  npq reputation checks            installed but SUPPRESSED on 
 WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers bypassing PATH unaffected
 ```
 
-It narrows install-time attacks and nothing else: **it is not a sandbox**, and an agent on the host runs as the same user and can undo it. [What it protects against, and what it does not](docs/threat-model.md).
+It mainly narrows install-time attacks, and **it is not a sandbox**: an agent on the host runs as the same user and can undo it. [What it protects against, and what it does not](docs/threat-model.md).
 
 Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a **GitHub Action** (with adapters for GitLab, CircleCI, Azure, Buildkite and plain shells).
 
@@ -126,9 +126,9 @@ The order is the one thing you have to get right. Hardening wraps the binaries t
 ## What it is not
 
 - **Not a sandbox.** Anything running as the same user can override env vars and config files, an agent on the host included. This raises the default posture against naive installs; process isolation is a separate, complementary concern.
-- **Not a malware scanner.** Socket Firewall blocks npm and Cargo packages already flagged as malware. Beyond that, a malicious release older than the window installs as usual, and so does a package name an agent guessed that an attacker registered long ago. The age gate delays an attack long enough for it to be caught; it does not detect one.
+- **Not a malware scanner.** Socket Firewall, where it runs (on by default in the role with a system-wide Node 20 or later, opt-in in the Action), blocks npm and Cargo packages already flagged as malware. Beyond that, a malicious release older than the window installs as usual, and so does a package name an agent guessed that an attacker registered long ago. The age gate delays an attack long enough for it to be caught; it does not detect one.
 - **Not a limit on code that runs.** Once a package is installed, its code runs with your privileges, and code fetched without a package manager (`curl | sh`, a binary download, a repo's own agent config) never meets these gates.
-- **Not OS-package hardening.** `apt`, `pacman` and the AUR have their own trust mechanisms. This role covers language package managers only.
+- **Not OS-package hardening.** `apt`, `pacman` and the AUR have their own trust mechanisms. This role covers language package managers, plus an opt-in podman registry allowlist for container images.
 - **Not a substitute for reading the verifier.** No single deployed file shows the whole posture; `supply-chain-verify` does.
 
 What it protects against on a host where agents run, what it does not, and what to pair it with: [docs/threat-model.md](docs/threat-model.md). Every known boundary, each one measured on a real host: [docs/limitations.md](docs/limitations.md).
