@@ -4,6 +4,10 @@
 #
 # Requires from the calling surface: row(), have(), run_bounded() (the block
 # fenced by `# >>> run_bounded` in both preambles), and (CI only) requested().
+# Uses, where the preamble defines them (both do): the "shell reachability"
+# block's scv_reach_row, scv_where_clause, scv_tool_file and scv_passwd_home.
+# Each call is behind a `type` test, so a preamble without them loses those
+# rows and clauses, not the run.
 #
 # KNOWN: 5 helper functions are defined more than once (identical bodies;
 # each probe carries its ecosystem's preamble so it can be read standalone).
@@ -25,15 +29,23 @@ scv_toolchain_gap() { # id evidence protection detail
 # (VM#14, a host hardened with action/harden.sh --emit=plain): the frozen-cutoff
 # rows told the user to re-apply a role they never ran and to check a systemd
 # timer that path never installs. SCV_SURFACE is declared by both preambles.
+# A run record from harden.sh --home-only (home_only=true) makes action/verify.sh
+# set SCV_HOME_ONLY=1: the fix is then that mode again, which writes no env file
+# to re-source.
 scv_reapply() { # -> an imperative phrase, lower case
   case "${SCV_SURFACE:-role}" in
-    ci) printf 're-run action/harden.sh' ;;
+    ci) if [ "${SCV_HOME_ONLY:-0}" = 1 ]; then printf 're-run action/harden.sh --home-only'
+        else printf 're-run action/harden.sh'; fi ;;
     *)  printf 're-apply the role' ;;
   esac
 }
 scv_cutoff_fix() { # -> the remedy for a frozen absolute uv/pip cutoff
   case "${SCV_SURFACE:-role}" in
-    ci) printf '%s' "Re-run action/harden.sh to advance it, and re-source its env file in any shell that sourced the old one. harden.sh ships no refresh timer: a CI job re-hardens on every run, but a long-lived host hardened this way keeps the cutoff of its last harden.sh run until something runs it again (the Ansible role installs supply-chain-age-gate-refresh.timer for this)" ;;
+    ci) if [ "${SCV_HOME_ONLY:-0}" = 1 ]; then
+          printf '%s' "Re-run action/harden.sh --home-only to advance it. Nothing else does in that mode, so run it at the start of each session"
+        else
+          printf '%s' "Re-run action/harden.sh to advance it, and re-source its env file in any shell that sourced the old one. harden.sh ships no refresh timer: a CI job re-hardens on every run, but a long-lived host hardened this way keeps the cutoff of its last harden.sh run until something runs it again (the Ansible role installs supply-chain-age-gate-refresh.timer for this)"
+        fi ;;
     *)  printf '%s' "Re-apply the role to advance it; on a systemd host the role's supply-chain-age-gate-refresh.timer should be doing that, so check \`systemctl status supply-chain-age-gate-refresh.timer\` and its journal" ;;
   esac
 }
@@ -44,6 +56,59 @@ scv_want_hours() {
   if [ -n "${SCV_MIN_AGE_HOURS:-}" ]; then printf '%s' "$SCV_MIN_AGE_HOURS"; return 0; fi
   [ -f "${OUTPUT_FILE:-}" ] && grep '^release_age_hours=' "${OUTPUT_FILE:-}" 2>/dev/null | head -1 | cut -d= -f2-
   return 0
+}
+
+# scv_ver_ge <version> <minimum>: dotted numbers, a missing part read as 0. awk,
+# not sort -V, which the macOS runners' sort may lack.
+scv_ver_ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN { na = split(a, x, "."); nb = split(b, y, "."); n = (na > nb) ? na : nb
+    for (i = 1; i <= n; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
+    exit 0 }'
+}
+
+# scv_where <name> <path> and scv_where_cmd <command>: for a too-old tool's GAP,
+# where it is and whether this account can change it (scv_where_clause in the
+# preambles), or nothing.
+scv_where() { if type scv_where_clause >/dev/null 2>&1; then scv_where_clause "$@"; fi; return 0; }
+scv_where_cmd() { if type scv_tool_file >/dev/null 2>&1; then scv_where "$1" "$(scv_tool_file "$1")"; fi; return 0; }
+
+# scv_window_secs: the window this surface promised, in seconds; nothing when
+# none was recorded.
+scv_window_secs() {
+  local scv__w; scv__w=$(scv_want_hours)
+  case "$scv__w" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s' "$((scv__w * 3600))"
+}
+
+# scv_iso_dur_secs <duration>: an ISO 8601 duration of weeks, days, hours,
+# minutes and seconds (P2D, PT48H, P1DT12H, P1W) in seconds; nothing for any
+# other text, months and years included (their length varies).
+scv_iso_dur_secs() {
+  printf '%s\n' "$1" | awk '{
+    s = toupper($0)
+    if (s !~ /^P([0-9]+W)?([0-9]+D)?(T([0-9]+H)?([0-9]+M)?([0-9]+S)?)?$/ || s == "P" || s ~ /T$/) exit 1
+    s = substr(s, 2); tot = 0; tp = 0
+    while (s != "") {
+      if (substr(s, 1, 1) == "T") { tp = 1; s = substr(s, 2); continue }
+      match(s, /^[0-9]+/); v = substr(s, 1, RLENGTH) + 0; u = substr(s, RLENGTH + 1, 1); s = substr(s, RLENGTH + 2)
+      if (u == "W") tot += v * 604800; else if (u == "D") tot += v * 86400
+      else if (u == "H") tot += v * 3600; else if (u == "M" && tp) tot += v * 60; else if (u == "S") tot += v
+    }
+    printf "%d\n", tot }'
+}
+
+# Where both writers put gradle's init script, which is where gradle reads it:
+# GRADLE_USER_HOME when set, else <passwd home of uid $(id -u)>/.gradle, the
+# JVM's user.home (tasks/gradle.yml; harden_gradle in action/harden.sh). This
+# used to be ${GRADLE_USER_HOME:-$HOME/.gradle}, which neither writer uses when
+# HOME is not the passwd home. With no passwd entry, $HOME/.gradle, where
+# harden.sh falls back to. The lookup is scv_passwd_home, in the preambles.
+scv_gradle_write_home() {
+  local scv__ph=""
+  if [ -n "${GRADLE_USER_HOME:-}" ]; then printf '%s' "$GRADLE_USER_HOME"; return 0; fi
+  if type scv_passwd_home >/dev/null 2>&1; then scv__ph=$(scv_passwd_home); fi
+  scv__ph=${scv__ph:-$HOME}
+  printf '%s/.gradle' "${scv__ph%/}"
 }
 
 # cq() quotes a value for a row detail. It is a pass-through; the comment at the
@@ -153,6 +218,20 @@ discover go       /usr/local/go/bin "$HOME/go/bin"                              
 discover pnpm     "$HOME/.local/share/pnpm"                                      || true
 discover composer "$HOME/.config/composer/vendor/bin" "$HOME/.composer/vendor/bin" || true
 discover poetry  "$HOME/.local/bin" "${POETRY_HOME:-$HOME/.local/share/pypoetry}/venv/bin" || true
+
+# --- <tool> on this shell's PATH  [PARSED] ---
+# A row where the rows below grade a binary that a bare call in the caller's
+# shell does not run: the tool was found only in a directory added above, or a
+# copy there now comes first. scv_reach_row is in the preambles' "shell
+# reachability" block; each entry is command:first word of its rows:ecosystem.
+if type scv_reach_row >/dev/null 2>&1; then
+  for scv__rt in yarn:yarn:yarn pnpm:pnpm:pnpm bun:bun:bun bunx:bunx:bun deno:deno:deno \
+                 uv:uv:uv python3:pip:pip poetry:poetry:pip go:go:go composer:composer:composer \
+                 bundle:bundler:bundler mvn:maven:maven gradle:gradle:gradle dotnet:nuget:nuget; do
+    scv__rr=${scv__rt#*:}
+    scv_reach_row "${scv__rt%%:*}" "${scv__rr%%:*}" "${scv__rr#*:}"
+  done
+fi
 
 # ======================================================================
 # yarn
@@ -575,7 +654,7 @@ $yfiles}"
           "this host's yarn, $yv, is classic and ignores .yarnrc.yml$ywhere"
       else
         scv_toolchain_gap yarn.classic FUNCTIONAL "yarn hardening" \
-          "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them"
+          "yarn $yv is classic and ignores .yarnrc.yml entirely: no age gate, and none of the yarn settings this project writes apply. Only Yarn 4.10 or later honours them$(scv_where_cmd yarn)"
       fi ;;
     *)
       yout=$(scv_at_root yarn config get npmMinimalAgeGate 2>/dev/null); yrc=$?
@@ -587,7 +666,7 @@ $yfiles}"
           "yarn could not report its version (\`yarn --version\` printed none) and \`yarn config get npmMinimalAgeGate\` exited $yrc: ${ysaid:-<no output>}. Whether any age gate is in effect is unknown. Run \`yarn --version\` from / to see why it printed none$ywhere"
       elif [ "$yrc" -ne 0 ]; then
         scv_toolchain_gap yarn.age-gate PARSED "yarn age gate" \
-          "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this$ywhere"
+          "yarn $yv has no npmMinimalAgeGate (needs Yarn 4.10.0), so the age gate written to .yarnrc.yml is inert and a release minutes old installs. yarn config get exited $yrc: $ysaid. Only a yarn upgrade closes this$(scv_where_cmd yarn)$ywhere"
       else
         yv="${yv:-(version unknown)}"
         case "$v" in
@@ -877,7 +956,7 @@ else
     pna=$(scv_pnpm_get minimum-release-age)
     if [ "$pnM" -lt 10 ] 2>/dev/null || { [ "$pnM" = 10 ] && [ "$pnm" -lt 16 ] 2>/dev/null; }; then
       scv_toolchain_gap pnpm.age-gate FUNCTIONAL "pnpm age gate" \
-        "pnpm $pnv does NOT implement minimumReleaseAge (added in pnpm 10.16.0): it prints the key back ('${pna:-<nothing>}') and enforces nothing. Only a pnpm upgrade closes this"
+        "pnpm $pnv does NOT implement minimumReleaseAge (added in pnpm 10.16.0): it prints the key back ('${pna:-<nothing>}') and enforces nothing. Only a pnpm upgrade closes this$(scv_where_cmd pnpm)"
     else
       case "$pna" in
         ''|undefined|null)
@@ -2402,6 +2481,28 @@ scv_uv_span_secs() { # span
     printf "%d\n", tot
   }'
 }
+# scv_uv_below <version>: every uv older than <version> (or that will not say)
+# on this shell's PATH, the one the caller started the verifier with, and the
+# uv graded here, as "uv <v> at <path>", comma-separated. Each is asked its
+# version from /, bounded. Only absolute PATH entries: a relative one is the
+# working directory, which may be a checkout.
+scv_uv_below() {
+  local scv__d scv__u scv__v scv__out="" scv__seen=" "
+  local -a scv__ud
+  IFS=: read -ra scv__ud <<< "${SCV_CALLER_PATH-$PATH}"
+  for scv__d in ${scv__ud[@]+"${scv__ud[@]}"} "$(dirname -- "$(command -v uv 2>/dev/null || echo .)")"; do
+    case "$scv__d" in /*) ;; *) continue ;; esac
+    scv__u="${scv__d%/}/uv"
+    [ -f "$scv__u" ] && [ -x "$scv__u" ] || continue
+    case "$scv__seen" in *" $scv__u "*) continue ;; esac
+    scv__seen="$scv__seen$scv__u "
+    scv__v=$(cd / && run_bounded 30 "$scv__u" --version 2>/dev/null | head -1 | awk '{print $2}')
+    if [ -z "$scv__v" ] || ! scv_ver_ge "$scv__v" "$1"; then
+      scv__out="${scv__out:+$scv__out, }uv ${scv__v:-of unknown version} at $scv__u"
+    fi
+  done
+  printf '%s' "$scv__out"
+}
 # scv_uv_cutoff: one exclude-newer value -> the cutoff as epoch seconds, "off"
 # when it gates nothing (Disabled, or no global at all), "?" when it cannot be
 # read. A span is resolved the way uv resolves it, against now. When a value
@@ -2612,12 +2713,35 @@ if have uv; then
         row GAP FUNCTIONAL "uv age gate" \
           "uv rejects its own config, so exclude-newer is not in effect"
       elif [ -z "$uvcut" ] && [ -n "$uvspan" ]; then
-        # WEAK, deliberately not OK. The verifier cannot resolve a span to an
-        # instant, so it cannot tell a live 48h gate from a zero-width
-        # `exclude-newer = "0 seconds"` one — MEASURED, both render identically
-        # here. Reporting OK on this would be a false OK on a disabled gate.
-        row WEAK PARSED "uv age gate" \
-          "uv reports a RELATIVE exclude-newer span of $uvspan - a gate is set, but the verifier cannot resolve a span to an instant and so cannot confirm the window (a '0 seconds' span is indistinguishable here). The role deploys an absolute RFC 3339 instant for this reason"
+        # A RELATIVE span: uv resolves it against now on every run, so it does
+        # not freeze. It was WEAK whatever it said, because the verifier could
+        # not tell a 48h span from a zero one; scv_uv_span_secs reads uv's form
+        # now. Two more conditions before it counts:
+        #   - it covers the window promised here (scv_window_secs);
+        #   - every uv on this shell's PATH reads a span. MEASURED 2026-11-19
+        #     (defaults/main.yml, action/harden.sh): uv 0.9.16 rejects the whole
+        #     config over "48 hours" ("failed to parse year in date"), so every
+        #     command it runs fails, and 0.9.17 accepts it. The file a span sits
+        #     in is read by every uv this account runs, not only the one graded.
+        uvss=$(scv_uv_span_secs "$uvspan"); uvwin=$(scv_window_secs)
+        uvold=""
+        [ -n "$uvss" ] && uvold=$(scv_uv_below 0.9.17)
+        if [ -z "$uvss" ]; then
+          row WEAK PARSED "uv age gate" \
+            "uv reports a RELATIVE exclude-newer span of $uvspan, which the verifier cannot read as a length, so the window is not confirmed. The role deploys an absolute RFC 3339 instant"
+        elif [ "$uvss" -eq 0 ]; then
+          row GAP PARSED "uv age gate" \
+            "uv reports exclude-newer span $uvspan, a window of zero: a release published minutes ago is installable"
+        elif [ -n "$uvwin" ] && [ "$uvss" -lt "$uvwin" ]; then
+          row WEAK PARSED "uv age gate" \
+            "uv reports exclude-newer span $uvspan ($((uvss / 3600))h), shorter than the $((uvwin / 3600))h promised here"
+        elif [ -n "$uvold" ]; then
+          row WEAK PARSED "uv age gate" \
+            "uv $uvver reads the exclude-newer span $uvspan, but $uvold is on this shell's PATH, and uv before 0.9.17 rejects the whole config over a span, so every command of that uv fails"
+        else
+          row OK PARSED "uv age gate" \
+            "uv reports exclude-newer span $uvspan ($((uvss / 3600))h), resolved against now on every run, and every uv on this shell's PATH is 0.9.17 or newer, which reads a span - anything newer is refused"
+        fi
       elif [ -z "$uvcut" ]; then
         row GAP PARSED "uv age gate" \
           "uv reports no exclude-newer - a release published minutes ago is installable"
@@ -2935,13 +3059,17 @@ elif have python3 && scv_at_root python3 -m pip --version >/dev/null 2>&1; then
   # --version` (MEASURED, pip 25.1.1 on Python 3.13.5). pip reads no config from
   # the working directory, so / reports the same settings. Not -I: that also
   # drops the user site, where `pip install --user` puts pip.
-  pipver=$(scv_at_root python3 -m pip --version 2>/dev/null | awk '{print $2}')
+  pipvl=$(scv_at_root python3 -m pip --version 2>/dev/null | head -1)
+  pipver=$(printf '%s\n' "$pipvl" | awk '{print $2}')
   if ! scv_at_root python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
     # Toolchain, not config: no re-run of the hardening teaches pip 24 the flag.
     # As a plain row() it was counted "fixable by re-running the hardening", so
     # --fail-on=config failed every stock-runner job that hardened pip.
+    # Where it is: the directory pip is installed in ("pip X from <dir>/pip
+    # (python Y)"), which an upgrade has to write.
+    pipdir=$(printf '%s\n' "$pipvl" | sed -n 's/^pip [^ ]* from \(.*\)\/pip (python .*/\1/p')
     scv_toolchain_gap pip.native-age-gate PARSED "pip native age gate" \
-      "pip $pipver does NOT implement --uploaded-prior-to (added in pip 26.0) - the key is deployed but inert, so \`python3 -m pip install\` is not age-gated on this interpreter"
+      "pip $pipver does NOT implement --uploaded-prior-to (added in pip 26.0) - the key is deployed but inert, so \`python3 -m pip install\` is not age-gated on this interpreter$(scv_where pip "$pipdir")"
   else
     # pip prints `config list` in override-order groups, so the LAST match is
     # the effective value (env beats file). Strip optional surrounding quotes.
@@ -2952,9 +3080,27 @@ elif have python3 && scv_at_root python3 -m pip --version >/dev/null 2>&1; then
       '')
         row GAP PARSED "pip native age gate" \
           "pip $pipver implements --uploaded-prior-to but reports no value - a release published minutes ago is installable via \`python3 -m pip\`" ;;
-      P*D|P*)
-        row WEAK PARSED "pip native age gate" \
-          "pip $pipver reports a RELATIVE uploaded-prior-to='$pipcut' - the P<n>D form needs pip 26.1+ and is a hard error on 26.0; the role deploys an absolute instant for that reason" ;;
+      P*)
+        # A duration. pip 26.0 refuses it with exit 2 (MEASURED, defaults/main.yml),
+        # and pip 26.1 reads it as a window that moves with the clock (stated in
+        # defaults/main.yml; not measured here). So it counts only on 26.1 and later.
+        pipsec=$(scv_iso_dur_secs "$pipcut"); pipwin=$(scv_window_secs)
+        if ! scv_ver_ge "$pipver" 26.1; then
+          row WEAK PARSED "pip native age gate" \
+            "pip $pipver reports a RELATIVE uploaded-prior-to='$pipcut' - the P<n>D form needs pip 26.1+ and is a hard error on 26.0; the role deploys an absolute instant for that reason"
+        elif [ -z "$pipsec" ]; then
+          row WEAK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to='$pipcut', a duration the verifier cannot read as a length (months and years vary), so the window is not confirmed"
+        elif [ "$pipsec" -eq 0 ]; then
+          row GAP PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to='$pipcut', a window of zero: it refuses nothing"
+        elif [ -n "$pipwin" ] && [ "$pipsec" -lt "$pipwin" ]; then
+          row WEAK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to='$pipcut' ($((pipsec / 3600))h), shorter than the $((pipwin / 3600))h promised here"
+        else
+          row OK PARSED "pip native age gate" \
+            "pip $pipver reports uploaded-prior-to='$pipcut' ($((pipsec / 3600))h), a window that moves with the clock on pip 26.1 and later (not measured here) - anything newer is refused (silently open for --find-links, direct path/URL installs, and indexes without PEP 700 upload-time metadata)"
+        fi ;;
       *Z)
         # Same freeze as uv above, and for the same reason: pip's
         # uploaded-prior-to takes an absolute instant. The relative P<n>D form
@@ -3054,6 +3200,18 @@ if have python3 && { ! command -v requested >/dev/null 2>&1 || requested pip; };
         else
           row OK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to, and would read the cutoff $pvcut"
         fi ;;
+      P*)
+        # A duration counts on pip 26.1 and later only (see pip native age gate).
+        pvsec=$(scv_iso_dur_secs "$pvcut"); pvwin=$(scv_window_secs)
+        if [ -z "$pvsec" ] || ! scv_ver_ge "$pvseed" 26.1; then
+          row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut', not an absolute instant ending in Z, or a duration it reads (see pip native age gate)"
+        elif [ "$pvsec" -eq 0 ]; then
+          row GAP PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, and the uploaded-prior-to it would read, '$pvcut', is a window of zero: it refuses nothing"
+        elif [ -n "$pvwin" ] && [ "$pvsec" -lt "$pvwin" ]; then
+          row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut' ($((pvsec / 3600))h), shorter than the $((pvwin / 3600))h promised here"
+        else
+          row OK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut' ($((pvsec / 3600))h), a window that moves with the clock on pip 26.1 and later (not measured here)"
+        fi ;;
       *)
         row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut', not an absolute instant ending in Z (see pip native age gate)" ;;
     esac
@@ -3090,7 +3248,7 @@ if have poetry && { ! command -v requested >/dev/null 2>&1 || requested pip; }; 
     row WEAK PRESENT "poetry publish-age gate" "could not read a version from poetry; the gate was not checked"
   elif [ "$(printf '2.4.0\n%s\n' "$pov" | sort -V | head -1)" != "2.4.0" ]; then
     scv_toolchain_gap pip.poetry-age-gate PARSED "poetry publish-age gate" \
-      "poetry $pov has no solver.min-release-age (added in 2.4.0), and it reads neither pip.conf nor uv.toml, so a release published minutes ago still resolves"
+      "poetry $pov has no solver.min-release-age (added in 2.4.0), and it reads neither pip.conf nor uv.toml, so a release published minutes ago still resolves$(scv_where_cmd poetry)"
   else
     pod=$(poetry --no-plugins config solver.min-release-age 2>/dev/null | tail -1)
     pox=$(poetry --no-plugins config solver.min-release-age-exclude 2>/dev/null | tail -1)
@@ -4349,6 +4507,8 @@ if ! have cargo; then
     if [ -x "$_cbin/cargo" ]; then PATH="$_cbin:$PATH"; export PATH; break; fi
   done
 fi
+# A cargo found only there is not what a bare `cargo` runs in this shell.
+if type scv_reach_row >/dev/null 2>&1; then scv_reach_row cargo cargo cargo; fi
 if ! have cargo; then
   row "N/A" - "cargo publish-age gate"        "cargo not installed"
   row "N/A" - "cargo age-gate refuses"        "cargo not installed"
@@ -6047,17 +6207,18 @@ gradle_facts() {
   esac
   # Where the two WRITERS put the file, versus the home gradle actually read.
   # MEASURED: on Linux the JVM takes user.home from the passwd entry, not from
-  # $HOME, so gradle's default GRADLE_USER_HOME can differ from $HOME/.gradle.
-  gwrite="${GRADLE_USER_HOME:-$HOME/.gradle}"
+  # $HOME, so gradle's default GRADLE_USER_HOME can differ from $HOME/.gradle,
+  # and both writers use the passwd home for that reason (scv_gradle_write_home).
+  gwrite=$(scv_gradle_write_home)
   ghome=""
-  [ -n "$gguh" ] && [ "$gguh" != "$gwrite" ] && ghome=" - NOTE: gradle reads init scripts from '$(gradle_san "$gguh")', this role and harden.sh write to '$(gradle_san "$gwrite")'"
+  [ -n "$gguh" ] && [ "$gguh" != "$gwrite" ] && ghome=" - NOTE: gradle reads init scripts from '$(gradle_san "$gguh")', but the role and harden.sh put them in '$(gradle_san "$gwrite")' (GRADLE_USER_HOME, else the passwd home's .gradle)"
   return 0
 }
 
 # True when an init script of ours is on disk even though `gradle` is not on
 # PATH: ./gradlew still reads $GRADLE_USER_HOME, so the script IS in force.
 gradle_script_deployed() {
-  gwrite="${GRADLE_USER_HOME:-$HOME/.gradle}"
+  gwrite=$(scv_gradle_write_home)
   [ -f "$gwrite/init.gradle.kts" ] && return 0
   [ -f "$gwrite/init.gradle" ] && return 0
   [ -n "$(ls "$gwrite"/init.d/*.gradle 2>/dev/null | head -1)" ] && return 0
@@ -6356,17 +6517,18 @@ gradle_facts() {
   esac
   # Where the two WRITERS put the file, versus the home gradle actually read.
   # MEASURED: on Linux the JVM takes user.home from the passwd entry, not from
-  # $HOME, so gradle's default GRADLE_USER_HOME can differ from $HOME/.gradle.
-  gwrite="${GRADLE_USER_HOME:-$HOME/.gradle}"
+  # $HOME, so gradle's default GRADLE_USER_HOME can differ from $HOME/.gradle,
+  # and both writers use the passwd home for that reason (scv_gradle_write_home).
+  gwrite=$(scv_gradle_write_home)
   ghome=""
-  [ -n "$gguh" ] && [ "$gguh" != "$gwrite" ] && ghome=" - NOTE: gradle reads init scripts from '$(gradle_san "$gguh")', this role and harden.sh write to '$(gradle_san "$gwrite")'"
+  [ -n "$gguh" ] && [ "$gguh" != "$gwrite" ] && ghome=" - NOTE: gradle reads init scripts from '$(gradle_san "$gguh")', but the role and harden.sh put them in '$(gradle_san "$gwrite")' (GRADLE_USER_HOME, else the passwd home's .gradle)"
   return 0
 }
 
 # True when an init script of ours is on disk even though `gradle` is not on
 # PATH: ./gradlew still reads $GRADLE_USER_HOME, so the script IS in force.
 gradle_script_deployed() {
-  gwrite="${GRADLE_USER_HOME:-$HOME/.gradle}"
+  gwrite=$(scv_gradle_write_home)
   [ -f "$gwrite/init.gradle.kts" ] && return 0
   [ -f "$gwrite/init.gradle" ] && return 0
   [ -n "$(ls "$gwrite"/init.d/*.gradle 2>/dev/null | head -1)" ] && return 0

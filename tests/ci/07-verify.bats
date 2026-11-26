@@ -1199,7 +1199,12 @@ ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $
   venv_pip "$(ago -48)"
   run verify -- --emit=plain
   [[ "$output" == *"GAP    PARSED      pip venv age gate"*"in the FUTURE"* ]] || { echo "$output" | grep 'pip '; false; }
+  # A duration is read from pip 26.1 on, and this venv's pip is 26.2.2
+  # (16-verify-reach.bats has the 26.0.1 control).
   venv_pip P2D
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"*"'P2D' (48h)"* ]] || { echo "$output" | grep 'pip '; false; }
+  venv_pip P1M
   run verify -- --emit=plain
   [[ "$output" == *"WEAK   PARSED      pip venv age gate"*"not an absolute instant"* ]] || { echo "$output" | grep 'pip '; false; }
 }
@@ -1832,6 +1837,8 @@ GO
   # Not a substring test: "cargo not installed" contains "go not installed".
   ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output" || false
   grep -qE '^[A-Z/]+ +[A-Z-]+ +go settings persisted' <<<"$output"
+  # And the table says a bare `go` here does not run the go it graded.
+  grep -qE "^WEAK +PARSED +go on this shell's PATH +the go rows grade " <<<"$output"
 }
 
 @test "go: 'settings persisted' is OK from go env -w alone, and a GAP when GOTOOLCHAIN=local did not persist" {

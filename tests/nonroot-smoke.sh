@@ -24,7 +24,10 @@ echo "user=$u  npm=$(command -v npm) ($(npm --version 2>&1))  home=$HOME"
 #    -bearing regression guard: the npq-alias break and the failed global
 #    installs all surfaced here as gaps that root-apply never produced.
 say "verify: no gaps as non-root"
-vout=$(/usr/local/bin/supply-chain-verify 2>&1); vrc=$?
+# From a login shell, as dev would log in: the verifier reports what the shell
+# it runs in gets, and this container's CMD loads no startup file, so run bare
+# it reports the env layer as missing (a GAP), which is true of the CMD only.
+vout=$(bash -lc /usr/local/bin/supply-chain-verify 2>&1); vrc=$?
 printf '%s\n' "$vout" | tail -45
 # Tolerate ONLY the Socket Firewall gap: sfw's firewall binary is fetched from
 # GitHub at apply time (best-effort, network-dependent) and the role records it

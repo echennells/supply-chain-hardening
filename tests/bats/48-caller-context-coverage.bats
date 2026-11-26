@@ -309,6 +309,12 @@ EOF
   PATH="$stripped" run "$VERIFY" --verbose
   echo "$output" | grep -q "uv age gate"
   [[ "$output" != *"uv not installed"* ]]
+  # ... and says those verdicts are about a uv a bare `uv` here does not run.
+  echo "$output" | grep "uv on this shell's PATH" | grep -q "^WEAK"
+  echo "$output" | grep "uv on this shell's PATH" | grep -q "$uvdir/uv"
+  # Control: with uv on PATH there is no such row.
+  run "$VERIFY" --verbose
+  [ "$(echo "$output" | grep -c "uv on this shell's PATH")" = 0 ]
 }
 
 @test "caller: a tool outside every documented location is still invisible" {
@@ -326,4 +332,49 @@ EOF
   run "$VERIFY" --verbose
   echo "$output" | grep -qi "deno"
   echo "$output" | grep -i "deno" | grep -qiE "not installed|N/A"
+}
+
+# ------------------------------------------- what this shell gets, by row ---
+
+@test "caller: a shell that loaded no startup file has no env layer (GAP); a login shell has all of it" {
+  [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
+  [ -f /etc/profile.d/supply-chain-hardening.sh ] || skip "env layer not deployed"
+  # The first agent VM's runner, MEASURED 2026-11-26: bash --norc --noprofile -c.
+  run env -i PATH="$PATH" HOME="$HOME" /bin/bash --norc --noprofile -c "$VERIFY --verbose"
+  echo "$output" | grep "env layer propagation"
+  echo "$output" | grep "env layer propagation" | grep -q "^GAP .*FUNCTIONAL"
+  echo "$output" | grep "env layer propagation" | grep -q "loaded no startup file"
+  # Control: a login shell sources /etc/profile.d.
+  run env -i PATH="$PATH" HOME="$HOME" /bin/bash -lc "$VERIFY --verbose"
+  echo "$output" | grep "env layer propagation" | grep -q "^OK .*FUNCTIONAL"
+  # The same shell with the file sourced by hand.
+  run env -i PATH="$PATH" HOME="$HOME" /bin/bash --norc --noprofile -c ". /etc/profile.d/supply-chain-hardening.sh; $VERIFY --verbose"
+  echo "$output" | grep "env layer propagation" | grep -q "^OK "
+}
+
+@test "caller: the apply's own verifier run reports the env layer as N/A, not as this container's GAP" {
+  # tasks/verify.yml sets SCV_APPLY_RUN=1: ansible's process loads no startup
+  # file, so a GAP there would fail every verify_fail_on_gap (agent_host) apply.
+  [ -f /var/log/ansible-run.log ] || skip "no apply log in this image"
+  grep -q 'env layer propagation' /var/log/ansible-run.log
+  grep 'env layer propagation' /var/log/ansible-run.log | grep -q 'N/A'
+  [ "$(grep 'env layer propagation' /var/log/ansible-run.log | grep -c 'GAP')" = 0 ]
+}
+
+@test "caller: HOME that is not the passwd home is WEAK for gradle, naming both homes; the passwd home is not" {
+  [ -x "$VERIFY" ] || skip "role not applied (no supply-chain-verify)"
+  local pw fake="$BATS_TEST_TMPDIR/fakebin" h="$BATS_TEST_TMPDIR/relocated"
+  pw=$(getent passwd "$(id -u)" | cut -d: -f6)
+  [ -n "$pw" ] || skip "no passwd entry for uid $(id -u)"
+  mkdir -p "$fake" "$h"
+  # A stand-in gradle: the row is about which home the JVM would read, not gradle.
+  printf '#!/bin/sh\nexit 0\n' > "$fake/gradle"; chmod +x "$fake/gradle"
+  HOME="$h" PATH="$fake:$PATH" run env -u GRADLE_USER_HOME "$VERIFY" --verbose
+  echo "$output" | grep "env JVM user home"
+  echo "$output" | grep "env JVM user home" | grep -q "^WEAK"
+  echo "$output" | grep "env JVM user home" | grep -q "HOME is $h"
+  echo "$output" | grep "env JVM user home" | grep -q "$pw/.gradle"
+  # Control: HOME is the passwd home.
+  HOME="$pw" PATH="$fake:$PATH" run env -u GRADLE_USER_HOME "$VERIFY" --verbose
+  [ "$(echo "$output" | grep -c "env JVM user home")" = 0 ]
 }

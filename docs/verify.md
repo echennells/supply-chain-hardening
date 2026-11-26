@@ -81,7 +81,7 @@ container on Node 22: [verify-json-example.json](verify-json-example.json).
 | `result.ok` | Rows whose status is `OK`: verified at the row's evidence level. |
 | `result.na_design` | `N/A` rows with evidence `BYDESIGN`: this host's configuration (or this job) never asked for it. |
 | `result.na_absent` | The other `N/A` rows: nothing here to check, because the tool is not installed or the project config the row looks for is not here. Evidence `-` on `role`, `ABSENT` on `ci`. |
-| `result.tools_seen` | The tools that at least one `OK`, `WEAK` or `GAP` row judged, in row order: the first word of the row's protection, with `Socket Firewall` as `sfw`. Rows about the run or the host are not tools: `env layer propagation`, `hardening run record`, `ci id-token exposure`, the `<token> coverage` rows, and `python startup hooks`, a scan that runs wherever a system Python is. `npq` and `sfw`, whose absence is itself a `GAP` row on `role`, count only when they are installed. |
+| `result.tools_seen` | The tools that at least one `OK`, `WEAK` or `GAP` row judged, in row order: the first word of the row's protection, with `Socket Firewall` as `sfw`. Rows about the run or the host are not tools: `env layer propagation`, `env JVM user home`, `hardening run record`, `ci id-token exposure`, the `<token> coverage` rows, and `python startup hooks`, a scan that runs wherever a system Python is. `npq` and `sfw`, whose absence is itself a `GAP` row on `role`, count only when they are installed. |
 | `rows[]` | One object per table row, in table order: `status` (`OK`, `GAP`, `WEAK`, `N/A`), `evidence` (`FUNCTIONAL`, `PARSED`, `PRESENT`, or `-`, `ABSENT`, `BYDESIGN` on `N/A` rows), `protection`, and `detail` (the full rationale, as `--verbose` prints it). |
 
 The counts are tallied from `rows`, so they always add up:
@@ -92,6 +92,36 @@ manager was checked, whatever `gaps` says: a host with nothing installed has
 `"gaps": 0` too. `ok` can be 1 there, from the `python startup hooks` scan. Then
 compare `tools_seen` with the package managers the host or job is supposed to
 have.
+
+## Run it from the shell you want checked
+
+The verifier reports what the shell it runs in gets, and an agent's shell can
+get less than a login. MEASURED on two agent VMs (2026-11-26): one runner
+started every command as `bash --norc --noprofile -c`, as root with
+`HOME=/home/hatch` (root's passwd home is `/root`) and no home directory on
+`PATH`; the other replayed a shell state saved once per session
+([Agent runners](design-principles.md#agent-runners)). So run it the way the
+agent runs its commands, and read these rows:
+
+| Row | What it says |
+|---|---|
+| `env layer propagation` | On `role`: whether the variables `/etc/profile.d/supply-chain-hardening.sh` exports are set here. `OK` all, `WEAK` some (a shell state saved before the last apply), `GAP` none: this shell loaded no startup file. The config files still apply; the variables do not. On `ci`: the variables in harden.sh's env file, as before, and `N/A BYDESIGN` after `harden.sh --home-only`, which writes no env file. |
+| `env JVM user home` | `WEAK` when gradle (with `GRADLE_USER_HOME` unset) or maven is installed and `HOME` is not the passwd home of this uid. The JVM takes `user.home` from the passwd entry, so they read that home, not files under `HOME` (measured for gradle; inferred for maven). No row otherwise. |
+| `<tool> on this shell's PATH` | `WEAK` when the rows for a tool grade a binary a bare call here does not run: the verifier also looks in a few fixed places (`~/.local/bin`, `~/.bun/bin`, `/usr/local/go/bin`, ...), and found it only there, or a copy there now comes first. No row when `PATH` finds the same file. |
+
+A tool too old for a setting is a `GAP` as before (npm, pip, yarn, pnpm, poetry);
+its detail now also says where the tool is when this account cannot change it:
+`read-only (image-owned?)` for root, or the account that owns the directory.
+
+A uv `exclude-newer` span (`"48 hours"`) is `OK` when it covers the window and
+every uv on this `PATH` is 0.9.17 or newer: older ones reject the whole file. A
+pip `uploaded-prior-to` duration (`P2D`) is `OK` on pip 26.1 or newer, and
+`WEAK` below that, as before.
+
+The role's own run at the end of an apply is ansible's process, not anyone's
+shell, so it sets `SCV_APPLY_RUN=1`: the env layer row is `N/A` there and the
+`PATH` rows are left out. After `harden.sh --home-only`, the fixes the rows give
+say to re-run it in that mode.
 
 ## Don't run it on a host you suspect is compromised
 
