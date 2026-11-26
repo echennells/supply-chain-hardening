@@ -5512,7 +5512,17 @@ harden_gradle() {
   fi
 
   mkdir -p "$gradle_home"
-  cat > "$gradle_home/init.gradle.kts" <<'EOF'
+  # A person's own init script at this path can hold repository credentials. Keep it
+  # the way put_user_cfg keeps the other per-user files: a 0600 copy next to itself,
+  # then replaced, with a warning. Ours starts with the line written below. MEASURED
+  # before this: an init.gradle.kts of the user's was overwritten with no copy and
+  # nothing said.
+  local ginit="$gradle_home/init.gradle.kts" gbak
+  if [[ -f "$ginit" ]] && [[ "$(head -n 1 -- "$ginit" 2>/dev/null)" != "// Managed by supply-chain-harden action" ]]; then
+    gbak=$(ucf_copy "$ginit") || { err "gradle: could not copy $ginit next to itself before replacing it; it was left as it is"; exit 1; }
+    warn "gradle: replaced $ginit, which this project did not write. Any repository, credential or other setting you had in it no longer applies; the previous file is at $gbak. It may hold a token or a password: delete it once you have moved what you need"
+  fi
+  cat > "$ginit" <<'EOF'
 // Managed by supply-chain-harden action
 // Enforce HTTPS-only repositories in EVERY scope gradle fetches from, and block
 // dynamic versions. Not just project repositories: buildscript{} and the

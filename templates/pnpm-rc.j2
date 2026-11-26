@@ -4,23 +4,18 @@ minimum-release-age-strict={{ pnpm_minimum_release_age_strict | bool | lower }}
 {% for pkg in pnpm_minimum_release_age_exclude %}
 minimum-release-age-exclude[]={{ pkg }}
 {% endfor %}
-; block-exotic-subdeps is deliberately NOT emitted here.
+; block-exotic-subdeps is NOT emitted here (yet).
 ;
-; It refuses git / http(s) / tarball-URL dependencies, and runtime
-; enforcement requires pnpm 11+. Writing it to THIS file is dead in both
-; directions:
-;   - pnpm 10 reads this file but silently ignores the key. Verified
-;     empirically against pnpm 10.34.5, which proceeded to a DNS lookup for
-;     `pnpm add https://does-not-resolve.invalid/pkg.tgz`.
-;   - pnpm 11+ enforces the key but does not read this file at all (it reads
-;     only ~/.config/pnpm/config.yaml for non-auth settings).
-; So no pnpm version exists in which this line does anything.
-;
-; The live emission is `blockExoticSubdeps: true` in pnpm-config.yaml.j2.
-; When the detected pnpm is older than 11, tasks/pnpm.yml records the gap in
-; the end-of-run "protections NOT applied" summary instead of leaving an inert
-; key behind that reads like coverage. Same principle as 111e21b (composer:
-; stop shipping fake script-blocking protection).
+; It refuses git / http(s) / tarball-URL SUBdependencies. pnpm 11+ enforces it
+; by default but does not read this file at all (only config.yaml, where
+; pnpm-config.yaml.j2 writes blockExoticSubdeps: true). pnpm 10.26.0 to 10.34.9
+; have the control, off by default, and honour block-exotic-subdeps=true HERE
+; (MEASURED with a tarball-URL dependency of a dependency; 10.25.0 has none). An
+; earlier note called this line dead on pnpm 10 from `pnpm add <tarball-url>` on
+; 10.34.5, but a direct exotic dependency is allowed by design and proves nothing.
+; action/harden.sh writes it to rc. The role does not: tasks/pnpm.yml records
+; pnpm older than 11 in the end-of-run "protections NOT applied" summary, and
+; the verifier reports a GAP there.
 ; Store integrity (see defaults/main.yml): hash-check store contents against
 ; the lockfile.
 verify-store-integrity={{ pnpm_verify_store_integrity | bool | lower }}

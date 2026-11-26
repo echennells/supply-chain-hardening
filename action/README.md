@@ -60,8 +60,8 @@ them cares which CI you are on:
    `~/.npmrc` is merged: a token, registry or scope an earlier step put there
    stays, and the file ends 0600. The others are replaced; one that is not what
    this project last wrote is copied next to itself first (0600), and the log has a
-   warning with the path (`cooldown.toml` and the gradle init script, which hold no
-   credentials, are replaced without that). No value from any of them is printed. If a later
+   warning with the path (`cooldown.toml`, which holds no credentials, is replaced
+   without that). No value from any of them is printed. If a later
    step needs a registry that was in one, put it back after this one, or pass it
    in the environment.
 2. **PATH wrappers** — bun, bunx, composer, deno, cargo, wrapped in place at
@@ -456,6 +456,11 @@ verifier reads that record:
 | impossible on this tool version | `GAP` | `N/A BYDESIGN` |
 | its tool is not installed | `N/A ABSENT` | `N/A ABSENT` |
 
+An ecosystem's own rows (npm's, bun's, pip's, cargo's and the rest) are not measured
+for an ecosystem the job did not ask for: they say `N/A BYDESIGN` whatever state the
+tool is in. The `OK` in the second column is for the rows measured either way, such as
+the PATH-wrapper rows.
+
 The `N/A` rows say which kind in the EVIDENCE column: `ABSENT` (nothing here
 to protect) or `BYDESIGN` (never requested). **When the record is missing,
 incomplete, or was written by a different job, the verifier ignores it and
@@ -646,7 +651,7 @@ Example consumption:
 - **pnpm 11 vs 10 nuance.** pnpm 11 only reads `config.yaml` in its config directory; pnpm 10 reads `rc` there. The action writes both, so you're covered either way. The directory is `$XDG_CONFIG_HOME/pnpm` when that is set, `~/Library/Preferences/pnpm` on macOS, `~/.config/pnpm` otherwise.
 - **pnpm 11+: the action exports no `pnpm_config_*` variable, so a repo's own `pnpm-workspace.yaml` settings stand in CI.** pnpm 11+ reads those variables, and they outrank the workspace file (MEASURED on pnpm 11.0.0 to 12.21.0), but in CI the repository is the project being built: the age variable would set the window exactly, cutting a project's longer `minimumReleaseAge` down to the action's, and the exclude variable would wipe its own `minimumReleaseAgeExclude` list. A project that sets neither gets the action's window from `config.yaml`; a workspace `minimumReleaseAge: 0` is the project's call, and `verify.sh` run from the checkout reports it in its `pnpm repo config override` row (GAP for `0`, WEAK for a shorter window or an exclude list). (The Ansible role does export both on a host, where the repository may be one someone cloned.) `pnpm_config_ignore_scripts` is not set: `true` would silently skip the builds a project approves with its own `ignoreScripts: false` + `allowBuilds`, so a repo's own `ignoreScripts: false` still runs its scripts. pnpm 10 reads none of these.
 - **A repo's own `exclude-newer` and `no-build` win over the action's `uv.toml`.** `UV_EXCLUDE_NEWER` would outrank a repo's `exclude-newer`, but it outranks a project that pins an earlier one too, and uv records the cutoff in `uv.lock`: MEASURED, such a project's `uv sync --locked` fails with it set on uv 0.8.17, 0.11.16 and 0.12.7, and on 0.13.9 a lockfile written with it set fails `--locked` without it. A CI job is where `--locked` runs, so the action does not export it (the Ansible role can, opt-in). `UV_NO_BUILD` is not exported either: no `uv pip` command reads it. See [docs/limitations.md](../docs/limitations.md).
-- **pnpm 10 silently ignores `block-exotic-subdeps`.** Runtime enforcement landed in pnpm 11. Action writes the key on both versions for forward-compat; pnpm 10 reads it but doesn't act.
+- **`block-exotic-subdeps` needs pnpm 10.26.0.** The action writes it to `rc` (pnpm 10) and `config.yaml` (pnpm 11, where it is also the default). pnpm 10.26.0 to 10.34.9 honour it in `rc` (MEASURED with a tarball-URL dependency of a dependency); below 10.26.0 there is no such control, so a transitive git, http or tarball dependency is not refused there.
 - **Doesn't validate node/python versions.** If you're targeting older toolchains, some settings are silently ignored. The sharpest case: **npm's `min-release-age` landed in npm 11.10.0**, so on npm 10.x the action writes the key, `npm config get` echoes it back, and *nothing enforces it*. Age-gate keys in general tend to be accepted-and-ignored by older versions rather than rejected, so an old toolchain looks hardened and is not. `action/verify.sh` detects exactly this and reports it as a GAP — run it if your runners pin a Node version.
 - **Cargo `build.rs` and proc-macro execution CANNOT be blocked** by cargo config — structural gap in cargo itself. Cargo runs them at *compile* time with your privileges, before any of your code, and has no `--ignore-scripts` equivalent. Refusing to *resolve* a too-new version is the only control that prevents execution, which is what the publish-age gate does. For vetting the code itself, run `cargo deny check` / `cargo audit` as a separate step.
 - **The cargo age gate needs a backend to enforce it.** `cooldown.toml` is always written, but nothing reads it unless `cargo-cooldown` is installed — set `install_cargo_cooldown: true`, or install it in an earlier cached step. Without it you still get `--locked` injection, which covers reuse of an existing lockfile but not `cargo update`.
