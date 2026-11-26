@@ -105,7 +105,7 @@ agent runs its commands, and read these rows:
 
 | Row | What it says |
 |---|---|
-| `env layer propagation` | On `role`: whether the variables `/etc/profile.d/supply-chain-hardening.sh` exports are set here. `OK` all, `WEAK` some (a shell state saved before the last apply), `GAP` none: this shell loaded no startup file. The config files still apply; the variables do not. On `ci`: the variables in harden.sh's env file, as before, and `N/A BYDESIGN` after `harden.sh --home-only`, which writes no env file. |
+| `env layer propagation` | On `role`: whether the variables `/etc/profile.d/supply-chain-hardening.sh` exports are set here. `OK` all, `WEAK` some (a shell that got `/etc/environment` only, or a shell state saved before the last apply), `GAP` none: this shell loaded no startup file. The config files still apply; the variables do not. On `ci`: the variables in harden.sh's env file, as before, and `N/A BYDESIGN` after `harden.sh --home-only`, which writes no env file. |
 | `env JVM user home` | `WEAK` when gradle (with `GRADLE_USER_HOME` unset) or maven is installed and `HOME` is not the passwd home of this uid. The JVM takes `user.home` from the passwd entry, so they read that home, not files under `HOME` (measured for gradle; inferred for maven). No row otherwise. |
 | `<tool> on this shell's PATH` | `WEAK` when the rows for a tool grade a binary a bare call here does not run: the verifier also looks in a few fixed places (`~/.local/bin`, `~/.bun/bin`, `/usr/local/go/bin`, ...), and found it only there, or a copy there now comes first. No row when `PATH` finds the same file. |
 

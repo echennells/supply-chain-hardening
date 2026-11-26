@@ -1008,7 +1008,7 @@ scv_profile_env_row() {
       "NONE of the $SCV_EP_N variables $1 exports are set in this shell. Most likely it loaded no startup file (bash --norc or -c, a container CMD, systemd, cron, an agent runner): the config files still apply, the variables do not. Run it from a login shell, or source the file first"
   else
     row WEAK FUNCTIONAL "env layer propagation" \
-      "$SCV_EP_HAVE/$SCV_EP_N variables $1 exports are set in this shell; missing:$SCV_EP_MISSING. A shell state saved before the last apply looks like this: start a new session"
+      "$SCV_EP_HAVE/$SCV_EP_N variables $1 exports are set in this shell; missing:$SCV_EP_MISSING. A shell that got /etc/environment but not /etc/profile.d (cron, or sudo on Ubuntu) looks like this, and so does a shell state saved before the last apply: start a new session"
   fi
 }
 
