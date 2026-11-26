@@ -9,28 +9,38 @@
 # was deployed correctly and that mvn can still execute. Matrix mode
 # runs these per (java, maven) cell to confirm the config is read
 # correctly across maven versions.
+#
+# ~ here is the passwd home of the uid, where maven reads it (user.home), not
+# $HOME: tasks/passwd_home.yml, and 56-home-paths.bats for a HOME elsewhere.
 
 load setup
 
+maven_settings() {
+  local pw
+  pw=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6) || pw=""
+  case "$pw" in /?*) [ -d "$pw" ] && [ -w "$pw" ] || pw="" ;; *) pw="" ;; esac
+  printf '%s\n' "${pw:-$HOME}/.m2/settings.xml"
+}
+
 @test "maven: ~/.m2/settings.xml exists" {
   command -v mvn >/dev/null 2>&1 || skip "mvn not installed (role's maven task is no-op)"
-  [ -f "$HOME/.m2/settings.xml" ]
+  [ -f "$(maven_settings)" ]
 }
 
 @test "maven: settings.xml forces HTTPS-only central mirror" {
   command -v mvn >/dev/null 2>&1 || skip "mvn not installed"
-  assert_file_contains "$HOME/.m2/settings.xml" "https://repo.maven.apache.org/maven2"
+  assert_file_contains "$(maven_settings)" "https://repo.maven.apache.org/maven2"
   # Belt-and-suspenders: no <url>http://...</url> repository URL allowed.
   # Scoping to <url> tags only (not bare http://) because the file's
   # XML namespace declarations (xmlns, xsi:schemaLocation) contain
   # http:// URIs by W3C convention — those are identifiers, not fetched,
   # and matching them was the previous regex's bug.
-  ! grep -qE "<url>[^<]*http://" "$HOME/.m2/settings.xml"
+  ! grep -qE "<url>[^<]*http://" "$(maven_settings)" || false
 }
 
 @test "maven: settings.xml enforces strict checksum policy" {
   command -v mvn >/dev/null 2>&1 || skip "mvn not installed"
-  assert_file_contains "$HOME/.m2/settings.xml" "<checksumPolicy>fail</checksumPolicy>"
+  assert_file_contains "$(maven_settings)" "<checksumPolicy>fail</checksumPolicy>"
 }
 
 @test "maven: mvn --version works (config doesn't break the binary)" {
@@ -76,7 +86,7 @@ PY
   # maven 3.9.11 with a plugin jar served under a wrong .sha1: two WARNINGs
   # and BUILD SUCCESS, the tampered maven-compiler-plugin ran. The same
   # redefinition dropped the super POM's <snapshots><enabled>false</enabled>.
-  run maven_central_policy_problems "$HOME/.m2/settings.xml"
+  run maven_central_policy_problems "$(maven_settings)"
   echo "$output"
   [ "$status" -eq 0 ]
 }
@@ -115,7 +125,7 @@ X
 
 @test "maven: a plugin jar with a wrong checksum is refused at download, not warned about (CMP 4.4)" {
   command -v mvn >/dev/null 2>&1 || skip "mvn not installed"
-  run maven_plugin_checksum_run "$HOME/.m2/settings.xml" bad
+  run maven_plugin_checksum_run "$(maven_settings)" bad
   echo "$output" | grep -E 'Checksum|ERROR' | head -5
   # The refusal itself, at ERROR level, for the plugin jar — not the warning
   # Maven prints under its default 'warn' policy before installing the jar.
@@ -128,7 +138,7 @@ X
   # Without this, a fixture Maven never fetched would pass the test above. The
   # empty jar has no plugin descriptor, so getting that far means the jar was
   # downloaded and accepted from the file:// Central.
-  run maven_plugin_checksum_run "$HOME/.m2/settings.xml" good
+  run maven_plugin_checksum_run "$(maven_settings)" good
   echo "$output" | grep -E 'Checksum|ERROR' | head -5
   echo "$output" | grep -q 'No plugin descriptor found'
   ! echo "$output" | grep -q 'Checksum validation failed'

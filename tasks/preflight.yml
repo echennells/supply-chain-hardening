@@ -350,6 +350,9 @@
     - npm_global_class.stdout_lines | select('match', 'foreign ') | list | length > 0
     - not (accept_etc_overwrite | default(false) | bool)
 
+- name: Look up the passwd home, where tasks/maven.yml writes settings.xml
+  ansible.builtin.import_tasks: passwd_home.yml
+
 - name: Detect per-user config files this run would replace that this project did not write
   # The same refusal as the /etc check above, for the per-user files the role
   # REPLACES wholesale: pnpm's config.yaml and rc, ~/.yarnrc.yml, pip.conf,
@@ -388,6 +391,9 @@
     # those of each file's include in tasks/main.yml.
     sch_run_tags: "{{ ansible_run_tags | default(['all']) }}"
     sch_skip_tags: "{{ ansible_skip_tags | default([]) }}"
+    # maven's settings.xml is judged in the task after this one when it is not
+    # under $HOME.
+    sch_maven_apart: "{{ sch_passwd_home | default('', true) | length > 0 and sch_passwd_home != ansible_env.HOME }}"
     sch_user_cfg_tags:
       npmrc: [npm]
       pnpm-yaml: [pnpm]
@@ -405,7 +411,7 @@
     sch_user_cfg_kinds: >-
       {%- set kinds = [] -%}
       {%- for k, t in sch_user_cfg_tags.items() -%}
-      {%- if ('all' in sch_run_tags or (sch_run_tags | intersect(t) | length > 0)) and (sch_skip_tags | intersect(t) | length == 0) -%}
+      {%- if ('all' in sch_run_tags or (sch_run_tags | intersect(t) | length > 0)) and (sch_skip_tags | intersect(t) | length == 0) and not (k == 'maven' and sch_maven_apart | bool) -%}
       {%- set _ = kinds.append(k) -%}
       {%- endif -%}
       {%- endfor -%}
@@ -416,6 +422,31 @@
   # Fail closed: a check that could not run must not read as "no conflict".
   failed_when: user_cfg_preflight.rc | default(1) not in [0, 42]
 
+- name: Detect a maven settings.xml in the passwd home that this project did not write
+  # tasks/maven.yml writes settings.xml to the passwd home, which maven reads
+  # (tasks/passwd_home.yml). Where that is not $HOME, ucf_path in
+  # files/user-config.sh names $HOME's file (the block is action/harden.sh's
+  # too), so this one is judged here, with SCH_UCF_PATH. The tags are those of
+  # maven's include in tasks/main.yml, as in the task above.
+  ansible.builtin.script: "../files/user-config.sh classify maven"
+  args:
+    executable: /bin/bash
+  environment:
+    SCH_UCF_PATH: "{{ sch_passwd_home }}/.m2/settings.xml"
+  register: user_cfg_preflight_maven
+  changed_when: false
+  check_mode: false
+  failed_when: user_cfg_preflight_maven.rc | default(1) not in [0, 42]
+  when:
+    - sch_passwd_home | default('', true) | length > 0
+    - sch_passwd_home != ansible_env.HOME
+    - "'all' in (ansible_run_tags | default(['all'])) or (ansible_run_tags | default(['all'])) | intersect(['maven', 'java']) | length > 0"
+    - "(ansible_skip_tags | default([])) | intersect(['maven', 'java']) | length == 0"
+
+- name: Put together what the per-user checks found
+  ansible.builtin.set_fact:
+    sch_user_cfg_lines: "{{ (user_cfg_preflight.stdout_lines | default([])) + (user_cfg_preflight_maven.stdout_lines | default([])) }}"
+
 - name: Fail when a per-user config file cannot be written as it has to be
   # Before anything is changed: one the role cannot read, does not own or cannot
   # replace would otherwise stop the play half way through.
@@ -423,12 +454,12 @@
     msg: |
       [supply-chain-hardening] These per-user config files cannot be written:
 
-      {% for l in user_cfg_preflight.stdout_lines if l is match('blocked ') %}
+      {% for l in sch_user_cfg_lines if l is match('blocked ') %}
         {{ l | regex_replace('^blocked ', '') }}
       {% endfor %}
 
       Fix or move each one, then re-run. Nothing has been changed yet.
-  when: user_cfg_preflight.stdout_lines | select('match', 'blocked ') | list | length > 0
+  when: sch_user_cfg_lines | select('match', 'blocked ') | list | length > 0
 
 - name: Fail when per-user config files exist that this project did not write
   ansible.builtin.fail:
@@ -436,7 +467,7 @@
       [supply-chain-hardening] Refusing to overwrite existing per-user config
       files that are not exactly what this project wrote:
 
-      {% for l in user_cfg_preflight.stdout_lines if l is match('foreign ') %}
+      {% for l in sch_user_cfg_lines if l is match('foreign ') %}
         {{ l | regex_replace('^foreign ', '') }}
       {% endfor %}
 
@@ -455,7 +486,7 @@
            need by hand.
       (~/.npmrc is not one of them: the role merges into it.)
   when:
-    - user_cfg_preflight.stdout_lines | select('match', 'foreign ') | list | length > 0
+    - sch_user_cfg_lines | select('match', 'foreign ') | list | length > 0
     - not (accept_user_config_overwrite | default(false) | bool)
 
 - name: Assert the pip age-gate cutoff is an absolute Z-suffixed RFC 3339 instant

@@ -1,0 +1,47 @@
+---
+# The passwd home of the uid the role runs as. Gradle (its default user home)
+# and Maven (~/.m2/settings.xml) read this home, not $HOME: both take the JVM's
+# user.home, which on Linux comes from the passwd entry of the uid. MEASURED
+# (maven 3.10.2 and gradle 8.14.8 on temurin 21.0.13.1, as root with
+# HOME=/tmp/h and USER=LOGNAME=nobody): maven read /root/.m2/settings.xml,
+# gradle ran the init script in /root/.gradle/init.d, and user.home was /root.
+#
+# Looked up by uid (getent, or awk over /etc/passwd where getent is missing),
+# never by name. ansible_user_dir, which tasks/gradle.yml used to read, is looked
+# up by the name in $LOGNAME or $USER (ansible-core 2.16.3,
+# module_utils/facts/system/user.py), so it names another account's home
+# whenever those variables do.
+#
+# sch_passwd_home is set only when the home is a directory this account can
+# write, and is longer than "/". MEASURED for a uid whose entry says "/"
+# (podman --user 4242): java 21.0.13.1 then took user.home from $HOME, and java
+# 17.0.21 used "/". A passwd home that does not exist is still user.home
+# (MEASURED on both: maven read /nonexistent/.m2/settings.xml), so a caller
+# that falls back to $HOME records that the tool may not read it.
+#
+# Imported by tasks/preflight.yml, gradle.yml and maven.yml; it runs once.
+# Tests stand in for the passwd entry with -e sch_passwd_home=<dir>, which
+# skips the lookup (an extra var outranks set_fact).
+- name: Look up the passwd home of this uid (gradle and maven read it, not $HOME)
+  ansible.builtin.shell:
+    cmd: |
+      uid=$(id -u)
+      h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6)
+      [ -n "$h" ] || h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null)
+      printf 'uid %s\npasswd %s\n' "$uid" "$h"
+      case "$h" in
+        /?*) if [ -d "$h" ] && [ -w "$h" ]; then printf 'home %s\n' "$h"; fi ;;
+      esac
+    executable: /bin/bash
+  register: sch_passwd_home_check
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: sch_passwd_home is not defined
+
+- name: Keep the passwd home, the uid, and what passwd says
+  ansible.builtin.set_fact:
+    sch_passwd_home: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^home /') | map('regex_replace', '^home ', '') | first | default('') }}"
+    sch_passwd_uid: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^uid ') | map('regex_replace', '^uid ', '') | first | default('') }}"
+    sch_passwd_entry: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^passwd ') | map('regex_replace', '^passwd ', '') | first | default('') }}"
+  when: sch_passwd_home is not defined

@@ -8,8 +8,9 @@
 # to a token added after hardening. At 860a91c it still did so to Composer's
 # config.json, and to a token added after hardening to cargo's, Maven's and NuGet's.
 #
-# Each test applies the role for a home of its own (HOME is what the role reads),
-# with only the tasks that write these files. tests/ci/14-user-config.bats covers
+# Each test applies the role for a home of its own (HOME is what the role reads;
+# for Maven's settings.xml, which goes to the passwd home, -e sch_passwd_home
+# stands in for it), with only the tasks that write these files. tests/ci/14-user-config.bats covers
 # the same code on the action's side in more detail.
 
 load setup
@@ -77,7 +78,7 @@ role() { # [ansible args]: output in $output, the play's status in $status
   run env -u XDG_CONFIG_HOME HOME="$H" COREPACK_HOME=/root/.cache/node/corepack \
     GRADLE_USER_HOME="$H/.gradle" CARGO_HOME="$H/.cargo" \
     PATH="$T/bin:/usr/local/bin:/usr/bin:/bin" ansible-playbook site.yml --connection=local --limit localhost \
-    --tags "${ONLY:-$TAGS}" --skip-tags npq,socket \
+    --tags "${ONLY:-$TAGS}" --skip-tags npq,socket -e sch_passwd_home="$H" \
     -e podman_enabled=false -e verify_protections=false -e socket_firewall_install=false -e age_gate_refresh=false "$@"
 }
 

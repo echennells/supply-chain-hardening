@@ -63,7 +63,7 @@ ACTION_ONLY = {
         "gradle resolves its user home from the JVM passwd entry, not $HOME. "
         "The action pins the variable at the directory it wrote so a later "
         "step cannot resolve it differently; the role relies on writing into "
-        "the passwd home instead. Documented at tasks/gradle.yml:39.",
+        "the passwd home instead. Documented at tasks/gradle.yml:59.",
 }
 # Lower case too: pnpm 11 reads pnpm_config_* and reads the upper-case form
 # only from 11.0.6, so both sides export those names in lower case.
