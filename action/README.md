@@ -686,7 +686,7 @@ absent tool are inert, so the wide default is the safer starting point.
 
 ```yaml
 - uses: echennells/supply-chain-hardening/action@v2        # floating major — gets fixes
-- uses: echennells/supply-chain-hardening/action@v2.1.0    # exact release
+- uses: echennells/supply-chain-hardening/action@v2.1.1    # exact release
 - uses: echennells/supply-chain-hardening/action@<sha>     # immutable; strongest
 ```
 
