@@ -9,10 +9,11 @@ explained. The full list of known boundaries is [limitations.md](limitations.md)
 This project changes how a machine's language package managers treat a package before
 it runs. Where the installed version supports it, an install through npm, pnpm, Yarn,
 Bun, Deno, pip, uv or Cargo will not take a release published in the last 48 hours;
-npm, pnpm, Yarn, Bun, Deno and Composer do not run install scripts; and Python
-installers refuse source distributions from an index. Go, Maven, Gradle and NuGet get
-stricter source and checksum settings, but no age gate. A verifier then asks each
-installed tool what it is really doing and reports each protection as OK, WEAK or GAP.
+npm, pnpm, Yarn, Bun, Deno and Composer do not run install scripts; and pip and uv
+refuse source distributions from an index (Poetry and PDM are not covered). Go, Maven,
+Gradle and NuGet get stricter source and checksum settings, but no age gate. A verifier
+then asks each installed tool what it is really doing and reports each protection as OK,
+WEAK or GAP.
 
 That narrows two attacks: a release that is malicious when it is published and is
 pulled within hours (the age gate), and a package whose payload is an install script
@@ -32,20 +33,25 @@ Each protection reaches only the tools, versions and callers named in
 [the README's table](../README.md#what-it-protects) and in [how-it-works.md](how-it-works.md).
 The verifier names the version a gate needs when a tool is older.
 
-- **A 48-hour age gate.** npm (11.10 and later), pnpm, Yarn, Bun, Deno and uv resolve to
-  an older release, or fail when none fits; pip from 26. Cargo is gated through
+- **A 48-hour age gate.** npm (11.10 and later), pnpm, Yarn, Bun and uv resolve to an
+  older release, or fail when none fits; pip from 26. Deno is gated by its wrapper for
+  `run`, `cache`, `install`, `test`, `compile`, `eval` and `bench`, not for `deno x` or
+  `deno add`. Cargo is gated through
   `cargo-cooldown` behind the cargo wrapper: on by default in the role where rustc is
-  1.91.1 or later, opt-in in the GitHub Action, and not for `cargo install`, `cargo add`,
-  `generate-lockfile` or `vendor`. Composer from 2.11 and Bundler from 4.0.13. Registry
-  compromises are usually caught and pulled within hours, which is why a window works
-  ([limitations.md](limitations.md), "Why an age gate works on this threat").
+  1.91.1 or later, opt-in in the GitHub Action. It gates `build`, `check`, `test`, `run`
+  and `update`; other commands that resolve (`clippy`, `doc`, `bench`, `fetch`, `tree`)
+  get only `--locked`, and only where a `Cargo.lock` exists; `cargo install`, `cargo add`,
+  `generate-lockfile` and `vendor` are not gated. Composer from 2.11 and Bundler from
+  4.0.13. Registry compromises are usually caught and pulled within hours, which is why
+  a window works ([limitations.md](limitations.md), "Why an age gate works on this
+  threat").
 - **Install scripts are not run.** npm, pnpm, Yarn 2+ and Bun skip lifecycle scripts.
-  Composer runs without plugins (its config) and without scripts (its wrapper). Deno's
-  wrapper adds the age gate and `--ignore-scripts`. uv's `no-build` refuses every source
+  Composer runs without plugins (its config) and without scripts (its wrapper), and
+  Deno's wrapper adds `--ignore-scripts` to `deno x`. uv's `no-build` refuses every source
   distribution; pip's `only-binary` refuses one from an index, but still builds one named
-  by path or URL. On role hosts `pip` runs `uv pip` where uv was installed at apply time.
-  None of this reaches Cargo's `build.rs`, Ruby's `extconf.rb` or a Python wheel's
-  startup hook.
+  by path or URL; Poetry and PDM read neither. On role hosts `pip` runs `uv pip` where uv
+  was installed at apply time. None of this reaches Cargo's `build.rs`, Ruby's
+  `extconf.rb` or a Python wheel's startup hook.
 - **Fewer ways to pull in code you did not pick.** npm git dependencies are refused (npm
   11.9.0 and later), and on pnpm 11 a dependency of a dependency cannot come from git or
   a URL. Cargo (through its wrapper), Bundler, Yarn and Bun refuse an install that would
@@ -56,7 +62,9 @@ The verifier names the version a gate needs when a tool is older.
   for Cargo, through their wrappers, for packages not already cached. It is on by default
   in the role where a system-wide Node 20 or later exists (not for a bare `npx` there),
   and opt-in in the GitHub Action (`intel: sfw`, which wraps `npx` too). It blocks what
-  Socket has already flagged; it does not judge anything new.
+  Socket has already flagged; it does not judge anything new. If sfw cannot run at apply
+  time, it is moved aside and the wrappers let installs through unfiltered, with a
+  warning in the run summary ([how-it-works.md](how-it-works.md)).
 - **Reputation checks before an npm, pnpm or Yarn install** (npq), in the role only, and
   only when the command runs on a terminal. Most agents, scripts and CI jobs have none;
   an agent driving a terminal gets npq's prompt and can answer it.
@@ -66,8 +74,10 @@ The verifier names the version a gate needs when a tool is older.
   reports where some of that project's own config weakens the host's (not all of it: see
   below). It flags Python startup hooks, and it never runs the project's code
   ([verify.md](verify.md)).
-- **An agent-host profile** (`-e agent_host=true`, off by default) that makes a GAP fail
-  the play and turns on two settings with real breaks
+- **An agent-host profile** (`-e agent_host=true`, off by default). It makes a GAP fail
+  the play, so on a host with a stock npm or pip, or where cargo-cooldown routes builds,
+  every apply fails until those are upgraded or the setting is turned back off; and it
+  turns on two Python settings that break some projects
   ([configuration.md](configuration.md#agent-hosts-agent_host)).
 
 ## What it does not do
@@ -116,8 +126,10 @@ The verifier names the version a gate needs when a tool is older.
   `Cargo.lock` you did not generate is trusted").
 - **An agent under its own account gets the least.** The per-user files cover the
   account the role was applied as. Another account gets npm's, pip's and uv's settings
-  from `/etc`, the system-wide wrappers, and the environment layer in login shells; for
-  Yarn, Bun, pnpm 11, Bundler and Cargo's config it gets the tools' own defaults
+  from `/etc`, the system-wide wrappers, and the environment layer in login shells,
+  which carries some gates (pnpm's and Bundler's age gates among them). The config files
+  of Yarn, Bun, pnpm, Bundler, Cargo, Composer, Maven, Gradle and NuGet are the deploying
+  account's alone, so for those it gets the tools' own defaults
   ([limitations.md](limitations.md), "sudo clears the environment";
   [design-principles.md](design-principles.md#deploying-user-vs-other-user)).
 - **Agent processes often miss the environment layer.** It reaches login shells and
@@ -146,12 +158,14 @@ The verifier names the version a gate needs when a tool is older.
   block, Deno's age gate, Cargo's age gate and `--locked`, Socket Firewall, Composer's
   `--no-scripts`) does not.
 - **Some installs have no age gate here:** Go, Maven, Gradle and NuGet, `gem install`
-  below RubyGems 4.1.0, `cargo install` and `cargo add`, Yarn 1.x, and PDM. A venv made
+  below RubyGems 4.1.0, `cargo install` and `cargo add` (and `clippy`, `doc` or `bench`
+  with no lockfile), `deno x` and `deno add`, Yarn 1.x, and PDM. A venv made
   with `python3 -m venv` gets the pip bundled with that Python, which may be too old for
   its gate.
 - **Stock toolchains are often too old for the gates that exist.** npm before 11.10,
   pip before 26, Composer before 2.11, Bundler before 4.0.13 and rustc before 1.91.1
-  lack them. The verifier reports each as a GAP, and an upgrade closes it.
+  lack them. The verifier reports each as a GAP; an upgrade followed by a re-apply
+  closes it.
 - **The pip and uv cutoffs are fixed dates.** The role's timer advances them every six
   hours on systemd hosts. With `action/harden.sh`, or with no systemd, they stay where the
   last run put them, and the window grows until the next run.

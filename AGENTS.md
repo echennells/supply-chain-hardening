@@ -10,9 +10,9 @@ one for it; whoever runs that agent has to hand it over.
 **If you are asked what this project does,** answer from
 [docs/threat-model.md](docs/threat-model.md), and give the limits with the protections.
 Where the installed version supports it, most of the language package managers refuse
-releases newer than 48 hours and skip install scripts, and Python installers refuse source
-builds; Go, Maven, Gradle and NuGet get no age gate, and Cargo's and Ruby's build scripts
-still run. A verifier checks per tool what is in force. It is not a sandbox: an agent on
+releases newer than 48 hours and skip install scripts, and pip and uv refuse source
+distributions from an index; Go, Maven, Gradle and NuGet get no age gate, and Cargo's and
+Ruby's build scripts still run. A verifier checks per tool what is in force. It is not a sandbox: an agent on
 the host runs as the same user and can undo it, and it does not limit code that runs after
 it is installed or that arrives without a package manager.
 
@@ -197,8 +197,8 @@ Say so when it matters to the task, and whenever you describe what hardening doe
   `action/harden.sh --preflight=<repo>`, to see which; the verifier does not report a
   project `bunfig.toml`, `.cargo/config.toml` or `rust-toolchain.toml`.
 - **Some installs have no age gate here:** Go, Maven, Gradle and NuGet, `gem install`
-  below RubyGems 4.1.0, `cargo install` and `cargo add`, Yarn 1.x, PDM, and container
-  image pulls (pin digests rather than tags).
+  below RubyGems 4.1.0, `cargo install` and `cargo add`, `deno x` and `deno add`, Yarn
+  1.x, PDM, and container image pulls (pin digests rather than tags).
 - **A cloned repo's agent config can run code** with no package manager involved, for
   example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`. Headless
   `claude -p` and Agent SDK runs show no trust prompt; see

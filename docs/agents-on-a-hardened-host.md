@@ -7,7 +7,7 @@ Give it this file, or the rules in it; nothing installs or loads it for you.
 
 The package managers on this host treat a package differently before it runs. Where the
 tool supports it, releases newer than the age window are refused, install scripts are
-skipped, and Python source builds are refused. Not every tool: Go, Maven, Gradle and NuGet
+skipped, and pip and uv refuse source builds from an index. Not every tool: Go, Maven, Gradle and NuGet
 have no age gate here, and Cargo's and Ruby's build scripts still run. It is not a sandbox. You run as the same user and could undo every setting,
 which is why the rules below ask you not to. If your user asks what it protects against
 and what it does not, the honest answer is in [threat-model.md](threat-model.md).
