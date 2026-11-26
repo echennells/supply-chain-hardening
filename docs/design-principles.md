@@ -313,13 +313,52 @@ in `defaults/main.yml`.
 
 ### Interactive vs non-interactive shells
 
-`alias npm=npq-hero` (and friends) only fires in interactive shells.
-Agents, CI, scripts, and most automation never see aliases — they look
-up `npm` via PATH and bypass the alias entirely.
+`alias npm=npq-hero` (and friends) only fires in an interactive shell, in
+bash with `expand_aliases` set, or in dash, which expands aliases in scripts
+too. CI, scripts, and most automation and agents never see aliases — they
+look up `npm` via PATH and bypass the alias entirely. An agent runner that
+replays a saved shell state is the exception ([Agent runners](#agent-runners)):
+it can carry the aliases into commands that have no terminal, where npq has
+nobody to ask.
 
 **Principle**: aliases are not a security layer. If you need an
 intercept in non-interactive contexts, deploy a wrapper at the binary
 path (the npm/deno path-wrapper pattern).
+
+### Agent runners
+
+An agent's commands run in whatever shell its runner starts. Two runners,
+MEASURED on two agent VMs on 2026-11-26, started different shells:
+
+- **No startup files.** One runs its commands as
+  `/bin/bash --norc --noprofile -c '...'`, with no `BASH_ENV`, as root with
+  `HOME=/home/hatch` (root's passwd home is `/root`). Its shells had no
+  variable of the env layer; it sources no startup file, so it would not
+  load `/etc/profile.d/`. The config files under its `HOME` were read: npm
+  10.9.4 reported `ignore-scripts` `true`, with no `/etc/npmrc` and a
+  `~/.npmrc` present, and the system pip and a new venv's pip (both 24.0)
+  listed `only-binary = :all:` from `~/.config/pip/pip.conf` in
+  `pip config debug`. Its `PATH` puts the image's own `bin`, where its npm
+  and bun are, before `/usr/local/bin`, so a wrapper there would not be the
+  npm or bun it runs.
+- **A saved shell state.** The other, `/exec-daemon` (its variables are
+  named `cursor_*`), replays a saved state. Per its code, it builds the state
+  once per session from `bash -ilc` with no terminal, which sources
+  `/etc/profile.d/`. It replays the state into every command under
+  `shopt -s expand_aliases`, and saves it again after each one. An older
+  session still had npq aliases that the current `npq-aliases.sh` does not
+  set without a terminal, a `PIP_UPLOADED_PRIOR_TO` two days older than the
+  one in `/etc/profile.d/supply-chain-hardening.sh`, and no
+  `UV_EXCLUDE_NEWER`: the state of an earlier apply. npq then refused
+  `pnpm add esbuild@0.24.0` ("Installation blocked: findings require an
+  interactive terminal"). A new session on the same VM had the current
+  variables, no npq alias, and installed it.
+
+**Principle**: the config files reached both runners. The env layer reached
+one, as it stood when its session began. A protection that matters for
+agents needs a config file, in the home the runner's `HOME` names. After a
+re-apply, start new agent sessions. Run the verifier from the runner's own
+shell: it reports what that shell gets.
 
 ### Deploying user vs other user
 

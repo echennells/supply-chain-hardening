@@ -134,7 +134,7 @@ The verifier names the version a gate needs when a tool is older.
   [design-principles.md](design-principles.md#deploying-user-vs-other-user)).
 - **Agent processes often miss the environment layer.** It reaches login shells and
   whatever loaded `/etc/environment`. An agent started by systemd or a supervisor gets
-  the config files and the wrappers on `PATH` only. The role gives Go its settings
+  the config files only, and the wrappers if they come first on its `PATH`. The role gives Go its settings
   through the environment alone, so there Go runs with its own defaults
   ([limitations.md](limitations.md), "Non-PAM contexts"). A container on a hardened host
   gets none of the host's hardening; apply the role inside the image
