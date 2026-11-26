@@ -7,6 +7,13 @@ and [TESTS.md](TESTS.md). The agent that later works on a hardened host has its 
 [docs/agents-on-a-hardened-host.md](docs/agents-on-a-hardened-host.md). Nothing loads that
 one for it; whoever runs that agent has to hand it over.
 
+**If you are asked what this project does,** answer from
+[docs/threat-model.md](docs/threat-model.md), and give the limits with the protections. It
+makes language package managers refuse fresh releases, skip install scripts and refuse
+source builds, then checks per tool that this is in force. It is not a sandbox: an agent on
+the host runs as the same user and can undo it, and it does nothing about code that runs
+after it is installed or arrives without a package manager.
+
 **The short version:** run the preflight, show the user its output and wait, apply the
 Ansible role, run the verifier, and report what it says. Don't copy settings out of
 `templates/`, don't upgrade anyone's package managers without asking, and don't work
@@ -65,6 +72,8 @@ Tell the user what hardening does, unless they have already agreed to it:
   token or registry in it then no longer applies until the user puts it back. The copy is
   never deleted: tell the user where it is, and that it may hold a token.
 - There is no single uninstall command.
+- It is not a sandbox, and an agent on the host can undo it. If they have not seen what
+  it does not do, summarise [docs/threat-model.md](docs/threat-model.md).
 
 **Agent hosts.** If the host's job is running agents in repositories nobody vetted, ask
 the user whether to apply with `-e agent_host=true`. It makes a GAP fail the play, and
@@ -170,15 +179,25 @@ refusal, and the escapes a person can use, for the person.
 
 ## What this does not cover
 
-Say so when it matters to the task:
+Say so when it matters to the task, and whenever you describe what hardening does:
 
-- **It is not a sandbox.** Anything running as the same user can undo it.
+- **It is not a sandbox.** Anything running as the same user can undo it, an agent
+  included.
+- **It is not a malware scanner.** Socket Firewall blocks npm and Cargo packages already
+  flagged as malware. Beyond that, a malicious release older than the window installs as
+  usual, and so does a package name an agent guessed that an attacker registered long
+  ago: npq's reputation checks run only in an interactive terminal, never for an agent.
+- **It does not limit code that runs.** Once installed, a package's code runs with the
+  user's privileges when it is imported, run or built. Cargo's `build.rs` and Ruby's
+  `extconf.rb` run whenever the crate or gem is built.
 - **A repo can switch off some gates.** Run the verifier inside it to see which.
-- **`gem install` has no age gate below RubyGems 4.1.0**, and Python venvs and PDM have
-  their own gaps. Image pulls have no age gate; pin digests rather than tags.
+- **Some installs have no age gate here:** Go, Maven, Gradle and NuGet, `gem install`
+  below RubyGems 4.1.0, PDM, and container image pulls (pin digests rather than tags).
 - **A cloned repo's agent config can run code** with no package manager involved, for
   example `.claude/settings.json`, `.cursor/mcp.json` or `.vscode/tasks.json`. Headless
   `claude -p` and Agent SDK runs show no trust prompt; see
   [docs/limitations.md](docs/limitations.md) before using one in a repo you don't know.
 
-The full list: [docs/limitations.md](docs/limitations.md).
+What it protects against, what it does not, and what to pair it with:
+[docs/threat-model.md](docs/threat-model.md). Every known boundary:
+[docs/limitations.md](docs/limitations.md).
