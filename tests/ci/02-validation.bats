@@ -515,7 +515,87 @@ NOT_A_VERSION='/home/u/.nvm/versions/node/v22.23.5/lib/node_modules/corepack/dis
   grep -qxF 'tool_versions={"composer":""}' "$OUT_FILE"
 }
 
+@test "reporting: pip before 26 is degraded, 26 is applied, and the role's uv pip is not judged" {
+  # MEASURED (an agent's VM, pip 24.0): "Fully applied" had pip, and the verifier said
+  # "pip 24.0 does NOT implement --uploaded-prior-to".
+  local v
+  bare_path
+  pip_is() { stub_bin "$1" "case \"\${1:-}\" in --version) echo '$2 from /x/pip (python 3.12)' ;; *) echo STUB ;; esac"; }
+  for v in 21.2.4 24.0 25.3; do
+    pip_is pip "pip $v"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=pip -- --emit=plain
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"pip $v does NOT implement uploaded-prior-to"* ]] || { echo "$v: $output"; false; }
+    grep -qx 'ecosystems_degraded=pip' "$OUT_FILE"
+  done
+  for v in 'pip 26.0' 'pip 26.0.1' 'pip 26.1' 'uv-pip 0.13.9'; do
+    pip_is pip "$v"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS=pip -- --emit=plain
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"does NOT implement"* ]] || { echo "$v: $output"; false; }
+    grep -qx 'ecosystems_effective=pip' "$OUT_FILE"
+  done
+  # pip3 alone is the pip there is
+  rm -f "$TEST_BIN/pip"; pip_is pip3 'pip 21.2.4'
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=pip -- --emit=plain
+  grep -qx 'ecosystems_degraded=pip' "$OUT_FILE"
+  grep -qxF 'tool_versions={"pip":"21.2.4"}' "$OUT_FILE"
+  stub_bin pip3 'exit 1'
+  run harden PATH="$BARE_PATH" ECOSYSTEMS=pip -- --emit=plain
+  [[ "$output" == *"\`pip3 --version\` failed or printed no version"* ]] || { echo "$output"; false; }
+  grep -qx 'ecosystems_degraded=pip' "$OUT_FILE"
+}
+
+@test "reporting: bun before 1.3 and composer before 2.11 are degraded, and the release that has the gate is not" {
+  # Both had a notice in the log and were "Fully applied". Their wrappers go into a
+  # directory of ours, so nothing else degrades them.
+  local x t
+  bare_path
+  for x in bun:1.1.38 bun:1.2.23 composer:2.5.5 composer:2.10.3; do
+    t=${x%%:*}
+    rm -f "$TEST_BIN/$t" "$TEST_BIN/$t-real"
+    stub_bin "$t" "case \"\${1:-}\" in --version) echo '$t ${x#*:}' ;; *) echo STUB ;; esac"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS="$t" -- --emit=plain
+    [ "$status" -eq 0 ] || { echo "$x: $output"; false; }
+    [[ "$output" == *"| INERT | "*"$t ${x#*:}"* ]] || { echo "$x: $output"; false; }
+    grep -qx "ecosystems_degraded=$t" "$OUT_FILE" || { echo "$x"; cat "$OUT_FILE"; false; }
+  done
+  for x in bun:1.3.0 bun:1.4.5 composer:2.11.0 composer:2.11.3; do
+    t=${x%%:*}
+    rm -f "$TEST_BIN/$t" "$TEST_BIN/$t-real"
+    stub_bin "$t" "case \"\${1:-}\" in --version) echo '$t ${x#*:}' ;; *) echo STUB ;; esac"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS="$t" -- --emit=plain
+    [ "$status" -eq 0 ] || { echo "$x: $output"; false; }
+    grep -qx "ecosystems_effective=$t" "$OUT_FILE" || { echo "$x: $output"; cat "$OUT_FILE"; false; }
+  done
+  for t in bun composer; do
+    rm -f "$TEST_BIN/$t" "$TEST_BIN/$t-real"
+    stub_bin "$t" "echo '$NOT_A_VERSION' >&2; exit 1"
+    run harden PATH="$BARE_PATH" ECOSYSTEMS="$t" -- --emit=plain
+    [ "$status" -eq 0 ] || { echo "$t: $output"; false; }
+    [[ "$output" == *"\`$t --version\` failed or printed no version"* ]] || { echo "$t: $output"; false; }
+    grep -qx "ecosystems_degraded=$t" "$OUT_FILE"
+  done
+}
+
+@test "reporting: an old tool whose wrapper cannot be deployed either says both" {
+  [ "$(id -u)" -ne 0 ] || skip "running as root: a 0555 directory does not stop root"
+  local ro="${BATS_TEST_TMPDIR}/ro-old"
+  mkdir -p "$ro"
+  printf '#!/bin/bash\ncase "${1:-}" in --version|-v) echo "1.2.23";; *) echo STUB;; esac\n' > "$ro/bun"
+  chmod 755 "$ro/bun"; chmod 555 "$ro"
+  bare_path
+  stub_bin sudo 'exit 1'
+  run env -i PATH="${TEST_BIN}:${ro}:${BARE_PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    WRITE_ETC=false ECOSYSTEMS=bun bash "$HARDEN_SH" --emit=plain
+  chmod 755 "$ro"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"bun 1.2.23 has no minimumReleaseAge"*"; PATH wrapper not deployed"* ]] || { echo "$output"; false; }
+  grep -qx 'ecosystems_degraded=bun' "$OUT_FILE"
+}
+
 @test "reporting: a fully applied ecosystem says so without noise" {
+  stub_bin pip 'echo "pip 26.1 from /x/pip (python 3.12)"'
   run harden ECOSYSTEMS=pip -- --emit=plain
   [ "$status" -eq 0 ]
   assert_file_contains "$OUT_FILE" "ecosystems_effective=pip"
