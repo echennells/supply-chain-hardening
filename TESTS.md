@@ -1,6 +1,6 @@
 # Tests
 
-656 container tests verify the supply chain hardening works (`make test`), plus 552 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+658 container tests verify the supply chain hardening works (`make test`), plus 552 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -61,7 +61,7 @@
 | 53-verifier-no-project-code.bats | 2 | supply-chain-verify run inside a booby-trapped checkout (a `.yarnrc.yml` yarnPath and plugin, classic `.yarnrc` yarn-path, `.corepack.env`, a pnpmfile, `rust-toolchain.toml` `path =`, a `.cargo` rustc-wrapper, `.mvn/jvm.config`, `global.json` sdk paths, `Directory.Build.props`, `pip.py`, a `.venv` interpreter, a go.mod toolchain line, a Gemfile, composer and bun hooks) sets off none of them, with a FIXTURE CONTROL that the installed tools do when run there; with a world-writable TMPDIR every tool it starts gets a TMPDIR under root's private `~/.cache`, files planted above that TMPDIR stay inert, and the scratch dir is gone afterwards (CONTROL: with no private base, a warning and the probes under TMPDIR) |
 | 54-agent-host-profile.bats | 6 | `agent_host`: off by default and reported so; on, it turns on verify_fail_on_gap, python_safe_path and uv_exclude_newer_env and the env layer carries both variables; an explicit value wins as an extra var, in play vars and in inventory host vars, measured with the role's real defaults loaded through include_role; the summary names the two attribution-test breaks and marks an explicit value; the image's own apply log carries the profile line |
 | 55-user-config.bats | 16 | The per-user config files (issue 48): the role refuses the eleven it replaces when one is not exactly what it last wrote, before anything is changed, under `--check` too; with the overwrite accepted each is copied 0600 and `~/.npmrc` is merged with its token kept, at 0600; nothing of the user's reaches the output, with `--diff -vvv` too; a second run changes nothing; a token added after hardening survives; files v2.0.0 and v2.1.0 wrote (tests/fixtures/user-config) are upgraded silently; a symlink is written through; a cutoff the refresh timer advanced is still the role's own file; no directory that is there changes mode or owner (the home, 0750, first) and a new one is 0755 under `umask 0000`; root's own Composer config is left alone and listed; a home with only `~/.composer` keeps it and its `auth.json`; npm's global config is refused, or copied when accepted; one in a home is written as the user, and one left root's there is named; root writes it only where no other account controls the path, whatever the user's npm or its settings say, and the summary names what it left alone; a root that sudo made writes no per-user file in the home it came from |
-| 56-home-paths.bats | 6 | Which home each write lands in when HOME is not the passwd home: gradle's init script and Maven's settings.xml go to the uid's passwd home, looked up by uid, also when USER and LOGNAME name another account (with a FIXTURE CONTROL that ansible_user_dir names root's home there), and the run summary names both homes (with a control at the passwd home); a uid with no passwd home it can write gets both under HOME, listed as not applied; the preflight refuses a foreign settings.xml in the passwd home and leaves HOME's alone; a binary in /home/hatchery is not inside HOME=/home/hatch for the cargo and bun wrappers; cargo's and composer's sudo coverage asks passwd for root's home |
+| 56-home-paths.bats | 8 | Which home each write lands in when HOME is not the passwd home: gradle's init script and Maven's settings.xml go to the uid's passwd home, looked up by uid, also when USER and LOGNAME name another account (with a FIXTURE CONTROL that ansible_user_dir names root's home there), and the run summary names both homes (with a control at the passwd home, and none for a HOME that only adds a slash); a uid with no passwd home it can write gets both under HOME, listed as not applied, but not when HOME is that passwd home; a root that sudo reached with a user's HOME writes neither to root's home, maven refused and gradle listed, both saying whose account to run as (CONTROL: without sudo's variables both go to root's passwd home); the preflight refuses a foreign settings.xml in the passwd home and leaves HOME's alone; a binary in /home/hatchery is not inside HOME=/home/hatch for the cargo and bun wrappers; cargo's and composer's sudo coverage asks passwd for root's home |
 
 ## Adversarial tests
 
@@ -130,7 +130,7 @@ The same workflow runs the role on a Mac, which has to refuse before it writes a
 ## Running tests
 
 ```bash
-make test          # build container + run all 656 tests
+make test          # build container + run all 658 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```

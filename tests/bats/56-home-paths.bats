@@ -8,6 +8,8 @@
 #     from there. MEASURED (maven 3.10.2, gradle 8.14.8, temurin 21.0.13.1, as
 #     root with HOME=/tmp/h): both read /root. Not ansible_user_dir, which
 #     follows $LOGNAME/$USER; the run summary names both homes;
+#   - except for a root that sudo reached with a user's HOME, which writes
+#     neither to root's home and says whose account to run as;
 #   - root's sudo coverage for cargo and composer goes to root's passwd home;
 #   - "is the binary inside HOME" compares with a slash after HOME.
 #
@@ -19,6 +21,7 @@ load setup
 
 ACCT=schjvm
 NOHOME_ACCT=schnohome
+SUDO_ACCT=schsudo
 
 setup() {
   command -v ansible-playbook >/dev/null 2>&1 || skip "ansible-playbook not installed"
@@ -66,16 +69,30 @@ YML
 
 teardown() {
   [ -n "${D:-}" ] || return 0
-  local a
+  local a f
   for a in "$ACCT" "$NOHOME_ACCT"; do
     if [ "$(id -u)" = 0 ] && id "$a" >/dev/null 2>&1; then userdel "$a" 2>/dev/null || true; fi
   done
-  # What the root test wrote into root's passwd home, when it was not there before.
-  if [ -f "$D/root-had-none" ]; then
-    rm -f "$ROOT_HOME/.gradle/init.d/supply-chain-security.gradle"
-    rmdir "$ROOT_HOME/.gradle/init.d" "$ROOT_HOME/.gradle" 2>/dev/null || true
+  if [ -f "$D/sudo-acct" ]; then
+    userdel -r "$SUDO_ACCT" 2>/dev/null || true
+    rm -f "/etc/sudoers.d/$SUDO_ACCT"
+  fi
+  # What a test wrote into root's passwd home goes; what was there comes back.
+  if [ -f "$D/root-files" ]; then
+    while IFS= read -r f; do
+      rm -f "$f"
+      [ ! -e "$D/aside$f" ] || mv -f "$D/aside$f" "$f"
+    done < "$D/root-files"
+    rmdir "$ROOT_HOME/.gradle/init.d" "$ROOT_HOME/.gradle" "$ROOT_HOME/.m2" 2>/dev/null || true
   fi
   rm -rf "$D"
+}
+
+# root_file <path>: a file in root's passwd home that this test may write. Moved
+# aside now; teardown removes what the test wrote and puts the file back.
+root_file() {
+  printf '%s\n' "$1" >> "$D/root-files"
+  if [ -e "$1" ]; then mkdir -p "$D/aside$(dirname "$1")"; mv -f "$1" "$D/aside$1"; fi
 }
 
 # make_account <name> <passwd home>: an account whose passwd home is that path
@@ -121,12 +138,18 @@ jvm_play_as() {
   grep -qF "settings.xml goes to $D/pw/.m2, where maven looks, not under \$HOME." "$D/o/out"
   echo "$output" | grep -qF '2 file(s) go to the passwd home, not under $HOME'
   ! grep -q '^skip=' "$D/o/out" || false
+  # HOME with a slash at the end is the passwd home: nothing to say
+  jvm_play_as "$ACCT" "$D/pw/" USER=root LOGNAME=root
+  [ "$status" -eq 0 ]
+  ! grep -q '^note=' "$D/o/out" || false
+  ! grep -q '^skip=' "$D/o/out" || false
+  ! echo "$output" | grep -q 'go to the passwd home' || false
 }
 
 @test "jvm home: root with a relocated HOME gets the init script in root's passwd home and a summary line naming both homes" {
   require_root "writes the init script into root's passwd home"
   [ -n "$ROOT_HOME" ] && [ -d "$ROOT_HOME" ] || skip "no passwd home for root here"
-  [ -e "$ROOT_HOME/.gradle/init.d/supply-chain-security.gradle" ] || : > "$D/root-had-none"
+  root_file "$ROOT_HOME/.gradle/init.d/supply-chain-security.gradle"
   mkdir -p "$D/h"
   run env -i HOME="$D/h" PATH="$D/bin:/usr/local/bin:/usr/bin:/bin" LC_ALL=C.UTF-8 \
     ansible-playbook -i localhost, "$D/pb.yml" -e role_dir="$ROLE_DIR" -e summary_task="$D/summary.json" \
@@ -167,12 +190,77 @@ jvm_play_as() {
   ! grep -q '^note=' "$D/o/out" || false
 }
 
+@test "jvm home: with HOME at a passwd home the account cannot write, files in its own .m2 and .gradle are not listed as not applied" {
+  require_root "creates the $ACCT account"
+  make_account "$ACCT" "$D/ro"
+  mkdir -p "$D/ro/.m2" "$D/ro/.gradle"
+  chmod 755 "$D/ro"
+  chown "$ACCT:" "$D/ro/.m2" "$D/ro/.gradle"
+  # FIXTURE CONTROL: the account cannot write its passwd home, so the lookup keeps none
+  ! su "$ACCT" -s /bin/bash -c "test -w '$D/ro'" || false
+  jvm_play_as "$ACCT" "$D/ro"
+  echo "$output" | grep -E 'fatal|FAILED|PLAY RECAP' -A2 | head -12
+  [ "$status" -eq 0 ]
+  grep -q 'Managed by ansible-supply-chain-security' "$D/ro/.gradle/init.d/supply-chain-security.gradle"
+  grep -q 'Managed by ansible-supply-chain-security' "$D/ro/.m2/settings.xml"
+  ! grep -q '^skip=' "$D/o/out" || false
+  ! grep -q '^note=' "$D/o/out" || false
+}
+
+# as_sudo <tags> [env options]: the role, as root by way of sudo from $SUDO_ACCT,
+# with that account's HOME kept. Output in $output.
+as_sudo() {
+  local tags="$1"; shift
+  run su - "$SUDO_ACCT" -c "cd $ROLE_DIR && sudo env $* HOME=/home/$SUDO_ACCT PATH=$D/bin:/usr/local/bin:/usr/bin:/bin LC_ALL=C.UTF-8 \
+    ansible-playbook site.yml --connection=local --limit localhost --tags $tags \
+    -e podman_enabled=false -e verify_protections=false 2>&1"
+}
+
+@test "jvm home: root by way of sudo with a user's HOME writes neither file to root's home, and says whose account to run as" {
+  require_root "creates the $SUDO_ACCT account, with sudo"
+  command -v sudo >/dev/null 2>&1 || skip "no sudo here"
+  [ -n "$ROOT_HOME" ] && [ -d "$ROOT_HOME" ] || skip "no passwd home for root here"
+  : > "$D/sudo-acct"
+  userdel -r "$SUDO_ACCT" 2>/dev/null || true
+  useradd -m -s /bin/bash "$SUDO_ACCT"
+  echo "$SUDO_ACCT ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$SUDO_ACCT"
+  chmod 440 "/etc/sudoers.d/$SUDO_ACCT"
+  local g="$ROOT_HOME/.gradle/init.d/supply-chain-security.gradle" m="$ROOT_HOME/.m2/settings.xml" u="/home/$SUDO_ACCT"
+  root_file "$g"
+  root_file "$m"
+  # maven: the preflight refuses the user's home, as for the other per-user files
+  as_sudo maven
+  echo "$output" | grep -E 'cannot be written|fatal|PLAY RECAP' -A2 | head -10
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -qF "$u/.m2/settings.xml is in $u, which is not root's"
+  echo "$output" | grep -qF "(run this as $SUDO_ACCT, not as root)"
+  [ ! -e "$m" ]
+  [ ! -e "$u/.m2" ]
+  # gradle: nothing written, and the summary says whose account to run as
+  as_sudo gradle
+  echo "$output" | grep -E 'fatal|FAILED|PLAY RECAP' -A2 | head -10
+  [ "$status" -eq 0 ]
+  [ ! -e "$g" ]
+  [ ! -e "$u/.gradle" ]
+  echo "$output" | grep -qF "not written: this is root reached by sudo or doas from $SUDO_ACCT, and \$HOME ($u) is not root's passwd home ($ROOT_HOME). Run this as $SUDO_ACCT, not as root"
+  ! echo "$output" | grep -q 'go to the passwd home' || false
+  # FIXTURE CONTROL: the same run without what sudo adds to the environment is
+  # root with a relocated HOME, and writes both files to root's passwd home.
+  as_sudo maven,gradle -u SUDO_UID -u SUDO_GID -u SUDO_USER -u SUDO_COMMAND
+  echo "$output" | grep -E 'fatal|FAILED|PLAY RECAP' -A2 | head -10
+  [ "$status" -eq 0 ]
+  grep -q 'Managed by ansible-supply-chain-security' "$g"
+  grep -q 'Managed by ansible-supply-chain-security' "$m"
+  echo "$output" | grep -qF '2 file(s) go to the passwd home, not under $HOME'
+  ! echo "$output" | grep -q 'reached by sudo or doas' || false
+}
+
 # The preflight judges maven's settings.xml where tasks/maven.yml writes it. The
 # passwd home is stood in for with -e sch_passwd_home (tasks/passwd_home.yml), so
 # that root's own home is not touched; the tests above use the real lookup.
 preflight_maven() { # extra ansible args
   cd "$ROLE_DIR"
-  env -u DOTNET_CLI_HOME -u GRADLE_USER_HOME HOME="$D/home" PATH="$D/bin:$PATH" \
+  env -u DOTNET_CLI_HOME -u GRADLE_USER_HOME -u SUDO_UID -u SUDO_USER -u DOAS_USER HOME="$D/home" PATH="$D/bin:$PATH" \
     ansible-playbook site.yml --connection=local --limit localhost --tags maven \
       -e podman_enabled=false -e verify_protections=false -e sch_passwd_home="$D/pw" "$@" 2>&1
 }

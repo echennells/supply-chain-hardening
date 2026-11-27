@@ -17,11 +17,22 @@
 # (podman --user 4242): java 21.0.13.1 then took user.home from $HOME, and java
 # 17.0.21 used "/". A passwd home that does not exist is still user.home
 # (MEASURED on both: maven read /nonexistent/.m2/settings.xml), so a caller
-# that falls back to $HOME records that the tool may not read it.
+# that falls back to $HOME records that the tool may not read it, unless $HOME
+# is the passwd entry itself.
 #
-# Imported by tasks/preflight.yml, gradle.yml and maven.yml; it runs once.
-# Tests stand in for the passwd entry with -e sch_passwd_home=<dir>, which
-# skips the lookup (an extra var outranks set_fact).
+# A root that sudo or doas reached from another account, with a $HOME that is
+# not root's passwd home (sudo -E, sudo HOME=...), was most likely meant for that
+# account. sch_passwd_kept_out then names it, by the same test as ucf_kept_out
+# in files/user-config.sh: maven stays on $HOME, where user-config.sh refuses
+# that account's home ("run this as <user>, not as root"), and gradle writes
+# nothing, as for the account's other per-user files. Without this check both
+# went to root's own home, and a run with --tags maven or gradle passed.
+#
+# Imported by tasks/preflight.yml, gradle.yml and maven.yml, and looked up each
+# time: it is cheap, and a playbook can apply the role to one host as two
+# accounts. Tests stand in for the passwd home with -e sch_passwd_home=<dir>
+# (an extra var outranks set_fact); the uid, the entry and sudo still come from
+# the lookup.
 - name: Look up the passwd home of this uid (gradle and maven read it, not $HOME)
   ansible.builtin.shell:
     cmd: |
@@ -29,19 +40,38 @@
       h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6)
       [ -n "$h" ] || h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null)
       printf 'uid %s\npasswd %s\n' "$uid" "$h"
+      while :; do case "$h" in ?*/) h=${h%/} ;; *) break ;; esac; done
       case "$h" in
         /?*) if [ -d "$h" ] && [ -w "$h" ]; then printf 'home %s\n' "$h"; fi ;;
       esac
+      if [ "$uid" = 0 ] && { [ "${SUDO_UID:-0}" != 0 ] || [ "${DOAS_USER:-root}" != root ]; }; then
+        printf 'via %s\n' "${SUDO_USER:-${DOAS_USER:-that account}}"
+      fi
     executable: /bin/bash
   register: sch_passwd_home_check
   changed_when: false
   check_mode: false
   failed_when: false
-  when: sch_passwd_home is not defined
 
-- name: Keep the passwd home, the uid, and what passwd says
+- name: Keep the passwd home, the uid, what passwd says, and who ran sudo or doas
   ansible.builtin.set_fact:
     sch_passwd_home: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^home /') | map('regex_replace', '^home ', '') | first | default('') }}"
     sch_passwd_uid: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^uid ') | map('regex_replace', '^uid ', '') | first | default('') }}"
     sch_passwd_entry: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^passwd ') | map('regex_replace', '^passwd ', '') | first | default('') }}"
-  when: sch_passwd_home is not defined
+    sch_passwd_via: "{{ sch_passwd_home_check.stdout_lines | default([]) | select('match', '^via ') | map('regex_replace', '^via ', '') | first | default('') }}"
+
+- name: Compare the passwd home with $HOME
+  # Slashes at the end do not count: HOME=/root/ is root's passwd home.
+  #   sch_passwd_kept_out: the account sudo or doas came from, as above, or ''.
+  #   sch_passwd_apart: gradle and maven write to the passwd home, which is not
+  #     $HOME (the run summary says so).
+  #   sch_passwd_at_home: $HOME is the passwd entry, so a file under $HOME is
+  #     where the JVM looks even when this account cannot write the home itself.
+  vars:
+    sch_cmp_home: "{{ ansible_env.HOME | default('') | regex_replace('/+$', '') }}"
+    sch_cmp_pw: "{{ (sch_passwd_home | default('', true) or sch_passwd_entry) | regex_replace('/+$', '') }}"
+    sch_cmp_kept: "{{ sch_passwd_via | length > 0 and sch_cmp_home != sch_cmp_pw }}"
+  ansible.builtin.set_fact:
+    sch_passwd_kept_out: "{{ sch_passwd_via if (sch_cmp_kept | bool) else '' }}"
+    sch_passwd_apart: "{{ sch_passwd_home | default('', true) | length > 0 and sch_cmp_home != (sch_passwd_home | regex_replace('/+$', '')) and not (sch_cmp_kept | bool) }}"
+    sch_passwd_at_home: "{{ sch_passwd_entry | length > 0 and sch_cmp_home == (sch_passwd_entry | regex_replace('/+$', '')) }}"

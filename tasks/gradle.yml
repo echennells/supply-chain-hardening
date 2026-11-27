@@ -55,6 +55,10 @@
   #      `become`, so the lookup and the JVM describe the same uid;
   #   3. `ansible_env.HOME` when this uid has no passwd home it can write.
   #      That case is recorded below, since the JVM may not look there.
+  # Nothing, recorded below, for a root that sudo or doas reached with another
+  # account's HOME (tasks/passwd_home.yml): root's home is not the one meant,
+  # and root writing into that account's home would leave it a ~/.gradle it
+  # cannot write.
   #
   # The action (action/harden.sh) additionally EXPORTS GRADLE_USER_HOME so the
   # ambiguity cannot come back. The role deliberately does not: its env layer
@@ -68,7 +72,8 @@
   ansible.builtin.set_fact:
     gradle_user_home_resolved: >-
       {{ ansible_env.GRADLE_USER_HOME | default('', true)
-      or ((sch_passwd_home | default('', true) or ansible_env.HOME) ~ '/.gradle') }}
+      or ('' if sch_passwd_kept_out | length > 0
+          else ((sch_passwd_home | default('', true) or ansible_env.HOME) ~ '/.gradle')) }}
   when: gradle_check.rc == 0
 
 - name: Note that the init script is outside $HOME, in the passwd home
@@ -80,8 +85,7 @@
   when:
     - gradle_check.rc == 0
     - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
-    - sch_passwd_home | default('', true) | length > 0
-    - sch_passwd_home != ansible_env.HOME
+    - sch_passwd_apart | bool
 
 - name: Create Gradle init.d directory
   # Only when it is not there: a mode on an existing directory changed it on every
@@ -90,7 +94,9 @@
     cmd: umask 022 && mkdir -p -- {{ (gradle_user_home_resolved ~ '/init.d') | quote }}
     creates: "{{ (gradle_user_home_resolved ~ '/init.d') }}"
     executable: /bin/bash
-  when: gradle_check.rc == 0
+  when:
+    - gradle_check.rc == 0
+    - gradle_user_home_resolved | length > 0
 
 - name: Deploy Gradle init script to enforce HTTPS-only repositories
   ansible.builtin.copy:
@@ -178,14 +184,17 @@
           configurations.all(refuseDynamic)
           buildscript.configurations.all(refuseDynamic)
       }
-  when: gradle_check.rc == 0
+  when:
+    - gradle_check.rc == 0
+    - gradle_user_home_resolved | length > 0
 
 - name: Record skipped protection — no passwd home the gradle init script could go to
   # Feeds the end-of-run summary in main.yml. Reached when the target sets no
   # GRADLE_USER_HOME and this uid has no passwd home it can write: the script
   # was written under ansible's HOME, which gradle reads only when the JVM
   # falls back to $HOME (tasks/passwd_home.yml: java 21 does for a passwd home
-  # of "/", java 17 does not).
+  # of "/", java 17 does not). Not when that HOME is the passwd entry itself:
+  # the script is then where the JVM looks.
   ansible.builtin.set_fact:
     skipped_protections: >-
       {{ (skipped_protections | default([])) + ['gradle init script — uid ' ~ (sch_passwd_uid | default('?', true)) ~ ' has no passwd home it can write (passwd says: ' ~ (sch_passwd_entry | default('', true) or 'nothing') ~ '), so the script was written to ' ~ gradle_user_home_resolved ~ ', under $HOME. The JVM takes its home from the passwd entry, not $HOME, so gradle may not load it. Set GRADLE_USER_HOME on the target, or give the account a home it can write, and re-apply.'] }}
@@ -193,6 +202,16 @@
     - gradle_check.rc == 0
     - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
     - sch_passwd_home | default('', true) | length == 0
+    - sch_passwd_kept_out | length == 0
+    - not (sch_passwd_at_home | bool)
+
+- name: Record skipped protection — root by way of sudo or doas, with another account's HOME
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ["gradle init script — not written: this is root reached by sudo or doas from " ~ sch_passwd_kept_out ~ ", and $HOME (" ~ ansible_env.HOME ~ ") is not root's passwd home (" ~ (sch_passwd_home | default('', true) or sch_passwd_entry) ~ "). Run this as " ~ sch_passwd_kept_out ~ ", not as root, and re-apply."] }}
+  when:
+    - gradle_check.rc == 0
+    - gradle_user_home_resolved | length == 0
 
 - name: Record skipped protection — neither gradle nor a JDK
   ansible.builtin.set_fact:

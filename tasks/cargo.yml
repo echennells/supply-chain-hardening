@@ -58,9 +58,9 @@
 
 - name: Resolve root's home directory (cargo sudo coverage)
   # A build run under sudo reads root's CARGO_HOME, not the invoking user's:
-  # sudo clears CARGO_HOME and sets HOME to root's passwd home (see
-  # tasks/yarn.yml). Asked of the passwd database, as for yarn, not assumed to
-  # be /root.
+  # sudo sets HOME to root's passwd home (MEASURED, see tasks/yarn.yml), and its
+  # default env_reset drops CARGO_HOME (inferred, not measured). Asked of the
+  # passwd database, as for yarn, not assumed to be /root.
   ansible.builtin.shell:
     cmd: 'h=~root; case "$h" in /*) printf "%s" "$h" ;; esac'
     executable: /bin/bash

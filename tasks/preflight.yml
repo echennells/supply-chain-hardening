@@ -392,8 +392,7 @@
     sch_run_tags: "{{ ansible_run_tags | default(['all']) }}"
     sch_skip_tags: "{{ ansible_skip_tags | default([]) }}"
     # maven's settings.xml is judged in the task after this one when it is not
-    # under $HOME.
-    sch_maven_apart: "{{ sch_passwd_home | default('', true) | length > 0 and sch_passwd_home != ansible_env.HOME }}"
+    # under $HOME (sch_passwd_apart, tasks/passwd_home.yml).
     sch_user_cfg_tags:
       npmrc: [npm]
       pnpm-yaml: [pnpm]
@@ -411,7 +410,7 @@
     sch_user_cfg_kinds: >-
       {%- set kinds = [] -%}
       {%- for k, t in sch_user_cfg_tags.items() -%}
-      {%- if ('all' in sch_run_tags or (sch_run_tags | intersect(t) | length > 0)) and (sch_skip_tags | intersect(t) | length == 0) and not (k == 'maven' and sch_maven_apart | bool) -%}
+      {%- if ('all' in sch_run_tags or (sch_run_tags | intersect(t) | length > 0)) and (sch_skip_tags | intersect(t) | length == 0) and not (k == 'maven' and sch_passwd_apart | bool) -%}
       {%- set _ = kinds.append(k) -%}
       {%- endif -%}
       {%- endfor -%}
@@ -438,8 +437,7 @@
   check_mode: false
   failed_when: user_cfg_preflight_maven.rc | default(1) not in [0, 42]
   when:
-    - sch_passwd_home | default('', true) | length > 0
-    - sch_passwd_home != ansible_env.HOME
+    - sch_passwd_apart | bool
     - "'all' in (ansible_run_tags | default(['all'])) or (ansible_run_tags | default(['all'])) | intersect(['maven', 'java']) | length > 0"
     - "(ansible_skip_tags | default([])) | intersect(['maven', 'java']) | length == 0"
 
