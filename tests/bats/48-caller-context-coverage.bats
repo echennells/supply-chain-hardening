@@ -350,10 +350,15 @@ EOF
   # The same shell with the file sourced by hand.
   run env -i PATH="$PATH" HOME="$HOME" /bin/bash --norc --noprofile -c ". /etc/profile.d/supply-chain-hardening.sh; $VERIFY --verbose"
   echo "$output" | grep "env layer propagation" | grep -q "^OK "
+  # The apply's flag makes it N/A; the variable it sets, exported, does not.
+  run env -i PATH="$PATH" HOME="$HOME" /bin/bash --norc --noprofile -c "$VERIFY --verbose --apply-run"
+  echo "$output" | grep "env layer propagation" | grep -q "^N/A .*BYDESIGN"
+  run env -i PATH="$PATH" HOME="$HOME" SCV_APPLY_RUN=1 /bin/bash --norc --noprofile -c "$VERIFY --verbose"
+  echo "$output" | grep "env layer propagation" | grep -q "^GAP .*FUNCTIONAL"
 }
 
 @test "caller: the apply's own verifier run reports the env layer as N/A, not as this container's GAP" {
-  # tasks/verify.yml sets SCV_APPLY_RUN=1: ansible's process loads no startup
+  # tasks/verify.yml passes --apply-run: ansible's process loads no startup
   # file, so a GAP there would fail every verify_fail_on_gap (agent_host) apply.
   [ -f /var/log/ansible-run.log ] || skip "no apply log in this image"
   grep -q 'env layer propagation' /var/log/ansible-run.log

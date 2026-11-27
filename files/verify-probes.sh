@@ -80,21 +80,15 @@ scv_window_secs() {
   printf '%s' "$((scv__w * 3600))"
 }
 
-# scv_iso_dur_secs <duration>: an ISO 8601 duration of weeks, days, hours,
-# minutes and seconds (P2D, PT48H, P1DT12H, P1W) in seconds; nothing for any
-# other text, months and years included (their length varies).
-scv_iso_dur_secs() {
-  printf '%s\n' "$1" | awk '{
-    s = toupper($0)
-    if (s !~ /^P([0-9]+W)?([0-9]+D)?(T([0-9]+H)?([0-9]+M)?([0-9]+S)?)?$/ || s == "P" || s ~ /T$/) exit 1
-    s = substr(s, 2); tot = 0; tp = 0
-    while (s != "") {
-      if (substr(s, 1, 1) == "T") { tp = 1; s = substr(s, 2); continue }
-      match(s, /^[0-9]+/); v = substr(s, 1, RLENGTH) + 0; u = substr(s, RLENGTH + 1, 1); s = substr(s, RLENGTH + 2)
-      if (u == "W") tot += v * 604800; else if (u == "D") tot += v * 86400
-      else if (u == "H") tot += v * 3600; else if (u == "M" && tp) tot += v * 60; else if (u == "S") tot += v
-    }
-    printf "%d\n", tot }'
+# scv_pip_dur_secs <value>: a duration pip's uploaded-prior-to accepts, in
+# seconds; nothing for any other text. pip takes whole days only, P<n>D.
+# MEASURED (pip 26.1.2, 26.2.2, 26.3; Python 3.13.5): P2D, P0D, P10D and P08D
+# were accepted, from the flag, PIP_UPLOADED_PRIOR_TO and a pip.conf alike;
+# PT48H, P1W, P1DT12H, P2DT0H, PT0S, P0W, P1M, P1Y, P-2D, p2d and P2d made
+# every `pip install` exit 2, and so did every duration on pip 26.0.1.
+# In awk, not $(( )): a leading zero (P08D) is octal there.
+scv_pip_dur_secs() {
+  printf '%s\n' "$1" | awk '/^P[0-9]+D$/ { printf "%.0f\n", substr($0, 2, length($0) - 2) * 86400 }'
 }
 
 # Where both writers put gradle's init script, which is where gradle reads it:
@@ -2485,17 +2479,35 @@ scv_uv_span_secs() { # span
 # on this shell's PATH, the one the caller started the verifier with, and the
 # uv graded here, as "uv <v> at <path>", comma-separated. Each is asked its
 # version from /, bounded. Only absolute PATH entries: a relative one is the
-# working directory, which may be a checkout.
+# working directory, which may be a checkout. These are uvs a bare `uv` does
+# not run, so one under the working directory, or in a directory other
+# accounts can write, is not run ("The verifier test" in
+# docs/design-principles.md): it is listed as not run, which keeps the row
+# from OK.
 scv_uv_below() {
-  local scv__d scv__u scv__v scv__out="" scv__seen=" "
+  local scv__d scv__u scv__v scv__out="" scv__seen=" " scv__g scv__w scv__p scv__why
   local -a scv__ud
+  scv__g=$(command -v uv 2>/dev/null) || scv__g=""
+  scv__w=$(pwd -P 2>/dev/null) || scv__w=""
   IFS=: read -ra scv__ud <<< "${SCV_CALLER_PATH-$PATH}"
-  for scv__d in ${scv__ud[@]+"${scv__ud[@]}"} "$(dirname -- "$(command -v uv 2>/dev/null || echo .)")"; do
+  for scv__d in ${scv__ud[@]+"${scv__ud[@]}"} "$(dirname -- "${scv__g:-.}")"; do
     case "$scv__d" in /*) ;; *) continue ;; esac
     scv__u="${scv__d%/}/uv"
     [ -f "$scv__u" ] && [ -x "$scv__u" ] || continue
     case "$scv__seen" in *" $scv__u "*) continue ;; esac
     scv__seen="$scv__seen$scv__u "
+    scv__why=""
+    if [ -z "$scv__g" ] || [ ! "$scv__u" -ef "$scv__g" ]; then
+      scv__p=$(cd -P -- "$scv__d" 2>/dev/null && pwd -P) || scv__p=$scv__d
+      if [ -n "$scv__w" ] && [ "$scv__w" != / ]; then
+        case "$scv__p/" in "$scv__w"/*) scv__why="under the working directory" ;; esac
+      fi
+      case "$(ls -ld -- "$scv__p" 2>/dev/null)" in ????????w*) scv__why="other accounts can write its directory" ;; esac
+    fi
+    if [ -n "$scv__why" ]; then
+      scv__out="${scv__out:+$scv__out, }uv at $scv__u (not run: $scv__why)"
+      continue
+    fi
     scv__v=$(cd / && run_bounded 30 "$scv__u" --version 2>/dev/null | head -1 | awk '{print $2}')
     if [ -z "$scv__v" ] || ! scv_ver_ge "$scv__v" "$1"; then
       scv__out="${scv__out:+$scv__out, }uv ${scv__v:-of unknown version} at $scv__u"
@@ -3030,6 +3042,19 @@ fi
 # pip (native age gate)
 # ======================================================================
 
+# pip prints `config list` in override-order groups, so the LAST match is the
+# effective value (env beats file). Optional surrounding quotes are stripped.
+scv_pip_cutoff_in() { # stdin: pip config list -> the last uploaded-prior-to
+  sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" | tail -1
+}
+# scv_pip_refused <who> <value>: the detail for a pip that refuses its
+# uploaded-prior-to value (see scv_pip_dur_secs).
+scv_pip_refused() {
+  local scv__v=""
+  [ -z "${2:-}" ] || scv__v="='$2'"
+  printf '%s refuses uploaded-prior-to%s, so every pip install exits 2 and nothing is age-gated. pip takes an absolute instant ending in Z, or from pip 26.1 a whole number of days (P<n>D)' "$1" "$scv__v"
+}
+
 # --- pip native age gate  [PARSED] ---
 # A DIFFERENT AXIS from the uv rows above, and deliberately NOT nested
 # inside any `have pip || have pip3` gate: the whole point of this row is the
@@ -3061,7 +3086,21 @@ elif have python3 && scv_at_root python3 -m pip --version >/dev/null 2>&1; then
   # drops the user site, where `pip install --user` puts pip.
   pipvl=$(scv_at_root python3 -m pip --version 2>/dev/null | head -1)
   pipver=$(printf '%s\n' "$pipvl" | awk '{print $2}')
-  if ! scv_at_root python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
+  # A pip that knows the option and refuses the value it is given prints no
+  # help either: MEASURED (pip 26.0.1, 26.1.2, 26.3), `pip install --help` then
+  # exits 2 with nothing on stdout and "--uploaded-prior-to error: invalid
+  # value" on stderr, as every `pip install` does. That pip is not too old, so
+  # it gets its own GAP below, not the toolchain one.
+  piphelp=none
+  if scv_at_root python3 -m pip install --help 2>/dev/null | grep -q -- '--uploaded-prior-to'; then
+    piphelp=flag
+  elif scv_at_root python3 -m pip install --help 2>&1 >/dev/null | grep -q -- '--uploaded-prior-to error: invalid value'; then
+    piphelp=refused
+  fi
+  if [ "$piphelp" = refused ]; then
+    pipcut=$(scv_at_root python3 -m pip config list 2>/dev/null | scv_pip_cutoff_in)
+    row GAP PARSED "pip native age gate" "$(scv_pip_refused "pip $pipver" "$pipcut")"
+  elif [ "$piphelp" = none ]; then
     # Toolchain, not config: no re-run of the hardening teaches pip 24 the flag.
     # As a plain row() it was counted "fixable by re-running the hardening", so
     # --fail-on=config failed every stock-runner job that hardened pip.
@@ -3071,26 +3110,24 @@ elif have python3 && scv_at_root python3 -m pip --version >/dev/null 2>&1; then
     scv_toolchain_gap pip.native-age-gate PARSED "pip native age gate" \
       "pip $pipver does NOT implement --uploaded-prior-to (added in pip 26.0) - the key is deployed but inert, so \`python3 -m pip install\` is not age-gated on this interpreter$(scv_where pip "$pipdir")"
   else
-    # pip prints `config list` in override-order groups, so the LAST match is
-    # the effective value (env beats file). Strip optional surrounding quotes.
-    pipcut=$(scv_at_root python3 -m pip config list 2>/dev/null \
-      | sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" \
-      | tail -1)
+    pipcut=$(scv_at_root python3 -m pip config list 2>/dev/null | scv_pip_cutoff_in)
     case "$pipcut" in
       '')
         row GAP PARSED "pip native age gate" \
           "pip $pipver implements --uploaded-prior-to but reports no value - a release published minutes ago is installable via \`python3 -m pip\`" ;;
       P*)
-        # A duration. pip 26.0 refuses it with exit 2 (MEASURED, defaults/main.yml),
-        # and pip 26.1 reads it as a window that moves with the clock (stated in
-        # defaults/main.yml; not measured here). So it counts only on 26.1 and later.
-        pipsec=$(scv_iso_dur_secs "$pipcut"); pipwin=$(scv_window_secs)
+        # A duration. pip takes whole days only (P<n>D), from 26.1 on; every
+        # other form, and every duration on 26.0, makes each install exit 2
+        # (scv_pip_dur_secs has what was MEASURED). That it is a window that
+        # moves with the clock is pip's word, not measured here. A real pip that
+        # refuses its value was caught above, by its help; this is a pip that
+        # printed its help anyway.
+        pipsec=$(scv_pip_dur_secs "$pipcut"); pipwin=$(scv_window_secs)
         if ! scv_ver_ge "$pipver" 26.1; then
           row WEAK PARSED "pip native age gate" \
             "pip $pipver reports a RELATIVE uploaded-prior-to='$pipcut' - the P<n>D form needs pip 26.1+ and is a hard error on 26.0; the role deploys an absolute instant for that reason"
         elif [ -z "$pipsec" ]; then
-          row WEAK PARSED "pip native age gate" \
-            "pip $pipver reports uploaded-prior-to='$pipcut', a duration the verifier cannot read as a length (months and years vary), so the window is not confirmed"
+          row GAP PARSED "pip native age gate" "$(scv_pip_refused "pip $pipver" "$pipcut")"
         elif [ "$pipsec" -eq 0 ]; then
           row GAP PARSED "pip native age gate" \
             "pip $pipver reports uploaded-prior-to='$pipcut', a window of zero: it refuses nothing"
@@ -3157,9 +3194,6 @@ fi
 # and asked again by level only where that site file exists. With no pip module to
 # ask, a throwaway venv in the scratch directory answers (ensurepip is offline; it
 # installs from the wheel it carries).
-scv_pip_cutoff_in() { # stdin: pip config list -> the last uploaded-prior-to
-  sed -n "s/^.*\.uploaded-prior-to=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" | tail -1
-}
 scv_pip_venv_cutoff() { # <sys.prefix> -> the cutoff a pip in a venv would read, or nothing
   local c d
   if scv_at_root python3 -m pip --version >/dev/null 2>&1; then
@@ -3201,10 +3235,14 @@ if have python3 && { ! command -v requested >/dev/null 2>&1 || requested pip; };
           row OK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which implements uploaded-prior-to, and would read the cutoff $pvcut"
         fi ;;
       P*)
-        # A duration counts on pip 26.1 and later only (see pip native age gate).
-        pvsec=$(scv_iso_dur_secs "$pvcut"); pvwin=$(scv_window_secs)
-        if [ -z "$pvsec" ] || ! scv_ver_ge "$pvseed" 26.1; then
-          row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut', not an absolute instant ending in Z, or a duration it reads (see pip native age gate)"
+        # Whole days (P<n>D) on pip 26.1 and later only; any other duration
+        # makes that pip refuse every install (see scv_pip_dur_secs). Below
+        # 26.1 it stays WEAK, as before.
+        pvsec=$(scv_pip_dur_secs "$pvcut"); pvwin=$(scv_window_secs)
+        if ! scv_ver_ge "$pvseed" 26.1; then
+          row WEAK PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, which would read uploaded-prior-to='$pvcut', not an absolute instant ending in Z; a duration needs pip 26.1 or later (see pip native age gate)"
+        elif [ -z "$pvsec" ]; then
+          row GAP PARSED "pip venv age gate" "$(scv_pip_refused "python3 -m venv seeds pip $pvseed, which" "$pvcut")"
         elif [ "$pvsec" -eq 0 ]; then
           row GAP PARSED "pip venv age gate" "python3 -m venv seeds pip $pvseed, and the uploaded-prior-to it would read, '$pvcut', is a window of zero: it refuses nothing"
         elif [ -n "$pvwin" ] && [ "$pvsec" -lt "$pvwin" ]; then

@@ -130,11 +130,27 @@ $(block "$VERIFY_SH")"
   grep -qx "scv_profile_env_row $dest" "$ROLE_TPL"
   grep -qx 'scv_jvm_home_row' "$ROLE_TPL"
   grep -qx 'scv_jvm_home_row' "$VERIFY_SH"
-  # The apply's own run sets SCV_APPLY_RUN on the command that runs the verifier.
-  awk '/ansible.builtin.command: \/usr\/local\/bin\/supply-chain-verify/ { c = 1; next }
-       c && /^    SCV_APPLY_RUN: "1"$/ { found = 1 }
-       c && /^- name:/ { c = 0 }
-       END { exit !found }' "$ROOT/tasks/verify.yml"
+  # The apply's own run passes --apply-run, and no longer sets the variable.
+  grep -qx '  ansible.builtin.command: /usr/local/bin/supply-chain-verify --apply-run' "$ROOT/tasks/verify.yml"
+  ! grep -n 'SCV_APPLY_RUN' "$ROOT/tasks/verify.yml" || false
+}
+
+@test "reach: only the role's --apply-run sets SCV_APPLY_RUN; one exported by the caller does nothing" {
+  # The role's reset line and argument loop, run as they are in the template
+  # (the rest of the preamble is Jinja).
+  local code
+  [ "$(grep -cx 'SCV_APPLY_RUN=0' "$ROLE_TPL")" = 1 ]
+  [ "$(grep -n '^SCV_APPLY_RUN=0$' "$ROLE_TPL" | cut -d: -f1)" -lt "$(grep -n '^for arg in "\$@"; do$' "$ROLE_TPL" | cut -d: -f1)" ]
+  code="$(grep -x 'SCV_APPLY_RUN=0' "$ROLE_TPL")
+$(sed -n '/^for arg in "\$@"; do$/,/^done$/p' "$ROLE_TPL")
+echo \"apply=\$SCV_APPLY_RUN\""
+  run env SCV_APPLY_RUN=1 /bin/bash --norc --noprofile -c "usage() { :; }; $code" _ --verbose
+  [ "$output" = "apply=0" ]
+  # Control: the flag.
+  run env -u SCV_APPLY_RUN /bin/bash --norc --noprofile -c "usage() { :; }; $code" _ --verbose --apply-run
+  [ "$output" = "apply=1" ]
+  # The ci surface clears it too, before the block reads it.
+  [ "$(grep -n '^SCV_APPLY_RUN=0$' "$VERIFY_SH" | cut -d: -f1)" -lt "$(grep -n '^# >>> shell reachability$' "$VERIFY_SH" | cut -d: -f1)" ]
 }
 
 # ------------------------------------------------------------ env layer (ci) --
@@ -250,7 +266,7 @@ role_env() { # [VAR=value ...] -- <profile file>
   local f="$BATS_TEST_TMPDIR/profile.sh"
   printf 'export UV_LINK_MODE=copy\n' > "$f"
   run role_env SCV_APPLY_RUN=1 -- "$f"
-  [[ "$output" == "N/A|-|env layer propagation|this is the apply's own run"* ]]
+  [[ "$output" == "N/A|BYDESIGN|env layer propagation|this is the apply's own run"* ]]
   # Control: the same shell without the marker.
   run role_env -- "$f"
   [[ "$output" == "GAP|FUNCTIONAL|"* ]]
@@ -290,10 +306,11 @@ uv_stub() { # <dir> <version> [span]
   run reach_verify "$TEST_HOME/.local/bin:$BARE_PATH"
   [ -n "$(row_of "uv age gate")" ]
   [ -z "$(row_of "uv on this shell's PATH")" ]
-  # The role's apply run leaves these rows out.
+  # The role's apply run leaves these rows out (--apply-run, the test above);
+  # the variable exported by a caller does not.
   run reach_verify SCV_APPLY_RUN=1 "$BARE_PATH"
   [ -n "$(row_of "uv age gate")" ]
-  [ -z "$(row_of "uv on this shell's PATH")" ]
+  [[ "$(row_of "uv on this shell's PATH")" == "WEAK"* ]]
 }
 
 @test "reach: the row does not stand in for the tool's own rows in the coverage check" {
@@ -327,6 +344,13 @@ uv_stub() { # <dir> <version> [span]
   [ "$output" = "$sys/poetry" ]
   run reach_verify "$BARE_PATH:$sys"
   [[ "$(row_of "poetry on this shell's PATH")" == "WEAK   PARSED      poetry on this shell's PATH"*"the poetry rows grade $TEST_HOME/.local/bin/poetry, from a directory the verifier added to PATH, but a bare \`poetry\` here runs $sys/poetry"* ]]
+  # A symlink to the copy this shell runs is the same file: no row.
+  rm -f "$TEST_HOME/.local/bin/poetry"
+  ln -s "$sys/poetry" "$TEST_HOME/.local/bin/poetry"
+  [ "$TEST_HOME/.local/bin/poetry" -ef "$sys/poetry" ]
+  run reach_verify "$BARE_PATH:$sys"
+  [ -n "$(row_of "poetry publish-age gate")" ]
+  [ -z "$(row_of "poetry on this shell's PATH")" ]
   # Control: no uv to look for in ~/.local/bin, so nothing is added and
   # poetry resolves as in this shell.
   rm -f "$TEST_HOME/.local/bin/uv"
@@ -362,7 +386,7 @@ echo \"me:x:$(id -u):$(id -g)::$1:/bin/bash\""
   getent_home "$pw"
   stub_bin gradle 'exit 0'
   run reach_verify "$BARE_PATH"
-  [[ "$(row_of "env JVM user home")" == "WEAK   PARSED      env JVM user home"*"HOME is $TEST_HOME, but the JVM takes user.home from the passwd entry of uid $(id -u), $pw, so the gradle files under HOME are not read: gradle reads $pw/.gradle"* ]]
+  [[ "$(row_of "env JVM user home")" == "WEAK   PARSED      env JVM user home"*"HOME is $TEST_HOME, but the JVM takes user.home from the passwd entry of uid $(id -u), $pw: gradle reads $pw/.gradle, not $TEST_HOME/.gradle (GRADLE_USER_HOME would move it)" ]]
   # Control: GRADLE_USER_HOME set, so gradle reads that.
   run reach_verify GRADLE_USER_HOME="$TEST_HOME/.gradle" "$BARE_PATH"
   [ -z "$(row_of "env JVM user home")" ]
@@ -386,7 +410,7 @@ echo \"me:x:$(id -u):$(id -g)::$1:/bin/bash\""
   [ -z "$(row_of "env JVM user home")" ]
   stub_bin mvn 'exit 0'
   run reach_verify GRADLE_USER_HOME="$TEST_HOME/.gradle" "$BARE_PATH"
-  [[ "$(row_of "env JVM user home")" == "WEAK"*"the maven files under HOME are not read: maven most likely reads $pw/.m2 (not measured)"* ]]
+  [[ "$(row_of "env JVM user home")" == "WEAK"*"$pw: maven most likely reads $pw/.m2, not $TEST_HOME/.m2 (not measured)" ]]
   run --separate-stderr reach_verify GRADLE_USER_HOME="$TEST_HOME/.gradle" "$BARE_PATH" --json
   python3 -c '
 import json, sys
@@ -406,7 +430,27 @@ assert "env" not in d["result"]["tools_seen"], d["result"]
   stub_bin getent 'exit 2'
   stub_bin gradle 'exit 0'
   run reach_verify "$BARE_PATH"
-  [[ "$(row_of "env JVM user home")" == "WEAK"*"passwd entry of uid $(id -u), $pw,"* ]]
+  [[ "$(row_of "env JVM user home")" == "WEAK"*"passwd entry of uid $(id -u), $pw: gradle reads $pw/.gradle,"* ]]
+}
+
+@test "JVM home: a tool the record did not ask for is left out, as its other rows are N/A" {
+  local pw="$BATS_TEST_TMPDIR/pwhome"
+  mkdir -p "$pw"
+  getent_home "$pw"
+  stub_bin gradle 'exit 0'
+  stub_bin mvn 'exit 0'
+  forge ecosystems_hardened=npm release_age_hours=48
+  run reach_verify "$BARE_PATH"
+  [[ "$(row_of "gradle HTTPS-only repos")" == "N/A    BYDESIGN    gradle HTTPS-only repos"* ]]
+  [ -z "$(row_of "env JVM user home")" ]
+  # Control: the same host with gradle in the record; maven still left out.
+  forge ecosystems_hardened=npm,gradle release_age_hours=48
+  run reach_verify "$BARE_PATH"
+  [[ "$(row_of "env JVM user home")" == "WEAK"*"gradle reads $pw/.gradle, not $TEST_HOME/.gradle (GRADLE_USER_HOME would move it)" ]]
+  [[ "$output" != *"maven most likely"* ]]
+  forge ecosystems_hardened=maven release_age_hours=48
+  run reach_verify "$BARE_PATH"
+  [[ "$(row_of "env JVM user home")" == "WEAK"*"$pw: maven most likely reads $pw/.m2, not $TEST_HOME/.m2 (not measured)" ]]
 }
 
 @test "gradle: off PATH, an init script counts where gradle reads it (the passwd home), not under a HOME it does not read" {
@@ -495,14 +539,17 @@ old_tools() { # <dir>
 # --------------------------------------------- versions that read a relative --
 
 # A python3 whose pip is <version>, reports uploaded-prior-to=<value>, and
-# whose ensurepip seeds the same pip. [no-flag] for a pip without the option.
-pip_stub() { # <version> <value> [no-flag] [pip dir]
-  local help="  --uploaded-prior-to <when>"
-  [ "${3:-}" != no-flag ] || help="  --only-binary <format_control>"
+# whose ensurepip seeds the same pip. [no-flag] for a pip without the option;
+# [refused] for one that refuses the value, which fails its help as a real pip
+# does (MEASURED, pip 26.0.1 to 26.3: exit 2, nothing on stdout).
+pip_stub() { # <version> <value> [no-flag|refused] [pip dir]
+  local help="echo '  --uploaded-prior-to <when>'"
+  [ "${3:-}" != no-flag ] || help="echo '  --only-binary <format_control>'"
+  [ "${3:-}" != refused ] || help="echo \"--uploaded-prior-to error: invalid value: '$2'\" >&2; exit 2"
   stub_bin python3 "case \"\$*\" in
   *'import ensurepip'*) echo $1; echo /nonexistent-prefix ;;
   '-m pip --version') echo 'pip $1 from ${4:-/nonexistent}/pip (python 3.12)' ;;
-  '-m pip install --help') echo '$help' ;;
+  '-m pip install --help') $help ;;
   '-m pip config list'*) echo \"global.uploaded-prior-to='$2'\" ;;
   *) exit 1 ;;
 esac"
@@ -518,10 +565,7 @@ esac"
   pip_stub 26.0.1 P3D
   run reach_verify "$BARE_PATH"
   [[ "$(row_of "pip native age gate")" == "WEAK   PARSED      pip native age gate"*"the P<n>D form needs pip 26.1+"* ]]
-  [[ "$(row_of "pip venv age gate")" == "WEAK   PARSED      pip venv age gate"*"not an absolute instant ending in Z, or a duration it reads"* ]]
-  pip_stub 26.2.2 PT48H
-  run reach_verify "$BARE_PATH"
-  [[ "$(row_of "pip native age gate")" == "OK"*"(48h)"* ]]
+  [[ "$(row_of "pip venv age gate")" == "WEAK   PARSED      pip venv age gate"*"not an absolute instant ending in Z; a duration needs pip 26.1 or later"* ]]
   pip_stub 26.2.2 P0D
   run reach_verify "$BARE_PATH"
   [[ "$(row_of "pip native age gate")" == "GAP    PARSED      pip native age gate"*"a window of zero"* ]]
@@ -529,10 +573,43 @@ esac"
   pip_stub 26.2.2 P1D
   run reach_verify "$BARE_PATH"
   [[ "$(row_of "pip native age gate")" == "WEAK"*"(24h), shorter than the 48h promised here"* ]]
-  # A form it cannot read as a length stays WEAK.
-  pip_stub 26.2.2 P1M
+  # A leading zero is still days (pip 26.1.2 and 26.3 accept P08D, MEASURED),
+  # not octal.
+  pip_stub 26.2.2 P08D
   run reach_verify "$BARE_PATH"
-  [[ "$(row_of "pip native age gate")" == "WEAK"*"'P1M', a duration the verifier cannot read as a length"* ]]
+  [[ "$(row_of "pip native age gate")" == "OK"*"'P08D' (192h)"* ]]
+}
+
+@test "pip: on 26.1 and later a duration that is not whole days is refused, a GAP, never OK" {
+  # MEASURED (pip 26.1.2, 26.2.2, 26.3): PT48H, P1W, P1DT12H and P1M make every
+  # pip install exit 2, while `pip config list` still prints them.
+  local v
+  forge ecosystems_hardened=pip release_age_hours=48
+  for v in PT48H P1W P1DT12H P1M; do
+    pip_stub 26.2.2 "$v"
+    run reach_verify "$BARE_PATH"
+    [[ "$(row_of "pip native age gate")" == "GAP    PARSED      pip native age gate"*"pip 26.2.2 refuses uploaded-prior-to='$v', so every pip install exits 2 and nothing is age-gated."* ]]
+    [[ "$(row_of "pip venv age gate")" == "GAP    PARSED      pip venv age gate"*"python3 -m venv seeds pip 26.2.2, which refuses uploaded-prior-to='$v', so every pip install exits 2"* ]]
+  done
+  # Control: the whole-days form of the same 48h.
+  pip_stub 26.2.2 P2D
+  run reach_verify "$BARE_PATH"
+  [[ "$(row_of "pip native age gate")" == "OK"*"'P2D' (48h)"* ]]
+  [[ "$(row_of "pip venv age gate")" == "OK"*"'P2D' (48h)"* ]]
+}
+
+@test "pip: a pip whose help fails over its value is a GAP for the value, not one for a pip too old" {
+  # A real pip refusing its value fails `pip install --help` too, so the row
+  # never got to the value: it said pip lacked the option.
+  forge ecosystems_hardened=pip release_age_hours=48
+  pip_stub 26.3 PT48H refused
+  run reach_verify "$BARE_PATH"
+  [[ "$(row_of "pip native age gate")" == "GAP    PARSED      pip native age gate"*"pip 26.3 refuses uploaded-prior-to='PT48H', so every pip install exits 2"* ]]
+  [[ "$output" != *"does NOT implement --uploaded-prior-to"* ]]
+  # Control: a pip whose help has no such option and prints no error.
+  pip_stub 24.0 "" no-flag
+  run reach_verify "$BARE_PATH"
+  [[ "$(row_of "pip native age gate")" == "GAP    PARSED      pip native age gate"*"pip 24.0 does NOT implement --uploaded-prior-to"* ]]
 }
 
 @test "pip: too old for the option, the GAP says where pip is when this account cannot change it" {
@@ -571,6 +648,29 @@ esac"
   uv_stub "$TEST_BIN" 0.13.9 1w
   run reach_verify "$BARE_PATH"
   [[ "$(row_of "uv age gate")" == "OK"*"(168h)"* ]]
+}
+
+@test "uv: a uv under the working directory, or in a directory others can write, is not run; it keeps the span from OK" {
+  # A bare `uv` runs $TEST_BIN/uv. The other one sits later on PATH, and
+  # leaves a mark when it runs.
+  local w="$BATS_TEST_TMPDIR/checkout"
+  forge ecosystems_hardened=uv release_age_hours=48
+  uv_stub "$TEST_BIN" 0.13.9 48h
+  mkdir -p "$w/.venv/bin"
+  printf '#!/bin/bash\n: > %q\necho "uv 0.13.9"\n' "$w/ran" > "$w/.venv/bin/uv"
+  chmod 0755 "$w/.venv/bin/uv"
+  run agent_sh "$BARE_PATH:$w/.venv/bin" 'cd "$1" && exec bash "$0" --emit=plain' "$VERIFY_SH" "$w"
+  [[ "$(row_of "uv age gate")" == "WEAK   PARSED      uv age gate"*"but uv at $w/.venv/bin/uv (not run: under the working directory) is on this shell's PATH"* ]]
+  [ ! -e "$w/ran" ]
+  # Control: the same PATH from /, where it is run, and 0.13.9 reads a span.
+  run agent_sh "$BARE_PATH:$w/.venv/bin" 'cd / && exec bash "$0" --emit=plain' "$VERIFY_SH"
+  [[ "$(row_of "uv age gate")" == "OK"*"every uv on this shell's PATH is 0.9.17 or newer"* ]]
+  [ -e "$w/ran" ]
+  rm -f "$w/ran"
+  chmod o+w "$w/.venv/bin"
+  run agent_sh "$BARE_PATH:$w/.venv/bin" 'cd / && exec bash "$0" --emit=plain' "$VERIFY_SH"
+  [[ "$(row_of "uv age gate")" == "WEAK"*"but uv at $w/.venv/bin/uv (not run: other accounts can write its directory)"* ]]
+  [ ! -e "$w/ran" ]
 }
 
 # ------------------------------------------------------- home-only re-apply --

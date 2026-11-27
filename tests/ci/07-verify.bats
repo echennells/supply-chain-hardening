@@ -1204,7 +1204,12 @@ ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $
   venv_pip P2D
   run verify -- --emit=plain
   [[ "$output" == *"OK     PARSED      pip venv age gate"*"'P2D' (48h)"* ]] || { echo "$output" | grep 'pip '; false; }
+  # Months are refused (pip 26.1.2 and 26.3 exit 2 on P1M, MEASURED).
   venv_pip P1M
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"*"refuses uploaded-prior-to='P1M'"* ]] || { echo "$output" | grep 'pip '; false; }
+  # A value with no Z stays WEAK, as before.
+  venv_pip 2026-01-01T00:00:00
   run verify -- --emit=plain
   [[ "$output" == *"WEAK   PARSED      pip venv age gate"*"not an absolute instant"* ]] || { echo "$output" | grep 'pip '; false; }
 }

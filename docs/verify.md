@@ -106,8 +106,8 @@ agent runs its commands, and read these rows:
 | Row | What it says |
 |---|---|
 | `env layer propagation` | On `role`: whether the variables `/etc/profile.d/supply-chain-hardening.sh` exports are set here. `OK` all, `WEAK` some (a shell that got `/etc/environment` only, or a shell state saved before the last apply), `GAP` none: this shell loaded no startup file. The config files still apply; the variables do not. On `ci`: the variables in harden.sh's env file, as before, and `N/A BYDESIGN` after `harden.sh --home-only`, which writes no env file. |
-| `env JVM user home` | `WEAK` when gradle (with `GRADLE_USER_HOME` unset) or maven is installed and `HOME` is not the passwd home of this uid. The JVM takes `user.home` from the passwd entry, so they read that home, not files under `HOME` (measured for gradle; inferred for maven). No row otherwise. |
-| `<tool> on this shell's PATH` | `WEAK` when the rows for a tool grade a binary a bare call here does not run: the verifier also looks in a few fixed places (`~/.local/bin`, `~/.bun/bin`, `/usr/local/go/bin`, ...), and found it only there, or a copy there now comes first. No row when `PATH` finds the same file. |
+| `env JVM user home` | `WEAK` when gradle (with `GRADLE_USER_HOME` unset) or maven is installed, this run checks it, and `HOME` is not the passwd home of this uid. The JVM takes `user.home` from the passwd entry, so they read that home, not files under `HOME` (measured for gradle; inferred for maven). No row otherwise. |
+| `<tool> on this shell's PATH` | `WEAK` when the rows for a tool grade a binary a bare call here does not run: the verifier also looks in a few fixed places (`~/.local/bin`, `~/.bun/bin`, `/usr/local/go/bin`, ...), and found it only there, or a copy there now comes first. No row when `PATH` finds the same file, or a symlink to it. |
 
 A tool too old for a setting is a `GAP` as before (npm, pip, yarn, pnpm, poetry);
 its detail now also says where the tool is when this account cannot change it:
@@ -115,13 +115,20 @@ its detail now also says where the tool is when this account cannot change it:
 
 A uv `exclude-newer` span (`"48 hours"`) is `OK` when it covers the window and
 every uv on this `PATH` is 0.9.17 or newer: older ones reject the whole file. A
-pip `uploaded-prior-to` duration (`P2D`) is `OK` on pip 26.1 or newer, and
-`WEAK` below that, as before.
+uv under the working directory, or in a directory other accounts can write, is
+not run to ask; it keeps the row from `OK`.
+
+A pip `uploaded-prior-to` duration is `OK` only as whole days (`P2D`) on pip
+26.1 or newer, and `WEAK` below 26.1, as before. Any other duration (`PT48H`,
+`P1W`) is a `GAP` on 26.1 and later: MEASURED on pip 26.1.2, 26.2.2 and 26.3,
+pip refuses it and every `pip install` exits 2. A pip that refuses its value
+gets that `GAP` too, not the one for a pip too old to have the setting.
 
 The role's own run at the end of an apply is ansible's process, not anyone's
-shell, so it sets `SCV_APPLY_RUN=1`: the env layer row is `N/A` there and the
-`PATH` rows are left out. After `harden.sh --home-only`, the fixes the rows give
-say to re-run it in that mode.
+shell, so it passes `--apply-run`: the env layer row is `N/A` there and the
+`PATH` rows are left out. It is a flag and not a variable, so nothing left in
+a shell's environment does the same. After `harden.sh --home-only`, the fixes
+the rows give say to re-run it in that mode.
 
 ## Don't run it on a host you suspect is compromised
 

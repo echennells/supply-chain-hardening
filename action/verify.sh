@@ -51,6 +51,9 @@ set -u
 # command finds here. tests/ci/16-verify-reach.bats checks both preambles.
 SCV_CALLER_PATH=${PATH-}
 SCV_CALLER_HOME=${HOME-}
+# Set only by the role's --apply-run ("shell reachability"); this surface has
+# no apply run, and an exported one changes nothing here.
+SCV_APPLY_RUN=0
 
 # ---- surface identity (the preamble half of the preamble/probes contract) ----
 # Declared by both preambles even where a given probe body does not read them
@@ -876,9 +879,11 @@ fi
 #
 # They compare against SCV_CALLER_PATH and SCV_CALLER_HOME, saved at the top of
 # this file: go discovery and the shared body's discover() prepend directories
-# to PATH later. The role's run at the end of an apply sets SCV_APPLY_RUN=1
-# (tasks/verify.yml). That run is ansible's own process, not a shell anyone
-# works in, so the rows about this shell are left out of it.
+# to PATH later. The role's run at the end of an apply passes --apply-run
+# (tasks/verify.yml), which sets SCV_APPLY_RUN=1. That run is ansible's own
+# process, not a shell anyone works in, so the rows about this shell are left
+# out of it. A flag and not a variable: both preambles set SCV_APPLY_RUN=0
+# first, so one left exported in a shell rc cannot hide these rows.
 
 # scv_passwd_home: the home the passwd database gives uid $(id -u), looked up by
 # uid, never by $USER or $LOGNAME, which a relocated-HOME container can set to
@@ -909,22 +914,28 @@ scv_same_dir() {
 # the passwd entry, not from HOME. MEASURED for gradle 8.14.3 on openjdk-21
 # (tasks/gradle.yml): with HOME relocated it read <passwd home>/.gradle. That
 # maven reads <passwd home>/.m2 the same way is inferred, not measured. So where
-# HOME is not the passwd home, their files under HOME are not read: WEAK, naming
-# both homes. A gradle with GRADLE_USER_HOME set reads that instead and is left
-# out. No row in any other case: a mismatch alone says nothing (every tests/ci
-# test relocates HOME), and the row would be noise.
+# HOME is not the passwd home, they do not read their files under HOME: WEAK,
+# naming both homes. A gradle with GRADLE_USER_HOME set reads that instead and
+# is left out, and so is a tool this run was not asked to check (requested, as
+# in scv_reach_row). No row in any other case: a mismatch alone says nothing
+# (every tests/ci test relocates HOME), and the row would be noise.
 scv_jvm_home_row() {
-  local scv__ph scv__t="" scv__d=""
-  if have gradle && [ -z "${GRADLE_USER_HOME:-}" ]; then scv__t=gradle; fi
-  if have mvn; then scv__t="${scv__t:+$scv__t and }maven"; fi
-  [ -n "$scv__t" ] || return 0
+  local scv__ph scv__h scv__d=""
+  have gradle || have mvn || return 0
   scv__ph=$(scv_passwd_home)
-  [ -n "$scv__ph" ] && [ -n "${SCV_CALLER_HOME:-}" ] || return 0
-  scv_same_dir "$scv__ph" "$SCV_CALLER_HOME" && return 0
-  case "$scv__t" in *gradle*) scv__d="gradle reads ${scv__ph%/}/.gradle (GRADLE_USER_HOME would move it)" ;; esac
-  case "$scv__t" in *maven*) scv__d="${scv__d:+$scv__d; }maven most likely reads ${scv__ph%/}/.m2 (not measured)" ;; esac
+  scv__h=${SCV_CALLER_HOME:-}
+  [ -n "$scv__ph" ] && [ -n "$scv__h" ] || return 0
+  scv_same_dir "$scv__ph" "$scv__h" && return 0
+  if have gradle && [ -z "${GRADLE_USER_HOME:-}" ] \
+     && { ! command -v requested >/dev/null 2>&1 || requested gradle; }; then
+    scv__d="gradle reads ${scv__ph%/}/.gradle, not ${scv__h%/}/.gradle (GRADLE_USER_HOME would move it)"
+  fi
+  if have mvn && { ! command -v requested >/dev/null 2>&1 || requested maven; }; then
+    scv__d="${scv__d:+$scv__d; }maven most likely reads ${scv__ph%/}/.m2, not ${scv__h%/}/.m2 (not measured)"
+  fi
+  [ -n "$scv__d" ] || return 0
   row WEAK PARSED "env JVM user home" \
-    "HOME is $SCV_CALLER_HOME, but the JVM takes user.home from the passwd entry of uid $(id -u), $scv__ph, so the $scv__t files under HOME are not read: $scv__d"
+    "HOME is $scv__h, but the JVM takes user.home from the passwd entry of uid $(id -u), $scv__ph: $scv__d"
 }
 
 # scv_tool_file <command>: the file a bare <command> runs or, when that is one
@@ -990,7 +1001,7 @@ scv_env_presence() {
 # MEASURED on the first agent VM above: no variable of the env layer was set.
 scv_profile_env_row() {
   if [ "${SCV_APPLY_RUN:-}" = 1 ]; then
-    row "N/A" - "env layer propagation" \
+    row "N/A" BYDESIGN "env layer propagation" \
       "this is the apply's own run, in ansible's environment, which loads no startup file. Run supply-chain-verify from the shell you want checked"
     return 0
   fi
@@ -1017,8 +1028,8 @@ scv_profile_env_row() {
 # That happens only where the verifier added a directory to PATH (go discovery,
 # and discover() and the cargo lookup in files/verify-probes.sh): the tool is
 # then found only there, or a copy there now comes first. No row when PATH is
-# as the caller left it, when both resolve to the same file, or for an
-# ecosystem this run was not asked to check.
+# as the caller left it, when both name the same file (a symlink to it
+# included: test -ef), or for an ecosystem this run was not asked to check.
 scv_reach_row() {
   local scv__now scv__was
   [ "${SCV_APPLY_RUN:-}" = 1 ] && return 0
@@ -1028,6 +1039,7 @@ scv_reach_row() {
   scv__was=$(PATH=$SCV_CALLER_PATH; command -v "$1" 2>/dev/null) || scv__was=""
   case "$scv__was" in /*) ;; *) scv__was="" ;; esac
   [ "$scv__now" = "$scv__was" ] && return 0
+  [ -n "$scv__was" ] && [ "$scv__now" -ef "$scv__was" ] && return 0
   if command -v requested >/dev/null 2>&1 && ! requested "$3"; then return 0; fi
   if [ -z "$scv__was" ]; then
     row WEAK PARSED "$2 on this shell's PATH" \
