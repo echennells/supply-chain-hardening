@@ -93,7 +93,7 @@ role_report() { # <rows> [JSON=1 ...]
   # protection started with any other word would put that word in tools_seen.
   local tools=" npm npx pnpm yarn bun bunx deno uv pip pip3 python poetry go cargo composer bundler maven gradle nuget npq Socket "
   local run=" env hardening ci "
-  local vars=' $w $tok $ngp $uvpr $1 $4 '
+  local vars=' $w $tok $ngp $uvpr $1 $2 $4 '
   local out w bad=""
   out=$(python3 "${BATS_TEST_DIRNAME}/protections.py" "$ROOT/templates/verify.sh.j2" "$ROOT/files/verify-probes.sh" "$VERIFY_SH")
   [ "$(wc -l <<<"$out")" -gt 400 ]   # it found the probes, not just a few lines
@@ -103,9 +103,25 @@ role_report() { # <rows> [JSON=1 ...]
   [ -z "$bad" ] || { echo "protections starting with a word that is not a tool: $bad"; return 1; }
   # The variable ones: $w is the wrapper loop over tool names, $tok the
   # "<token> coverage" row, $ngp and $uvpr loops over nuget and uv names,
-  # $1 and $4 the helpers that pass a caller's protection on.
+  # $1 and $4 the helpers that pass a caller's protection on, and $2 the
+  # "<tool> on this shell's PATH" row, whose callers name the tool.
   grep -q "^SCV_WRAPPERS='npm pip pip3 bun bunx composer deno cargo'$" "$ROOT/templates/verify.sh.j2"
   grep -q 'row GAP PRESENT "$tok coverage"' "$VERIFY_SH"
+  # Every $2 row is scv_reach_row's, and every word its callers pass is a tool.
+  local f ln
+  while IFS=$'\t' read -r w where; do
+    [ "$w" = '$2' ] || continue
+    f=${where%:*}; ln=${where##*:}
+    sed -n "${ln}p" "$f" | grep -qF '"$2 on this shell'"'"'s PATH"' || { echo "a \$2 protection that is not scv_reach_row's: $where"; return 1; }
+  done <<<"$out"
+  local labels l n=0
+  labels=$(awk '/^  for scv__rt in /,/; do$/' "$ROOT/files/verify-probes.sh" | grep -oE '[a-z0-9]+:[a-z]+:[a-z]+' | cut -d: -f2)
+  labels="$labels $(sed -n 's/^if type scv_reach_row .*; then scv_reach_row [a-z0-9]* \([a-z]*\) [a-z]*; fi$/\1/p' "$ROOT/files/verify-probes.sh")"
+  for l in $labels; do
+    n=$((n + 1))
+    case "$tools" in *" $l "*) ;; *) echo "scv_reach_row label '$l' is not a tool"; return 1 ;; esac
+  done
+  [ "$n" -ge 15 ]
 }
 
 @test "json report (role): the result counts every status, adds up to the rows, and names the tools judged" {
