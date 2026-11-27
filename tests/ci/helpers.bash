@@ -59,6 +59,23 @@ common_setup() {
   # shellcheck disable=SC2034
   PNPM_DIR="${TEST_HOME}/.config/pnpm"
   [ "$(uname -s)" != Darwin ] || PNPM_DIR="${TEST_HOME}/Library/Preferences/pnpm"
+  # A getent whose passwd entry for this uid names TEST_HOME as its home, for a normal
+  # run. Maven reads <user.home>/.m2/settings.xml and the JVM takes user.home from the
+  # passwd entry, not $HOME, so harden.sh writes settings.xml to the passwd home it
+  # looks up by uid (getent first). With nothing in the way that was this account's real
+  # home, from inside a sandboxed test. Unlike gradle (GRADLE_USER_HOME, below), Maven
+  # has no variable that moves it. harden() puts this directory after TEST_BIN, so a
+  # test's own `stub_bin getent` wins; any other question goes to the real getent.
+  PASSWD_BIN="${BATS_TEST_TMPDIR}/passwd-bin"
+  mkdir -p "$PASSWD_BIN"
+  local real_getent
+  {
+    printf '#!/bin/sh\n# tests/ci (helpers.bash): the passwd home of this uid is TEST_HOME\n'
+    printf 'if [ "$#" -eq 2 ] && [ "$1" = passwd ] && [ "$2" = "$(id -u)" ]; then\n'
+    printf '  echo "u:x:$2:$(id -g)::%s:/bin/sh"; exit 0\nfi\n' "$TEST_HOME"
+    if real_getent=$(type -P getent 2>/dev/null); then printf 'exec %q "$@"\n' "$real_getent"; else printf 'exit 2\n'; fi
+  } > "$PASSWD_BIN/getent"
+  chmod +x "$PASSWD_BIN/getent"
 }
 
 # harden [VAR=value ...] [-- script args ...]
@@ -82,9 +99,10 @@ harden() {
   # script into the developer's REAL ~/.gradle from inside a sandboxed test.
   # GRADLE_USER_HOME is the only lever that moves it, which is exactly why
   # harden_gradle exports it. Any sandbox that relocates HOME has to set this
-  # too.
+  # too. Maven's settings.xml goes to the passwd home as well, and nothing but
+  # the passwd entry moves it: PASSWD_BIN's getent names TEST_HOME (common_setup).
   env -i \
-    PATH="${TEST_BIN}:${PATH}" \
+    PATH="${TEST_BIN}:${PASSWD_BIN}:${PATH}" \
     HOME="$TEST_HOME" \
     GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
     TMPDIR="$TEST_TMP" \

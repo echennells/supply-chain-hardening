@@ -37,7 +37,7 @@ harden_nosudo() {
     if [[ $sep -eq 1 ]]; then args+=("$a"); else envs+=("$a"); fi
   done
   shield_host_tools "${envs[@]}"
-  env -i PATH="${NOSUDO}:${TEST_BIN}:${PATH}" HOME="$TEST_HOME" \
+  env -i PATH="${NOSUDO}:${TEST_BIN}:${PASSWD_BIN}:${PATH}" HOME="$TEST_HOME" \
     GRADLE_USER_HOME="${TEST_HOME}/.gradle" TMPDIR="$TEST_TMP" WRITE_ETC=false \
     "${envs[@]}" bash "$HARDEN_SH" "${args[@]}"
 }
@@ -389,7 +389,7 @@ weak_sudo() { stub_bin sudo '[ "${1:-}" != -n ] || shift; exec "$@"'; }
     cp "$ro/$t" "${BATS_TEST_TMPDIR}/$t.before"
     rm -f "${TEST_BIN}/$t"
     chmod 555 "$ro"
-    run env -i PATH="${TEST_BIN}:${ro}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+    run env -i PATH="${TEST_BIN}:${ro}:${PASSWD_BIN}:${PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
       WRITE_ETC=false ECOSYSTEMS="$t,maven" bash "$HARDEN_SH" --emit=plain
     chmod 755 "$ro"
     [ "$status" -eq 0 ] || { echo "$t: $output"; false; }

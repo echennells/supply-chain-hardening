@@ -248,7 +248,12 @@ ucf_path() {
     bun)       printf '%s\n' "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" ;;
     bundler)   printf '%s\n' "$HOME/.bundle/config" ;;
     cargo)     printf '%s\n' "${CARGO_HOME:-$HOME/.cargo}/config.toml" ;;
-    maven)     printf '%s\n' "$HOME/.m2/settings.xml" ;;
+    maven)
+      # In the home the JVM reads it from (ucf_jvm_home), so a preflight judges the
+      # file the apply writes.
+      d=$(ucf_jvm_home)
+      case "$d" in "home "*) d=${d#home } ;; *) d=$HOME ;; esac
+      printf '%s\n' "$d/.m2/settings.xml" ;;
     nuget)     printf '%s\n' "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config" ;;
     composer)  printf '%s\n' "$(ucf_composer_base)/config.json" ;;
     composer-home)
@@ -319,6 +324,69 @@ ucf_composer_home() {
     fi
   fi
   printf '%s\n' "$HOME/.composer"
+}
+
+# ucf_passwd_home: this uid's home as the passwd database has it. The JVM takes user.home
+# from it, not from $HOME, so Maven reads <it>/.m2/settings.xml and gradle's default
+# user home is <it>/.gradle. MEASURED (maven 3.10.2 on temurin 21.0.13.1, as root, whose
+# passwd home is /root, with HOME=/tmp/h, also with USER and LOGNAME=nobody):
+# `mvn -X -o -B validate` read /root/.m2/settings.xml. Looked up by uid (id -u), never by
+# $USER or $LOGNAME, which can name another account. getent, then /etc/passwd where
+# getent is missing. macOS has no getent, and its /etc/passwd lists none of the people's
+# accounts, which are in Directory Services (inferred from Apple's documentation, not
+# run here), so last the account's name from its uid and its home from a tilde
+# (getpwnam). A uid with no name has no entry, and nothing is printed.
+ucf_passwd_home() {
+  local uid h n
+  uid=$(id -u)
+  h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || h=""
+  if [ -z "$h" ]; then
+    h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || h=""
+  fi
+  if [ -z "$h" ]; then
+    n=$(id -un 2>/dev/null) || n=""
+    if [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+      eval "h=~$n"
+      case "$h" in /*) ;; *) h="" ;; esac
+    fi
+  fi
+  printf '%s\n' "$h"
+}
+
+# ucf_noslash <path>: without the slashes at its end; "/" stays "/".
+ucf_noslash() {
+  local p="$1"
+  while :; do case "$p" in ?*/) p=${p%/} ;; *) break ;; esac; done
+  printf '%s\n' "$p"
+}
+
+# ucf_jvm_home: the home Maven's ~/.m2 goes in, and gradle's default user home. One line:
+#   home <dir>      the passwd home (ucf_passwd_home), a directory this account can
+#                   write, and not "/";
+#   kept <account>  this is root, reached by sudo or doas from <account> (the test
+#                   ucf_kept_out makes), and $HOME is not root's passwd home. That HOME
+#                   was most likely meant for <account>, so root's own home is not the
+#                   one meant: Maven stays on $HOME, where ucf_kept_out refuses a home
+#                   another account controls, and gradle gets nothing;
+#   none <entry>    no such home; <entry> is what passwd says, or nothing.
+# "/" is not a home here. MEASURED for a uid whose passwd entry says "/" (podman's own
+# entry for --user 4242): java 21.0.13.1 took user.home from $HOME, java 17.0.21 used "/".
+# A passwd home that does not exist is still user.home (MEASURED on both, with root's
+# set to /nonexistent: maven read /nonexistent/.m2/settings.xml). Homes are compared
+# without the slashes at their end, so HOME=/root/ is the passwd home /root.
+ucf_jvm_home() {
+  local pw
+  pw=$(ucf_passwd_home)
+  if [ "$(id -u)" = 0 ] && { [ "${SUDO_UID:-0}" != 0 ] || [ "${DOAS_USER:-root}" != root ]; } \
+     && [ "$(ucf_noslash "${HOME:-}")" != "$(ucf_noslash "$pw")" ]; then
+    printf 'kept %s\n' "${SUDO_USER:-${DOAS_USER:-that account}}"
+    return 0
+  fi
+  case "$(ucf_noslash "$pw")" in
+    /?*)
+      if [ -d "$pw" ] && [ -w "$pw" ]; then printf 'home %s\n' "$(ucf_noslash "$pw")"; return 0; fi ;;
+  esac
+  printf 'none %s\n' "$pw"
 }
 
 # ucf_applies <kind>: whether the role would write that file on this host.
@@ -3333,38 +3401,12 @@ kept_wrapper() {
   [ -n "$r" ] && [ -x "$r" ]
 }
 
-# uid_passwd_home: this uid's home in the passwd database, which is where the JVM takes
-# user.home from (see harden_gradle). id -u, never $USER/$LOGNAME: those are env-derived
-# and can lie in exactly the relocated-HOME containers this resolution exists for.
-# getent is missing from some minimal images, so fall back to /etc/passwd directly.
-# macOS has no getent, and its /etc/passwd lists none of the people's accounts, which
-# are in Directory Services (inferred from Apple's documentation, not run here). So
-# last, the account's name from its uid, and its home from a tilde (getpwnam, which
-# asks Directory Services), as harden_yarn does with ~root. A uid with no name has
-# no entry.
-uid_passwd_home() {
-  local uid h n
-  uid=$(id -u)
-  h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || h=""
-  if [[ -z "$h" ]]; then
-    h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || h=""
-  fi
-  if [[ -z "$h" ]]; then
-    n=$(id -un 2>/dev/null) || n=""
-    if [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
-      eval "h=~$n"
-      case "$h" in /*) ;; *) h="" ;; esac
-    fi
-  fi
-  printf '%s\n' "$h"
-}
-
 # jvm_home_why <dir under the home, .gradle or .m2>: in --home-only mode, why a file
 # there under HOME would not be read, because the JVM's user.home is not HOME; nothing
 # when it is.
 jvm_home_why() {
   local pw r
-  pw=$(uid_passwd_home)
+  pw=$(ucf_passwd_home)
   if [ -z "$pw" ]; then
     echo "uid $(id -u) has no passwd entry, so it is not known where the JVM looks"
     return 0
@@ -5958,18 +6000,38 @@ sch_probes_vm() { [ "$HOME_ONLY" != true ]; }
 
 harden_maven() {
   section "maven"
-  # --home-only: Maven reads ${user.home}/.m2/settings.xml, and user.home is the JVM's,
-  # which on Linux comes from the passwd entry, not $HOME. MEASURED for gradle (see
-  # harden_gradle); for Maven it is INFERRED from that, not measured. So a file under a
-  # HOME that is not the passwd home would not be read, and none is written.
-  local why
+  # Maven reads ${user.home}/.m2/settings.xml, and user.home is the JVM's, which comes
+  # from the passwd entry of the uid, not from $HOME (ucf_passwd_home: MEASURED on maven
+  # 3.10.2, as root with HOME=/tmp/h, it read /root/.m2/settings.xml). It has no
+  # variable like GRADLE_USER_HOME to point it elsewhere. So the file goes to the passwd
+  # home, looked up by uid as gradle's init script is, and the log says so when that is
+  # not $HOME. $HOME/.m2 when there is no passwd home to use (ucf_jvm_home), with a
+  # warning, and for a root that sudo or doas reached with another account's HOME:
+  # ucf_kept_out then refuses that HOME, as it refuses the other per-user files there,
+  # before anything is made in it.
+  # --home-only writes nothing when HOME is not the passwd home: the file would not be read.
+  local why m2home="$HOME" jh="" pw
   if [[ "$HOME_ONLY" == true ]]; then
     why=$(jvm_home_why .m2)
     if [[ -n "$why" ]]; then home_skip maven "$why"; end_section; return 0; fi
+  else
+    jh=$(ucf_jvm_home)
+    case "$jh" in
+      "home "*)
+        m2home=${jh#home }
+        if [[ "$m2home" != "$(ucf_noslash "$HOME")" ]]; then
+          log "maven: \$HOME is '$HOME' but the passwd home is '$m2home' — settings.xml goes to $m2home/.m2, where the JVM looks, not under \$HOME"
+        fi ;;
+      "none "*)
+        pw=${jh#none }
+        if [[ "$(ucf_noslash "$pw")" != "$(ucf_noslash "$HOME")" ]]; then
+          warn "maven: no usable passwd home for uid $(id -u) (passwd says '${pw:-<none>}'; it has to be a directory this account can write, and not /), so settings.xml goes to '$HOME/.m2'. Maven takes its home from the passwd entry, not \$HOME, so it may not read it."
+        fi ;;
+    esac
   fi
-  if ! home_guard "$HOME/.m2/settings.xml"; then home_skip maven "$(outside "$HOME/.m2/settings.xml")"; end_section; return 0; fi
-  sch_mkdir "$HOME/.m2"
-  put_user_cfg maven "$HOME/.m2/settings.xml" <<'EOF' || { end_section; return 0; }
+  if ! home_guard "$m2home/.m2/settings.xml"; then home_skip maven "$(outside "$m2home/.m2/settings.xml")"; end_section; return 0; fi
+  [[ "$jh" == "kept "* ]] || sch_mkdir "$m2home/.m2"
+  put_user_cfg maven "$m2home/.m2/settings.xml" <<'EOF' || { end_section; return 0; }
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by supply-chain-harden action -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
@@ -6025,6 +6087,9 @@ harden_maven() {
 </settings>
 EOF
   HARDENED+=("maven")
+  if [[ "$jh" == "kept "* ]]; then
+    warn "maven: this is root, reached by sudo or doas from ${jh#kept }, and \$HOME ('$HOME') is not root's passwd home ('$(ucf_passwd_home)'), so settings.xml was written to $HOME/.m2, which maven run as root does not read. Run this as ${jh#kept }, not as root."
+  fi
   if sch_probes_vm; then set_tool_version "maven" "$(detect_version maven "mvn --version")"; fi
   log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central, for dependencies and plugins"
   end_section
@@ -6068,7 +6133,7 @@ harden_gradle() {
   # --home-only has no env layer, so (2) is out: it writes only where gradle looks on
   # its own. That is GRADLE_USER_HOME when the caller has it set (the agent's shell
   # then has it too), else the passwd home when that is HOME; anywhere else, nothing.
-  local gradle_home="" passwd_home="" uid why
+  local gradle_home="" passwd_home="" uid why jh
   if [[ "$HOME_ONLY" == true && -z "${GRADLE_USER_HOME:-}" ]]; then
     why=$(jvm_home_why .gradle)
     if [[ -n "$why" ]]; then home_skip gradle "$why"; end_section; return 0; fi
@@ -6076,17 +6141,27 @@ harden_gradle() {
   if [[ -n "${GRADLE_USER_HOME:-}" ]]; then
     gradle_home="$GRADLE_USER_HOME"
   else
+    # The passwd home when it is a directory this account can write, and not "/"; for a
+    # root that sudo or doas reached with another account's HOME, nothing, as for that
+    # account's other per-user files (ucf_jvm_home).
     uid=$(id -u)
-    passwd_home=$(uid_passwd_home)
-    if [[ -n "$passwd_home" && -d "$passwd_home" && -w "$passwd_home" ]]; then
-      gradle_home="$passwd_home/.gradle"
-      if [[ "$passwd_home" != "${HOME:-}" ]]; then
-        log "gradle: \$HOME is '${HOME:-<unset>}' but the passwd home is '$passwd_home' — writing the init script where the JVM will look, and pinning GRADLE_USER_HOME to it"
-      fi
-    else
-      gradle_home="${HOME:-.}/.gradle"
-      warn "gradle: no writable passwd home for uid $uid (passwd says '${passwd_home:-<none>}'), so the init script goes to '$gradle_home' and GRADLE_USER_HOME is exported to point gradle at it. A gradle build that does not inherit this job's environment will not load it."
-    fi
+    jh=$(ucf_jvm_home)
+    case "$jh" in
+      "home "*)
+        passwd_home=${jh#home }
+        gradle_home="$passwd_home/.gradle"
+        if [[ "$passwd_home" != "$(ucf_noslash "${HOME:-}")" ]]; then
+          log "gradle: \$HOME is '${HOME:-<unset>}' but the passwd home is '$passwd_home' — writing the init script where the JVM will look, and pinning GRADLE_USER_HOME to it"
+        fi ;;
+      "kept "*)
+        warn "gradle: init script not written: this is root, reached by sudo or doas from ${jh#kept }, and \$HOME ('${HOME:-<unset>}') is not root's passwd home ('$(ucf_passwd_home)'), so the home meant is most likely not root's. Run this as ${jh#kept }, not as root."
+        eco_failed gradle "init script not written: root reached by sudo or doas from ${jh#kept }, with a HOME that is not root's passwd home"
+        end_section; return 0 ;;
+      *)
+        passwd_home=${jh#none }
+        gradle_home="${HOME:-.}/.gradle"
+        warn "gradle: no usable passwd home for uid $uid (passwd says '${passwd_home:-<none>}'; it has to be a directory this account can write, and not /), so the init script goes to '$gradle_home' and GRADLE_USER_HOME is exported to point gradle at it. A gradle build that does not inherit this job's environment will not load it." ;;
+    esac
   fi
 
   if ! home_guard "$gradle_home/init.gradle.kts"; then

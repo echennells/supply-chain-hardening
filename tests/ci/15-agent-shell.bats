@@ -355,7 +355,7 @@ npm_fixture() {
 # --------------------------------------------------------- JVM homes ----
 
 # passwd_home: this uid's home in the account database, looked up as harden.sh's
-# uid_passwd_home does: getent, /etc/passwd, then the name's tilde (macOS keeps its
+# ucf_passwd_home does: getent, /etc/passwd, then the name's tilde (macOS keeps its
 # people's accounts in Directory Services, not /etc/passwd).
 passwd_home() {
   local h n
@@ -432,6 +432,106 @@ getent_home() {
   run harden_agent GRADLE_USER_HOME="$TEST_HOME/g" ECOSYSTEMS=gradle
   [ "$status" -eq 0 ]
   assert_file_contains "$TEST_HOME/g/init.gradle.kts" "Managed by supply-chain-harden action"
+}
+
+# ------------------------------------------------- JVM homes, a normal run ----
+#
+# Maven reads <user.home>/.m2/settings.xml, and the JVM takes user.home from the passwd
+# entry, not $HOME. MEASURED (maven 3.10.2 on temurin 21.0.13.1, as root with
+# HOME=/tmp/h): maven read /root/.m2/settings.xml. A normal run writes it there, as it
+# does gradle's init script. The passwd home is a stub getent's (getent_home), a
+# directory of this test's: no test writes into this account's real home.
+
+# stub_id_root: an id that says uid 0. Nothing runs as root: the run writes as this account.
+stub_id_root() {
+  stub_bin id 'case "$*" in -u) echo 0 ;; -un) echo root ;; -g) echo 0 ;; *) exec /usr/bin/id "$@" ;; esac'
+}
+
+@test "normal run: settings.xml goes to the passwd home when HOME is not it, and the log says so" {
+  local pw="$BATS_TEST_TMPDIR/pwhome"
+  mkdir -p "$pw"
+  getent_home "$pw"
+  stub_bin mvn
+  run harden ECOSYSTEMS=maven -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_file_contains "$pw/.m2/settings.xml" "Managed by supply-chain-harden action"
+  [ ! -e "$TEST_HOME/.m2" ]
+  [[ "$output" == *"maven: \$HOME is '$TEST_HOME' but the passwd home is '$pw' — settings.xml goes to $pw/.m2,"* ]]
+  [[ ",$(rec ecosystems_effective)," == *",maven,"* ]]
+  # The control: the passwd home is HOME, so HOME's .m2, and no such line.
+  rm -rf "$pw/.m2"
+  getent_home "$TEST_HOME"
+  run harden ECOSYSTEMS=maven -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_file_contains "$TEST_HOME/.m2/settings.xml" "Managed by supply-chain-harden action"
+  [ ! -e "$pw/.m2" ]
+  [[ "$output" != *"but the passwd home is"* ]]
+}
+
+@test "normal run: a root that sudo made, with a HOME that is not root's passwd home, writes neither file" {
+  # ucf_kept_out's test: uid 0 with SUDO_UID set and not 0. Root's passwd home is a
+  # directory this account can write, so without the guard gradle's init script went there.
+  [ "$(id -u)" -ne 0 ] || skip "running as root: whether root may write in TEST_HOME depends on who owns the directories above it"
+  local pwroot="$BATS_TEST_TMPDIR/roothome"
+  mkdir -p "$pwroot"
+  getent_home "$pwroot"
+  stub_id_root
+  stub_bin gradle
+  stub_bin mvn
+  run harden GRADLE_USER_HOME= SUDO_UID=4242 SUDO_USER=alice ECOSYSTEMS=gradle,maven -- --emit=plain
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"gradle: init script not written: this is root, reached by sudo or doas from alice,"*"Run this as alice, not as root."* ]]
+  [[ "$output" == *"maven: $TEST_HOME/.m2/settings.xml "*"(run this as alice, not as root); it was left as it is"* ]]
+  [ -z "$(ls -A "$pwroot")" ]
+  [ ! -e "$TEST_HOME/.gradle" ]
+  [ ! -e "$TEST_HOME/.m2" ]
+}
+
+@test "normal run control: that root with HOME at root's passwd home (a slash at its end) writes the init script there; with no SUDO_UID both files go there" {
+  local pwroot="$BATS_TEST_TMPDIR/roothome"
+  mkdir -p "$pwroot"
+  getent_home "$pwroot"
+  stub_id_root
+  stub_bin gradle
+  stub_bin mvn
+  # sudo -i, sudo -H: HOME is root's. HOME=/root/ is the passwd home /root.
+  run harden HOME="$pwroot/" GRADLE_USER_HOME= SUDO_UID=4242 SUDO_USER=alice ECOSYSTEMS=gradle -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_file_contains "$pwroot/.gradle/init.gradle.kts" "Managed by supply-chain-harden action"
+  [[ "$output" != *"run this as alice"* ]]
+  [[ "$output" != *"but the passwd home is"* ]]
+  # A root login, no sudo, with HOME elsewhere: the passwd home, for both.
+  rm -rf "$pwroot/.gradle"
+  run harden GRADLE_USER_HOME= ECOSYSTEMS=gradle,maven -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_file_contains "$pwroot/.gradle/init.gradle.kts" "Managed by supply-chain-harden action"
+  assert_file_contains "$pwroot/.m2/settings.xml" "Managed by supply-chain-harden action"
+  [ ! -e "$TEST_HOME/.m2" ]
+}
+
+@test "normal run: a passwd home of / is not used; settings.xml and the init script go under HOME, with a warning" {
+  # MEASURED for a uid whose passwd entry says "/" (podman --user 4242): java 21.0.13.1
+  # took user.home from $HOME, java 17.0.21 used "/". As a normal account "/" is not
+  # writable either, so this cannot tell "/" refused from "/" unwritable; as root it can.
+  getent_home /
+  stub_bin gradle
+  stub_bin mvn
+  run harden GRADLE_USER_HOME= ECOSYSTEMS=gradle,maven -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_file_contains "$TEST_HOME/.m2/settings.xml" "Managed by supply-chain-harden action"
+  assert_file_contains "$TEST_HOME/.gradle/init.gradle.kts" "Managed by supply-chain-harden action"
+  [[ "$output" == *"maven: no usable passwd home for uid $(id -u) (passwd says '/';"*"so settings.xml goes to '$TEST_HOME/.m2'"* ]]
+  [[ "$output" == *"gradle: no usable passwd home for uid $(id -u) (passwd says '/';"* ]]
+  # The control: a passwd home that is a directory this account can write is used, with
+  # no warning.
+  local pw="$BATS_TEST_TMPDIR/pwhome"
+  mkdir -p "$pw"
+  getent_home "$pw"
+  run harden GRADLE_USER_HOME= ECOSYSTEMS=gradle,maven -- --emit=plain
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_file_contains "$pw/.m2/settings.xml" "Managed by supply-chain-harden action"
+  assert_file_contains "$pw/.gradle/init.gradle.kts" "Managed by supply-chain-harden action"
+  [[ "$output" != *"no usable passwd home"* ]]
 }
 
 # ------------------------------------------------- record and env file ----

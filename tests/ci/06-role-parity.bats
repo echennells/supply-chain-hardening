@@ -39,9 +39,9 @@ setup() { common_setup; }
   # Whatever one stops on, the other says it would.
   local role act kinds="npmrc pnpm-yaml pnpm-rc yarn pip uv bun bundler cargo maven nuget composer composer-home" v p
   judge() {
-    role=$(env -i PATH="${TEST_BIN}:$PATH" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" \
+    role=$(env -i PATH="${TEST_BIN}:${PASSWD_BIN}:$PATH" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" \
       bash "${BATS_TEST_DIRNAME}/../../files/user-config.sh" classify $kinds | sed -nE 's/^(foreign|blocked) ([^ ]*).*/\2/p' | sort) || true
-    act=$(env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" CARGO_HOME="$TEST_HOME/.cargo" \
+    act=$(env -i PATH="${TEST_BIN}:${PASSWD_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$TEST_HOME/.config" CARGO_HOME="$TEST_HOME/.cargo" \
       bash "$HARDEN_SH" --preflight | sed -n "s|^  STOP  \\($TEST_HOME/[^:]*\\):.*|\\1|p" | sort) || true
     echo "role: $role"; echo "action: $act"
     [ "$role" = "$act" ]
