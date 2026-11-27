@@ -949,17 +949,20 @@ EOF
   [ "$status" -eq 1 ]
 }
 
-@test "pnpm: one whose --version prints nothing is a GAP no configuration can close, after --home-only or not; one that runs and reads nothing is one a re-run closes" {
+@test "pnpm: a corepack shim that starts no pnpm is a GAP no configuration can close, after --home-only or not; any other silent pnpm, or one that reads nothing, is one a re-run closes" {
   # MEASURED (2026-11-27, macOS): Homebrew's pnpm, a corepack shim, printed no
   # version in an empty HOME and failed --fail-on=config with "2 fixable".
-  stub_bin pnpm 'exit 0'
+  # The shim lives under .../corepack/shims, as Homebrew's does, and PATH has a link to it.
+  local cs="$TEST_TMP/lib/node_modules/corepack/shims"
+  mkdir -p "$cs" && printf '#!/bin/sh\nexit 0\n' > "$cs/pnpm" && chmod +x "$cs/pnpm"
+  rm -f "$TEST_BIN/pnpm" && ln -s "$cs/pnpm" "$TEST_BIN/pnpm"
   run agent_sh "$BARE_PATH" 'cd / && pnpm --version; echo "rc=$?"'
   [ "$output" = "rc=0" ]
   forge ecosystems_hardened=pnpm release_age_hours=48
   run reach_verify "$BARE_PATH" --fail-on=config
   echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
-  [[ "$(row_of "pnpm lifecycle scripts blocked")" == "GAP    FUNCTIONAL  pnpm lifecycle scripts blocked"*"'pnpm --version' from / returned nothing, so nothing about it could be checked" ]]
-  [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"'pnpm --version' from / returned nothing, so nothing about it could be checked" ]]
+  [[ "$(row_of "pnpm lifecycle scripts blocked")" == "GAP    FUNCTIONAL  pnpm lifecycle scripts blocked"*"pnpm is a corepack shim and 'pnpm --version' from / returned nothing"* ]]
+  [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"corepack did not start a pnpm"* ]]
   [[ "$output" == *"0 fixable by re-running the hardening, 2 no configuration can close (the tool is too old, does not run, or has no such control)."* ]]
   [ "$status" -eq 0 ]
   forge ecosystems_hardened=pnpm release_age_hours=48 home_only=true env_layer=none
@@ -967,6 +970,15 @@ EOF
   [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"returned nothing"* ]]
   [[ "$output" == *"0 fixable by re-running the hardening, 2 that a re-run cannot close"* ]]
   [ "$status" -eq 0 ]
+
+  # Control: the same silent pnpm, not a corepack shim (a bad config.yaml does this
+  # to pnpm 11.0.0, and a re-run fixes that): a gap a re-run closes.
+  rm -f "$TEST_BIN/pnpm"; stub_bin pnpm 'exit 0'
+  forge ecosystems_hardened=pnpm release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"pnpm is present but 'pnpm --version' from / returned nothing"* ]]
+  [[ "$output" == *"2 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
 
   # Control: a pnpm 11 that runs and reads none of what the hardening wrote.
   stub_bin pnpm 'case "$*" in --version) echo 11.0.0 ;; "config get "*) echo undefined ;; esac'

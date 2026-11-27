@@ -1759,7 +1759,7 @@ elif [ "$QUIET" -eq 0 ]; then
     # The toolchain class holds every gap no configuration closes: a tool too
     # old for the setting (npm 10 and min-release-age), a tool with no such
     # control at all (cargo-cooldown has no verb for cargo add / generate-lockfile),
-    # and a tool that does not run (a pnpm whose --version prints nothing).
+    # and a tool that does not run (a corepack pnpm whose --version prints nothing).
     # After harden.sh --home-only it also holds what that mode never writes: a
     # wrapper for bun, bunx, cargo, deno or composer outside HOME, and the
     # variable an SDK that ignores NuGet's signatureValidationMode needs

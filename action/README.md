@@ -555,7 +555,7 @@ On GitHub, `quiet: true` is `--quiet`, and the verify step has these outputs:
 |---|---|
 | `gaps` | Protections found not in effect. `unknown` if the verifier died before writing its outputs. |
 | `gaps_config` | Of those, how many a re-run of the hardening can close. |
-| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, does not run, or has no such control. After `--home-only`, also an unwrapped bun, bunx, cargo, deno or composer outside HOME, which that mode never wraps, and NuGet signatures on an SDK that needs `DOTNET_NUGET_SIGNATURE_VERIFICATION` (macOS), which that mode cannot set. |
+| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, does not run, or has no such control. After `--home-only`, also an unwrapped bun, bunx, cargo, deno or composer outside HOME, which that mode never wraps, and NuGet signatures on an SDK that needs `DOTNET_NUGET_SIGNATURE_VERIFICATION` (macOS, and Linux below SDK 8.0.424), which that mode cannot set. |
 | `weak` | `WEAK` rows, which are not counted as coverage. |
 | `rows` | Rows in the table. 0 means the verifier did not run. |
 | `expectations` | `known` when it read the harden step's record, `unknown` when it checked every installed tool instead. |

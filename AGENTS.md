@@ -101,9 +101,10 @@ supply-chain-verify --json
 - If `ansible-playbook` is not installed, don't install it: run it through uv,
   `uv tool run --from 'ansible-core>=2.14' ansible-playbook site.yml --limit localhost`
   (or `pipx run --spec 'ansible-core>=2.14' ansible-playbook ...`), which leaves only
-  uv's cache. The preflight prints that command when uv or pipx is there. Then run
-  `supply-chain-verify` from your own shell: the verifier the apply ran found uv's Python
-  first on `PATH` and can read pip as N/A.
+  uv's or pipx's cache and `~/.ansible`. The preflight prints that command when uv or
+  pipx is there. Then run `supply-chain-verify` from your own shell: the play found uv's
+  Python first on `PATH`, so its python and pip lines, and the verifier it ran, describe
+  that Python, not the host's.
 - Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or a global
   `--become`: per-user config would land in root's home. The preflight refuses this.
 - If the play stops on a file, don't override it yourself. Tell the user which one (it may

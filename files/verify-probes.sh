@@ -953,13 +953,21 @@ else
   fi
 
   if [ -z "$pnv" ]; then
-    # A pnpm that does not run, in the class no configuration closes. MEASURED
-    # (2026-11-27, macOS 27.2.1): Homebrew's pnpm, a corepack 0.34.0 shim, crashed
-    # in an empty HOME, because the pnpm 12.23.0 it fetched has pnpm.mjs as its bin.
-    # As config gaps these two failed --fail-on=config, and no re-run of the
-    # hardening, in any mode, makes that pnpm run.
-    scv_toolchain_gap pnpm.ignore-scripts FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
-    scv_toolchain_gap pnpm.age-gate FUNCTIONAL "pnpm age gate" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
+    # A pnpm that prints no version. A corepack shim that did not start pnpm is in
+    # the class no configuration closes. MEASURED (2026-11-27, macOS 27.2.1):
+    # Homebrew's pnpm, a corepack 0.34.0 shim, crashed in an empty HOME, because the
+    # pnpm 12.23.0 it fetched has pnpm.mjs as its bin; as config gaps these two failed
+    # --fail-on=config, and no re-run of the hardening makes that pnpm run. Anything
+    # else stays a config gap: an invalid config.yaml made every pnpm 11.0.0 command,
+    # --version included, fail (MEASURED, action/harden.sh), and a re-run replaces it.
+    case "$(readlink -f "$(command -v pnpm)" 2>/dev/null)" in
+      */corepack/*)
+        scv_toolchain_gap pnpm.ignore-scripts FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is a corepack shim and 'pnpm --version' from / returned nothing: corepack did not start a pnpm, so nothing about it could be checked, and no re-run of the hardening changes that"
+        scv_toolchain_gap pnpm.age-gate FUNCTIONAL "pnpm age gate" "pnpm is a corepack shim and 'pnpm --version' from / returned nothing: corepack did not start a pnpm, so nothing about it could be checked, and no re-run of the hardening changes that" ;;
+      *)
+        row GAP FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
+        row GAP FUNCTIONAL "pnpm age gate" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked" ;;
+    esac
   else
     pns=$(scv_pnpm_get ignore-scripts)
     case "$pns" in

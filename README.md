@@ -90,9 +90,10 @@ uv tool run --from 'ansible-core>=2.14' ansible-playbook site.yml --limit localh
 
 MEASURED with uv 0.13.9 on an agent VM with no Ansible on disk (2026-11-27). On a host
 this project already hardened, the download goes through uv's own age gate and
-source-build block like any other. One side effect: the play, and the verifier it runs at
-the end, find uv's Python first on `PATH`, so that verifier run can read pip as N/A. Run
-`supply-chain-verify` from your own shell afterwards for the real result. The preflight
+source-build block like any other. One side effect: the play finds uv's Python first on
+`PATH`, so its own python and pip checks, and the verifier it runs at the end (which can
+read pip as N/A), describe that Python rather than the host's. Run `supply-chain-verify`
+from your own shell afterwards for the real result. Add `-K` if sudo asks for a password. The preflight
 (`action/harden.sh --preflight`) prints the right command when Ansible is missing and uv
 or pipx is there.
 
