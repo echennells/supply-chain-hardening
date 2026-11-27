@@ -146,6 +146,29 @@ echo "${0##*/} 1.95.0 (stub)"'
   [[ "$output" == *"wait for their answer"* ]]
 }
 
+@test "preflight: no Ansible but uv is no STOP: it names the uv command, and starts nothing" {
+  # Control: without uv (the test above) it is a STOP.
+  run preflight
+  [[ "$output" == *"STOP  ansible-playbook not found"* ]]
+  printf '#!/bin/sh\ntouch "%s"\n' "$BATS_TEST_TMPDIR/uv-ran" > "${TEST_BIN}/uv"
+  chmod +x "${TEST_BIN}/uv"
+  run preflight
+  ! grep -q 'STOP  ansible-playbook' <<<"$output" || false
+  [[ "$output" == *"ansible-playbook is not installed, but uv is (${TEST_BIN}/uv)"* ]]
+  [[ "$output" == *"uv tool run --from 'ansible-core>="*"' ansible-playbook site.yml --limit localhost"* ]]
+  [[ "$output" == *"Run supply-chain-verify from your own shell after it"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/uv-ran" ]
+}
+
+@test "preflight: no Ansible and no uv, but pipx, names the pipx command instead" {
+  printf '#!/bin/sh\ntouch "%s"\n' "$BATS_TEST_TMPDIR/pipx-ran" > "${TEST_BIN}/pipx"
+  chmod +x "${TEST_BIN}/pipx"
+  run preflight
+  ! grep -q 'STOP  ansible-playbook' <<<"$output" || false
+  [[ "$output" == *"pipx run --spec 'ansible-core>="*"' ansible-playbook site.yml --limit localhost"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/pipx-ran" ]
+}
+
 @test "preflight: an Ansible new enough, and nothing in the way, says so and exits 0" {
   [ "$(id -u)" -ne 0 ] || skip "running as root: a different report"
   # This machine's own /etc is read too, and GitHub's Ubuntu image ships an

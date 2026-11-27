@@ -50,10 +50,11 @@ for their OK**:
 It changes no file, and run as a normal user it reads none as root; it makes one
 `sudo -n true` probe, which sudo logs. A line starting with `STOP` would end the play
 before it changes anything, or keep it from running: an existing `/etc` file, a per-user
-config file that is not exactly what this project wrote, the wrong user, no Ansible or
-one too old. It says what happens to `~/.npmrc`, names the keys that would be taken out of
-it, lists the package managers found, and for a repo it adds `--suggest`: the
-exceptions that repo needs and its own config that outranks the host's.
+config file that is not exactly what this project wrote, the wrong user, no Ansible (and
+no uv or pipx to run it with) or one too old. It says what happens to `~/.npmrc`, names
+the keys that would be taken out of it, lists the package managers found, and for a repo
+it adds `--suggest`: the exceptions that repo needs and its own config that outranks the
+host's.
 `ansible-playbook --check` is not this: it is a dry run of the whole play that stops at
 the first refusal, escalates, and runs the role's probes for real, which leaves npm logs,
 uv and node caches and Go telemetry behind.
@@ -97,6 +98,12 @@ ansible-playbook site.yml --limit localhost    # add -K if sudo needs a password
 supply-chain-verify --json
 ```
 
+- If `ansible-playbook` is not installed, don't install it: run it through uv,
+  `uv tool run --from 'ansible-core>=2.14' ansible-playbook site.yml --limit localhost`
+  (or `pipx run --spec 'ansible-core>=2.14' ansible-playbook ...`), which leaves only
+  uv's cache. The preflight prints that command when uv or pipx is there. Then run
+  `supply-chain-verify` from your own shell: the verifier the apply ran found uv's Python
+  first on `PATH` and can read pip as N/A.
 - Run as a normal user with sudo rights. Never use `sudo ansible-playbook` or a global
   `--become`: per-user config would land in root's home. The preflight refuses this.
 - If the play stops on a file, don't override it yourself. Tell the user which one (it may
@@ -105,7 +112,8 @@ supply-chain-verify --json
   `-e accept_user_config_overwrite=true` (the per-user ones) only if they agree.
 - On Ubuntu 26.04's sudo-rs the preflight may stop because ansible-core cannot answer its
   password prompt. The fix is a newer ansible-core for the user
-  (`pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo for the apply. Don't change
+  (`uv tool run --from 'ansible-core>=2.21.6' ansible-playbook ...`, or
+  `pipx install 'ansible-core>=2.21.6'`) or NOPASSWD sudo for the apply. Don't change
   their sudoers yourself.
 - If Ansible stops with "could not initialize the preferred locale", run it with
   `LC_ALL=C.UTF-8`.
