@@ -1837,7 +1837,12 @@ case "$1 $2" in
 esac
 GO
   chmod +x "$TEST_HOME/go/bin/go"
-  run env -i PATH="/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
+  # Not /usr/bin:/bin: GitHub's ubuntu runners have a go a bare `go` finds there, and
+  # then the shell does run a go and no row is right (ubuntu-24.04, 2026-11-27). The
+  # bare PATH has basic utilities only; check that it has no go before relying on it.
+  bare_path
+  ! env -i PATH="$BARE_PATH" sh -c 'command -v go' || false
+  run env -i PATH="$BARE_PATH" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
   [[ "$output" == *"go checksum verification"* ]]
   # Not a substring test: "cargo not installed" contains "go not installed".
   ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output" || false
