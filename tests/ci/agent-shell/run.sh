@@ -172,14 +172,16 @@ agent() {
 }
 
 # outside_home <marker name> <home> <prune...>: what changed (mtime or ctime) after the
-# marker, outside HOME, on the container's root filesystem. /tmp is searched like
-# every other directory. -xdev keeps out /proc, /sys, /dev and /run, which are
+# marker, outside HOME, on the container's root filesystem. /tmp and /run are
+# searched like every other directory: both are on the root overlay (MEASURED,
+# podman 5.7.0: the same device as /; vm-a's contents check it on any engine), so
+# a write there counts. -xdev keeps out /proc, /sys and /dev, which are
 # other filesystems; they are pruned by name as well, with the markers' directory
 # and the cell's own bind mounts (the <prune...> arguments).
 outside_home() {
   local m=$1 h=$2 p prune=""
   shift 2
-  for p in /proc /sys /dev /run "$MARKS" "$h" "$@"; do prune="$prune -path $p -o"; done
+  for p in /proc /sys /dev "$MARKS" "$h" "$@"; do prune="$prune -path $p -o"; done
   in_ctr sh -c "find / /tmp -xdev \\( ${prune% -o} \\) -prune -o \\( -newer $MARKS/$m -o -cnewer $MARKS/$m \\) -print 2>/dev/null | sort -u"
 }
 # mark <name>: a marker strictly newer than whatever made it. The markers live in
@@ -256,9 +258,9 @@ vm_a_contents() {
   show "mount, and root writing into it" "$OUT"
   check "/opt/hatch-image is mounted ro and root's write fails with EROFS" \
     eval '[ "$RC" -ne 0 ] && has "$OUT" " ro," && has "$OUT" "Read-only file system"'
-  capture in_ctr sh -c 'stat -c "%d %m %n" / /tmp /home/hatch'
-  show "devices of /, /tmp and HOME" "$OUT"
-  check "/tmp and HOME are on the root filesystem, so the find below covers them" \
+  capture in_ctr sh -c 'stat -c "%d %m %n" / /tmp /run /home/hatch'
+  show "devices of /, /tmp, /run and HOME" "$OUT"
+  check "/tmp, /run and HOME are on the root filesystem, so the find below covers them" \
     eval '[ "$(printf "%s\n" "$OUT" | awk "{print \$1}" | sort -u | wc -l)" -eq 1 ]'
   done_phase 9
 }
