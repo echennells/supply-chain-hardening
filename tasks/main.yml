@@ -338,6 +338,20 @@
   when: sch_apply_notes | default([]) | length > 0
   tags: always
 
+# Files written outside $HOME because the tool reads another home: gradle's init
+# script and Maven's settings.xml go to the passwd home, which the JVM reads
+# (tasks/passwd_home.yml). In effect, so not in the NOT-applied count; listed
+# because someone looking under $HOME, or keeping only $HOME, would miss them.
+- name: Report files written outside $HOME
+  ansible.builtin.debug:
+    msg: |-
+      {{ sch_home_notes | length }} file(s) go to the passwd home, not under $HOME:
+      {% for item in sch_home_notes %}
+        {{ loop.index }}. {{ item }}
+      {% endfor %}
+  when: sch_home_notes | default([]) | length > 0
+  tags: always
+
 # What the run did to anything of the user's in the per-user files it writes
 # (files/user-config.sh). Paths, key names from this project's own list and line
 # numbers only: these files hold tokens. A copy appears here only with

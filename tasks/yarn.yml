@@ -104,7 +104,8 @@
 # it: one that is not exactly what this project last wrote is left alone, and the
 # summary says so. It used to be judged by the marker alone, so a token added to it
 # after hardening was lost (MEASURED at 860a91c).
-# When the role runs as root, root's home IS the deploying user's, written above.
+# When the role runs as root with HOME at root's home, that file was written
+# above and this task stands aside; with HOME elsewhere, both are written.
 - name: Deploy hardened .yarnrc.yml to root's home (sudo coverage)
   become: true
   ansible.builtin.command:
