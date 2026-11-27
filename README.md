@@ -22,7 +22,7 @@ WEAK   PRESENT     npm PATH wrapper                 wrapper installed; callers b
 
 It mainly narrows install-time attacks, and **it is not a sandbox**: an agent on the host runs as the same user and can undo it. [What it protects against, and what it does not](docs/threat-model.md).
 
-Ships as an **Ansible role** (bare hosts, sandboxes, container images) and as a **GitHub Action** (with adapters for GitLab, CircleCI, Azure, Buildkite and plain shells).
+Ships as an **Ansible role** (bare hosts, sandboxes, [container images](docs/container-images.md)) and as a **GitHub Action** (with adapters for GitLab, CircleCI, Azure, Buildkite and plain shells).
 
 ## What it protects
 
@@ -140,6 +140,7 @@ What it protects against on a host where agents run, what it does not, and what 
 | [docs/threat-model.md](docs/threat-model.md) | you want to know what this protects against on a host where agents run, what it does not, and what to pair it with |
 | [AGENTS.md](AGENTS.md) | you're an AI agent applying this, or handing the repo to one |
 | [docs/how-it-works.md](docs/how-it-works.md) | you want to know what the role writes where, and which callers each layer reaches |
+| [docs/container-images.md](docs/container-images.md) | you are baking the hardening into a container image, or an agent platform runs your image |
 | [docs/configuration.md](docs/configuration.md) | you want to change the age gate, run one ecosystem, add hosts, or tune a wrapper |
 | [docs/verify.md](docs/verify.md) | you want to read `supply-chain-verify` output: evidence levels, flags, exit codes, the `--json` fields |
 | [docs/day-one.md](docs/day-one.md) | an install or build fails on a hardened host with an error that doesn't name this role |

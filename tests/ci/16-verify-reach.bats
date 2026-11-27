@@ -686,3 +686,132 @@ esac"
   [[ "$(row_of "pip native age gate")" == "WEAK"*"FREEZE"*"Re-run action/harden.sh to advance it, and re-source its env file"* ]]
   [[ "$output" != *"--home-only"* ]]
 }
+
+# A uv whose settings come from a per-user config only while there is one under
+# HOME, as uv's do with no /etc/uv/uv.toml: the system-config row asks again
+# with an empty HOME. Without the per-user file, <how>: none (uv's defaults),
+# bad (uv refuses a malformed system file), system (a live system layer).
+uv_sys_stub() { # <dir> <how>
+  mkdir -p "$1"
+  cat > "$1/uv" <<EOF
+#!/bin/bash
+span() { printf '%s\n' "PipSettings {" "    no_build: All," "    exclude_newer: ExcludeNewer {" "        global: Some(" "            Relative(" "                ExcludeNewerSpan(" "                    48h," "                )," "            )," "        )," "    }," "}"; }
+case "\$*" in
+  --version*|-V*) echo "uv 0.13.9" ;;
+  "pip list --show-settings")
+    if [ -f "\$HOME/.config/uv/uv.toml" ]; then span; exit 0; fi
+    case "$2" in
+      none)   printf '%s\n' "PipSettings {" "    no_build: None," "    exclude_newer: ExcludeNewer {" "        global: None," "    }," "}" ;;
+      bad)    echo "error: Failed to parse: \\\`/etc/uv/uv.toml\\\`" >&2; exit 2 ;;
+      system) printf '%s\n' "PipSettings {" "    no_build: All," "    exclude_newer: ExcludeNewer {" "        global: Some(" "            Absolute(" "                2026-11-25T00:00:00Z," "            )," "        )," "    }," "}" ;;
+    esac ;;
+  *) echo /tmp ;;
+esac
+EOF
+  chmod +x "$1/uv"
+}
+
+@test "home-only record: uv's system config missing is N/A BYDESIGN, not a GAP a re-run closes; an older record keeps the GAP" {
+  mkdir -p "$TEST_HOME/.config/uv"
+  printf 'exclude-newer = "48 hours"\nno-build = true\n' > "$TEST_HOME/.config/uv/uv.toml"
+  uv_sys_stub "$TEST_BIN" none
+  # Ground truth: with HOME's file uv reports the settings, with an empty HOME none.
+  run agent_sh "$BARE_PATH" 'uv pip list --show-settings | grep no_build'
+  [[ "$output" == *"no_build: All,"* ]]
+  run agent_sh "$BARE_PATH" 'HOME=$(mktemp -d) uv pip list --show-settings | grep no_build'
+  [[ "$output" == *"no_build: None,"* ]]
+  forge ecosystems_hardened=uv release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|uv system|fixable' || true
+  [[ "$(row_of "uv system config (sudo/other users)")" == "N/A    BYDESIGN    uv system config (sudo/other users)"*"uv reports neither no-build nor exclude-newer, so sudo uv and other users on this host get no uv config. This run checks harden.sh --home-only, which by design writes no /etc file"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"RESULT: "*"gap(s)"* ]]
+
+  # Control: the same host with a record without the key, a GAP a re-run closes.
+  forge ecosystems_hardened=uv release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "uv system config (sudo/other users)")" == "GAP    PARSED      uv system config (sudo/other users)"*"needs /etc/uv/uv.toml"* ]]
+  [[ "$output" == *"1 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
+
+  # With the key, only the last branch changes: a file uv refuses is still a GAP,
+  # and a live system layer still OK.
+  forge ecosystems_hardened=uv release_age_hours=48 home_only=true env_layer=none
+  uv_sys_stub "$TEST_BIN" bad
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "uv system config (sudo/other users)")" == "GAP    FUNCTIONAL  uv system config (sudo/other users)"*"uv STILL refuses to run: error: Failed to parse"* ]]
+  [ "$status" -eq 1 ]
+  uv_sys_stub "$TEST_BIN" system
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "uv system config (sudo/other users)")" == "OK     PARSED      uv system config (sudo/other users)"*"cutoff 2026-11-25T00:00:00Z"* ]]
+  [ "$status" -eq 0 ]
+
+  # The role never applies --home-only: on its surface a SCV_HOME_ONLY from the
+  # environment does nothing (action/verify.sh sets its own, never inherited).
+  local def
+  def=$(grep '^scv_home_only() ' "$PROBES")
+  [ -n "$def" ]
+  run env SCV_HOME_ONLY=1 bash -c "SCV_SURFACE=role; $def"$'\n''scv_home_only'
+  [ "$status" -eq 1 ]
+  run env SCV_HOME_ONLY=1 bash -c "SCV_SURFACE=ci; $def"$'\n''scv_home_only'
+  [ "$status" -eq 0 ]
+}
+
+# A bun 1.4.4, unwrapped, as far as the bun rows ask it: bun usage for --help,
+# the type-check error the age-gate row looks for, and an install that runs no
+# script.
+bun_stub() { # <dir>
+  mkdir -p "$1"
+  cat > "$1/bun" <<'EOF'
+#!/bin/bash
+case "${1:-}" in
+  --version|-v) echo 1.4.4 ;;
+  --help) echo "Usage: bun <command> [...flags] [...args]"; echo "  --no-install    Disable auto install in the Bun runtime" ;;
+  pm) if grep -q '^minimumReleaseAge = "SCH-PROBE-SENTINEL"' bunfig.toml 2>/dev/null; then
+        echo "error: Expected number of seconds for minimumReleaseAge"; fi ;;
+esac
+exit 0
+EOF
+  chmod +x "$1/bun"
+}
+
+@test "home-only record: a bun outside HOME stays a GAP, one a re-run cannot close; under HOME, or with an older record, one it can" {
+  printf '[install]\nignoreScripts = true\nminimumReleaseAge = 172800\n' > "$TEST_HOME/.bunfig.toml"
+  bun_stub "$TEST_BIN"
+  # Ground truth: this shell's bun is outside HOME and is no wrapper.
+  run agent_sh "$BARE_PATH" 'command -v bun'
+  [ "$output" = "$TEST_BIN/bun" ]
+  [[ "$output" != "$TEST_HOME"/* ]]
+  ! grep -q supply-chain-harden "$TEST_BIN/bun" || false
+  forge ecosystems_hardened=bun release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
+  [[ "$(row_of "bun runtime auto-install blocked")" == "GAP    PRESENT     bun runtime auto-install blocked"*"unwrapped binary at $TEST_BIN/bun;"*"harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"* ]]
+  [[ "$(row_of "bunx fetch-and-execute blocked")" == "GAP    PRESENT     bunx fetch-and-execute blocked"*"bunx is not on PATH and bun at $TEST_BIN/bun is unwrapped"*"re-running it does not close this" ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 2 that a re-run cannot close (the tool is too old, has no such control, or is outside HOME, where --home-only writes nothing)."* ]]
+  [ "$status" -eq 0 ]
+  # A bunx beside it, linked to bun as bun installs it: the bunx branch.
+  ln -s bun "$TEST_BIN/bunx"
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "bunx fetch-and-execute blocked")" == "GAP    PRESENT     bunx fetch-and-execute blocked"*"bunx resolves to an unwrapped binary at $TEST_BIN/bunx;"*"re-running it does not close this" ]]
+  [ "$status" -eq 0 ]
+  rm -f "$TEST_BIN/bunx"
+
+  # Control: the same record and bun, with no home_only key. Both are GAPs a
+  # re-run closes, as before, and --fail-on=config fails.
+  forge ecosystems_hardened=bun release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "bun runtime auto-install blocked")" == "GAP    PRESENT     bun runtime auto-install blocked"*"is not consulted for \`bun run\` at all" ]]
+  [[ "$output" == *"2 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [[ "$output" != *"--home-only"* ]]
+  [ "$status" -eq 1 ]
+
+  # Control: home_only, with the bun under HOME, where a re-run writes its wrapper.
+  forge ecosystems_hardened=bun release_age_hours=48 home_only=true env_layer=none
+  rm -f "$TEST_BIN/bun"
+  bun_stub "$TEST_HOME/.bun/bin"
+  run reach_verify "$TEST_HOME/.bun/bin:$BARE_PATH" --fail-on=config
+  [[ "$(row_of "bun runtime auto-install blocked")" == "GAP    PRESENT     bun runtime auto-install blocked"*"unwrapped binary at $TEST_HOME/.bun/bin/bun;"*"is not consulted for \`bun run\` at all" ]]
+  [[ "$output" == *"2 fixable by re-running the hardening, 0 that a re-run cannot close"* ]]
+  [ "$status" -eq 1 ]
+}

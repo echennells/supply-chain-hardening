@@ -8,6 +8,11 @@ name: harden.sh unit tests
 # macOS is in the matrix for one specific reason: it is the only place the
 # BSD `date` fallback for uv's exclude-newer timestamp is exercised. On Linux
 # the GNU branch always wins and that code would never run.
+#
+# agent-shells runs harden.sh and the verifier in containers, in the shells two
+# agent runners were measured to start (docs/design-principles.md, "Agent
+# runners"), and builds action/examples/Dockerfile. Its cells are in
+# tests/ci/agent-shell/run.sh.
 
 on:
   push:
@@ -78,13 +83,14 @@ jobs:
           # into each test's fresh HOME until the disk was full (2026-11-10).
           bats --timing --print-output-on-failure tests/ci/
 
-      - name: Shell-check harden.sh
+      - name: Shell-check harden.sh and the agent-shell driver
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           # SC1090/SC1091: sourced paths are runtime values by design.
-          # SC2016: wrapper heredocs intentionally emit literal $VAR.
-          shellcheck --severity=warning --exclude=SC1090,SC1091,SC2016 action/harden.sh
+          # SC2016: wrapper heredocs intentionally emit literal $VAR, and the
+          # driver's single-quoted commands are expanded by the container's shell.
+          shellcheck --severity=warning --exclude=SC1090,SC1091,SC2016 action/harden.sh tests/ci/agent-shell/run.sh
 
   # The Mac of somebody who is not a CI runner (issue 48, item 6): npm 11.5.1, which
   # warns about keys it does not know; Apple's own /usr/bin/bundle (Bundler 1.17.2,
@@ -143,3 +149,37 @@ jobs:
           env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" TMPDIR="$TMPDIR" LANG=en_US.UTF-8 PATH="$RUNNER_TEMP/asks:$MACPATH" \
             bats --timing --print-output-on-failure tests/ci/
           if [ -s "$RUNNER_TEMP/asked" ]; then echo "::error::the suite asked for a password:"; sort "$RUNNER_TEMP/asked" | uniq -c | head -20; exit 1; fi
+
+  # VM A (root, HOME=/home/hatch, npm 10.9.4 and bun in a read-only image directory,
+  # every command through `bash --norc --noprofile -c "umask 0007; ..."`), a uid with
+  # no passwd entry, VM B's replayed shell state, and the shipped example Dockerfile.
+  # Each step is one phase of the driver; the container carries over between them.
+  agent-shells:
+    name: "agent shell (${{ matrix.cell }})"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [vm-a, uid-without-passwd, replayed-state, image-recipe]
+    env:
+      CELL: ${{ matrix.cell }}
+    steps:
+      # The tree goes to docker build as its context and into containers as a
+      # bind mount: leave no token in .git/config for either to carry.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up the cell
+        run: bash tests/ci/agent-shell/run.sh "$CELL" setup
+
+      - name: What the cell contains
+        run: bash tests/ci/agent-shell/run.sh "$CELL" contents
+
+      - name: Run the cell
+        run: bash tests/ci/agent-shell/run.sh "$CELL" checks
+
+      - name: Clean up
+        if: always()
+        run: bash tests/ci/agent-shell/run.sh "$CELL" cleanup

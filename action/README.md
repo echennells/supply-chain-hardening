@@ -161,7 +161,9 @@ with a one-line reminder. The Ansible role installs
 
 For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
-hardening into an image and skip the adapter question altogether.
+hardening into an image and skip the adapter question altogether
+([docs/container-images.md](../docs/container-images.md),
+[`examples/Dockerfile`](examples/Dockerfile)).
 
 ### An agent's VM: `--home-only`
 
@@ -196,7 +198,10 @@ included, and checked against HOME before anything is written there. In this mod
   every one on `PATH`, in `~/.local/bin` and in `~/.cargo/bin` is 0.9.17 or later: then
   uv gets `exclude-newer = "<N> hours"`, which moves with the clock.
 - The run record has to be under HOME, or the run stops with exit 2 before writing
-  anything. It carries `home_only=true` and `env_layer=none`.
+  anything. It carries `home_only=true` and `env_layer=none`. From it, the verifier
+  reports the env layer, and a uv system config that is not there, `N/A BYDESIGN`,
+  and does not count a bun or bunx outside HOME left unwrapped as a gap a re-run closes
+  ([verify.md](../docs/verify.md#run-it-from-the-shell-you-want-checked)).
 - `--preflight` is refused: it asks sudo whether it needs a password.
 
 A second run on the same day changes nothing but its own run record, makes no copy,
@@ -549,7 +554,7 @@ On GitHub, `quiet: true` is `--quiet`, and the verify step has these outputs:
 |---|---|
 | `gaps` | Protections found not in effect. `unknown` if the verifier died before writing its outputs. |
 | `gaps_config` | Of those, how many a re-run of the hardening can close. |
-| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, or has no such control. |
+| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, or has no such control. After `--home-only`, also an unwrapped bun or bunx outside HOME, which that mode never wraps. |
 | `weak` | `WEAK` rows, which are not counted as coverage. |
 | `rows` | Rows in the table. 0 means the verifier did not run. |
 | `expectations` | `known` when it read the harden step's record, `unknown` when it checked every installed tool instead. |

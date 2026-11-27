@@ -20,8 +20,30 @@
 # for the toolchain it was handed; a plain row() there counts as a config gap.
 # The role preamble has no classes, so there it is an ordinary GAP. `unavail`
 # must stay behind this test: a bare call aborts the role verifier at line 1.
+# The bun and bunx rows use it too after harden.sh --home-only for a bun outside
+# HOME, which that mode never wraps: a re-run of it cannot close those either.
 scv_toolchain_gap() { # id evidence protection detail
   if type unavail >/dev/null 2>&1; then unavail "$@"; else shift; row GAP "$@"; fi
+}
+
+# scv_home_only: this run checks what harden.sh --home-only applied. Only
+# action/verify.sh sets SCV_HOME_ONLY, from a trusted, complete run record that
+# says home_only=true; the role never applies that way, so on its surface this
+# is false whatever the environment holds.
+scv_home_only() { [ "${SCV_SURFACE:-role}" = ci ] && [ "${SCV_HOME_ONLY:-0}" = 1 ]; }
+
+# scv_entry_outside_home <path>: 0 only when the PATH entry is shown to be
+# outside HOME, judged as harden.sh --home-only judges where it may write a
+# wrapper (home_guard --entry): the directory resolved, the name kept. A path
+# that cannot be resolved is not shown to be outside, so its GAP stays one a
+# re-run can close, which fails --fail-on=config.
+scv_entry_outside_home() {
+  local scv__d scv__h
+  case "$1" in */*) ;; *) return 1 ;; esac
+  scv__d=$(cd -P -- "${1%/*}/" 2>/dev/null && pwd -P) || return 1
+  scv__h=$(cd -P -- "$HOME" 2>/dev/null && pwd -P) || return 1
+  case "${scv__d%/}/" in "${scv__h%/}"/*) return 1 ;; esac
+  return 0
 }
 
 # How THIS surface puts a deployed setting back. The body is shared, so a
@@ -1778,7 +1800,16 @@ if have bun && bun_requested; then
   bver=$(scv_at_root bun --version 2>/dev/null | head -1 | tr -d '\r')
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   if ! grep -q 'supply-chain-harden' "$bpath" 2>/dev/null; then
-    row GAP PRESENT    "bun runtime auto-install blocked" "bun resolves to an unwrapped binary at $bpath; \`bun run\` downloads and executes missing imports, and the global bunfig is not consulted for \`bun run\` at all"
+    # After harden.sh --home-only a bun outside HOME is still unwrapped, so
+    # this stays a GAP, in the class a re-run cannot close: that mode never
+    # writes there. MEASURED (tests/ci/agent-shell, cell vm-a, bun 1.4.4 in a
+    # read-only /opt/hatch-image/bin): as a config gap it failed
+    # --fail-on=config after an apply that had done all it could.
+    if scv_home_only && scv_entry_outside_home "$bpath"; then
+      scv_toolchain_gap bun.runtime-auto-install PRESENT "bun runtime auto-install blocked" "bun resolves to an unwrapped binary at $bpath; \`bun run\` downloads and executes missing imports, and the global bunfig is not consulted for \`bun run\` at all. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this; a bun under HOME, or a wrapper put there by whoever builds the image, does"
+    else
+      row GAP PRESENT    "bun runtime auto-install blocked" "bun resolves to an unwrapped binary at $bpath; \`bun run\` downloads and executes missing imports, and the global bunfig is not consulted for \`bun run\` at all"
+    fi
   elif [ "$(bun_entrypoint_mode "$bpath")" != "bun" ]; then
     # MUST precede the --help flag grep. A wrapper whose REAL_BUN is missing
     # exits 127 from the recursion guard, so `bun --help` prints only the
@@ -1855,7 +1886,12 @@ elif ! have bunx; then
   bpath=$(scv_our_wrapper bun 2>/dev/null) || bpath=$(command -v bun 2>/dev/null)
   bxo=$(bun_wrapper_dispatch bun x some-cli)
   if ! grep -q 'supply-chain-harden' "$bpath" 2>/dev/null; then
-    row GAP PRESENT    "bunx fetch-and-execute blocked" "bunx is not on PATH and bun at $bpath is unwrapped, so \`bun x <pkg>\` fetches and executes with no age gate and no script blocking"
+    # A bun outside HOME after --home-only: as the runtime row says.
+    if scv_home_only && scv_entry_outside_home "$bpath"; then
+      scv_toolchain_gap bun.bunx PRESENT "bunx fetch-and-execute blocked" "bunx is not on PATH and bun at $bpath is unwrapped, so \`bun x <pkg>\` fetches and executes with no age gate and no script blocking. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"
+    else
+      row GAP PRESENT    "bunx fetch-and-execute blocked" "bunx is not on PATH and bun at $bpath is unwrapped, so \`bun x <pkg>\` fetches and executes with no age gate and no script blocking"
+    fi
   elif [ "$(bun_entrypoint_mode "$bpath")" != "bun" ]; then
     row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "bunx is not on PATH and the bun entry point at $bpath does not run in bun mode (\`bun --help\` reported '$(bun_entrypoint_mode "$bpath")') — the surviving fetch-and-execute path cannot be exercised; see the runtime row"
   elif [ "$(printf '%s\n' "$bxo" | head -1)" != "--no-install" ]; then
@@ -1869,7 +1905,12 @@ else
   bxpath=$(scv_our_wrapper bunx 2>/dev/null) || bxpath=$(command -v bunx 2>/dev/null)
   bxmode=$(bun_entrypoint_mode "$bxpath")
   if ! grep -q 'supply-chain-harden' "$bxpath" 2>/dev/null; then
-    row GAP PRESENT    "bunx fetch-and-execute blocked" "bunx resolves to an unwrapped binary at $bxpath; \`bunx <pkg>\` fetches and executes in one step with no age gate and no script blocking"
+    # A bunx outside HOME after --home-only: as the runtime row says.
+    if scv_home_only && scv_entry_outside_home "$bxpath"; then
+      scv_toolchain_gap bun.bunx PRESENT "bunx fetch-and-execute blocked" "bunx resolves to an unwrapped binary at $bxpath; \`bunx <pkg>\` fetches and executes in one step with no age gate and no script blocking. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"
+    else
+      row GAP PRESENT    "bunx fetch-and-execute blocked" "bunx resolves to an unwrapped binary at $bxpath; \`bunx <pkg>\` fetches and executes in one step with no age gate and no script blocking"
+    fi
   elif [ "$bxmode" != "bunx" ]; then
     row GAP FUNCTIONAL "bunx fetch-and-execute blocked" "the wrapper at $bxpath does not reach a working bun in bunx mode (\`bunx --help\` reported '$bxmode') — argv[0] is lost, or the embedded REAL_BUN is missing and the guard exits 127; either way every bunx call has changed meaning"
   else
@@ -2870,6 +2911,12 @@ if have uv; then
         elif [ "$uvsnb" = "All" ] || [ -n "$uvscut" ]; then
           row WEAK PARSED "uv system config (sudo/other users)" \
             "system layer partial: no_build=${uvsnb:-<absent>}, exclude-newer=${uvscut:-<absent>}"
+        elif scv_home_only; then
+          # harden.sh --home-only writes no /etc file, so a GAP here (counted
+          # as one a re-run closes) failed --fail-on=config after every such
+          # apply (MEASURED, cell vm-a). What uv says is kept in the detail.
+          row "N/A" BYDESIGN "uv system config (sudo/other users)" \
+            "with the per-user config removed uv reports neither no-build nor exclude-newer, so sudo uv and other users on this host get no uv config. This run checks harden.sh --home-only, which by design writes no /etc file; /etc/uv/uv.toml can only come from the image (the role, or harden.sh with WRITE_ETC=true)"
         else
           row GAP PARSED "uv system config (sudo/other users)" \
             "with the per-user config removed uv reports neither no-build nor exclude-newer - sudo uv and other users on this host are unprotected (needs /etc/uv/uv.toml; write_etc / become)"

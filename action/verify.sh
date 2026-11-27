@@ -1757,7 +1757,13 @@ elif [ "$QUIET" -eq 0 ]; then
     # The toolchain class holds every gap no configuration closes: a tool too
     # old for the setting (npm 10 and min-release-age), and a tool with no such
     # control at all (cargo-cooldown has no verb for cargo add / generate-lockfile).
-    echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN no configuration can close (the tool is too old, or has no such control)."
+    # After harden.sh --home-only it also holds a bun outside HOME, which that
+    # mode never wraps (scv_toolchain_gap in files/verify-probes.sh).
+    if [ "$SCV_HOME_ONLY" = 1 ]; then
+      echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN that a re-run cannot close (the tool is too old, has no such control, or is outside HOME, where --home-only writes nothing)."
+    else
+      echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN no configuration can close (the tool is too old, or has no such control)."
+    fi
   else
     echo "RESULT: no gaps."
   fi
