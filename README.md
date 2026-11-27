@@ -61,7 +61,8 @@ Each protection is delivered in up to three overlapping layers — system-wide e
 Linux only. The role hardens the package managers a host **already has** — it does not install them. Install the toolchains you want protected first, then apply.
 
 ```bash
-# 1. Prerequisites: Ansible >= 2.14, plus the package managers you want hardened
+# 1. Prerequisites: the package managers you want hardened, and Ansible >= 2.14,
+#    or uv or pipx to run it without installing it (below)
 sudo apt-get install -y ansible nodejs npm            # example
 
 # 2. Get the role — from Galaxy...
@@ -79,14 +80,32 @@ ansible-playbook site.yml --limit localhost
 supply-chain-verify
 ```
 
+**No Ansible installed? You don't need to install it.** uv (or pipx) runs ansible-core's
+`ansible-playbook` from its own cache and puts nothing on `PATH`:
+
+```bash
+uv tool run --from 'ansible-core>=2.14' ansible-playbook site.yml --limit localhost
+# or: pipx run --spec 'ansible-core>=2.14' ansible-playbook site.yml --limit localhost
+```
+
+MEASURED with uv 0.13.9 on an agent VM with no Ansible on disk (2026-11-27). On a host
+this project already hardened, the download goes through uv's own age gate and
+source-build block like any other. One side effect: the play finds uv's Python first on
+`PATH`, so its own python and pip checks, and the verifier it runs at the end (which can
+read pip as N/A), describe that Python rather than the host's. Run `supply-chain-verify`
+from your own shell afterwards for the real result. Add `-K` if sudo asks for a password. The preflight
+(`action/harden.sh --preflight`) prints the right command when Ansible is missing and uv
+or pipx is there.
+
 **sudo-rs (Ubuntu 26.04's default sudo) and `-K`:** ansible-core cannot answer
 sudo-rs's password prompt before 2.20.11 (and in 2.21.0 to 2.21.5): every
 escalating task times out (measured on 2.19.9 to 2.20.10 and 2.21.0 to 2.21.5)
 or hangs (measured on 2.16 to 2.18). Ubuntu 26.04's apt package is 2.20.1.
 The preflight stops the play before the first escalation and says so. Either
 run a fixed ansible-core for your user (`pipx install 'ansible-core>=2.21.6'`, then
-`~/.local/bin/ansible-playbook ... -K`) or give the user NOPASSWD sudo for the
-apply. A user with no sudo rights at all gets the same refusal, and neither fix
+`~/.local/bin/ansible-playbook ... -K`, or with nothing installed
+`uv tool run --from 'ansible-core>=2.21.6' ansible-playbook ... -K`) or give the user
+NOPASSWD sudo for the apply. A user with no sudo rights at all gets the same refusal, and neither fix
 applies to them. Measured with sudo-rs 0.2.13.
 
 From your own playbook:

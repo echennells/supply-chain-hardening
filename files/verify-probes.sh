@@ -20,8 +20,11 @@
 # for the toolchain it was handed; a plain row() there counts as a config gap.
 # The role preamble has no classes, so there it is an ordinary GAP. `unavail`
 # must stay behind this test: a bare call aborts the role verifier at line 1.
-# The bun and bunx rows use it too after harden.sh --home-only for a bun outside
-# HOME, which that mode never wraps: a re-run of it cannot close those either.
+# After harden.sh --home-only, the rows whose only fix is a wrapper next to a tool
+# outside HOME use it too (bun, bunx, cargo, deno, composer scripts), and so does
+# NuGet's signature row when the SDK needs DOTNET_NUGET_SIGNATURE_VERIFICATION:
+# that mode writes no such wrapper and no env file, so a re-run cannot close those.
+# A pnpm that does not run uses it in any mode: no configuration makes it run.
 scv_toolchain_gap() { # id evidence protection detail
   if type unavail >/dev/null 2>&1; then unavail "$@"; else shift; row GAP "$@"; fi
 }
@@ -950,8 +953,21 @@ else
   fi
 
   if [ -z "$pnv" ]; then
-    row GAP FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
-    row GAP FUNCTIONAL "pnpm age gate" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
+    # A pnpm that prints no version. A corepack shim that did not start pnpm is in
+    # the class no configuration closes. MEASURED (2026-11-27, macOS 27.2.1):
+    # Homebrew's pnpm, a corepack 0.34.0 shim, crashed in an empty HOME, because the
+    # pnpm 12.23.0 it fetched has pnpm.mjs as its bin; as config gaps these two failed
+    # --fail-on=config, and no re-run of the hardening makes that pnpm run. Anything
+    # else stays a config gap: an invalid config.yaml made every pnpm 11.0.0 command,
+    # --version included, fail (MEASURED, action/harden.sh), and a re-run replaces it.
+    case "$(readlink -f "$(command -v pnpm)" 2>/dev/null)" in
+      */corepack/*)
+        scv_toolchain_gap pnpm.ignore-scripts FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is a corepack shim and 'pnpm --version' from / returned nothing: corepack did not start a pnpm, so nothing about it could be checked, and no re-run of the hardening changes that"
+        scv_toolchain_gap pnpm.age-gate FUNCTIONAL "pnpm age gate" "pnpm is a corepack shim and 'pnpm --version' from / returned nothing: corepack did not start a pnpm, so nothing about it could be checked, and no re-run of the hardening changes that" ;;
+      *)
+        row GAP FUNCTIONAL "pnpm lifecycle scripts blocked" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked"
+        row GAP FUNCTIONAL "pnpm age gate" "pnpm is present but 'pnpm --version' from / returned nothing, so nothing about it could be checked" ;;
+    esac
   else
     pns=$(scv_pnpm_get ignore-scripts)
     case "$pns" in
@@ -2170,10 +2186,17 @@ deno_npm_fallback() { # prints the min-release-age value deno would read, or fai
   [ -n "$_dnf" ] && printf '%s' "$_dnf"
 }
 
+# dho=1 (set below): this run checks harden.sh --home-only and deno is outside
+# HOME, where that mode writes no wrapper, so a re-run of it does not close the GAP.
 deno_unwrapped_row() { # <why it is not wrapped>
   if _dnr=$(deno_npm_fallback); then
+    if [ "${dho:-0}" = 1 ]; then _dnfix="harden.sh --home-only writes no wrapper outside HOME, so re-running it does not add one"
+    else _dnfix="To restore the wrapper, $(scv_reapply)"; fi
     row WEAK PARSED "deno publish-age gate" \
-      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. To restore the wrapper, $(scv_reapply)"
+      "$1. deno $dver does read npm's min-release-age ($_dnr day(s)), so npm: specifiers are age-gated; jsr: and https: imports are not. $_dnfix"
+  elif [ "${dho:-0}" = 1 ]; then
+    scv_toolchain_gap deno.age-gate PRESENT "deno publish-age gate" \
+      "$1, so no invocation is age-gated${dver:+ (deno $dver reads no npm min-release-age here)}. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"
   else
     row GAP PRESENT "deno publish-age gate" \
       "$1, so no invocation is age-gated${dver:+ (deno $dver reads no npm min-release-age here)}"
@@ -2190,6 +2213,11 @@ else
   dp=$(scv_our_wrapper deno 2>/dev/null) || dp=$(command -v deno 2>/dev/null)
   dwrapped=0
   grep -q 'supply-chain-harden' "$dp" 2>/dev/null && dwrapped=1
+  # After harden.sh --home-only a deno outside HOME is never wrapped, and the
+  # wrapper is deno's only age gate: as for bun, the GAP is one a re-run of that
+  # mode cannot close.
+  dho=0
+  scv_home_only && scv_entry_outside_home "$dp" && dho=1
 
   # ---- interrogate the TOOL (row 2 prints at the bottom of this block) -------
   drb=$(deno_real_binary)
@@ -2261,6 +2289,9 @@ else
     if dshadow=$(deno_wrapper_on_path); then
       row GAP PRESENT "deno publish-age gate" \
         "wrapper is at $dshadow but deno resolves to $dp — the wrapper is shadowed and never runs, so no invocation is age-gated"
+    elif [ -x "${dp}-real" ] && [ "$dho" = 1 ]; then
+      scv_toolchain_gap deno.age-gate PRESENT "deno publish-age gate" \
+        "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"
     elif [ -x "${dp}-real" ]; then
       row GAP PRESENT "deno publish-age gate" \
         "$dp is an unwrapped binary but ${dp}-real is beside it — a deno upgrade or a re-run of the official installer overwrote the wrapper; $(scv_reapply)"
@@ -4237,12 +4268,22 @@ CJSON
     elif [ ! -f "$ctmp/p/vendor/autoload.php" ]; then
       row GAP FUNCTIONAL "composer lifecycle scripts blocked" \
         "'composer dump-autoload' through $(cq "$cpath") exits $lrc without running: $(composer_err "$live") — the probe cannot run and neither can callers"
-    elif [ -f "$ctmp/live" ]; then
-      row GAP FUNCTIONAL "composer lifecycle scripts blocked" \
-        "a post-autoload-dump script EXECUTED through $(cq "$cpath") — composer scripts are not blocked in this job"
-    elif [ "$live_disp" -eq 1 ]; then
-      row GAP FUNCTIONAL "composer lifecycle scripts blocked" \
-        "composer DISPATCHED the post-autoload-dump script through $(cq "$cpath") (it echoed the command) though the marker never appeared — the script ran and merely failed to write; scripts are not blocked"
+    elif [ -f "$ctmp/live" ] || [ "$live_disp" -eq 1 ]; then
+      if [ -f "$ctmp/live" ]; then
+        cran="a post-autoload-dump script EXECUTED through $(cq "$cpath") — composer scripts are not blocked in this job"
+      else
+        cran="composer DISPATCHED the post-autoload-dump script through $(cq "$cpath") (it echoed the command) though the marker never appeared — the script ran and merely failed to write; scripts are not blocked"
+      fi
+      # After harden.sh --home-only an unwrapped composer outside HOME stays so:
+      # that mode writes no wrapper there and no env file for
+      # COMPOSER_SKIP_SCRIPTS, the only other layer, so a re-run of it does not
+      # close this (the config still refuses plugins: the plugin row).
+      if [ "$cwrapped" -eq 0 ] && scv_home_only && scv_entry_outside_home "$cpath"; then
+        scv_toolchain_gap composer.scripts FUNCTIONAL "composer lifecycle scripts blocked" \
+          "$cran. harden.sh --home-only writes no wrapper outside HOME and no env file, so re-running it does not close this"
+      else
+        row GAP FUNCTIONAL "composer lifecycle scripts blocked" "$cran"
+      fi
     else
       # Name the mechanism from what is OBSERVABLE. creal = cpath means "no
       # wrapper, or a wrapper whose real target we could not read" - it does
@@ -4702,6 +4743,13 @@ else
     if [ -n "$cshadow" ]; then
       row GAP PRESENT "cargo publish-age gate" \
         "the cargo wrapper is deployed at $cshadow but SHADOWED - PATH resolves cargo to $(command -v cargo 2>/dev/null) first, so no caller reaches it. The fix is PATH order, not redeploying the wrapper"
+    elif scv_home_only && scv_entry_outside_home "$(command -v cargo 2>/dev/null)"; then
+      # After harden.sh --home-only a cargo outside HOME is never wrapped, as for
+      # bun. MEASURED (2026-11-27, macOS 27.2.1, a rustup proxy in a ~/.cargo/bin
+      # outside the HOME harden.sh was given): as a config gap this failed
+      # --fail-on=config after an apply that had done all it could.
+      scv_toolchain_gap cargo.age-gate PRESENT "cargo publish-age gate" \
+        "cargo is not wrapped - \`cargo build\` executes build.rs from whatever version the resolver picks, including one published minutes ago. cargo resolves to $(command -v cargo 2>/dev/null). harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"
     else
       row GAP PRESENT "cargo publish-age gate" \
         "cargo is not wrapped - \`cargo build\` executes build.rs from whatever version the resolver picks, including one published minutes ago. cargo resolves to $(command -v cargo 2>/dev/null)"
@@ -7066,21 +7114,43 @@ NGEOF
 
     # Why did the host's config admit the package?  Env kill-switch beats
     # everything, then an inert SDK tier, then the key simply not being set.
+    #
+    # Inert means only the variable turns verification on. The SDK tiers were
+    # measured on Linux (6.0.428 inert, 8.0.424 up enforcing). macOS is not a
+    # tier: MEASURED on SDK 10.0.106 (macOS 27.2.1, 2026-11-27), require was
+    # inert with DOTNET_NUGET_SIGNATURE_VERIFICATION unset and enforced with it
+    # true. harden.sh exports it through its env file; --home-only writes none,
+    # so there a re-run cannot close an inert row (nsigcls).
     nwhy="the merged config does not enforce it (dotnet reports signatureValidationMode=${nsvm_val:-<unset>})"
-    [ "$ncap" = "inert" ] && nwhy="the key is accepted and inert on SDK $nsdk (enforcement needs SDK 8.0+ on Linux/macOS; measured inert on 6.0.428)"
+    nsigcls=config
+    if [ "$ncap" = "inert" ]; then
+      if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+        nwhy="the key is accepted and inert on SDK $nsdk: on macOS NuGet verifies package signatures only when DOTNET_NUGET_SIGNATURE_VERIFICATION=true (MEASURED on SDK 10.0.106, 2026-11-27)"
+      else
+        nwhy="the key is accepted and inert on SDK $nsdk (enforcement needs SDK 8.0+ on Linux; measured inert on 6.0.428)"
+      fi
+      if scv_home_only; then
+        nsigcls=toolchain
+        nwhy="$nwhy. harden.sh --home-only writes no env file, so it cannot set DOTNET_NUGET_SIGNATURE_VERIFICATION=true and re-running it does not close this"
+      fi
+    fi
     case "${DOTNET_NUGET_SIGNATURE_VERIFICATION:-}" in
-      [Ff][Aa][Ll][Ss][Ee]|0) nwhy="DOTNET_NUGET_SIGNATURE_VERIFICATION=$DOTNET_NUGET_SIGNATURE_VERIFICATION in this environment disables verification regardless of any config" ;;
+      [Ff][Aa][Ll][Ss][Ee]|0) nsigcls=config
+        nwhy="DOTNET_NUGET_SIGNATURE_VERIFICATION=$DOTNET_NUGET_SIGNATURE_VERIFICATION in this environment disables verification regardless of any config" ;;
     esac
+    nuget_sig_gap() { # evidence protection detail
+      if [ "$nsigcls" = toolchain ]; then scv_toolchain_gap nuget.signatures "$@"; else row GAP "$@"; fi
+    }
 
     if [ "$nact" = "refused" ]; then
       nsigstate="enforcing"
       row "OK" "FUNCTIONAL" "nuget signature enforcement" \
         "with the host's own NuGet config and no overrides, SDK $nsdk refused an UNSIGNED package with NU3004 and did not extract it; the same restore with DOTNET_NUGET_SIGNATURE_VERIFICATION=false installed it (measured for the user-level config, from a temp dir — a repo-local override is what row 1 covers)"
     elif [ "$nact" = "restored" ]; then
-      row "GAP" "FUNCTIONAL" "nuget signature enforcement" \
+      nuget_sig_gap "FUNCTIONAL" "nuget signature enforcement" \
         "the host's own NuGet config admitted an UNSIGNED package: $nwhy"
     elif [ "$ncap" = "inert" ]; then
-      row "GAP" "FUNCTIONAL" "nuget signature enforcement" \
+      nuget_sig_gap "FUNCTIONAL" "nuget signature enforcement" \
         "SDK $nsdk parses signatureValidationMode=require and restores an unsigned package anyway: $nwhy"
     elif [ "$ncap" = "enforces" ] && [ "$nsvm_val" != "require" ]; then
       # The end-to-end run was inconclusive, but two independently measured

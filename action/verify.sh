@@ -91,8 +91,10 @@ USAGE
   --fail-on=POLICY  any     fail on any gap (default; today's contract)
                     config  fail only on gaps a re-run of harden.sh can close,
                             not on ones no configuration can close (a
-                            toolchain too old for the setting, or a tool
-                            with no such control)
+                            toolchain too old for the setting, a tool that
+                            does not run, or a tool with no such control;
+                            after harden.sh --home-only, also what that
+                            mode cannot write)
                     never   always exit 0; report only
 
 WHY THIS EXISTS
@@ -1755,14 +1757,17 @@ elif [ "$QUIET" -eq 0 ]; then
   if [ "$GAPS" -gt 0 ]; then
     echo "RESULT: $GAPS gap(s) — protections NOT in effect $SCV_SCOPE_LABEL."
     # The toolchain class holds every gap no configuration closes: a tool too
-    # old for the setting (npm 10 and min-release-age), and a tool with no such
-    # control at all (cargo-cooldown has no verb for cargo add / generate-lockfile).
-    # After harden.sh --home-only it also holds a bun outside HOME, which that
-    # mode never wraps (scv_toolchain_gap in files/verify-probes.sh).
+    # old for the setting (npm 10 and min-release-age), a tool with no such
+    # control at all (cargo-cooldown has no verb for cargo add / generate-lockfile),
+    # and a tool that does not run (a corepack pnpm whose --version prints nothing).
+    # After harden.sh --home-only it also holds what that mode never writes: a
+    # wrapper for bun, bunx, cargo, deno or composer outside HOME, and the
+    # variable an SDK that ignores NuGet's signatureValidationMode needs
+    # (scv_toolchain_gap in files/verify-probes.sh).
     if [ "$SCV_HOME_ONLY" = 1 ]; then
-      echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN that a re-run cannot close (the tool is too old, has no such control, or is outside HOME, where --home-only writes nothing)."
+      echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN that a re-run cannot close (the tool is too old, does not run or has no such control, or needs a wrapper outside HOME or a variable, which --home-only does not write)."
     else
-      echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN no configuration can close (the tool is too old, or has no such control)."
+      echo "        $GAPS_CONFIG fixable by re-running the hardening, $GAPS_TOOLCHAIN no configuration can close (the tool is too old, does not run, or has no such control)."
     fi
   else
     echo "RESULT: no gaps."

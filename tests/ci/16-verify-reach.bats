@@ -788,7 +788,7 @@ EOF
   echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
   [[ "$(row_of "bun runtime auto-install blocked")" == "GAP    PRESENT     bun runtime auto-install blocked"*"unwrapped binary at $TEST_BIN/bun;"*"harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this"* ]]
   [[ "$(row_of "bunx fetch-and-execute blocked")" == "GAP    PRESENT     bunx fetch-and-execute blocked"*"bunx is not on PATH and bun at $TEST_BIN/bun is unwrapped"*"re-running it does not close this" ]]
-  [[ "$output" == *"0 fixable by re-running the hardening, 2 that a re-run cannot close (the tool is too old, has no such control, or is outside HOME, where --home-only writes nothing)."* ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 2 that a re-run cannot close (the tool is too old, does not run or has no such control, or needs a wrapper outside HOME or a variable, which --home-only does not write)."* ]]
   [ "$status" -eq 0 ]
   # A bunx beside it, linked to bun as bun installs it: the bunx branch.
   ln -s bun "$TEST_BIN/bunx"
@@ -814,4 +814,246 @@ EOF
   [[ "$(row_of "bun runtime auto-install blocked")" == "GAP    PRESENT     bun runtime auto-install blocked"*"unwrapped binary at $TEST_HOME/.bun/bin/bun;"*"is not consulted for \`bun run\` at all" ]]
   [[ "$output" == *"2 fixable by re-running the hardening, 0 that a re-run cannot close"* ]]
   [ "$status" -eq 1 ]
+}
+
+# A cargo, unwrapped, as far as the cargo rows ask it: a version, and nothing else.
+cargo_stub() { # <dir>
+  mkdir -p "$1"
+  printf '#!/bin/bash\ncase "${1:-}" in --version|-V) echo "cargo 1.95.0 (f2b3e4f5a 2026-10-01)" ;; esac\nexit 0\n' > "$1/cargo"
+  chmod +x "$1/cargo"
+}
+
+@test "home-only record: a cargo outside HOME left unwrapped is a GAP a re-run cannot close; under HOME, or with an older record, one it can" {
+  # MEASURED (2026-11-27, macOS): a rustup cargo outside the HOME harden.sh
+  # --home-only was given failed --fail-on=config with "1 fixable".
+  cargo_stub "$TEST_BIN"
+  # Ground truth: this shell's cargo is outside HOME and is no wrapper.
+  run agent_sh "$BARE_PATH" 'command -v cargo'
+  [ "$output" = "$TEST_BIN/cargo" ]
+  [[ "$output" != "$TEST_HOME"/* ]]
+  ! grep -q supply-chain-harden "$TEST_BIN/cargo" || false
+  forge ecosystems_hardened=cargo release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
+  [[ "$(row_of "cargo publish-age gate")" == "GAP    PRESENT     cargo publish-age gate"*"cargo is not wrapped"*"cargo resolves to $TEST_BIN/cargo. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this" ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 1 that a re-run cannot close"* ]]
+  [ "$status" -eq 0 ]
+
+  # Control: the same cargo with an older record, a GAP a re-run closes.
+  forge ecosystems_hardened=cargo release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "cargo publish-age gate")" == "GAP    PRESENT     cargo publish-age gate"*"cargo resolves to $TEST_BIN/cargo" ]]
+  [[ "$output" == *"1 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
+
+  # Control: home_only, with the cargo under HOME, where a re-run writes its wrapper.
+  forge ecosystems_hardened=cargo release_age_hours=48 home_only=true env_layer=none
+  rm -f "$TEST_BIN/cargo"
+  cargo_stub "$TEST_HOME/.cargo/bin"
+  run reach_verify "$TEST_HOME/.cargo/bin:$BARE_PATH" --fail-on=config
+  [[ "$(row_of "cargo publish-age gate")" == "GAP    PRESENT     cargo publish-age gate"*"cargo resolves to $TEST_HOME/.cargo/bin/cargo" ]]
+  [[ "$output" == *"1 fixable by re-running the hardening, 0 that a re-run cannot close"* ]]
+  [ "$status" -eq 1 ]
+}
+
+# A deno 2.7.14, unwrapped: it runs and prints its version, and reads no npm
+# min-release-age (2.8.0 is the first that does).
+deno_stub() { # <dir>
+  mkdir -p "$1"
+  printf '#!/bin/bash\ncase "${1:-}" in --version|-V) echo "deno 2.7.14 (stable, release, x86_64-unknown-linux-gnu)" ;; esac\nexit 0\n' > "$1/deno"
+  chmod +x "$1/deno"
+}
+
+@test "home-only record: a deno outside HOME without its wrapper is a GAP a re-run cannot close; under HOME, or with an older record, one it can" {
+  local tail=", so no invocation is age-gated (deno 2.7.14 reads no npm min-release-age here)"
+  deno_stub "$TEST_BIN"
+  run agent_sh "$BARE_PATH" 'command -v deno'
+  [ "$output" = "$TEST_BIN/deno" ]
+  forge ecosystems_hardened=deno release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
+  [[ "$(row_of "deno publish-age gate")" == "GAP    PRESENT     deno publish-age gate"*"$TEST_BIN/deno"*"$tail. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this" ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 1 that a re-run cannot close"* ]]
+  [ "$status" -eq 0 ]
+  # A deno-real beside it: an upgrade wrote over the wrapper an earlier full apply put there.
+  printf '#!/bin/bash\nexit 0\n' > "$TEST_BIN/deno-real"
+  chmod +x "$TEST_BIN/deno-real"
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "deno publish-age gate")" == "GAP    PRESENT     deno publish-age gate"*"$TEST_BIN/deno-real is beside it"*"overwrote the wrapper. harden.sh --home-only writes no wrapper outside HOME, so re-running it does not close this" ]]
+  [ "$status" -eq 0 ]
+
+  # Control: the same deno with an older record, GAPs a re-run closes.
+  forge ecosystems_hardened=deno release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "deno publish-age gate")" == "GAP    PRESENT     deno publish-age gate"*"overwrote the wrapper; re-run action/harden.sh" ]]
+  [ "$status" -eq 1 ]
+  rm -f "$TEST_BIN/deno-real"
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "deno publish-age gate")" == "GAP    PRESENT     deno publish-age gate"*"$TEST_BIN/deno"*"$tail" ]]
+  [[ "$output" == *"1 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
+
+  # Control: home_only, with the deno under HOME, where a re-run writes its wrapper.
+  forge ecosystems_hardened=deno release_age_hours=48 home_only=true env_layer=none
+  rm -f "$TEST_BIN/deno"
+  deno_stub "$TEST_HOME/.deno/bin"
+  run reach_verify "$TEST_HOME/.deno/bin:$BARE_PATH" --fail-on=config
+  [[ "$(row_of "deno publish-age gate")" == "GAP    PRESENT     deno publish-age gate"*"$TEST_HOME/.deno/bin/deno"*"$tail" ]]
+  [[ "$output" == *"1 fixable by re-running the hardening, 0 that a re-run cannot close"* ]]
+  [ "$status" -eq 1 ]
+}
+
+# A composer 2.11.2 whose config commands all fail and whose scripts run: on
+# dump-autoload it echoes the script line as composer does when it dispatches
+# one, writes the file the script would and vendor/autoload.php.
+composer_stub() { # <dir>
+  mkdir -p "$1"
+  cat > "$1/composer" <<'EOF'
+#!/bin/bash
+case " $* " in
+  *" --version "*) echo "Composer version 2.11.2 2026-10-01 12:00:00" ;;
+  *" dump-autoload "*)
+    echo "> @php -r \"file_put_contents(getenv('SCH_MARK'), '1');\""
+    [ -z "${SCH_MARK:-}" ] || : > "$SCH_MARK"
+    mkdir -p vendor && : > vendor/autoload.php ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$1/composer"
+}
+
+@test "home-only record: composer scripts running through an unwrapped composer outside HOME are a GAP a re-run cannot close; with an older record, one it can" {
+  # The stub's other rows are GAPs a re-run closes in both runs (its config
+  # commands fail), so the scripts row is told apart by the counts.
+  local re_ho='([0-9]+) fixable by re-running the hardening, ([0-9]+) that a re-run cannot close'
+  local re_old='([0-9]+) fixable by re-running the hardening, ([0-9]+) no configuration can close'
+  local n
+  composer_stub "$TEST_BIN"
+  run agent_sh "$BARE_PATH" 'command -v composer'
+  [ "$output" = "$TEST_BIN/composer" ]
+  forge ecosystems_hardened=composer release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
+  [[ "$(row_of "composer lifecycle scripts blocked")" == "GAP    FUNCTIONAL  composer lifecycle scripts blocked"*"a post-autoload-dump script EXECUTED through"*"$TEST_BIN/composer"*"not blocked in this job. harden.sh --home-only writes no wrapper outside HOME and no env file, so re-running it does not close this" ]]
+  [[ "$output" =~ $re_ho ]]
+  [ "${BASH_REMATCH[2]}" = 1 ]
+  n=${BASH_REMATCH[1]}
+
+  # Control: the same composer with an older record: one more a re-run closes.
+  forge ecosystems_hardened=composer release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "composer lifecycle scripts blocked")" == "GAP    FUNCTIONAL  composer lifecycle scripts blocked"*"EXECUTED through"*"$TEST_BIN/composer"*"composer scripts are not blocked in this job" ]]
+  [[ "$output" =~ $re_old ]]
+  [ "${BASH_REMATCH[2]}" = 0 ]
+  [ "${BASH_REMATCH[1]}" -eq $((n + 1)) ]
+  [ "$status" -eq 1 ]
+}
+
+@test "pnpm: a corepack shim that starts no pnpm is a GAP no configuration can close, after --home-only or not; any other silent pnpm, or one that reads nothing, is one a re-run closes" {
+  # MEASURED (2026-11-27, macOS): Homebrew's pnpm, a corepack shim, printed no
+  # version in an empty HOME and failed --fail-on=config with "2 fixable".
+  # The shim lives under .../corepack/shims, as Homebrew's does, and PATH has a link to it.
+  local cs="$TEST_TMP/lib/node_modules/corepack/shims"
+  mkdir -p "$cs" && printf '#!/bin/sh\nexit 0\n' > "$cs/pnpm" && chmod +x "$cs/pnpm"
+  rm -f "$TEST_BIN/pnpm" && ln -s "$cs/pnpm" "$TEST_BIN/pnpm"
+  run agent_sh "$BARE_PATH" 'cd / && pnpm --version; echo "rc=$?"'
+  [ "$output" = "rc=0" ]
+  forge ecosystems_hardened=pnpm release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
+  [[ "$(row_of "pnpm lifecycle scripts blocked")" == "GAP    FUNCTIONAL  pnpm lifecycle scripts blocked"*"pnpm is a corepack shim and 'pnpm --version' from / returned nothing"* ]]
+  [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"corepack did not start a pnpm"* ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 2 no configuration can close (the tool is too old, does not run, or has no such control)."* ]]
+  [ "$status" -eq 0 ]
+  forge ecosystems_hardened=pnpm release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"returned nothing"* ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 2 that a re-run cannot close"* ]]
+  [ "$status" -eq 0 ]
+
+  # Control: the same silent pnpm, not a corepack shim (a bad config.yaml does this
+  # to pnpm 11.0.0, and a re-run fixes that): a gap a re-run closes.
+  rm -f "$TEST_BIN/pnpm"; stub_bin pnpm 'exit 0'
+  forge ecosystems_hardened=pnpm release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "pnpm age gate")" == "GAP    FUNCTIONAL  pnpm age gate"*"pnpm is present but 'pnpm --version' from / returned nothing"* ]]
+  [[ "$output" == *"2 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
+
+  # Control: a pnpm 11 that runs and reads none of what the hardening wrote.
+  stub_bin pnpm 'case "$*" in --version) echo 11.0.0 ;; "config get "*) echo undefined ;; esac'
+  forge ecosystems_hardened=pnpm release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "pnpm lifecycle scripts blocked")" == "GAP    PARSED      pnpm lifecycle scripts blocked"*"pnpm 11.0.0 reports ignore-scripts=undefined"* ]]
+  [[ "$(row_of "pnpm age gate")" == "GAP    PARSED      pnpm age gate"*"pnpm 11.0.0 reports no minimumReleaseAge from its files"* ]]
+  [[ "$output" == *"2 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
+}
+
+# A dotnet SDK <version> that checks package signatures only when
+# DOTNET_NUGET_SIGNATURE_VERIFICATION=true, as MEASURED on macOS with SDK 10.0.106
+# (2026-11-27) and on Linux with 6.0.428: then signatureValidationMode=require
+# refuses an unsigned package with NU3004, and without it the package restores
+# whatever the config says. It answers no `nuget config` question, so the other
+# nuget rows are WEAK or N/A.
+dotnet_sig_stub() { # <version>
+  stub_bin dotnet 'case "$*" in
+  --list-sdks) echo "'"$1"' [/usr/local/share/dotnet/sdk]" ;;
+  --version) echo '"$1"' ;;
+  "nuget list source --format short") echo "E https://api.nuget.org/v3/index.json" ;;
+  restore\ *)
+    pk=""; prev=""
+    for a in "$@"; do [ "$prev" = --packages ] && pk=$a; prev=$a; done
+    cfg=NuGet.Config; [ -f "$cfg" ] || cfg="$HOME/.nuget/NuGet/NuGet.Config"
+    if [ "${DOTNET_NUGET_SIGNATURE_VERIFICATION:-}" = true ] && grep -q "signatureValidationMode. value=.require" "$cfg" 2>/dev/null; then
+      echo "error NU3004: Package Sch.Probe.Unsigned 1.0.0 from source probe: the package is not signed."; exit 1
+    fi
+    [ -n "$pk" ] && mkdir -p "$pk/sch.probe.unsigned/1.0.0" ;;
+  *) exit 1 ;;
+esac'
+}
+uname_stub() { # <what uname -s prints>
+  stub_bin uname 'if [ "$*" = -s ]; then echo '"$1"'; else exec "'"$BATS_TEST_TMPDIR"'/bare/uname" "$@"; fi'
+}
+
+@test "nuget: an inert signatureValidationMode names what each platform needs; after --home-only it is a GAP a re-run cannot close" {
+  local b64
+  b64=$(type -P base64) || skip "no base64 to write the probe's unsigned package"
+  ln -s "$b64" "$TEST_BIN/base64"
+  mkdir -p "$TEST_HOME/.nuget/NuGet"
+  printf '<configuration><config><add key="signatureValidationMode" value="require" /></config></configuration>\n' > "$TEST_HOME/.nuget/NuGet/NuGet.Config"
+  dotnet_sig_stub 10.0.106
+  uname_stub Darwin
+  run agent_sh "$BARE_PATH" 'uname -s'
+  [ "$output" = Darwin ]
+  forge ecosystems_hardened=nuget release_age_hours=48 home_only=true env_layer=none
+  # FIXTURE CONTROL: with the variable set, the host's config refuses the package.
+  run reach_verify DOTNET_NUGET_SIGNATURE_VERIFICATION=true "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|nuget|fixable' || true
+  [[ "$(row_of "nuget signature enforcement")" == "OK     FUNCTIONAL  nuget signature enforcement"*"refused an UNSIGNED package with NU3004"* ]]
+  [ "$status" -eq 0 ]
+  # Without it, the macOS reason, in the class a re-run cannot close.
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|nuget|fixable' || true
+  [[ "$(row_of "nuget signature enforcement")" == "GAP    FUNCTIONAL  nuget signature enforcement"*"admitted an UNSIGNED package: the key is accepted and inert on SDK 10.0.106: on macOS NuGet verifies package signatures only when DOTNET_NUGET_SIGNATURE_VERIFICATION=true (MEASURED on SDK 10.0.106, 2026-11-27). harden.sh --home-only writes no env file, so it cannot set DOTNET_NUGET_SIGNATURE_VERIFICATION=true and re-running it does not close this" ]]
+  [[ "$output" == *"0 fixable by re-running the hardening, 1 that a re-run cannot close"* ]]
+  [ "$status" -eq 0 ]
+
+  # Control: an older record, whose env file sets the variable: one a re-run closes.
+  forge ecosystems_hardened=nuget release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "nuget signature enforcement")" == "GAP    FUNCTIONAL  nuget signature enforcement"*"on macOS NuGet verifies package signatures only when DOTNET_NUGET_SIGNATURE_VERIFICATION=true (MEASURED on SDK 10.0.106, 2026-11-27)" ]]
+  [[ "$output" == *"1 fixable by re-running the hardening, 0 no configuration can close"* ]]
+  [ "$status" -eq 1 ]
+
+  # On Linux the reason stays the SDK tier measured there.
+  dotnet_sig_stub 6.0.428
+  uname_stub Linux
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "nuget signature enforcement")" == "GAP    FUNCTIONAL  nuget signature enforcement"*"admitted an UNSIGNED package: the key is accepted and inert on SDK 6.0.428 (enforcement needs SDK 8.0+ on Linux; measured inert on 6.0.428)" ]]
+  [ "$status" -eq 1 ]
+  forge ecosystems_hardened=nuget release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "nuget signature enforcement")" == "GAP"*"measured inert on 6.0.428). harden.sh --home-only writes no env file"* ]]
+  [ "$status" -eq 0 ]
 }

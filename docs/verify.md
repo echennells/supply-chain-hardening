@@ -129,12 +129,18 @@ shell, so it passes `--apply-run`: the env layer row is `N/A` there and the
 `PATH` rows are left out. It is a flag and not a variable, so nothing left in
 a shell's environment does the same. After `harden.sh --home-only`, the fixes
 the rows give say to re-run it in that mode. Two kinds of row change there,
-because that mode writes nothing outside HOME and a re-run cannot close them:
-`uv system config (sudo/other users)` with no system layer is `N/A BYDESIGN`
-instead of a `GAP` (its detail still says sudo uv and other users get no uv
-config), and the bun and bunx rows for an unwrapped bun outside HOME stay `GAP`
-but count with the gaps no configuration can close, so `--fail-on=config` does
-not fail on them. A bun under HOME left unwrapped is still one a re-run closes.
+because that mode writes nothing outside HOME and no env file, and a re-run
+cannot close them: `uv system config (sudo/other users)` with no system layer
+is `N/A BYDESIGN` instead of a `GAP` (its detail still says sudo uv and other
+users get no uv config), and these stay `GAP` but count with the gaps no
+configuration can close, so `--fail-on=config` does not fail on them: the bun
+and bunx rows, `cargo publish-age gate`, `deno publish-age gate` and `composer
+lifecycle scripts blocked` for an unwrapped tool outside HOME, and `nuget
+signature enforcement` where the SDK ignores `signatureValidationMode` without
+`DOTNET_NUGET_SIGNATURE_VERIFICATION=true`, a variable that mode cannot set (on
+macOS: MEASURED on SDK 10.0.106). The same tool under HOME left unwrapped
+is still one a re-run closes. In any mode, a pnpm whose `--version` prints
+nothing is a `GAP` of that class too: no configuration makes it run.
 
 ## Don't run it on a host you suspect is compromised
 

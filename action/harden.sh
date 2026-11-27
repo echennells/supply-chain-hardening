@@ -2082,7 +2082,26 @@ preflight_report() {
       fi
     fi
   else
-    _pf_stop "ansible-playbook not found. Install ansible-core >= 2.14 for this user, or use action/harden.sh --emit=plain (narrower, see AGENTS.md)."
+    # No ansible-playbook. uv and pipx run ansible-core's without installing it, and
+    # leave only their cache. MEASURED with uv: `uv tool run --from ansible-core
+    # ansible-playbook site.yml --limit localhost -e agent_host=true` applied the role
+    # on an agent VM with uv 0.13.9 and no Ansible on disk (2026-11-27). pipx: its
+    # syntax checked, an apply not measured. Here neither is run to apply anything:
+    # uv is only asked --version, by the package-manager listing above.
+    local pfmin=2.14 pfk=""
+    if [ "$is_rs" = 1 ] && [ "$need_pw" = 1 ]; then pfmin=2.21.6; fi
+    [ "$need_pw" = 1 ] && pfk=" -K"
+    if path=$(command -v uv 2>/dev/null); then
+      _pf_line "ansible-playbook is not installed, but uv is ($path). Run the role through it; nothing gets installed:"
+      _pf_line "  uv tool run --from 'ansible-core>=$pfmin' ansible-playbook site.yml --limit localhost$pfk"
+      _pf_note "the play then finds uv's own Python first on PATH: its own python and pip lines, and the verifier it runs at the end (which can read pip as N/A), describe that Python, not this host's. Run supply-chain-verify from your own shell after it."
+    elif path=$(command -v pipx 2>/dev/null); then
+      _pf_line "ansible-playbook is not installed, but pipx is ($path). Run the role through it; nothing gets installed:"
+      _pf_line "  pipx run --spec 'ansible-core>=$pfmin' ansible-playbook site.yml --limit localhost$pfk"
+      _pf_note "the play then finds pipx's own Python first on PATH: its own python and pip lines, and the verifier it runs at the end (which can read pip as N/A), describe that Python, not this host's. Run supply-chain-verify from your own shell after it."
+    else
+      _pf_stop "ansible-playbook not found, and neither uv nor pipx is here to run it without installing it. Install ansible-core >= $pfmin for this user, or use action/harden.sh --emit=plain (narrower, see AGENTS.md)."
+    fi
   fi
   # The role's probe is `date -u -d @0`. Not on macOS, where the play stops above
   # and BSD date reads -d as "set the kernel's daylight-saving value".
@@ -6307,9 +6326,11 @@ EOF
   # side of that conflict AND buys real enforcement on the 6.x tier, where the
   # config key alone is accepted-and-inert: MEASURED, 6.0.428 parses
   # signatureValidationMode=require and restores an unsigned package anyway,
-  # but refuses with NU3004 once this variable is true. 8.0.424+ enforce the
-  # config key on their own; setting it true there is a no-op that keeps a
-  # later `=false` from being the last word. (ECH-165, Axis 1.)
+  # but refuses with NU3004 once this variable is true. On Linux 8.0.424+
+  # enforce the config key on their own; setting it true there is a no-op that
+  # keeps a later `=false` from being the last word. On macOS it is not: SDK
+  # 10.0.106 enforced require only with this variable true (MEASURED,
+  # 2026-11-27), so there the env file carries the protection. (ECH-165, Axis 1.)
   write_env DOTNET_NUGET_SIGNATURE_VERIFICATION true
   HARDENED+=("nuget")
   if sch_probes_vm; then set_tool_version "nuget" "$(detect_version nuget "dotnet nuget --version")"; fi
