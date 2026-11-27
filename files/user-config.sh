@@ -69,9 +69,15 @@ ucf_path() {
     cargo)     printf '%s\n' "${CARGO_HOME:-$HOME/.cargo}/config.toml" ;;
     maven)
       # In the home the JVM reads it from (ucf_jvm_home), so a preflight judges the
-      # file the apply writes.
-      d=$(ucf_jvm_home)
-      case "$d" in "home "*) d=${d#home } ;; *) d=$HOME ;; esac
+      # file the apply writes. The role resolves that home itself
+      # (tasks/passwd_home.yml) and passes it in SCH_UCF_MAVEN_HOME, so the two
+      # lookups cannot disagree; harden.sh never sets it.
+      if [ -n "${SCH_UCF_MAVEN_HOME:-}" ]; then
+        d=$SCH_UCF_MAVEN_HOME
+      else
+        d=$(ucf_jvm_home)
+        case "$d" in "home "*) d=${d#home } ;; *) d=$HOME ;; esac
+      fi
       printf '%s\n' "$d/.m2/settings.xml" ;;
     nuget)     printf '%s\n' "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config" ;;
     composer)  printf '%s\n' "$(ucf_composer_base)/config.json" ;;
