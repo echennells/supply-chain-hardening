@@ -23,6 +23,24 @@
   check_mode: false
   failed_when: false
 
+- name: Look up the passwd home, which maven reads its settings.xml from
+  ansible.builtin.import_tasks: passwd_home.yml
+
+- name: Resolve the home maven reads ~/.m2/settings.xml from
+  # Maven reads <user.home>/.m2/settings.xml, and the JVM takes user.home from
+  # the passwd entry, not from $HOME (tasks/passwd_home.yml). MEASURED (maven
+  # 3.10.2 on temurin 21.0.13.1): as root with HOME=/tmp/h, `mvn -X` said
+  # "Reading user settings from /root/.m2/settings.xml", with a settings.xml in
+  # both homes. This task used to write $HOME/.m2, which maven did not read
+  # wherever the two homes differ. Maven has no variable like GRADLE_USER_HOME
+  # to point it elsewhere. $HOME when this uid has no passwd home it can write,
+  # recorded below. $HOME too for a root that sudo or doas reached with another
+  # account's HOME (tasks/passwd_home.yml): the preflight then refuses it, as
+  # for the other per-user files. tasks/preflight.yml judges the same file.
+  ansible.builtin.set_fact:
+    maven_user_home_resolved: "{{ ansible_env.HOME if sch_passwd_kept_out | length > 0 else (sch_passwd_home | default('', true) or ansible_env.HOME) }}"
+  when: mvn_check.rc == 0
+
 - name: Deploy Maven settings.xml with HTTPS-only mirror and strict checksums
   # Replaced whole, but only a file that is exactly what this project last wrote
   # (files/user-config.sh, user_cfg_class): a marker is not enough, because a
@@ -33,7 +51,7 @@
   args:
     executable: /bin/bash
   environment:
-    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.m2/settings.xml"
+    SCH_UCF_PATH: "{{ maven_user_home_resolved }}/.m2/settings.xml"
     SCH_UCF_BODY: |
       <!-- Managed by ansible-supply-chain-security -->
       <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
@@ -105,6 +123,34 @@
   check_mode: false
   changed_when: "'changed' in (sch_ucf_maven.stdout_lines | default([]))"
   when: mvn_check.rc == 0
+
+- name: Note that settings.xml is outside $HOME, in the passwd home
+  ansible.builtin.set_fact:
+    sch_home_notes: >-
+      {{ (sch_home_notes | default([])) + ["maven: $HOME is '" ~ ansible_env.HOME ~ "' but the passwd home is '" ~ maven_user_home_resolved ~ "' — settings.xml goes to " ~ maven_user_home_resolved ~ "/.m2, where maven looks, not under $HOME."] }}
+  when:
+    - mvn_check.rc == 0
+    - sch_passwd_apart | bool
+
+- name: Record skipped protection — no passwd home the maven settings.xml could go to
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ['maven settings.xml — uid ' ~ (sch_passwd_uid | default('?', true)) ~ ' has no passwd home it can write (passwd says: ' ~ (sch_passwd_entry | default('', true) or 'nothing') ~ '), so settings.xml was written to ' ~ maven_user_home_resolved ~ '/.m2, under $HOME. Maven takes its home from the passwd entry, not $HOME, so it may not read it. Give the account a home it can write, and re-apply.'] }}
+  when:
+    - mvn_check.rc == 0
+    - sch_passwd_home | default('', true) | length == 0
+    - sch_passwd_kept_out | length == 0
+    - not (sch_passwd_at_home | bool)
+
+- name: Record skipped protection — root by way of sudo or doas, with another account's HOME
+  # Reached only where files/user-config.sh let root write under that HOME (one
+  # no other account controls): maven run as root reads root's passwd home.
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + ["maven settings.xml — this is root reached by sudo or doas from " ~ sch_passwd_kept_out ~ ", and $HOME (" ~ ansible_env.HOME ~ ") is not root's passwd home (" ~ (sch_passwd_home | default('', true) or sch_passwd_entry) ~ "), so settings.xml was written to " ~ maven_user_home_resolved ~ "/.m2, which maven run as root does not read. Run this as " ~ sch_passwd_kept_out ~ ", not as root, and re-apply."] }}
+  when:
+    - mvn_check.rc == 0
+    - sch_passwd_kept_out | length > 0
 
 - name: Record skipped protection — neither mvn nor a JDK
   ansible.builtin.set_fact:

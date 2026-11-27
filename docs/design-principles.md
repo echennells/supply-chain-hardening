@@ -748,14 +748,26 @@ the shape that fixes cargo, uv and bun — is still wrong for gradle, because th
 DEFAULT half of it is passwd-derived. Both writers hardcoded `$HOME` and were
 dead on `docker run -u <uid>`, OpenShift arbitrary uids and `sudo -E`.
 
+**Maven has the same default, and no `GRADLE_USER_HOME` of its own.** It reads
+`<user.home>/.m2/settings.xml`. MEASURED (maven 3.10.2 on temurin 21.0.13.1, as
+root with `HOME=/tmp/h` and a `settings.xml` in both homes): "Reading user
+settings from /root/.m2/settings.xml". The role wrote `$HOME/.m2` until it
+looked the passwd home up for maven too; `action/harden.sh` still writes
+`$HOME/.m2`. For a passwd home of `/` the JVM went back to `$HOME`, on the newer
+JDK only: MEASURED for an arbitrary uid in podman, java 21.0.13.1 used `$HOME`
+and java 17.0.21 used `/`.
+
 **Principle**: when the tool's default config home is not derived from `$HOME`,
 resolving its env var only covers the case where the env var is set. Resolve
-the default the way the TOOL derives it (`getent passwd "$(id -u)"`,
-`ansible_user_dir` — ansible reads the same passwd entry the JVM does), and
-where the surface owns a private, single-user env layer, pin the env var to the
-directory you wrote so the ambiguity cannot return. A system-wide env layer is
-not such a place: one absolute path in `/etc/profile.d` would point every
-account on the host at one user's home.
+the default the way the TOOL derives it: `getent passwd "$(id -u)"`, by uid.
+Not `ansible_user_dir`: ansible looks that up by the name in `$LOGNAME` or
+`$USER` (read in ansible-core 2.16.3's source), so it names another account's
+home whenever those do, and the role's gradle task read it until this was
+found. Where the surface owns a private, single-user env layer, pin the env var
+to the directory you wrote so the ambiguity cannot return. A system-wide env
+layer is not such a place: one absolute path in `/etc/profile.d` would point
+every account on the host at one user's home. Say when the file lands outside
+`$HOME`: the role's run summary names both homes.
 
 ---
 
