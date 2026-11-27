@@ -132,8 +132,11 @@ rm_work() {
   }
 }
 cleanup() {
+  local t
   "$DOCKER" rm -f "$CTR" >/dev/null 2>&1 || true
-  [ "$CELL" != image-recipe ] || "$DOCKER" image rm -f "$IMG" >/dev/null 2>&1 || true
+  if [ "$CELL" = image-recipe ]; then
+    for t in latest $IR_TAGS; do "$DOCKER" image rm -f "$IMG:$t" >/dev/null 2>&1 || true; done
+  fi
   rm_work
 }
 
@@ -504,6 +507,17 @@ rs_checks() {
 # ======================================================= image-recipe ======
 
 IR_LIB=/usr/local/lib/supply-chain-hardening
+# The rebuilds the checks make, as tags of $IMG; cleanup removes them.
+IR_TAGS="nostamp stamp1 stamp1-again"
+# ir_build <tag> [build args...]: the example built again, as setup builds it.
+ir_build() {
+  local tag=$1; shift
+  local -a prog=()
+  [ "$PODMAN" = true ] || prog=(--progress=plain)
+  "$DOCKER" build ${prog[@]+"${prog[@]}"} "$@" -t "$IMG:$tag" -f "$REPO/action/examples/Dockerfile" "$REPO" > "$W/build-$tag.log" 2>&1
+}
+# ir_cutoffs <image>: the pip and uv cutoffs harden.sh wrote, instants taken when it ran.
+ir_cutoffs() { "$DOCKER" run --rm --entrypoint "" "$1" grep -h -e '^uploaded-prior-to' -e '^exclude-newer' /etc/pip.conf /etc/uv/uv.toml; }
 ir_setup() {
   say "image-recipe setup: docker build action/examples/Dockerfile, as shipped"
   local -a prog=()
@@ -554,7 +568,40 @@ ir_checks() {
   set -e
   row=$(json_row "$W/verify-noep.json" "env layer propagation")
   check "CONTROL: a command started without it gets none of the env layer ($row)" has "$row" "GAP|FUNCTIONAL|NONE of"
-  done_phase 5
+
+  say "image-recipe: arguments that are not a command run node, as on the base image"
+  local own base
+  capture "$DOCKER" run --rm "$NODE_IMAGE" --version
+  base=$OUT
+  check "CONTROL: the base image's entrypoint runs node for \`--version\` (got: $base, rc $RC)" \
+    eval '[ "$RC" -eq 0 ] && printf "%s\n" "$base" | grep -qxE "v[0-9]+\.[0-9]+\.[0-9]+"'
+  own=$("$DOCKER" run --rm --entrypoint "" "$IMG" node --version) || own="(node --version failed)"
+  capture "$DOCKER" run --rm "$IMG" --version
+  check "the image's entrypoint does too: \`IMG --version\` prints its node's version $own (got: $OUT, rc $RC)" \
+    eval '[ "$RC" -eq 0 ] && [ "$OUT" = "$own" ]'
+  capture "$DOCKER" run --rm "$IMG" -e 'console.log(6 * 7, process.env.NPM_CONFIG_IGNORE_SCRIPTS)'
+  check "and \`IMG -e '...'\` runs node, with the env layer loaded (got: $OUT, rc $RC)" \
+    eval '[ "$RC" -eq 0 ] && [ "$OUT" = "42 true" ]'
+
+  say "image-recipe: a rebuild and the uv and pip cutoffs"
+  local cut0 cut1 cut2 stamp
+  cut0=$(ir_cutoffs "$IMG") || true
+  show "cutoffs in the image setup built" "$cut0"
+  # The control, and the reason for HARDEN_STAMP: rebuilt as it was, the cache
+  # keeps the harden layer, and with it the cutoffs.
+  ir_build nostamp || { show "build log" "$(tail -20 "$W/build-nostamp.log")"; }
+  check "CONTROL: rebuilt with nothing changed, the cutoffs stay ($(ir_cutoffs "$IMG:nostamp" 2>&1 | head -1 || true))" \
+    eval '[ -n "$cut0" ] && [ "$(ir_cutoffs "$IMG:nostamp")" = "$cut0" ]'
+  stamp=$(date -u +%Y%m%dT%H%M%S)
+  ir_build stamp1 --build-arg HARDEN_STAMP="$stamp" || { show "build log" "$(tail -20 "$W/build-stamp1.log")"; }
+  cut1=$(ir_cutoffs "$IMG:stamp1" 2>&1) || true
+  show "cutoffs with HARDEN_STAMP=$stamp" "$cut1"
+  check "a new HARDEN_STAMP runs the hardening again: new cutoffs" \
+    eval '[ -n "$cut1" ] && [ "$cut1" != "$cut0" ] && has "$cut1" "uploaded-prior-to = "'
+  ir_build stamp1-again --build-arg HARDEN_STAMP="$stamp" || { show "build log" "$(tail -20 "$W/build-stamp1-again.log")"; }
+  cut2=$(ir_cutoffs "$IMG:stamp1-again" 2>&1) || true
+  check "the same HARDEN_STAMP again hits the cache: the same cutoffs ($cut2)" eval '[ -n "$cut2" ] && [ "$cut2" = "$cut1" ]'
+  done_phase 11
 }
 
 # ============================================================== main ======

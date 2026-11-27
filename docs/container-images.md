@@ -43,6 +43,13 @@ part that does not depend on `HOME`:
 | `/etc/pip.conf`, `/etc/uv/uv.toml` and `/etc/npmrc`, from the role or from `harden.sh` with `WRITE_ETC=true`. Only Debian's and Ubuntu's apt npm reads `/etc/npmrc`; the role also writes the global config other npms read, and pnpm reads none of the three ([how it works](how-it-works.md#config-files-deployed-unconditionally)) | `~/.npmrc` and every other per-user file ([AGENTS.md](../AGENTS.md#before-you-apply) lists them), for pnpm, Yarn and bun among others. Yarn reads no `/etc/yarnrc.yml` |
 | The PATH wrappers written in place of a binary (bun, bunx, composer, deno and cargo, from `harden.sh`) | Maven's `settings.xml` and Gradle's init script, which go to the passwd home of the uid, not to `HOME` |
 
+The example builds as root with `WRITE_ETC=true`, and on its base image no tool reads
+the `/etc` files: its npm reads `/usr/local/etc/npmrc`, not `/etc/npmrc`, and there is
+no pip or uv. So a user other than root gets the env layer, through the entrypoint, and
+nothing more. MEASURED (podman 5.7.0, 2026-11-27): as uid `node` with
+`--entrypoint ""`, `npm config get ignore-scripts` printed `false`; through the
+entrypoint, `true`.
+
 **Gradle and Maven read the passwd home.** The JVM takes `user.home` from the passwd entry
 of the uid, not from `HOME`, so both writers put Maven's file and Gradle's init script in
 that home, and say so when it is not `HOME`
@@ -81,6 +88,14 @@ than 7 days a freeze. So **rebuild the image at least every 7 days**, or pin the
 on purpose with the role's `uv_exclude_newer` and `pip_uploaded_prior_to`
 ([configuration](configuration.md#commonly-tuned-variables)).
 
+A rebuild alone moves nothing: the build cache keeps the layer that hardened, cutoffs
+and all, while nothing above it changes. The example declares `ARG HARDEN_STAMP` and
+its hardening `RUN` names it, so a new value runs that step and every one after it
+again; pass `--build-arg HARDEN_STAMP="$(date -u +%F)"`, or build with
+`--pull --no-cache`. MEASURED with the `image-recipe` cell (podman 5.7.0, 2026-11-27):
+rebuilt with nothing changed, the image kept its cutoffs; with a new stamp it got new
+ones; with the same stamp again the cache served the same.
+
 ## Fail the build on a GAP
 
 Run the verifier in the build, after the hardening, and let a GAP fail it:
@@ -95,12 +110,28 @@ Run the verifier in the build, after the hardening, and let a GAP fail it:
   files root's, as the example does: `verify.sh` reads only a record that its caller or
   root owns. `--fail-on=any` fails on every GAP; `--fail-on=config` only on those a new
   run of the hardening would close, not on a tool too old for a setting
-  ([the policies](../action/README.md#verifying-it-actually-applied)). The example uses
-  `config`: on `node:22-bookworm` it passes with two GAPs only a newer tool closes, npm
-  10.9.9's age gate and Yarn 1.22.22, which reads no `.yarnrc.yml` (MEASURED, same run as
-  above). Install newer tools before hardening and use `any` to fail on those too.
+  ([the policies](../action/README.md#verifying-it-actually-applied)).
 
-The verifier exits non-zero on any GAP, so it also works as a health check.
+**The example's build passes with npm's age gate off.** It uses `--fail-on=config`
+because `node:22-bookworm` ships two tools no configuration can gate: npm 10.9.9, which
+has no age gate (npm 11.10.0 added it), and Yarn 1.22.22, which reads no `.yarnrc.yml`.
+With `--fail-on=any` its build fails on those two GAPs; with `config` it passes and
+prints them (MEASURED, same run as above). For an image whose builds must not pass
+without an age gate, install npm 11.10.0 or later (and Yarn 4.10 or later, or no Yarn)
+above the hardening, in the same image, and use `any`.
+
+**Pin the base image by digest** (`FROM node:22-bookworm@sha256:...`), as for any image
+pull ([AGENTS.md](../AGENTS.md#what-this-does-not-cover)). A tag moves, and with it
+the npm and Yarn the image brings and what the verifier finds. The example uses the tag
+so that CI builds it against what the tag gives today.
+
+A `HEALTHCHECK` runs its command with neither the entrypoint nor a login shell, so it
+loads the env layer itself:
+`HEALTHCHECK CMD . /etc/supply-chain-hardening.env && /usr/local/lib/supply-chain-hardening/action/verify.sh --emit=plain --fail-on=config --quiet`.
+The default policy, `any`, would report the example image unhealthy for its two
+toolchain GAPs. MEASURED (podman 5.7.0, 2026-11-27, `podman run --health-cmd` on the
+example image): healthy with that command, and unhealthy without the `. ` part, from
+the env layer's GAP.
 
 ## Take build-time sudo out
 
