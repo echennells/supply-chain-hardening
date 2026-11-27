@@ -12,7 +12,7 @@ against throwaway `$HOME` and `$TMPDIR` directories.
 
 It runs on a Mac too, with Apple's bash 3.2, `bundle` and (missing) `javac`; nothing in
 it asks for a password, and the tests that need root skip without passwordless sudo.
-618 tests (lines that start with `@test ` in `tests/ci/*.bats`); CI runs them on
+620 tests (lines that start with `@test ` in `tests/ci/*.bats`); CI runs them on
 ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15 set up like a person's Mac
 (`.github/workflows/ci-script.yml`). The same workflow's `agent-shells` job runs
 [`agent-shell/run.sh`](agent-shell/run.sh), which is not part of this suite: it needs
@@ -53,7 +53,7 @@ silently inert.
 | `13-central-429.bats` | 7 | The smoke jobs' verdict script on the real logs of two runs Maven Central refused (429) and two that were blocked: not tested, neither a pass nor a fail, and nothing else excused by a 429. |
 | `14-user-config.bats` | 64 | The per-user config files: a fake secret in each survives the first run and one added later survives the next, upgrades from the files v2.0.0 and v2.1.0 wrote on either surface (`tests/fixtures/user-config`), `~/.npmrc` merged byte for byte with npm reading the result and sending the kept token, a longer `min-release-age` kept, modes, links, unwritable files, killed runs, the self-check, Composer's home and its `auth.json`, root's yarn file as root, where root writes and where it does not, npm's global config as every account's npm reads it and in the preflight, `--preflight` saying what the run does, and the shared block being the same in `files/user-config.sh`. |
 | `15-agent-shell.bats` | 38 | `harden.sh --home-only`, run the way an agent's runner with no startup files runs commands (`bash --norc --noprofile -c "umask 0007; ..."`, the `agent_sh` and `harden_agent` helpers): nothing written, moved or deleted outside HOME (`TMPDIR` included), no sudo, a wrapper only for a tool under HOME, no env file, nothing for Gradle and Maven when HOME is not the passwd home, uv's span and pip's cutoff at midnight, and a second run that changes nothing; where a normal run would differ, that run is the control. |
-| `16-verify-reach.bats` | 27 | What the shell the verifier runs in gets, in the shapes measured on two agent VMs (`bash --norc --noprofile -c`, a replayed shell state): the env layer on both surfaces and after `--home-only`, a tool found only off this shell's `PATH`, a `HOME` the JVM does not read, where a too-old tool is and who can change it, and which uv spans and pip durations count. Each with a control. |
+| `16-verify-reach.bats` | 29 | What the shell the verifier runs in gets, in the shapes measured on two agent VMs (`bash --norc --noprofile -c`, a replayed shell state): the env layer on both surfaces and after `--home-only`, a tool found only off this shell's `PATH`, a `HOME` the JVM does not read, where a too-old tool is and who can change it, and which uv spans and pip durations count. After `--home-only`, a missing uv system config is N/A and a bun outside HOME a GAP that `--fail-on=config` does not fail on. Each with a control. |
 
 ## `agent-shell/run.sh`: the same scripts in containers
 
