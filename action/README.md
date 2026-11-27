@@ -200,7 +200,8 @@ included, and checked against HOME before anything is written there. In this mod
 - The run record has to be under HOME, or the run stops with exit 2 before writing
   anything. It carries `home_only=true` and `env_layer=none`. From it, the verifier
   reports the env layer, and a uv system config that is not there, `N/A BYDESIGN`,
-  and does not count a bun or bunx outside HOME left unwrapped as a gap a re-run closes
+  and does not count a bun, bunx, cargo, deno or composer outside HOME left unwrapped,
+  or NuGet signatures that need `DOTNET_NUGET_SIGNATURE_VERIFICATION`, as a gap a re-run closes
   ([verify.md](../docs/verify.md#run-it-from-the-shell-you-want-checked)).
 - `--preflight` is refused: it asks sudo whether it needs a password.
 
@@ -554,7 +555,7 @@ On GitHub, `quiet: true` is `--quiet`, and the verify step has these outputs:
 |---|---|
 | `gaps` | Protections found not in effect. `unknown` if the verifier died before writing its outputs. |
 | `gaps_config` | Of those, how many a re-run of the hardening can close. |
-| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, or has no such control. After `--home-only`, also an unwrapped bun or bunx outside HOME, which that mode never wraps. |
+| `gaps_toolchain` | Of those, how many no configuration can close: the tool is too old, does not run, or has no such control. After `--home-only`, also an unwrapped bun, bunx, cargo, deno or composer outside HOME, which that mode never wraps, and NuGet signatures on an SDK that needs `DOTNET_NUGET_SIGNATURE_VERIFICATION` (macOS), which that mode cannot set. |
 | `weak` | `WEAK` rows, which are not counted as coverage. |
 | `rows` | Rows in the table. 0 means the verifier did not run. |
 | `expectations` | `known` when it read the harden step's record, `unknown` when it checked every installed tool instead. |

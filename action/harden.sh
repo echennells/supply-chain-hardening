@@ -6307,9 +6307,11 @@ EOF
   # side of that conflict AND buys real enforcement on the 6.x tier, where the
   # config key alone is accepted-and-inert: MEASURED, 6.0.428 parses
   # signatureValidationMode=require and restores an unsigned package anyway,
-  # but refuses with NU3004 once this variable is true. 8.0.424+ enforce the
-  # config key on their own; setting it true there is a no-op that keeps a
-  # later `=false` from being the last word. (ECH-165, Axis 1.)
+  # but refuses with NU3004 once this variable is true. On Linux 8.0.424+
+  # enforce the config key on their own; setting it true there is a no-op that
+  # keeps a later `=false` from being the last word. On macOS it is not: SDK
+  # 10.0.106 enforced require only with this variable true (MEASURED,
+  # 2026-11-27), so there the env file carries the protection. (ECH-165, Axis 1.)
   write_env DOTNET_NUGET_SIGNATURE_VERIFICATION true
   HARDENED+=("nuget")
   if sch_probes_vm; then set_tool_version "nuget" "$(detect_version nuget "dotnet nuget --version")"; fi
