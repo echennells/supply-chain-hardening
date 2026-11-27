@@ -12,7 +12,7 @@ against throwaway `$HOME` and `$TMPDIR` directories.
 
 It runs on a Mac too, with Apple's bash 3.2, `bundle` and (missing) `javac`; nothing in
 it asks for a password, and the tests that need root skip without passwordless sudo.
-625 tests (lines that start with `@test ` in `tests/ci/*.bats`); CI runs them on
+627 tests (lines that start with `@test ` in `tests/ci/*.bats`); CI runs them on
 ubuntu-24.04, macos-15 and macos-15-intel, and on a macos-15 set up like a person's Mac
 (`.github/workflows/ci-script.yml`). The same workflow's `agent-shells` job runs
 [`agent-shell/run.sh`](agent-shell/run.sh), which is not part of this suite: it needs
@@ -48,7 +48,7 @@ silently inert.
 | `08-suggest.bats` | 34 | `--suggest`: the `with:` block, the same exceptions as Ansible extra vars, and repo-local config that outranks the host's, read as files (a stub of every tool proves nothing runs, a spelling the readers do not follow is never "none found", and no symlink is followed). |
 | `09-intel-and-privilege.bats` | 24 | The `intel` input, the deprecated `install_sfw`, and what happens as root, without sudo, in slim containers, and where root cannot write either (a read-only image or mount). |
 | `10-verify-json.bats` | 9 | `verify.sh --json` and the role's report fragment: the result's counts add up to the rows, `tools_seen`, the exit code, an empty host, and that every protection name starts with a tool (`protections.py`). |
-| `11-preflight.bats` | 20 | `--preflight`: writes nothing, the STOP lines (a Mac, Ansible, sudo-rs, root, the files the play stops on), and that its markers, file list, classifier and affected ansible-core versions are `tasks/preflight.yml`'s. |
+| `11-preflight.bats` | 22 | `--preflight`: writes nothing, the STOP lines (a Mac, Ansible, sudo-rs, root, the files the play stops on), the uv and pipx commands when Ansible is missing, and that its markers, file list, classifier and affected ansible-core versions are `tasks/preflight.yml`'s. |
 | `12-sfw-binary-pin.bats` | 11 | The pinned Socket Firewall binary, with a stub launcher that caches as sfw does and a stub `curl`: used only when sfw's own fetch fails, held to its digest before it reaches sfw's cache, never put over a cached binary or through a directory another account could write, with each platform's own asset and digest, with `shasum` where there is no `sha256sum`, and with the reason in the warning when it is not used. Needs passwordless sudo; skips without it. |
 | `13-central-429.bats` | 7 | The smoke jobs' verdict script on the real logs of two runs Maven Central refused (429) and two that were blocked: not tested, neither a pass nor a fail, and nothing else excused by a 429. |
 | `14-user-config.bats` | 64 | The per-user config files: a fake secret in each survives the first run and one added later survives the next, upgrades from the files v2.0.0 and v2.1.0 wrote on either surface (`tests/fixtures/user-config`), `~/.npmrc` merged byte for byte with npm reading the result and sending the kept token, a longer `min-release-age` kept, modes, links, unwritable files, killed runs, the self-check, Composer's home and its `auth.json`, root's yarn file as root, where root writes and where it does not, npm's global config as every account's npm reads it and in the preflight, `--preflight` saying what the run does, and the shared block being the same in `files/user-config.sh`. |
