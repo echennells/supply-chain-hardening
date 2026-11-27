@@ -128,7 +128,13 @@ The role's own run at the end of an apply is ansible's process, not anyone's
 shell, so it passes `--apply-run`: the env layer row is `N/A` there and the
 `PATH` rows are left out. It is a flag and not a variable, so nothing left in
 a shell's environment does the same. After `harden.sh --home-only`, the fixes
-the rows give say to re-run it in that mode.
+the rows give say to re-run it in that mode. Two kinds of row change there,
+because that mode writes nothing outside HOME and a re-run cannot close them:
+`uv system config (sudo/other users)` with no system layer is `N/A BYDESIGN`
+instead of a `GAP` (its detail still says sudo uv and other users get no uv
+config), and the bun and bunx rows for an unwrapped bun outside HOME stay `GAP`
+but count with the gaps no configuration can close, so `--fail-on=config` does
+not fail on them. A bun under HOME left unwrapped is still one a re-run closes.
 
 ## Don't run it on a host you suspect is compromised
 

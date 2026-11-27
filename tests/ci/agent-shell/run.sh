@@ -340,7 +340,26 @@ vm_a_checks() {
   row=$(json_row "$W/verify.json" "uv on this shell's PATH")
   check "uv in ~/.local/bin is graded but off this shell's PATH: WEAK ($row)" has "$row" "WEAK|"
   check "the exit status ($RC) agrees with --json's result" exit_agrees "$W/verify.json" "$RC"
-  done_phase 16
+  # What --home-only cannot write: /etc, and a wrapper outside HOME. Neither is a
+  # gap a re-run closes, so neither fails --fail-on=config. Before they were
+  # classed so, this run exited 1 with "3 fixable by re-running the hardening".
+  row=$(json_row "$W/verify.json" "uv system config (sudo/other users)")
+  check "uv system config: N/A BYDESIGN, --home-only writes no /etc file ($row)" \
+    eval 'has "$row" "N/A|BYDESIGN|" && has "$row" "which by design writes no /etc file"'
+  local brow bxrow
+  brow=$(json_row "$W/verify.json" "bun runtime auto-install blocked")
+  bxrow=$(json_row "$W/verify.json" "bunx fetch-and-execute blocked")
+  check "bun runtime auto-install and bunx: still GAPs at /opt/hatch-image/bin, which a re-run does not close ($brow / $bxrow)" \
+    eval 'has "$brow" "GAP|PRESENT|bun resolves to an unwrapped binary at /opt/hatch-image/bin/bun;" && has "$brow" "re-running it does not close this" &&
+          has "$bxrow" "GAP|PRESENT|bunx resolves to an unwrapped binary at /opt/hatch-image/bin/bunx;" && has "$bxrow" "re-running it does not close this"'
+  set +e
+  agent "cd $VM_A_HOME/sch && ./action/verify.sh --emit=plain --fail-on=config" > "$W/verify-config.out" 2>&1
+  RC=$?
+  set -e
+  show "--fail-on=config: the summary (rc $RC)" "$(grep -A1 '^RESULT' "$W/verify-config.out")"
+  check "--fail-on=config exits 0: no GAP left that a re-run of --home-only closes (rc $RC)" \
+    eval '[ "$RC" -eq 0 ] && grep -q "^        0 fixable by re-running the hardening" "$W/verify-config.out"'
+  done_phase 19
 }
 
 # ================================================= uid-without-passwd ======

@@ -153,7 +153,11 @@ read-only `/opt/hatch-image`: `harden.sh --home-only` as root changed nothing ou
 `HOME` and nothing in the image directory, gave bun no wrapper, and the verifier, run
 from the same shell, reported npm's age gate as a GAP at
 `/opt/hatch-image/bin/npm: read-only (image-owned?)`, pip 24.0's age gate as a GAP, and
-GAPs for bun's runtime auto-install, bunx, and uv's system config.
+bun's runtime auto-install and bunx as GAPs, unwrapped in the image directory. Those
+four are GAPs that a re-run of `--home-only` cannot close, and uv's system config,
+which only `/etc` can hold, is `N/A BYDESIGN`, so `verify.sh --fail-on=config` exits 0
+there. Before the verifier classed them so, it exited 1 there, counting the bun, bunx
+and uv system config rows as "fixable by re-running the hardening".
 
 So if you build the image an agent platform runs, harden it there, as on this page.
 Otherwise run `./action/harden.sh --home-only` at the start of every session, and the
