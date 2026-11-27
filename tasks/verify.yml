@@ -124,7 +124,15 @@
   # verify_fail_on_gap=true would fail the play with "a protection this role
   # reports as applied is not actually doing anything" — about a protection
   # that was never deployed because the operator asked for a dry run.
-  ansible.builtin.command: /usr/local/bin/supply-chain-verify
+  #
+  # --apply-run: this run is ansible's own process, which loads no startup
+  # file, so the rows about "this shell" would describe nobody's shell. With it
+  # the env layer row is N/A and the "on this shell's PATH" rows are left out;
+  # without it, every apply would report the env layer as a GAP, and
+  # verify_fail_on_gap (agent_host) would fail it. A flag, not a variable, so
+  # nothing a shell leaves exported can do the same. Run supply-chain-verify
+  # from the shell you want checked for those rows.
+  ansible.builtin.command: /usr/local/bin/supply-chain-verify --apply-run
   register: verification
   changed_when: false
   failed_when: false

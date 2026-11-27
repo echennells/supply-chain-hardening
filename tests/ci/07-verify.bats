@@ -1199,7 +1199,17 @@ ago() { perl -e 'use POSIX; print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time - $
   venv_pip "$(ago -48)"
   run verify -- --emit=plain
   [[ "$output" == *"GAP    PARSED      pip venv age gate"*"in the FUTURE"* ]] || { echo "$output" | grep 'pip '; false; }
+  # A duration is read from pip 26.1 on, and this venv's pip is 26.2.2
+  # (16-verify-reach.bats has the 26.0.1 control).
   venv_pip P2D
+  run verify -- --emit=plain
+  [[ "$output" == *"OK     PARSED      pip venv age gate"*"'P2D' (48h)"* ]] || { echo "$output" | grep 'pip '; false; }
+  # Months are refused (pip 26.1.2 and 26.3 exit 2 on P1M, MEASURED).
+  venv_pip P1M
+  run verify -- --emit=plain
+  [[ "$output" == *"GAP    PARSED      pip venv age gate"*"refuses uploaded-prior-to='P1M'"* ]] || { echo "$output" | grep 'pip '; false; }
+  # A value with no Z stays WEAK, as before.
+  venv_pip 2026-01-01T00:00:00
   run verify -- --emit=plain
   [[ "$output" == *"WEAK   PARSED      pip venv age gate"*"not an absolute instant"* ]] || { echo "$output" | grep 'pip '; false; }
 }
@@ -1827,11 +1837,18 @@ case "$1 $2" in
 esac
 GO
   chmod +x "$TEST_HOME/go/bin/go"
-  run env -i PATH="/usr/bin:/bin" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
+  # Not /usr/bin:/bin: GitHub's ubuntu runners have a go a bare `go` finds there, and
+  # then the shell does run a go and no row is right (ubuntu-24.04, 2026-11-27). The
+  # bare PATH has basic utilities only; check that it has no go before relying on it.
+  bare_path
+  ! env -i PATH="$BARE_PATH" sh -c 'command -v go' || false
+  run env -i PATH="$BARE_PATH" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" bash "$VERIFY_SH" --emit=plain
   [[ "$output" == *"go checksum verification"* ]]
   # Not a substring test: "cargo not installed" contains "go not installed".
   ! grep -qE '^N/A +ABSENT +go +go not installed' <<<"$output" || false
   grep -qE '^[A-Z/]+ +[A-Z-]+ +go settings persisted' <<<"$output"
+  # And the table says a bare `go` here does not run the go it graded.
+  grep -qE "^WEAK +PARSED +go on this shell's PATH +the go rows grade " <<<"$output"
 }
 
 @test "go: 'settings persisted' is OK from go env -w alone, and a GAP when GOTOOLCHAIN=local did not persist" {

@@ -45,6 +45,16 @@
 
 set -u
 
+# The caller's PATH and HOME, saved before anything below changes them: go
+# discovery and the shared body's discover() prepend directories to PATH, and
+# the rows about this shell ("shell reachability") compare against what a bare
+# command finds here. tests/ci/16-verify-reach.bats checks both preambles.
+SCV_CALLER_PATH=${PATH-}
+SCV_CALLER_HOME=${HOME-}
+# Set only by the role's --apply-run ("shell reachability"); this surface has
+# no apply run, and an exported one changes nothing here.
+SCV_APPLY_RUN=0
+
 # ---- surface identity (the preamble half of the preamble/probes contract) ----
 # Declared by both preambles even where a given probe body does not read them
 # yet; the contract is the point, and a variable that appears on one surface
@@ -266,6 +276,14 @@ SCV_EXPECT=""
 SCV_EXPECT_WHY=""
 _record_note_status=""
 _record_note_detail=""
+# From a trusted, complete record only, so set here and never inherited.
+# harden.sh --home-only writes home_only=true and env_layer=none: it writes
+# config files under HOME and no env file, so there is no env layer to check,
+# and the fix for a stale cutoff is to re-run it in that mode. A record without
+# the keys (any earlier harden.sh) reads as before.
+# shellcheck disable=SC2034  # read by the shared probe body (scv_reapply)
+SCV_HOME_ONLY=0
+SCV_ENV_LAYER=""
 
 _rec() { # field name -> last value in the outputs file
   grep "^$1=" "$OUTPUT_FILE" 2>/dev/null | tail -1 | cut -d= -f2-
@@ -334,6 +352,9 @@ elif [ -n "$OUTPUT_FILE" ] && [ -r "$OUTPUT_FILE" ]; then
     _record_note_detail="the hardening outputs file at $OUTPUT_FILE was written by job '$_recjob', not this one ('$_thisjob') — it is a leftover from an earlier run on this machine. Ignoring it and checking every installed tool"
   else
     SCV_EXPECT_KNOWN=1
+    # shellcheck disable=SC2034  # read by the shared probe body (scv_reapply)
+    [ "$(_rec home_only)" = true ] && SCV_HOME_ONLY=1
+    SCV_ENV_LAYER=$(_rec env_layer)
     _exp=""
     _oldifs="$IFS"; IFS=,
     for _e in $HARDENED_LIST; do
@@ -344,7 +365,7 @@ elif [ -n "$OUTPUT_FILE" ] && [ -r "$OUTPUT_FILE" ]; then
     done
     IFS="$_oldifs"
     [ "$(_rec sfw_installed)" = "true" ] && _exp="$_exp tool.sfw"
-    [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ -z "$_env_file_why" ] && _exp="$_exp env.propagation"
+    [ "$SCV_ENV_LAYER" != none ] && [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ -z "$_env_file_why" ] && _exp="$_exp env.propagation"
     SCV_EXPECT="$_exp"
     SCV_EXPECT_WHY="this job hardened: ${HARDENED_LIST:-<nothing>}"
     # A wrapper's N/A is about the WRAPPER record, not the ecosystem list.
@@ -417,8 +438,13 @@ row() { # status, evidence, protection, detail
   esac
   # Coverage accumulator for the reconciliation pass. Every protection name in
   # both surfaces starts with the ecosystem it belongs to, which is what makes
-  # this cheap and self-maintaining as probes are added.
-  case "$SEEN" in *" ${p%% *} "*) ;; *) SEEN="$SEEN${p%% *} " ;; esac
+  # this cheap and self-maintaining as probes are added. A "<tool> on this
+  # shell's PATH" row is about the shell, not a probe of the tool, so it does
+  # not count: a body that stopped right after it would otherwise read as covered.
+  case "$p" in
+    *" on this shell's PATH") ;;
+    *) case "$SEEN" in *" ${p%% *} "*) ;; *) SEEN="$SEEN${p%% *} " ;; esac ;;
+  esac
   return 0
 }
 
@@ -836,6 +862,195 @@ elif [ -n "$scv_hooks_k" ]; then
 fi
 # <<< python startup hooks
 
+# >>> shell reachability
+# BYTE-IDENTICAL in templates/verify.sh.j2 and action/verify.sh, from the line
+# above to the matching <<< line (tests/ci/16-verify-reach.bats compares them).
+#
+# WHAT THIS SHELL GETS. The rows below grade the tools the verifier finds, with
+# the config it finds. An agent runner can start every command in a shell that
+# gets less: MEASURED on two agent VMs (2026-11-26), one ran each command as
+# `bash --norc --noprofile -c` with HOME=/home/hatch while root's passwd home
+# was /root, and a PATH with no home directory on it; the other replayed a
+# shell state saved once per session ("Agent runners" in
+# docs/design-principles.md). These helpers say where this shell differs:
+# no env layer, a HOME the JVM does not read, a tool the verifier found only in
+# a directory it added to PATH, a too-old tool in a directory nobody here can
+# change. They read PATH, the passwd database and file modes, and start no tool.
+#
+# They compare against SCV_CALLER_PATH and SCV_CALLER_HOME, saved at the top of
+# this file: go discovery and the shared body's discover() prepend directories
+# to PATH later. The role's run at the end of an apply passes --apply-run
+# (tasks/verify.yml), which sets SCV_APPLY_RUN=1. That run is ansible's own
+# process, not a shell anyone works in, so the rows about this shell are left
+# out of it. A flag and not a variable: both preambles set SCV_APPLY_RUN=0
+# first, so one left exported in a shell rc cannot hide these rows.
+
+# scv_passwd_home: the home the passwd database gives uid $(id -u), looked up by
+# uid, never by $USER or $LOGNAME, which a relocated-HOME container can set to
+# anything. getent is missing from some minimal images, so /etc/passwd is read
+# after it. Nothing for a uid with no entry. The lookup harden_gradle in
+# action/harden.sh does.
+scv_passwd_home() {
+  local scv__u scv__h
+  scv__u=$(id -u 2>/dev/null) || return 0
+  scv__h=$(getent passwd "$scv__u" 2>/dev/null | cut -d: -f6)
+  [ -n "$scv__h" ] || scv__h=$(awk -F: -v u="$scv__u" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null)
+  printf '%s' "$scv__h"
+}
+
+# scv_same_dir <a> <b>: both name one directory. Symlinks are resolved where
+# both exist; otherwise compared as text, less a trailing slash.
+scv_same_dir() {
+  local scv__a="${1%/}" scv__b="${2%/}"
+  [ -n "$scv__a" ] || scv__a=/
+  [ -n "$scv__b" ] || scv__b=/
+  [ "$scv__a" = "$scv__b" ] && return 0
+  scv__a=$(CDPATH="" cd -P -- "$scv__a" 2>/dev/null && pwd -P) || return 1
+  scv__b=$(CDPATH="" cd -P -- "$scv__b" 2>/dev/null && pwd -P) || return 1
+  [ "$scv__a" = "$scv__b" ]
+}
+
+# scv_jvm_home_row: gradle and maven run on the JVM, which takes user.home from
+# the passwd entry, not from HOME. MEASURED for gradle 8.14.3 on openjdk-21
+# (tasks/gradle.yml): with HOME relocated it read <passwd home>/.gradle. That
+# maven reads <passwd home>/.m2 the same way is inferred, not measured. So where
+# HOME is not the passwd home, they do not read their files under HOME: WEAK,
+# naming both homes. A gradle with GRADLE_USER_HOME set reads that instead and
+# is left out, and so is a tool this run was not asked to check (requested, as
+# in scv_reach_row). No row in any other case: a mismatch alone says nothing
+# (every tests/ci test relocates HOME), and the row would be noise.
+scv_jvm_home_row() {
+  local scv__ph scv__h scv__d=""
+  have gradle || have mvn || return 0
+  scv__ph=$(scv_passwd_home)
+  scv__h=${SCV_CALLER_HOME:-}
+  [ -n "$scv__ph" ] && [ -n "$scv__h" ] || return 0
+  scv_same_dir "$scv__ph" "$scv__h" && return 0
+  if have gradle && [ -z "${GRADLE_USER_HOME:-}" ] \
+     && { ! command -v requested >/dev/null 2>&1 || requested gradle; }; then
+    scv__d="gradle reads ${scv__ph%/}/.gradle, not ${scv__h%/}/.gradle (GRADLE_USER_HOME would move it)"
+  fi
+  if have mvn && { ! command -v requested >/dev/null 2>&1 || requested maven; }; then
+    scv__d="${scv__d:+$scv__d; }maven most likely reads ${scv__ph%/}/.m2, not ${scv__h%/}/.m2 (not measured)"
+  fi
+  [ -n "$scv__d" ] || return 0
+  row WEAK PARSED "env JVM user home" \
+    "HOME is $scv__h, but the JVM takes user.home from the passwd entry of uid $(id -u), $scv__ph: $scv__d"
+}
+
+# scv_tool_file <command>: the file a bare <command> runs or, when that is one
+# of our wrappers, the real binary it names (REAL_<TOOL>='...').
+scv_tool_file() {
+  local scv__f scv__t
+  scv__f=$(command -v "$1" 2>/dev/null) || return 0
+  case "$scv__f" in /*) ;; *) return 0 ;; esac
+  if grep -q 'supply-chain-harden' "$scv__f" 2>/dev/null; then
+    scv__t=$(grep -oE "^REAL_[A-Z]+='[^']*'" "$scv__f" 2>/dev/null | head -1 | sed "s/^[^=]*='//; s/'\$//")
+    [ -z "$scv__t" ] || scv__f=$scv__t
+  fi
+  printf '%s' "$scv__f"
+}
+
+# scv_where_clause <name> <path>: for the GAP of a tool too old for a setting,
+# where it is and whether this account can change it, as one clause that starts
+# with ". ". Nothing when its directory is writable. `[ -w ]` asks access(2),
+# which refuses a read-only filesystem to root too (EROFS, per its man page):
+# MEASURED on an agent VM, npm 10.9.4 sat in a read-only /opt/hatch-image/bin.
+scv_where_clause() {
+  local scv__d scv__o
+  [ -n "${2:-}" ] || return 0
+  if [ -d "$2" ]; then scv__d=$2; else scv__d=$(dirname -- "$2"); fi
+  [ -d "$scv__d" ] || return 0
+  [ -w "$scv__d" ] && return 0
+  if [ "$(id -u 2>/dev/null)" = 0 ]; then
+    printf '. %s is at %s: read-only (image-owned?)' "$1" "$2"
+    return 0
+  fi
+  scv__o=$(ls -ld -- "$scv__d" 2>/dev/null | awk '{print $3}')
+  if [ -n "$scv__o" ] && [ "$scv__o" != "$(id -un 2>/dev/null)" ] && [ "$scv__o" != "$(id -u 2>/dev/null)" ]; then
+    printf '. %s is at %s: owned by %s; upgrading needs that account' "$1" "$2" "$scv__o"
+  else
+    printf '. %s is at %s, in a directory its owner cannot write' "$1" "$2"
+  fi
+}
+
+# scv_env_presence <file>: how many variables the file exports (its
+# `export NAME=` lines), how many this shell has (set, even empty: the go
+# bypass knobs are empty on purpose), and which it lacks. Sets SCV_EP_N,
+# SCV_EP_HAVE and SCV_EP_MISSING (" NAME NAME"). Presence only: values are not
+# compared.
+scv_env_presence() {
+  local scv__l scv__k
+  SCV_EP_N=0; SCV_EP_HAVE=0; SCV_EP_MISSING=""
+  while IFS= read -r scv__l || [ -n "$scv__l" ]; do
+    case "$scv__l" in export\ *) ;; *) continue ;; esac
+    scv__k=${scv__l#export }; scv__k=${scv__k%%=*}
+    case "$scv__k" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+    SCV_EP_N=$((SCV_EP_N + 1))
+    if [ -n "${!scv__k+set}" ]; then
+      SCV_EP_HAVE=$((SCV_EP_HAVE + 1))
+    else
+      SCV_EP_MISSING="$SCV_EP_MISSING $scv__k"
+    fi
+  done < "$1"
+}
+
+# scv_profile_env_row <file>: the role's env layer, as the profile.d file it
+# deploys exports it, against this shell. A login shell sources that file
+# (/etc/profile does); a shell that loaded no startup file has none of it.
+# MEASURED on the first agent VM above: no variable of the env layer was set.
+scv_profile_env_row() {
+  if [ "${SCV_APPLY_RUN:-}" = 1 ]; then
+    row "N/A" BYDESIGN "env layer propagation" \
+      "this is the apply's own run, in ansible's environment, which loads no startup file. Run supply-chain-verify from the shell you want checked"
+    return 0
+  fi
+  if [ ! -f "$1" ]; then
+    row GAP PRESENT "env layer propagation" "$1 is not there, so no shell gets the env layer. Re-apply the role"
+    return 0
+  fi
+  scv_env_presence "$1"
+  if [ "$SCV_EP_N" -eq 0 ]; then
+    row WEAK PRESENT "env layer propagation" "$1 exports no variables"
+  elif [ -z "$SCV_EP_MISSING" ]; then
+    row OK FUNCTIONAL "env layer propagation" "all $SCV_EP_N variables $1 exports are set in this shell"
+  elif [ "$SCV_EP_HAVE" -eq 0 ]; then
+    row GAP FUNCTIONAL "env layer propagation" \
+      "NONE of the $SCV_EP_N variables $1 exports are set in this shell. Most likely it loaded no startup file (bash --norc or -c, a container CMD, systemd, cron, an agent runner): the config files still apply, the variables do not. Run it from a login shell, or source the file first"
+  else
+    row WEAK FUNCTIONAL "env layer propagation" \
+      "$SCV_EP_HAVE/$SCV_EP_N variables $1 exports are set in this shell; missing:$SCV_EP_MISSING. A shell that got /etc/environment but not /etc/profile.d (cron, or sudo on Ubuntu) looks like this, and so does a shell state saved before the last apply: start a new session"
+  fi
+}
+
+# scv_reach_row <command> <first word of its rows> <ecosystem>: WEAK when the
+# rows below grade a <command> that a bare call in this shell does not run.
+# That happens only where the verifier added a directory to PATH (go discovery,
+# and discover() and the cargo lookup in files/verify-probes.sh): the tool is
+# then found only there, or a copy there now comes first. No row when PATH is
+# as the caller left it, when both name the same file (a symlink to it
+# included: test -ef), or for an ecosystem this run was not asked to check.
+scv_reach_row() {
+  local scv__now scv__was
+  [ "${SCV_APPLY_RUN:-}" = 1 ] && return 0
+  [ -n "${SCV_CALLER_PATH+set}" ] && [ "$PATH" != "$SCV_CALLER_PATH" ] || return 0
+  scv__now=$(command -v "$1" 2>/dev/null) || return 0
+  case "$scv__now" in /*) ;; *) return 0 ;; esac
+  scv__was=$(PATH=$SCV_CALLER_PATH; command -v "$1" 2>/dev/null) || scv__was=""
+  case "$scv__was" in /*) ;; *) scv__was="" ;; esac
+  [ "$scv__now" = "$scv__was" ] && return 0
+  [ -n "$scv__was" ] && [ "$scv__now" -ef "$scv__was" ] && return 0
+  if command -v requested >/dev/null 2>&1 && ! requested "$3"; then return 0; fi
+  if [ -z "$scv__was" ]; then
+    row WEAK PARSED "$2 on this shell's PATH" \
+      "the $2 rows grade $scv__now, but that directory is not on this shell's PATH, so a bare \`$1\` here finds nothing (the verifier also looks in a few fixed places)"
+  else
+    row WEAK PARSED "$2 on this shell's PATH" \
+      "the $2 rows grade $scv__now, from a directory the verifier added to PATH, but a bare \`$1\` here runs $scv__was"
+  fi
+}
+# <<< shell reachability
+
 # ============================================================ env layer =======
 #
 # The check that no other tool performs. harden.sh writes every variable it
@@ -846,7 +1061,14 @@ fi
 # A mismatch is not cosmetic. On the targets with no native mechanism
 # (gitlab, buildkite, plain) the caller is expected to source the file, and
 # forgetting to is exactly the silent half-application this catches.
-if [ -n "$_env_file_why" ]; then
+#
+# harden.sh --home-only writes no env file and records env_layer=none: nothing
+# an agent runner starts would source one. There is then nothing to compare,
+# and a WEAK "no env file" here would fail every --strict run for good.
+if [ "$SCV_ENV_LAYER" = none ]; then
+  row "N/A" BYDESIGN "env layer propagation" \
+    "this run wrote config files under HOME only (harden.sh --home-only), so there is no env layer to check"
+elif [ -n "$_env_file_why" ]; then
   # Not compared: its owner chooses the variables this row would check. GAP and
   # not WEAK, because the documented next step after harden.sh is to source it.
   # Plain row(), not gap(): with env.propagation left out of the expectations
@@ -854,21 +1076,10 @@ if [ -n "$_env_file_why" ]; then
   row GAP PRESENT "env layer propagation" \
     "the env file at $ENV_FILE $_env_file_why, so it was NOT read. Do not source it: sourcing runs whatever its owner wrote, as you. Delete it and re-run harden.sh"
 elif [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-  intended=0; propagated=0; missing=""
-  while IFS= read -r line; do
-    case "$line" in export\ *) ;; *) continue ;; esac
-    kv="${line#export }"
-    k="${kv%%=*}"
-    [ -n "$k" ] || continue
-    intended=$((intended + 1))
-    # Set-but-empty is a real state here: the go bypass knobs are deliberately
-    # empty, and "unset" and "empty" mean different things to go.
-    if [ -n "${!k+set}" ]; then
-      propagated=$((propagated + 1))
-    else
-      missing="$missing $k"
-    fi
-  done < "$ENV_FILE"
+  # Set-but-empty counts as present: the go bypass knobs are deliberately
+  # empty, and "unset" and "empty" mean different things to go.
+  scv_env_presence "$ENV_FILE"
+  intended=$SCV_EP_N; propagated=$SCV_EP_HAVE; missing=$SCV_EP_MISSING
 
   if [ "$intended" -eq 0 ]; then
     row WEAK PRESENT "env layer propagation" "env file at $ENV_FILE records no variables"
@@ -886,6 +1097,9 @@ else
   row WEAK PRESENT "env layer propagation" \
     "no env file at $ENV_FILE — cannot tell what was intended (was harden.sh run in this job?)"
 fi
+
+# HOME against the home the JVM reads (the "shell reachability" block above).
+scv_jvm_home_row
 
 # ============================================================ wrappers ========
 #
@@ -1220,7 +1434,7 @@ else
 
   if ! npm_implements min-release-age; then
     unavail npm.age-gate FUNCTIONAL "npm age gate" \
-      "npm $nv does NOT implement min-release-age (added in npm 11.10.0), so nothing enforces it, whatever the config says. Only an npm upgrade closes this; re-run the hardening after it, because the key is left out where npm warns about it (11.2.0 to 11.9.0)"
+      "npm $nv does NOT implement min-release-age (added in npm 11.10.0), so nothing enforces it, whatever the config says. Only an npm upgrade closes this; re-run the hardening after it, because the key is left out where npm warns about it (11.2.0 to 11.9.0)$(scv_where_clause npm "$(scv_tool_file npm)")"
   else
     v=$(npm config get min-release-age 2>/dev/null | tr -d '\r')
     case "$v" in
