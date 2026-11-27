@@ -26,7 +26,7 @@
 
       Applying this role from a Mac to a Linux host works: give the Linux host in
       your inventory.
-  when: ansible_system | default('') == 'Darwin'
+  when: ansible_facts.system | default('') == 'Darwin'
 
 - name: Validate release_age_hours is at least 1
   ansible.builtin.assert:
@@ -52,10 +52,10 @@
 
 - name: Refuse to run when privilege escalation would mis-target per-user config
   # THE FAILURE THIS PREVENTS
-  # Per-user destinations are "{{ ansible_env.HOME }}/.npmrc" and friends.
+  # Per-user destinations are "{{ ansible_facts.env.HOME }}/.npmrc" and friends.
   # Facts are gathered under the play's become settings, so running the role
   # with `--become` (or `sudo ansible-playbook`) from a non-root account makes
-  # ansible_env.HOME = /root. Every per-user config then lands in root's home
+  # ansible_facts.env.HOME = /root. Every per-user config then lands in root's home
   # instead of the operator's, and $HOME-relative tool detection (cargo, uv)
   # looks in /root, finds nothing, and skips every tool install — while the
   # recap still reports failed=0. A clean success on an unhardened machine is
@@ -90,22 +90,22 @@
   ansible.builtin.assert:
     that:
       - >-
-        ansible_env.HOME != '/root'
+        ansible_facts.env.HOME != '/root'
         or (
           preflight_invoking_user.stdout | trim == 'root'
-          and (ansible_env.SUDO_USER is not defined or ansible_env.SUDO_USER == 'root')
+          and (ansible_facts.env.SUDO_USER is not defined or ansible_facts.env.SUDO_USER == 'root')
         )
     fail_msg: |
       Refusing to run: privilege escalation would write per-user config to the
       wrong home directory.
 
       Detected: ansible was invoked by '{{ preflight_invoking_user.stdout | trim }}'
-      {% if ansible_env.SUDO_USER is defined %}(under sudo from '{{ ansible_env.SUDO_USER }}'){% endif %}
-      but ansible_env.HOME is '{{ ansible_env.HOME }}'.
+      {% if ansible_facts.env.SUDO_USER is defined %}(under sudo from '{{ ansible_facts.env.SUDO_USER }}'){% endif %}
+      but ansible_facts.env.HOME is '{{ ansible_facts.env.HOME }}'.
 
       Every per-user file (~/.npmrc, ~/.config/pnpm/rc, ~/.yarnrc.yml,
       ~/.bunfig.toml, ~/.cargo/config.toml, ~/.config/uv/uv.toml, ...) would be
-      written under '{{ ansible_env.HOME }}' rather than the intended user's
+      written under '{{ ansible_facts.env.HOME }}' rather than the intended user's
       home, and $HOME-relative tool detection would skip every tool install —
       with no error and a failed=0 recap.
 
@@ -121,7 +121,7 @@
       If you genuinely intend to harden root's home directory, opt in:
 
           ansible-playbook site.yml -e accept_root_home_targeting=true
-    success_msg: "Privilege context OK — per-user config targets {{ ansible_env.HOME }}."
+    success_msg: "Privilege context OK — per-user config targets {{ ansible_facts.env.HOME }}."
   when: not (accept_root_home_targeting | default(false) | bool)
 
 # --- sudo-rs vs ansible-core's become prompt ---------------------------------
@@ -389,7 +389,7 @@
     # maven is in this list only when its home is $HOME (it is judged in the next
     # task when the passwd home is apart, sch_passwd_apart), so name that home
     # rather than let user-config.sh look the passwd home up on its own.
-    SCH_UCF_MAVEN_HOME: "{{ ansible_env.HOME }}"
+    SCH_UCF_MAVEN_HOME: "{{ ansible_facts.env.HOME }}"
   vars:
     # Would this run reach the task file that writes each one? `--tags npm`
     # must not stop on a ~/.m2/settings.xml it will never touch. The tags are

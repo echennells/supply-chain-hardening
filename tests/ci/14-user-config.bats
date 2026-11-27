@@ -1405,7 +1405,7 @@ root_without_chown() { # <allowed: owner|nothing>
   [ "$(grep -cE '(script: user-config.sh|bash -s --) replace yarn$' "$ROOT/tasks/yarn.yml")" -eq 2 ]
   # no template or redirect into one of them is left
   ! grep -nE '> "\$HOME/\.(npmrc|yarnrc\.yml|bundle/config|m2|config/(pnpm|pip|composer))|> "\$(cargo|nuget)_home/(config.toml|NuGet)' "$HARDEN_SH" || false
-  ! grep -nE 'dest: .*(ansible_env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config|m2)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path|config\.json|NuGet\.Config|cargo_home \}\}/config\.toml)' "$ROOT"/tasks/*.yml || false
+  ! grep -nE 'dest: .*(ansible_(facts\.)?env\.HOME \}\}/\.(npmrc|yarnrc\.yml|bundle/config|m2)|\.config/pip/pip\.conf|pnpm_config_dir|uv_config_dir|bun_bunfig_path|config\.json|NuGet\.Config|cargo_home \}\}/config\.toml)' "$ROOT"/tasks/*.yml || false
 }
 
 @test "user config: the role's tasks judge the same files, at the paths they write" {

@@ -766,7 +766,7 @@ and java 17.0.21 used `/`.
 **Principle**: when the tool's default config home is not derived from `$HOME`,
 resolving its env var only covers the case where the env var is set. Resolve
 the default the way the TOOL derives it: `getent passwd "$(id -u)"`, by uid.
-Not `ansible_user_dir`: ansible looks that up by the name in `$LOGNAME` or
+Not `ansible_facts.user_dir`: ansible looks that up by the name in `$LOGNAME` or
 `$USER` (read in ansible-core 2.16.3's source), so it names another account's
 home whenever those do, and the role's gradle task read it until this was
 found. Where the surface owns a private, single-user env layer, pin the env var

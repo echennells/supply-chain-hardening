@@ -96,7 +96,7 @@ SCV_SCOPE_LABEL="on $(hostname)"
 # apply, so the rendered fragment differs every run, assemble reports
 # changed forever and the role is never idempotent. Same reasoning and same
 # resolution as uv_exclude_newer in defaults/main.yml.
-SCV_APPLIED_AT='{{ (ansible_date_time.iso8601 | default("unknown"))[:10] }}'
+SCV_APPLIED_AT='{{ (ansible_facts.date_time.iso8601 | default("unknown"))[:10] }}'
 
 # The age window the role promised, in hours (defaults/main.yml:release_age_hours).
 SCV_MIN_AGE_HOURS='{{ release_age_hours | default("") }}'

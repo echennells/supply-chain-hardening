@@ -164,7 +164,8 @@ jobs:
           # Linux: the refusal is about the target, and this controller is a Mac
           # without GNU date, which a pinned cutoff does not need.
           printf '%s\n' '- hosts: localhost' '  connection: local' '  vars: { release_age_hours: 48 }' '  tasks:' \
+            '    - ansible.builtin.set_fact: { ansible_system: Linux, cacheable: true }' \
             '    - ansible.builtin.include_vars: "{{ playbook_dir }}/defaults/main.yml"' \
             '    - ansible.builtin.import_tasks: "{{ playbook_dir }}/tasks/preflight.yml"' > preflight-only.yml
-          ansible-playbook -i localhost, preflight-only.yml -e ansible_system=Linux \
+          ansible-playbook -i localhost, preflight-only.yml \
             -e uv_exclude_newer=2026-11-01T00:00:00Z -e accept_etc_overwrite=true -e accept_user_config_overwrite=true

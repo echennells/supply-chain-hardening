@@ -233,7 +233,7 @@ root = sys.argv[1]
 tasks = yaml.safe_load(open(root + "/tasks/preflight.yml", encoding="utf-8"))
 first = tasks[0]
 assert "ansible.builtin.fail" in first, first
-assert "ansible_system" in str(first["when"]) and "Darwin" in str(first["when"]), first["when"]
+assert "ansible_facts.system" in str(first["when"]) and "Darwin" in str(first["when"]), first["when"]
 assert "harden.sh" in first["ansible.builtin.fail"]["msg"]
 assert "become" not in first
 main = yaml.safe_load(open(root + "/tasks/main.yml", encoding="utf-8"))

@@ -26,7 +26,7 @@
   args:
     executable: /bin/bash
   environment:
-    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.bundle/config"
+    SCH_UCF_PATH: "{{ ansible_facts.env.HOME }}/.bundle/config"
     SCH_UCF_BODY: |
       ---
       # Managed by ansible-supply-chain-security

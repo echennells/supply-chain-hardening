@@ -1,5 +1,10 @@
 FROM ubuntu:24.04
 
+# Every playbook in this image, also the tests' own outside the role directory
+# (ansible.cfg covers only runs from it): no facts as top-level variables, as
+# from ansible-core 2.24.
+ENV ANSIBLE_INJECT_FACT_VARS=False
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HOME=/root
 

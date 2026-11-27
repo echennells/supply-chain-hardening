@@ -132,6 +132,33 @@ task_block() { # file, task-name substring
   [ -n "$output" ]
 }
 
+# ---- Facts are read through ansible_facts ----
+#
+# ansible-core deprecated injecting facts as top-level variables
+# (INJECT_FACTS_AS_VARS: ansible_env, ansible_system, ...) and will stop doing
+# it. The repo's ansible.cfg and the test images turn it off already, so an
+# apply that reads one fails on it. This catches the branches no test applies
+# (macOS, podman, a uid with no passwd home): every ansible_* name left in the
+# role is ansible_facts or a magic or connection variable.
+
+top_level_facts() {
+  grep -noE '\bansible_[a-z0-9_]+' "$@" \
+    | grep -vE ':ansible_(facts|check_mode|diff_mode|version|run_tags|skip_tags|verbosity|play_hosts|play_batch|limit|loop|loop_var|index_var|parent_role_names|role_name|config_file|playbook_python|search_path|local|connection|host|port|user|python_interpreter|shell_executable|become[a-z_]*|ssh_[a-z_]*)$'
+}
+
+@test "facts: the role reads every fact through ansible_facts, none as a top-level ansible_* variable" {
+  local bad
+  bad=$(top_level_facts "$ROLE_DIR"/site.yml "$ROLE_DIR"/tasks/*.yml "$ROLE_DIR"/templates/*.j2 "$ROLE_DIR"/defaults/*.yml "$ROLE_DIR"/meta/*.yml) || true
+  [ -z "$bad" ] || { echo "read these as ansible_facts.<name>:"; echo "$bad"; return 1; }
+  # CONTROL: the same check finds the old spellings, and passes the new ones and
+  # the magic and connection variables.
+  local f="$BATS_TEST_TMPDIR/facts.yml"
+  printf '%s\n' 'a: "{{ ansible_env.HOME }}"' 'b: "{{ ansible_user_id }}"' 'c: "{{ ansible_facts.env.HOME }}"' \
+    'd: "{{ ansible_check_mode }} {{ ansible_user }} {{ ansible_become_method }}"' > "$f"
+  bad=$(top_level_facts "$f") || true
+  [ "$bad" = "$(printf '1:ansible_env\n2:ansible_user_id')" ] || { echo "control: '$bad'"; return 1; }
+}
+
 # ---- Pre-flight tests (#9, #10) ----
 #
 # These actually run ansible-playbook with adversarial inputs and assert

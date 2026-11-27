@@ -23,13 +23,13 @@
 # then rename) and keeps the file's owner and mode.
 #
 #   --system   /etc/uv/uv.toml, /etc/pip.conf, /etc/profile.d (root only)
-#   --user     {{ ansible_user_id }}'s uv.toml and pip.conf (that uid only)
+#   --user     {{ ansible_facts.user_id }}'s uv.toml and pip.conf (that uid only)
 {% if socket_firewall_install | bool %}
 #   --sfw      Socket Firewall's cached firewall binary (root only)
 {% endif %}
 #
 # With no argument: everything the caller may do. As root that is --system,
-# plus --user when root is the deploying user; as {{ ansible_user_id }}, --user.
+# plus --user when root is the deploying user; as {{ ansible_facts.user_id }}, --user.
 #
 # The PIP_UPLOADED_PRIOR_TO env var outranks pip.conf, and UV_EXCLUDE_NEWER
 # (exported only with uv_exclude_newer_env) outranks every uv.toml. A shell
@@ -39,7 +39,7 @@ set -eu
 
 me=supply-chain-age-gate-refresh
 hours={{ release_age_hours | int }}
-deploy_uid={{ ansible_user_uid | int }}
+deploy_uid={{ ansible_facts.user_uid | int }}
 cut=$(date -u -d "@$(( $(date -u +%s) - hours * 3600 ))" +%Y-%m-%dT00:00:00Z)
 case "$cut" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T00:00:00Z) ;;
@@ -105,14 +105,14 @@ case "$mode" in
     # Never as anyone else: root writing into a user-owned directory is a
     # symlink race, and another user's files are not ours to advance.
     if [ "$(id -u)" != "$deploy_uid" ]; then
-      echo "$me: --user rewrites {{ ansible_user_id }}'s files and must run as uid $deploy_uid" >&2
+      echo "$me: --user rewrites {{ ansible_facts.user_id }}'s files and must run as uid $deploy_uid" >&2
       exit 1
     fi
 {% if sch_refresh_uv | bool %}
-    advance {{ ((uv_config_dir | default(ansible_env.HOME ~ '/.config/uv')) ~ '/uv.toml') | quote }} "^exclude-newer = \"$ts\"\$" "exclude-newer = \"$cut\""
+    advance {{ ((uv_config_dir | default(ansible_facts.env.HOME ~ '/.config/uv')) ~ '/uv.toml') | quote }} "^exclude-newer = \"$ts\"\$" "exclude-newer = \"$cut\""
 {% endif %}
 {% if sch_refresh_pip | bool %}
-    advance {{ (ansible_env.HOME ~ '/.config/pip/pip.conf') | quote }} "^uploaded-prior-to = $ts\$" "uploaded-prior-to = $cut"
+    advance {{ (ansible_facts.env.HOME ~ '/.config/pip/pip.conf') | quote }} "^uploaded-prior-to = $ts\$" "uploaded-prior-to = $cut"
 {% endif %}
     ;;
 {% if socket_firewall_install | bool %}

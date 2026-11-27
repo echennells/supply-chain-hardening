@@ -9,10 +9,10 @@
   # cutoff, is what lets an operator pin the gate exactly where it stands.
   ansible.builtin.set_fact:
     sch_refresh_uv: >-
-      {{ (age_gate_refresh | bool) and ansible_system == 'Linux'
+      {{ (age_gate_refresh | bool) and ansible_facts.system == 'Linux'
          and uv_exclude_newer == 'rolling' }}
     sch_refresh_pip: >-
-      {{ (age_gate_refresh | bool) and ansible_system == 'Linux'
+      {{ (age_gate_refresh | bool) and ansible_facts.system == 'Linux'
          and (pip_age_gate | bool) and pip_uploaded_prior_to == 'rolling' }}
 
 - name: Detect systemd (the refresh timer needs a running systemd)
@@ -104,10 +104,10 @@
          re-applied, and drifts one day further behind every day. The refresher
          is deployed: ' ~ ('add `/usr/local/sbin/supply-chain-age-gate-refresh` to
          root''s crontab (run as root with no argument it advances both the /etc
-         files and root''s own uv.toml and pip.conf)' if ansible_user_uid | int == 0
+         files and root''s own uv.toml and pip.conf)' if ansible_facts.user_uid | int == 0
          else 'run `/usr/local/sbin/supply-chain-age-gate-refresh` from root''s crontab
          and `/usr/local/sbin/supply-chain-age-gate-refresh --user` from ' ~
-         ansible_user_id ~ '''s') ~ ' every few hours to keep the gate rolling.'] }}
+         ansible_facts.user_id ~ '''s') ~ ' every few hours to keep the gate rolling.'] }}
   when:
     - sch_refresh_uv | bool or sch_refresh_pip | bool
     - not sch_systemd_present.stat.exists
@@ -116,10 +116,10 @@
   ansible.builtin.set_fact:
     skipped_protections: >-
       {{ (skipped_protections | default([])) + ['age-gate refresh — not implemented
-         on ' ~ ansible_system ~ ', so the uv exclude-newer / pip uploaded-prior-to
+         on ' ~ ansible_facts.system ~ ', so the uv exclude-newer / pip uploaded-prior-to
          cutoff stays frozen at apply time and drifts one day further behind every
          day until the role is re-applied.'] }}
   when:
     - age_gate_refresh | bool
-    - ansible_system != 'Linux'
+    - ansible_facts.system != 'Linux'
     - uv_exclude_newer == 'rolling' or (pip_age_gate | bool and pip_uploaded_prior_to == 'rolling')

@@ -208,7 +208,7 @@ PY
   gather_facts: false
   vars:
     yarn_root_home: { stdout: "$1" }
-    ansible_env: { HOME: "$2" }
+    ansible_facts: { env: { HOME: "$2" } }
     yarn_detected_version: "4.11.0"
     yarn_minimal_age_gate: 2880
     yarn_enable_scripts: false

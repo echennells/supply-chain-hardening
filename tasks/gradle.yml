@@ -38,7 +38,7 @@
   # NO init script from fakehome/.gradle. Again on gradle 8.14.8 (temurin
   # 21.0.13.1), as root with HOME=/tmp/h: the init script in /root/.gradle ran.
   #
-  # This task used to write to `ansible_env.HOME`, i.e. the HOME of ansible's
+  # This task used to write to `ansible_facts.env.HOME`, i.e. the HOME of ansible's
   # connection. On any host where that differs from the passwd home — a
   # container run with `-u <uid>`, OpenShift's arbitrary-uid pattern, sudo -E,
   # or a connection plugin that sets its own HOME — the init script was
@@ -49,11 +49,11 @@
   # because the DEFAULT itself is passwd-derived, not $HOME-derived. So:
   #   1. $GRADLE_USER_HOME from the target's own environment wins, as always;
   #   2. otherwise the passwd home of this uid (tasks/passwd_home.yml), the
-  #      entry the JVM reads. Not `ansible_user_dir`, which this used to take:
+  #      entry the JVM reads. Not `ansible_facts.user_dir`, which this used to take:
   #      ansible looks that up by the name in $LOGNAME or $USER, so it named
   #      another account's home whenever those did. These tasks do not
   #      `become`, so the lookup and the JVM describe the same uid;
-  #   3. `ansible_env.HOME` when this uid has no passwd home it can write.
+  #   3. `ansible_facts.env.HOME` when this uid has no passwd home it can write.
   #      That case is recorded below, since the JVM may not look there.
   # Nothing, recorded below, for a root that sudo or doas reached with another
   # account's HOME (tasks/passwd_home.yml): root's home is not the one meant,
@@ -71,9 +71,9 @@
   # (container CMD, systemd — Axis 2).
   ansible.builtin.set_fact:
     gradle_user_home_resolved: >-
-      {{ ansible_env.GRADLE_USER_HOME | default('', true)
+      {{ ansible_facts.env.GRADLE_USER_HOME | default('', true)
       or ('' if sch_passwd_kept_out | length > 0
-          else ((sch_passwd_home | default('', true) or ansible_env.HOME) ~ '/.gradle')) }}
+          else ((sch_passwd_home | default('', true) or ansible_facts.env.HOME) ~ '/.gradle')) }}
   when: gradle_check.rc == 0
 
 - name: Note that the init script is outside $HOME, in the passwd home
@@ -81,10 +81,10 @@
   # but someone checking $HOME, or keeping only $HOME, would not find it there.
   ansible.builtin.set_fact:
     sch_home_notes: >-
-      {{ (sch_home_notes | default([])) + ["gradle: $HOME is '" ~ ansible_env.HOME ~ "' but the passwd home is '" ~ sch_passwd_home ~ "' — the init script goes to " ~ gradle_user_home_resolved ~ "/init.d, where the JVM looks, not under $HOME."] }}
+      {{ (sch_home_notes | default([])) + ["gradle: $HOME is '" ~ ansible_facts.env.HOME ~ "' but the passwd home is '" ~ sch_passwd_home ~ "' — the init script goes to " ~ gradle_user_home_resolved ~ "/init.d, where the JVM looks, not under $HOME."] }}
   when:
     - gradle_check.rc == 0
-    - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
+    - ansible_facts.env.GRADLE_USER_HOME | default('', true) | length == 0
     - sch_passwd_apart | bool
 
 - name: Create Gradle init.d directory
@@ -200,7 +200,7 @@
       {{ (skipped_protections | default([])) + ['gradle init script — uid ' ~ (sch_passwd_uid | default('?', true)) ~ ' has no passwd home it can write (passwd says: ' ~ (sch_passwd_entry | default('', true) or 'nothing') ~ '), so the script was written to ' ~ gradle_user_home_resolved ~ ', under $HOME. The JVM takes its home from the passwd entry, not $HOME, so gradle may not load it. Set GRADLE_USER_HOME on the target, or give the account a home it can write, and re-apply.'] }}
   when:
     - gradle_check.rc == 0
-    - ansible_env.GRADLE_USER_HOME | default('', true) | length == 0
+    - ansible_facts.env.GRADLE_USER_HOME | default('', true) | length == 0
     - sch_passwd_home | default('', true) | length == 0
     - sch_passwd_kept_out | length == 0
     - not (sch_passwd_at_home | bool)
@@ -208,7 +208,7 @@
 - name: Record skipped protection — root by way of sudo or doas, with another account's HOME
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ["gradle init script — not written: this is root reached by sudo or doas from " ~ sch_passwd_kept_out ~ ", and $HOME (" ~ ansible_env.HOME ~ ") is not root's passwd home (" ~ (sch_passwd_home | default('', true) or sch_passwd_entry) ~ "). Run this as " ~ sch_passwd_kept_out ~ ", not as root, and re-apply."] }}
+      {{ (skipped_protections | default([])) + ["gradle init script — not written: this is root reached by sudo or doas from " ~ sch_passwd_kept_out ~ ", and $HOME (" ~ ansible_facts.env.HOME ~ ") is not root's passwd home (" ~ (sch_passwd_home | default('', true) or sch_passwd_entry) ~ "). Run this as " ~ sch_passwd_kept_out ~ ", not as root, and re-apply."] }}
   when:
     - gradle_check.rc == 0
     - gradle_user_home_resolved | length == 0

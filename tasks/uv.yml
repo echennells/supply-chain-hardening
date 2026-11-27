@@ -19,9 +19,9 @@
   ansible.builtin.set_fact:
     uv_config_dir: >-
       {{
-        ansible_env.XDG_CONFIG_HOME ~ '/uv'
-        if ansible_env.XDG_CONFIG_HOME is defined and ansible_env.XDG_CONFIG_HOME | length > 0
-        else ansible_env.HOME ~ '/.config/uv'
+        ansible_facts.env.XDG_CONFIG_HOME ~ '/uv'
+        if ansible_facts.env.XDG_CONFIG_HOME is defined and ansible_facts.env.XDG_CONFIG_HOME | length > 0
+        else ansible_facts.env.HOME ~ '/.config/uv'
       }}
 
 - name: Deploy hardened uv.toml

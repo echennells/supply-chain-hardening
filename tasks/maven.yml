@@ -38,7 +38,7 @@
   # account's HOME (tasks/passwd_home.yml): the preflight then refuses it, as
   # for the other per-user files. tasks/preflight.yml judges the same file.
   ansible.builtin.set_fact:
-    maven_user_home_resolved: "{{ ansible_env.HOME if sch_passwd_kept_out | length > 0 else (sch_passwd_home | default('', true) or ansible_env.HOME) }}"
+    maven_user_home_resolved: "{{ ansible_facts.env.HOME if sch_passwd_kept_out | length > 0 else (sch_passwd_home | default('', true) or ansible_facts.env.HOME) }}"
   when: mvn_check.rc == 0
 
 - name: Deploy Maven settings.xml with HTTPS-only mirror and strict checksums
@@ -127,7 +127,7 @@
 - name: Note that settings.xml is outside $HOME, in the passwd home
   ansible.builtin.set_fact:
     sch_home_notes: >-
-      {{ (sch_home_notes | default([])) + ["maven: $HOME is '" ~ ansible_env.HOME ~ "' but the passwd home is '" ~ maven_user_home_resolved ~ "' — settings.xml goes to " ~ maven_user_home_resolved ~ "/.m2, where maven looks, not under $HOME."] }}
+      {{ (sch_home_notes | default([])) + ["maven: $HOME is '" ~ ansible_facts.env.HOME ~ "' but the passwd home is '" ~ maven_user_home_resolved ~ "' — settings.xml goes to " ~ maven_user_home_resolved ~ "/.m2, where maven looks, not under $HOME."] }}
   when:
     - mvn_check.rc == 0
     - sch_passwd_apart | bool
@@ -147,7 +147,7 @@
   # no other account controls): maven run as root reads root's passwd home.
   ansible.builtin.set_fact:
     skipped_protections: >-
-      {{ (skipped_protections | default([])) + ["maven settings.xml — this is root reached by sudo or doas from " ~ sch_passwd_kept_out ~ ", and $HOME (" ~ ansible_env.HOME ~ ") is not root's passwd home (" ~ (sch_passwd_home | default('', true) or sch_passwd_entry) ~ "), so settings.xml was written to " ~ maven_user_home_resolved ~ "/.m2, which maven run as root does not read. Run this as " ~ sch_passwd_kept_out ~ ", not as root, and re-apply."] }}
+      {{ (skipped_protections | default([])) + ["maven settings.xml — this is root reached by sudo or doas from " ~ sch_passwd_kept_out ~ ", and $HOME (" ~ ansible_facts.env.HOME ~ ") is not root's passwd home (" ~ (sch_passwd_home | default('', true) or sch_passwd_entry) ~ "), so settings.xml was written to " ~ maven_user_home_resolved ~ "/.m2, which maven run as root does not read. Run this as " ~ sch_passwd_kept_out ~ ", not as root, and re-apply."] }}
   when:
     - mvn_check.rc == 0
     - sch_passwd_kept_out | length > 0
