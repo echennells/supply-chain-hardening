@@ -12,7 +12,7 @@
 # The path is resolved the way GRADLE does, not the way the shell does:
 # $GRADLE_USER_HOME wins, and its default is <user.home>/.gradle where the JVM
 # takes user.home from the PASSWD ENTRY, not from $HOME. tasks/gradle.yml
-# resolves the same way (ansible_user_dir, which ansible reads out of passwd).
+# resolves the same way (tasks/passwd_home.yml looks the home up by uid).
 # Asserting on a bare $HOME would pass on a host where the role wrote the right
 # file to the wrong place, and fail on one where it did the right thing.
 
@@ -25,8 +25,8 @@ gradle_home() {
   fi
   local pw
   pw=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6) || pw=""
-  [ -n "$pw" ] || pw="$HOME"
-  printf '%s\n' "$pw/.gradle"
+  case "$pw" in /?*) [ -d "$pw" ] && [ -w "$pw" ] || pw="" ;; *) pw="" ;; esac
+  printf '%s\n' "${pw:-$HOME}/.gradle"
 }
 
 @test "gradle: init.d directory exists" {

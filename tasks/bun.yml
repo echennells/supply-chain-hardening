@@ -173,8 +173,10 @@
   #
   # NOTE: `startswith` is a Python str method reached through Jinja, NOT an
   # Ansible filter; `| startswith(...)` raises "Could not load 'startswith'".
+  # HOME with a slash after it: /home/hatchery/.bun/bin/bun is not inside
+  # /home/hatch.
   ansible.builtin.set_fact:
-    bun_wrap_become: "{{ not (bun_binary_path.stdout | default('')).startswith(ansible_env.HOME) }}"
+    bun_wrap_become: "{{ not (bun_binary_path.stdout | default('')).startswith((ansible_env.HOME | regex_replace('/+$', '')) ~ '/') }}"
   when:
     - bun_binary_path is defined
     - bun_binary_path.rc | default(1) == 0

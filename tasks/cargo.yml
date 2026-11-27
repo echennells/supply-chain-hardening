@@ -56,28 +56,45 @@
     mode: "0644"
   when: cargo_cooldown_enforce | bool
 
-- name: Create /root cargo config directory (sudo coverage)
-  # Mirrors the composer /root pattern. A build run under sudo reads root's
-  # CARGO_HOME, not the invoking user's, so without this the gate silently
+- name: Resolve root's home directory (cargo sudo coverage)
+  # A build run under sudo reads root's CARGO_HOME, not the invoking user's:
+  # sudo sets HOME to root's passwd home (MEASURED, see tasks/yarn.yml), and its
+  # default env_reset drops CARGO_HOME (inferred, not measured). Asked of the
+  # passwd database, as for yarn, not assumed to be /root.
+  ansible.builtin.shell:
+    cmd: 'h=~root; case "$h" in /*) printf "%s" "$h" ;; esac'
+    executable: /bin/bash
+  register: cargo_root_home
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: cargo_cooldown_enforce | bool
+
+- name: Create root's cargo config directory (sudo coverage)
+  # Mirrors the composer root-home pattern. Without this the gate silently
   # does not apply to `sudo cargo build`.
   # Only when it is not there: a mode on an existing directory changed it on every
   # apply (MEASURED at d738db8: tasks/bun.yml turned a 0750 home into 0755).
   become: true
   ansible.builtin.shell:
-    cmd: umask 022 && mkdir -p -- {{ '/root/.cargo' | quote }}
-    creates: "{{ '/root/.cargo' }}"
+    cmd: umask 022 && mkdir -p -- {{ ((cargo_root_home.stdout | trim) ~ '/.cargo') | quote }}
+    creates: "{{ (cargo_root_home.stdout | trim) ~ '/.cargo' }}"
     executable: /bin/bash
-  when: cargo_cooldown_enforce | bool
+  when:
+    - cargo_cooldown_enforce | bool
+    - (cargo_root_home.stdout | default('') | trim) is match('^/')
 
-- name: Deploy publish-age gate config to /root (sudo coverage)
+- name: Deploy publish-age gate config to root's home (sudo coverage)
   become: true
   ansible.builtin.template:
     src: cargo-cooldown.toml.j2
-    dest: /root/.cargo/cooldown.toml
+    dest: "{{ cargo_root_home.stdout | trim }}/.cargo/cooldown.toml"
     owner: root
     group: root
     mode: "0644"
-  when: cargo_cooldown_enforce | bool
+  when:
+    - cargo_cooldown_enforce | bool
+    - (cargo_root_home.stdout | default('') | trim) is match('^/')
 
 - name: Check if cargo is installed
   # Check the canonical rustup install location first. rustup (the dominant
@@ -273,11 +290,14 @@
   # Ansible filter. Writing it as `| startswith(...)` raises "Could not load
   # 'startswith'" and aborts the play.
   #
+  # HOME with a slash after it: /home/hatchery/.cargo/bin/cargo is not inside
+  # /home/hatch.
+  #
   # Not gated on cargo_path_wrapper: the restore path needs the same answer
   # when the wrapper is being turned off, and would otherwise fall back to
   # become: true and escalate unnecessarily against a user-owned ~/.cargo.
   ansible.builtin.set_fact:
-    cargo_wrap_become: "{{ not (cargo_check.stdout | default('')).startswith(ansible_env.HOME) }}"
+    cargo_wrap_become: "{{ not (cargo_check.stdout | default('')).startswith((ansible_env.HOME | regex_replace('/+$', '')) ~ '/') }}"
   when:
     - cargo_check.rc == 0
     - cargo_check.stdout | default('') | length > 0

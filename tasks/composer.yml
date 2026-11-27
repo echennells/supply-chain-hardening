@@ -139,19 +139,30 @@
   check_mode: false
   changed_when: "'changed' in (sch_ucf_composer.stdout_lines | default([]))"
 
-# /root coverage for `sudo composer …`. Composer has no /etc/composer system
-# path, and sudo flips HOME to /root, so the per-user write above misses the
-# sudo invocation path. Writing to root's own home closes that. Root's file is
-# root's own configuration: one that is not exactly what this project last wrote
-# is left alone, and the summary says so, as for root's ~/.yarnrc.yml.
-# When the role itself is run as root, this is the file written above.
-- name: Deploy hardened composer config.json to /root (sudo coverage)
+# Root's home for `sudo composer …`. Composer has no /etc/composer system
+# path, and sudo flips HOME to root's passwd home, so the per-user write above
+# misses the sudo invocation path. Writing to root's own home closes that. Root's
+# file is root's own configuration: one that is not exactly what this project
+# last wrote is left alone, and the summary says so, as for root's ~/.yarnrc.yml.
+# Root's home is asked of the passwd database, as for yarn, not assumed to be
+# /root. When the role runs as root with HOME at root's home, this is the file
+# written above.
+- name: Resolve root's home directory (composer sudo coverage)
+  ansible.builtin.shell:
+    cmd: 'h=~root; case "$h" in /*) printf "%s" "$h" ;; esac'
+    executable: /bin/bash
+  register: composer_root_home
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Deploy hardened composer config.json to root's home (sudo coverage)
   become: true
   ansible.builtin.command:
     cmd: /bin/bash -s -- replace composer
     stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
-    HOME: /root
+    HOME: "{{ composer_root_home.stdout | trim }}"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'composer-config.json.j2', template_vars={'sch_body_prefix': 'x'}) }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "refuse"
@@ -160,6 +171,7 @@
   check_mode: false
   changed_when: "'changed' in (sch_ucf_composer_root.stdout_lines | default([]))"
   failed_when: sch_ucf_composer_root.rc | default(2) not in [0, 1, 42]
+  when: (composer_root_home.stdout | default('') | trim) is match('^/')
 
 # ECH-169. ~/.config/composer is NOT where composer reads its global config on
 # most hosts. MEASURED: composer's home is /root/.composer (or ~/.composer, or
@@ -192,7 +204,7 @@
     cmd: /bin/bash -s -- replace composer-home
     stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
-    HOME: /root
+    HOME: "{{ composer_root_home.stdout | trim }}"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'composer-config.json.j2', template_vars={'sch_body_prefix': 'x'}) }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "refuse"
@@ -201,7 +213,9 @@
   check_mode: false
   changed_when: "'changed' in (sch_ucf_composer_home_root.stdout_lines | default([]))"
   failed_when: sch_ucf_composer_home_root.rc | default(2) not in [0, 1, 42]
-  when: composer_detected_version | length > 0
+  when:
+    - composer_detected_version | length > 0
+    - (composer_root_home.stdout | default('') | trim) is match('^/')
 
 - name: Record skipped protection — root's own composer config.json
   ansible.builtin.set_fact:

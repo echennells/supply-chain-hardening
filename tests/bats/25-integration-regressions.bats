@@ -223,9 +223,10 @@ task_block() { # file, task-name substring
 # under gradle 8.14.3.
 #
 # Isolated: HOME and GRADLE_USER_HOME point into a temp dir (the role resolves
-# both from the target's environment), so the files this run writes cannot
-# leak into the suite's own hardened home. `java` is a stub: the gate only asks
-# whether a wrapper could start, it never runs java.
+# both from the target's environment), and -e sch_passwd_home stands in for the
+# passwd home maven's settings.xml goes to (tasks/passwd_home.yml), so the files
+# this run writes cannot leak into the suite's own hardened home. `java` is a
+# stub: the gate only asks whether a wrapper could start, it never runs java.
 
 # PATH with every directory that holds gradle, mvn or java removed, then $1
 # (if given) in front. Prints nothing when a needed system dir holds one of
@@ -247,7 +248,7 @@ jvm_only_apply() { # $1 = PATH to use
   cd "$ROLE_DIR"
   env -u JAVA_HOME HOME="$t/home" GRADLE_USER_HOME="$t/home/.gradle" PATH="$1" \
     ansible-playbook site.yml --connection=local --limit localhost \
-      -e podman_enabled=false --tags maven,gradle 2>&1
+      -e podman_enabled=false -e sch_passwd_home="$t/home" --tags maven,gradle 2>&1
 }
 
 @test "JDK-only host: a java with no gradle/mvn still gets the init script and settings.xml (CMP 4.5)" {
@@ -408,7 +409,8 @@ restore_saved_composer() {
 # message. Preflight now refuses unless accept_user_config_overwrite=true.
 #
 # Isolated like the JDK-only tests: HOME and CARGO_HOME point into a temp dir,
-# and stub `java` / `dotnet` satisfy the maven and nuget gates. cargo.yml is
+# -e sch_passwd_home puts maven's passwd home there too, and stub `java` /
+# `dotnet` satisfy the maven and nuget gates. cargo.yml is
 # only let past preflight when no cargo is installed: with one, it would build
 # the gate backend into the temp CARGO_HOME and point the suite's real cargo
 # wrapper at it. A refusal stops in preflight, so that test always covers it.
@@ -443,7 +445,7 @@ ucfg_apply() { # extra ansible args
   cd "$ROLE_DIR"
   env -u DOTNET_CLI_HOME HOME="$T/home" CARGO_HOME="$T/home/.cargo" PATH="$T/bin:$PATH" \
     ansible-playbook site.yml --connection=local --limit localhost \
-      -e podman_enabled=false "$@" 2>&1
+      -e podman_enabled=false -e sch_passwd_home="$T/home" "$@" 2>&1
 }
 
 # a backup of $1 (path) that is byte-identical to $2 (the original)
