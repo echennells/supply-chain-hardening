@@ -385,6 +385,11 @@
   ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"
   args:
     executable: /bin/bash
+  environment:
+    # maven is in this list only when its home is $HOME (it is judged in the next
+    # task when the passwd home is apart, sch_passwd_apart), so name that home
+    # rather than let user-config.sh look the passwd home up on its own.
+    SCH_UCF_MAVEN_HOME: "{{ ansible_env.HOME }}"
   vars:
     # Would this run reach the task file that writes each one? `--tags npm`
     # must not stop on a ~/.m2/settings.xml it will never touch. The tags are
