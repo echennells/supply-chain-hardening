@@ -63,7 +63,12 @@ them cares which CI you are on:
    warning with the path (`cooldown.toml`, which holds no credentials, is replaced
    without that). No value from any of them is printed. If a later
    step needs a registry that was in one, put it back after this one, or pass it
-   in the environment.
+   in the environment. Maven's `settings.xml`, and gradle's init script unless
+   `GRADLE_USER_HOME` is set, go to the passwd home of the uid, where the JVM
+   looks, when that is not `$HOME`, and the log says so; `$HOME` when there is none it can write (not `/`). A root that sudo
+   or doas reached with another account's `HOME` writes neither to root's home:
+   gradle gets nothing, and Maven's file is refused in that `HOME` like the other
+   per-user files (`run this as <user>, not as root`).
 2. **PATH wrappers** — bun, bunx, composer, deno, cargo, wrapped in place at
    their discovered path. No coupling.
 3. **Env vars** — the only layer that needs the platform's own mechanism to
@@ -157,6 +162,47 @@ with a one-line reminder. The Ansible role installs
 For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
 hardening into an image and skip the adapter question altogether.
+
+### An agent's VM: `--home-only`
+
+```bash
+./action/harden.sh --home-only        # or HOME_ONLY=true
+```
+
+For a VM where only HOME is the agent's and its runner loads no startup files
+([AGENTS.md](../AGENTS.md#an-agents-vm---home-only)). It writes the per-user config
+files under `$HOME` and nothing outside it: each path is resolved, symbolic links
+included, and checked against HOME before anything is written there. In this mode:
+
+- No `/etc` file, no env file, nothing in `$GITHUB_ENV`, `$GITHUB_OUTPUT` or
+  `$BASH_ENV` (every `--emit` target is `plain`), and no sudo, as root too, not even
+  the `sudo -n true` probe. `WRITE_ETC=true`, `intel: sfw`, `INSTALL_CARGO_COOLDOWN`,
+  `CARGO_SOCKET_FIREWALL` and `HARDENING_ENV_FILE` are ignored, and the summary says so.
+- A PATH wrapper only for a tool whose path is under HOME (`~/.bun/bin`,
+  `~/.cargo/bin`, `~/.deno/bin`, `~/.local/bin`), written in place. The path PATH finds
+  counts, not where it links to: `/usr/local/bin/deno` linked to `~/.deno/bin/deno` is
+  outside HOME. A tool anywhere else is left as it is, and the summary says what it goes
+  without: deno its only age gate, bun and bunx `--no-install`, composer `--no-scripts`,
+  cargo `--locked`. A wrapper an earlier full apply put there is kept, not updated, and
+  counted in the run record.
+- A tool whose config path is outside HOME (`XDG_CONFIG_HOME`, `CARGO_HOME`,
+  `COMPOSER_HOME`, `DOTNET_CLI_HOME`, `POETRY_CONFIG_DIR`, `GOENV`) is not applied. Go
+  is not even started when its user config directory, where it writes telemetry
+  counters, is outside HOME.
+  Neither are Gradle and Maven when HOME is not the passwd home, unless
+  `GRADLE_USER_HOME` is set and under HOME: the JVM takes `user.home` from the passwd
+  entry (measured for both). No JVM or `dotnet` is started.
+- The pip cutoff is rounded down to midnight UTC. So is uv's, unless there is a uv and
+  every one on `PATH`, in `~/.local/bin` and in `~/.cargo/bin` is 0.9.17 or later: then
+  uv gets `exclude-newer = "<N> hours"`, which moves with the clock.
+- The run record has to be under HOME, or the run stops with exit 2 before writing
+  anything. It carries `home_only=true` and `env_layer=none`.
+- `--preflight` is refused: it asks sudo whether it needs a password.
+
+A second run on the same day changes nothing but its own run record, makes no copy,
+and prints only the summary and lines it has not printed before. Run it at the start
+of every session: nothing else moves the pip cutoff, and it puts back a config file
+another program rewrote.
 
 ## Usage
 

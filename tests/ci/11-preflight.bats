@@ -31,7 +31,7 @@ base_path() {
 # preflight [args...]: run harden.sh --preflight with a clean environment.
 preflight() {
   base_path
-  env -i PATH="${TEST_BIN}:${BASE_PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
+  env -i PATH="${TEST_BIN}:${PASSWD_BIN}:${BASE_PATH}" HOME="$TEST_HOME" TMPDIR="$TEST_TMP" \
     ${PF_ENV[@]+"${PF_ENV[@]}"} bash "$HARDEN_SH" --preflight "$@"
 }
 
@@ -280,6 +280,31 @@ sudo_rs_stub() {
   stub_bin mvn 'echo "Apache Maven 3.9.9"'
   run preflight
   [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not exactly what this project last wrote"* ]]
+}
+
+@test "preflight: Maven's settings.xml is judged in the passwd home, where the run writes it, by both surfaces" {
+  # Maven reads <user.home>/.m2/settings.xml, and the JVM takes user.home from the
+  # passwd entry, not $HOME (ucf_jvm_home). A stub getent names a directory of this
+  # test's as the passwd home.
+  local pw="$BATS_TEST_TMPDIR/pwhome"
+  mkdir -p "$pw/.m2" "$TEST_HOME/.m2"
+  echo '<settings/>' > "$pw/.m2/settings.xml"
+  echo '<settings/>' > "$TEST_HOME/.m2/settings.xml"
+  stub_bin getent "echo 'u:x:$(id -u):$(id -g)::$pw:/bin/sh'"
+  stub_bin mvn 'echo "Apache Maven 3.9.9"'
+  run preflight
+  [[ "$output" == *"STOP  $pw/.m2/settings.xml: not exactly what this project last wrote"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"$TEST_HOME/.m2/settings.xml"* ]]
+  # The role's preflight runs the same block, from files/user-config.sh.
+  base_path
+  run env -i PATH="${TEST_BIN}:${BASE_PATH}" HOME="$TEST_HOME" bash "$ROOT/files/user-config.sh" classify maven
+  [ "$status" -eq 42 ]
+  [ "$output" = "foreign $pw/.m2/settings.xml" ]
+  # The control: with the passwd home at HOME, HOME's file is the one judged.
+  stub_bin getent "echo 'u:x:$(id -u):$(id -g)::$TEST_HOME:/bin/sh'"
+  run preflight
+  [[ "$output" == *"STOP  $TEST_HOME/.m2/settings.xml: not exactly what this project last wrote"* ]]
+  [[ "$output" != *"$pw/.m2/settings.xml"* ]]
 }
 
 @test "preflight: sudo is only asked whether it needs a password, never to read or run anything else" {

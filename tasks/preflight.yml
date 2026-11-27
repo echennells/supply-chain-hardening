@@ -385,6 +385,11 @@
   ansible.builtin.script: "../files/user-config.sh classify {{ sch_user_cfg_kinds }}"
   args:
     executable: /bin/bash
+  environment:
+    # maven is in this list only when its home is $HOME (it is judged in the next
+    # task when the passwd home is apart, sch_passwd_apart), so name that home
+    # rather than let user-config.sh look the passwd home up on its own.
+    SCH_UCF_MAVEN_HOME: "{{ ansible_env.HOME }}"
   vars:
     # Would this run reach the task file that writes each one? `--tags npm`
     # must not stop on a ~/.m2/settings.xml it will never touch. The tags are
@@ -423,9 +428,9 @@
 
 - name: Detect a maven settings.xml in the passwd home that this project did not write
   # tasks/maven.yml writes settings.xml to the passwd home, which maven reads
-  # (tasks/passwd_home.yml). Where that is not $HOME, ucf_path in
-  # files/user-config.sh names $HOME's file (the block is action/harden.sh's
-  # too), so this one is judged here, with SCH_UCF_PATH. The tags are those of
+  # (tasks/passwd_home.yml). ucf_path in files/user-config.sh now names that
+  # file too (ucf_jvm_home), but this task pins it with SCH_UCF_PATH to the home
+  # the role resolved, so the two lookups cannot disagree. The tags are those of
   # maven's include in tasks/main.yml, as in the task above.
   ansible.builtin.script: "../files/user-config.sh classify maven"
   args:

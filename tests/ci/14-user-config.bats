@@ -65,7 +65,7 @@ apply() { harden XDG_CONFIG_HOME="$XDG" ECOSYSTEMS="${ECO:-$ALL}" "$@" -- --emit
 
 # preflight: harden.sh --preflight in the same environment
 pf() {
-  env -i PATH="${TEST_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$XDG" TMPDIR="$TEST_TMP" \
+  env -i PATH="${TEST_BIN}:${PASSWD_BIN}:${PATH}" HOME="$TEST_HOME" XDG_CONFIG_HOME="$XDG" TMPDIR="$TEST_TMP" \
     bash "$HARDEN_SH" --preflight
 }
 

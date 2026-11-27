@@ -30,6 +30,7 @@ around a control to get an install through.
 | GitHub Actions | The action: [action/README.md](action/README.md) |
 | Other CI | `action/harden.sh`, with worked examples in [action/examples/](action/examples/) |
 | Ansible genuinely can't be used | `action/harden.sh --emit=plain`, below |
+| An agent's VM where only HOME is yours (a read-only or rebuilt image, a runner that loads no startup files) | `action/harden.sh --home-only`, at the start of every session, below |
 | Neither can run | **Stop and say so.** Don't write values into config files by hand. |
 
 Prefer the role even when copying a few settings looks easier: it detects each tool's
@@ -134,6 +135,29 @@ works, and **nothing refreshes the uv and pip cutoffs**, so on a host you keep, 
 three lines to move them. CI exercises only the GitHub path, so treat `plain` as less
 tested. If neither path can run, stop and tell the user: a person who wants to write the
 settings by hand can read [docs/how-it-works.md](docs/how-it-works.md#setting-values-by-hand).
+
+## An agent's VM: `--home-only`
+
+Some agent platforms give the agent a VM where only its HOME is its own: the image is
+read-only or rebuilt, so `/etc` is not the agent's to change (that only HOME survives a
+rebuild is believed, not measured), and the runner starts every command in a shell that
+loads no startup file, so an env file would not reach it
+([why](docs/design-principles.md#agent-runners)). There, at the start of every session:
+
+```bash
+./action/harden.sh --home-only && ./action/verify.sh --emit=plain --json
+```
+
+It writes the per-user config files under HOME and nothing else: no `/etc` file, no env
+file, no sudo (as root too), and a wrapper only for a tool that is itself under HOME. A
+tool whose config path is outside HOME (`XDG_CONFIG_HOME`, `CARGO_HOME`, ...) is not
+applied, nor are Gradle and Maven when HOME is not the passwd home. The first time,
+tell the user what hardening does, as for any apply, and wait for their OK. Then run it in
+every new session: a second run the same day changes nothing but its own run record, and
+nothing else moves the pip cutoff. Its summary ends with what is not reachable from HOME;
+pass that on with the verifier's GAP and WEAK rows. Run the verifier from the agent's own
+shell, as above. Where the role can be applied, it covers more: details in
+[action/README.md](action/README.md#an-agents-vm---home-only).
 
 ## Run the verifier, every time
 

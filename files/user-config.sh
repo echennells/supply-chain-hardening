@@ -67,7 +67,18 @@ ucf_path() {
     bun)       printf '%s\n' "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" ;;
     bundler)   printf '%s\n' "$HOME/.bundle/config" ;;
     cargo)     printf '%s\n' "${CARGO_HOME:-$HOME/.cargo}/config.toml" ;;
-    maven)     printf '%s\n' "$HOME/.m2/settings.xml" ;;
+    maven)
+      # In the home the JVM reads it from (ucf_jvm_home), so a preflight judges the
+      # file the apply writes. The role resolves that home itself
+      # (tasks/passwd_home.yml) and passes it in SCH_UCF_MAVEN_HOME, so the two
+      # lookups cannot disagree; harden.sh never sets it.
+      if [ -n "${SCH_UCF_MAVEN_HOME:-}" ]; then
+        d=$SCH_UCF_MAVEN_HOME
+      else
+        d=$(ucf_jvm_home)
+        case "$d" in "home "*) d=${d#home } ;; *) d=$HOME ;; esac
+      fi
+      printf '%s\n' "$d/.m2/settings.xml" ;;
     nuget)     printf '%s\n' "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config" ;;
     composer)  printf '%s\n' "$(ucf_composer_base)/config.json" ;;
     composer-home)
@@ -138,6 +149,69 @@ ucf_composer_home() {
     fi
   fi
   printf '%s\n' "$HOME/.composer"
+}
+
+# ucf_passwd_home: this uid's home as the passwd database has it. The JVM takes user.home
+# from it, not from $HOME, so Maven reads <it>/.m2/settings.xml and gradle's default
+# user home is <it>/.gradle. MEASURED (maven 3.10.2 on temurin 21.0.13.1, as root, whose
+# passwd home is /root, with HOME=/tmp/h, also with USER and LOGNAME=nobody):
+# `mvn -X -o -B validate` read /root/.m2/settings.xml. Looked up by uid (id -u), never by
+# $USER or $LOGNAME, which can name another account. getent, then /etc/passwd where
+# getent is missing. macOS has no getent, and its /etc/passwd lists none of the people's
+# accounts, which are in Directory Services (inferred from Apple's documentation, not
+# run here), so last the account's name from its uid and its home from a tilde
+# (getpwnam). A uid with no name has no entry, and nothing is printed.
+ucf_passwd_home() {
+  local uid h n
+  uid=$(id -u)
+  h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || h=""
+  if [ -z "$h" ]; then
+    h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || h=""
+  fi
+  if [ -z "$h" ]; then
+    n=$(id -un 2>/dev/null) || n=""
+    if [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+      eval "h=~$n"
+      case "$h" in /*) ;; *) h="" ;; esac
+    fi
+  fi
+  printf '%s\n' "$h"
+}
+
+# ucf_noslash <path>: without the slashes at its end; "/" stays "/".
+ucf_noslash() {
+  local p="$1"
+  while :; do case "$p" in ?*/) p=${p%/} ;; *) break ;; esac; done
+  printf '%s\n' "$p"
+}
+
+# ucf_jvm_home: the home Maven's ~/.m2 goes in, and gradle's default user home. One line:
+#   home <dir>      the passwd home (ucf_passwd_home), a directory this account can
+#                   write, and not "/";
+#   kept <account>  this is root, reached by sudo or doas from <account> (the test
+#                   ucf_kept_out makes), and $HOME is not root's passwd home. That HOME
+#                   was most likely meant for <account>, so root's own home is not the
+#                   one meant: Maven stays on $HOME, where ucf_kept_out refuses a home
+#                   another account controls, and gradle gets nothing;
+#   none <entry>    no such home; <entry> is what passwd says, or nothing.
+# "/" is not a home here. MEASURED for a uid whose passwd entry says "/" (podman's own
+# entry for --user 4242): java 21.0.13.1 took user.home from $HOME, java 17.0.21 used "/".
+# A passwd home that does not exist is still user.home (MEASURED on both, with root's
+# set to /nonexistent: maven read /nonexistent/.m2/settings.xml). Homes are compared
+# without the slashes at their end, so HOME=/root/ is the passwd home /root.
+ucf_jvm_home() {
+  local pw
+  pw=$(ucf_passwd_home)
+  if [ "$(id -u)" = 0 ] && { [ "${SUDO_UID:-0}" != 0 ] || [ "${DOAS_USER:-root}" != root ]; } \
+     && [ "$(ucf_noslash "${HOME:-}")" != "$(ucf_noslash "$pw")" ]; then
+    printf 'kept %s\n' "${SUDO_USER:-${DOAS_USER:-that account}}"
+    return 0
+  fi
+  case "$(ucf_noslash "$pw")" in
+    /?*)
+      if [ -d "$pw" ] && [ -w "$pw" ]; then printf 'home %s\n' "$(ucf_noslash "$pw")"; return 0; fi ;;
+  esac
+  printf 'none %s\n' "$pw"
 }
 
 # ucf_applies <kind>: whether the role would write that file on this host.

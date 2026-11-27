@@ -59,6 +59,23 @@ common_setup() {
   # shellcheck disable=SC2034
   PNPM_DIR="${TEST_HOME}/.config/pnpm"
   [ "$(uname -s)" != Darwin ] || PNPM_DIR="${TEST_HOME}/Library/Preferences/pnpm"
+  # A getent whose passwd entry for this uid names TEST_HOME as its home, for a normal
+  # run. Maven reads <user.home>/.m2/settings.xml and the JVM takes user.home from the
+  # passwd entry, not $HOME, so harden.sh writes settings.xml to the passwd home it
+  # looks up by uid (getent first). With nothing in the way that was this account's real
+  # home, from inside a sandboxed test. Unlike gradle (GRADLE_USER_HOME, below), Maven
+  # has no variable that moves it. harden() puts this directory after TEST_BIN, so a
+  # test's own `stub_bin getent` wins; any other question goes to the real getent.
+  PASSWD_BIN="${BATS_TEST_TMPDIR}/passwd-bin"
+  mkdir -p "$PASSWD_BIN"
+  local real_getent
+  {
+    printf '#!/bin/sh\n# tests/ci (helpers.bash): the passwd home of this uid is TEST_HOME\n'
+    printf 'if [ "$#" -eq 2 ] && [ "$1" = passwd ] && [ "$2" = "$(id -u)" ]; then\n'
+    printf '  echo "u:x:$2:$(id -g)::%s:/bin/sh"; exit 0\nfi\n' "$TEST_HOME"
+    if real_getent=$(type -P getent 2>/dev/null); then printf 'exec %q "$@"\n' "$real_getent"; else printf 'exit 2\n'; fi
+  } > "$PASSWD_BIN/getent"
+  chmod +x "$PASSWD_BIN/getent"
 }
 
 # harden [VAR=value ...] [-- script args ...]
@@ -82,15 +99,51 @@ harden() {
   # script into the developer's REAL ~/.gradle from inside a sandboxed test.
   # GRADLE_USER_HOME is the only lever that moves it, which is exactly why
   # harden_gradle exports it. Any sandbox that relocates HOME has to set this
-  # too.
+  # too. Maven's settings.xml goes to the passwd home as well, and nothing but
+  # the passwd entry moves it: PASSWD_BIN's getent names TEST_HOME (common_setup).
   env -i \
-    PATH="${TEST_BIN}:${PATH}" \
+    PATH="${TEST_BIN}:${PASSWD_BIN}:${PATH}" \
     HOME="$TEST_HOME" \
     GRADLE_USER_HOME="${TEST_HOME}/.gradle" \
     TMPDIR="$TEST_TMP" \
     WRITE_ETC=false \
     "${envs[@]}" \
     bash "$HARDEN_SH" "${args[@]}"
+}
+
+# agent_sh [VAR=value ...] <command>
+#
+# The command as an agent runner with no startup files runs it. MEASURED on an agent VM
+# on 2026-11-26 (docs/design-principles.md, "Agent runners"): every command went through
+# `/bin/bash --norc --noprofile -c "umask 0007; ..."`, with no env layer. Here the
+# environment holds HOME, PATH and TMPDIR and nothing else but what the caller names;
+# PATH is AGENT_PATH, by default TEST_BIN and then this PATH.
+agent_sh() {
+  local cmd="${!#}"
+  local -a envs=()
+  [ "$#" -lt 2 ] || envs=("${@:1:$(($# - 1))}")
+  env -i HOME="$TEST_HOME" PATH="${AGENT_PATH:-$TEST_BIN:$PATH}" TMPDIR="$TEST_TMP" \
+    ${envs[@]+"${envs[@]}"} /bin/bash --norc --noprofile -c "umask 0007; $cmd"
+}
+
+# harden_agent [VAR=value ...] [-- script args ...]
+#
+# harden.sh --home-only, started the way agent_sh starts a command. No GRADLE_USER_HOME
+# and no WRITE_ETC=false, unlike harden(): this mode has to keep out of the passwd home
+# and /etc by itself. shield_host_tools all the same, so that if it ever wrapped a tool
+# outside HOME it would be a stub of this test's.
+harden_agent() {
+  local -a envs=() args=()
+  local sep=0 a
+  for a in "$@"; do
+    if [[ "$a" == "--" ]]; then sep=1; continue; fi
+    if [[ $sep -eq 1 ]]; then args+=("$a"); else envs+=("$a"); fi
+  done
+  shield_host_tools ${envs[@]+"${envs[@]}"}
+  env -i HOME="$TEST_HOME" PATH="${AGENT_PATH:-$TEST_BIN:$PATH}" TMPDIR="$TEST_TMP" \
+    ${envs[@]+"${envs[@]}"} \
+    /bin/bash --norc --noprofile -c 'umask 0007; exec bash "$0" --home-only "$@"' \
+    "$HARDEN_SH" ${args[@]+"${args[@]}"}
 }
 
 # shield_host_tools [VAR=value ...]
@@ -253,7 +306,8 @@ stub_go_env() {
   local ver="${1:-go1.27.4}" minor notc=0
   minor=${ver#go1.}; minor=${minor%%.*}
   [[ "$minor" -lt 21 ]] && notc=1
-  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; touch "$f"
+  # Created when missing, never touched: a test of what a second run changes reads mtimes.
+  stub_bin go 'f="$HOME/.config/go/env"; mkdir -p "${f%/*}"; [ -e "$f" ] || : > "$f"
 notc='"$notc"'
 case "${1:-}" in
   version) echo "go version '"$ver"' linux/amd64" ;;

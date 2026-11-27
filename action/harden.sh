@@ -76,10 +76,16 @@ if [ -n "$INSTALL_SFW" ]; then
 fi
 [ -n "$INTEL" ] || INTEL="none"
 case "$INTEL" in sfw) INSTALL_SFW=true ;; *) INSTALL_SFW=false ;; esac
+# What the caller set, before the defaults: --home-only says which of them it ignores.
+_SCH_IN_WRITE_ETC="${WRITE_ETC:-}"
+_SCH_IN_CARGO_SFW="${CARGO_SOCKET_FIREWALL:-}"
+_SCH_IN_ENV_FILE="${HARDENING_ENV_FILE:-}"
 WRITE_ETC="${WRITE_ETC:-true}"
 COMPOSER_ALLOW_PLUGINS="${COMPOSER_ALLOW_PLUGINS:-false}"
 PNPM_BUILT_DEPENDENCIES="${PNPM_BUILT_DEPENDENCIES:-}"
 INSTALL_CARGO_COOLDOWN="${INSTALL_CARGO_COOLDOWN:-false}"
+# --home-only, or HOME_ONLY=true: see "--home-only" below the argument loop.
+HOME_ONLY="${HOME_ONLY:-false}"
 # Tool pins this script installs. Kept equal to the role's defaults/main.yml
 # (cargo_cooldown_version, sfw_version, and for the sfw binary
 # sfw_binary_version and sfw_binary_checksums); tests/ci/06-role-parity.bats
@@ -130,8 +136,13 @@ for _arg in "$@"; do
     --suggest=*) SUGGEST=1; SUGGEST_PATH="${_arg#--suggest=}" ;;
     --preflight) PREFLIGHT=1 ;;
     --preflight=*) PREFLIGHT=1; PREFLIGHT_REPO="${_arg#--preflight=}" ;;
+    --home-only) HOME_ONLY=true ;;
     --help|-h)
       echo "usage: harden.sh [--emit=auto|github|gitlab|circleci|azure|buildkite|plain]"
+      echo "       harden.sh --home-only        write config files under HOME and nothing else:"
+      echo "                                    no /etc, no env file, no sudo, wrappers only for"
+      echo "                                    tools under HOME; for an agent's VM, at the start"
+      echo "                                    of every session"
       echo "       harden.sh --suggest[=PATH]   inspect a repo and print the inputs it needs,"
       echo "                                    the same as Ansible extra vars, and any"
       echo "                                    repo-local config that outranks the host's"
@@ -140,12 +151,52 @@ for _arg in "$@"; do
       echo "                                    --suggest output for it; writes nothing"
       echo "       configuration is read from env: ECOSYSTEMS, RELEASE_AGE_HOURS,"
       echo "       STRICT, INSTALL_SFW, WRITE_ETC, COMPOSER_ALLOW_PLUGINS,"
-      echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN"
+      echo "       PNPM_BUILT_DEPENDENCIES, INSTALL_CARGO_COOLDOWN, HOME_ONLY"
       exit 0
       ;;
     *) echo "[supply-chain-harden] warning: unrecognised argument '$_arg' — ignoring" >&2 ;;
   esac
 done
+
+# ---- --home-only ----
+#
+# For an agent's VM, where the agent's HOME is the only place that is its own, and
+# nothing the runner starts loads an env file. MEASURED on an agent VM on 2026-11-26
+# (docs/design-principles.md, "Agent runners"): it ran every command as root with
+# HOME=/home/hatch (passwd home /root) through `bash --norc --noprofile`, so no startup
+# file and no variable of the env layer; its npm and bun were in a read-only image
+# directory ahead of /usr/local/bin, so a wrapper there would not be the one it ran; and
+# npm and pip read the config files under HOME. That only HOME survives a rebuild of
+# such a VM, so that /etc is not the agent's to write, is believed, not measured.
+#
+# The promise is literal: nothing is written, moved, created or deleted outside $HOME,
+# and sudo is never run, as root too. So /etc, the env file, the platform's own files
+# ($GITHUB_ENV and the like), sfw and the cargo-cooldown build are off whatever was asked
+# for, and a config file or a tool outside HOME is reported, not written. home_guard,
+# below, is the one check, made before every write.
+HOME_ONLY_IGNORED=""
+case "$HOME_ONLY" in
+  true|false) ;;
+  *)
+    echo "[supply-chain-harden] error: HOME_ONLY must be true or false, got '$HOME_ONLY'" >&2
+    exit 2 ;;
+esac
+if [ "$HOME_ONLY" = true ]; then
+  if [ "$PREFLIGHT" = 1 ]; then
+    echo "[supply-chain-harden] error: --preflight describes a full apply and asks sudo whether it needs a password; it does not combine with --home-only, which never runs sudo" >&2
+    exit 2
+  fi
+  [ "$_SCH_IN_WRITE_ETC" != true ] || HOME_ONLY_IGNORED="$HOME_ONLY_IGNORED, WRITE_ETC=true"
+  [ "$INSTALL_SFW" != true ] || HOME_ONLY_IGNORED="$HOME_ONLY_IGNORED, intel=sfw"
+  [ "$INSTALL_CARGO_COOLDOWN" != true ] || HOME_ONLY_IGNORED="$HOME_ONLY_IGNORED, INSTALL_CARGO_COOLDOWN=true"
+  [ "$_SCH_IN_CARGO_SFW" != true ] || HOME_ONLY_IGNORED="$HOME_ONLY_IGNORED, CARGO_SOCKET_FIREWALL=true"
+  [ -z "$_SCH_IN_ENV_FILE" ] || HOME_ONLY_IGNORED="$HOME_ONLY_IGNORED, HARDENING_ENV_FILE"
+  WRITE_ETC=false
+  INTEL=none
+  INSTALL_SFW=false
+  INSTALL_CARGO_COOLDOWN=false
+  CARGO_SOCKET_FIREWALL=false
+fi
 
 # ---- helpers the read-only modes share with the run ----
 #
@@ -197,7 +248,18 @@ ucf_path() {
     bun)       printf '%s\n' "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" ;;
     bundler)   printf '%s\n' "$HOME/.bundle/config" ;;
     cargo)     printf '%s\n' "${CARGO_HOME:-$HOME/.cargo}/config.toml" ;;
-    maven)     printf '%s\n' "$HOME/.m2/settings.xml" ;;
+    maven)
+      # In the home the JVM reads it from (ucf_jvm_home), so a preflight judges the
+      # file the apply writes. The role resolves that home itself
+      # (tasks/passwd_home.yml) and passes it in SCH_UCF_MAVEN_HOME, so the two
+      # lookups cannot disagree; harden.sh never sets it.
+      if [ -n "${SCH_UCF_MAVEN_HOME:-}" ]; then
+        d=$SCH_UCF_MAVEN_HOME
+      else
+        d=$(ucf_jvm_home)
+        case "$d" in "home "*) d=${d#home } ;; *) d=$HOME ;; esac
+      fi
+      printf '%s\n' "$d/.m2/settings.xml" ;;
     nuget)     printf '%s\n' "${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet/NuGet.Config" ;;
     composer)  printf '%s\n' "$(ucf_composer_base)/config.json" ;;
     composer-home)
@@ -268,6 +330,69 @@ ucf_composer_home() {
     fi
   fi
   printf '%s\n' "$HOME/.composer"
+}
+
+# ucf_passwd_home: this uid's home as the passwd database has it. The JVM takes user.home
+# from it, not from $HOME, so Maven reads <it>/.m2/settings.xml and gradle's default
+# user home is <it>/.gradle. MEASURED (maven 3.10.2 on temurin 21.0.13.1, as root, whose
+# passwd home is /root, with HOME=/tmp/h, also with USER and LOGNAME=nobody):
+# `mvn -X -o -B validate` read /root/.m2/settings.xml. Looked up by uid (id -u), never by
+# $USER or $LOGNAME, which can name another account. getent, then /etc/passwd where
+# getent is missing. macOS has no getent, and its /etc/passwd lists none of the people's
+# accounts, which are in Directory Services (inferred from Apple's documentation, not
+# run here), so last the account's name from its uid and its home from a tilde
+# (getpwnam). A uid with no name has no entry, and nothing is printed.
+ucf_passwd_home() {
+  local uid h n
+  uid=$(id -u)
+  h=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || h=""
+  if [ -z "$h" ]; then
+    h=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || h=""
+  fi
+  if [ -z "$h" ]; then
+    n=$(id -un 2>/dev/null) || n=""
+    if [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]]; then
+      eval "h=~$n"
+      case "$h" in /*) ;; *) h="" ;; esac
+    fi
+  fi
+  printf '%s\n' "$h"
+}
+
+# ucf_noslash <path>: without the slashes at its end; "/" stays "/".
+ucf_noslash() {
+  local p="$1"
+  while :; do case "$p" in ?*/) p=${p%/} ;; *) break ;; esac; done
+  printf '%s\n' "$p"
+}
+
+# ucf_jvm_home: the home Maven's ~/.m2 goes in, and gradle's default user home. One line:
+#   home <dir>      the passwd home (ucf_passwd_home), a directory this account can
+#                   write, and not "/";
+#   kept <account>  this is root, reached by sudo or doas from <account> (the test
+#                   ucf_kept_out makes), and $HOME is not root's passwd home. That HOME
+#                   was most likely meant for <account>, so root's own home is not the
+#                   one meant: Maven stays on $HOME, where ucf_kept_out refuses a home
+#                   another account controls, and gradle gets nothing;
+#   none <entry>    no such home; <entry> is what passwd says, or nothing.
+# "/" is not a home here. MEASURED for a uid whose passwd entry says "/" (podman's own
+# entry for --user 4242): java 21.0.13.1 took user.home from $HOME, java 17.0.21 used "/".
+# A passwd home that does not exist is still user.home (MEASURED on both, with root's
+# set to /nonexistent: maven read /nonexistent/.m2/settings.xml). Homes are compared
+# without the slashes at their end, so HOME=/root/ is the passwd home /root.
+ucf_jvm_home() {
+  local pw
+  pw=$(ucf_passwd_home)
+  if [ "$(id -u)" = 0 ] && { [ "${SUDO_UID:-0}" != 0 ] || [ "${DOAS_USER:-root}" != root ]; } \
+     && [ "$(ucf_noslash "${HOME:-}")" != "$(ucf_noslash "$pw")" ]; then
+    printf 'kept %s\n' "${SUDO_USER:-${DOAS_USER:-that account}}"
+    return 0
+  fi
+  case "$(ucf_noslash "$pw")" in
+    /?*)
+      if [ -d "$pw" ] && [ -w "$pw" ]; then printf 'home %s\n' "$(ucf_noslash "$pw")"; return 0; fi ;;
+  esac
+  printf 'none %s\n' "$pw"
 }
 
 # ucf_applies <kind>: whether the role would write that file on this host.
@@ -2296,6 +2421,12 @@ case "$PLATFORM" in
     exit 2
     ;;
 esac
+# --home-only: github and circleci write files the platform owns ($GITHUB_ENV,
+# $GITHUB_OUTPUT, $BASH_ENV), so every target is plain here: stdout and the run record.
+if [ "$HOME_ONLY" = true ] && [ "$PLATFORM" != plain ]; then
+  HOME_ONLY_IGNORED="$HOME_ONLY_IGNORED, emit=$PLATFORM"
+  PLATFORM=plain
+fi
 
 # ---- privilege: resolve ONCE, never assume ----
 #
@@ -2324,7 +2455,12 @@ esac
 #                    privilege and is the load-bearing layer anyway) still
 #                    applies, and wrapper deployment degrades with a recorded
 #                    reason instead of taking the run down.
-if [ "$(id -u)" -eq 0 ]; then
+#   --home-only   -> neither, as root too, and no `sudo -n true` probe: sudo logs
+#                    that call, and this mode runs no sudo at all.
+if [ "$HOME_ONLY" = true ]; then
+  SUDO=""
+  CAN_ESCALATE=0
+elif [ "$(id -u)" -eq 0 ]; then
   SUDO=""
   CAN_ESCALATE=1
 elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
@@ -2336,9 +2472,30 @@ else
 fi
 
 # ---- Log annotations (platform-specific markup, identical semantics) ----
-log()  { echo "[supply-chain-harden] $*"; }
+#
+# --home-only runs at the start of every agent session, so a second run should say
+# nothing the first one already said: the summary at the end is printed every time and
+# carries each reason that matters. A line an earlier run of this mode printed (by its
+# cksum, kept in the run record as notices_shown) is left out; one with anything new in
+# it, a copy's name or a new version, is printed. Errors always are.
+SCH_SEEN=""      # notices_shown from the previous --home-only record
+SCH_SHOWN=""     # the same for this run
+SCH_HIDDEN=0
+SCH_FILTER=1     # 0 once the record is written: the summary is always printed
+sch_shown() { # <text>: 0 when an earlier --home-only run printed it
+  local c
+  [ "$HOME_ONLY" = true ] && [ "$SCH_FILTER" = 1 ] || return 1
+  c=$(printf '%s' "$1" | cksum)
+  c=${c%% *}
+  SCH_SHOWN="$SCH_SHOWN $c"
+  case " $SCH_SEEN " in *" $c "*) SCH_HIDDEN=$((SCH_HIDDEN + 1)); return 0 ;; esac
+  return 1
+}
+
+log()  { sch_shown "$*" && return 0; echo "[supply-chain-harden] $*"; }
 
 notice() {
+  sch_shown "$*" && return 0
   case "$PLATFORM" in
     github) echo "::notice::$*" ;;
     azure)  echo "##vso[task.logissue type=warning]$*" ;;
@@ -2347,6 +2504,7 @@ notice() {
 }
 
 warn() {
+  sch_shown "$*" && return 0
   case "$PLATFORM" in
     github) echo "::warning::$*" ;;
     azure)  echo "##vso[task.logissue type=warning]$*" ;;
@@ -2419,6 +2577,8 @@ CURRENT_SECTION=""
 
 section() {
   CURRENT_SECTION=$(echo "$*" | tr -c '[:alnum:]_' '_')
+  # --home-only: each line names its tool, and a header over lines left out says nothing.
+  [ "$HOME_ONLY" != true ] || return 0
   case "$PLATFORM" in
     github) echo "::group::[supply-chain-harden] $*" ;;
     azure)  echo "##[group][supply-chain-harden] $*" ;;
@@ -2440,6 +2600,57 @@ end_section() {
 if [[ -z "${HOME:-}" || ! -d "$HOME" ]]; then
   err "HOME is unset or not a directory (got: '${HOME:-}'). Cannot deploy user-level config."
   exit 2
+fi
+
+# ---- --home-only: the one guard ----
+#
+# sch_resolve <path>: where a write to <path> lands. Every symbolic link in the part
+# that exists is followed (ucf_real), the rest is taken as written. A path with a ..
+# in it fails: a write resolves it only once what is before it exists.
+sch_resolve() {
+  local p="$1" rest="" r
+  case "/$p/" in */../*) return 1 ;; esac
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
+    rest="/${p##*/}$rest"
+    p=${p%/*}
+    [ -n "$p" ] || { p=/; break; }
+  done
+  r=$(ucf_real "$p") || return 1
+  printf '%s%s\n' "${r%/}" "$rest"
+}
+# home_guard [--entry] <path>: 0 when this run may write <path>. Always, except in
+# --home-only mode, where it must land in HOME or below it. Compared with a slash after
+# HOME, so /home/hatchery is not inside /home/hatch.
+#
+# A write through the path (a redirect, tee, mkdir -p, ucf_put) lands where its links
+# lead, so by default the whole path is resolved. A rename, a removal or a new file
+# beside it (mv, rm, a wrapper in place of a tool) changes the directory entry itself,
+# so --entry resolves only the directory it is in: a link in /usr/local/bin that leads
+# into HOME is outside it.
+home_guard() {
+  local r p
+  [ "$HOME_ONLY" = true ] || return 0
+  if [ "$1" = --entry ]; then
+    p=$2
+    case "$p" in */*) ;; *) p="./$p" ;; esac
+    case "${p##*/}" in ''|.|..) return 1 ;; esac
+    r=$(sch_resolve "${p%/*}") || return 1
+    r="${r%/}/${p##*/}"
+  else
+    r=$(sch_resolve "$1") || return 1
+  fi
+  case "$r/" in "$SCH_HOME_REAL"/*) return 0 ;; esac
+  return 1
+}
+SCH_HOME_REAL=""
+if [ "$HOME_ONLY" = true ]; then
+  SCH_HOME_REAL=$(cd -P -- "$HOME" 2>/dev/null && pwd -P) || SCH_HOME_REAL=""
+  SCH_HOME_REAL=${SCH_HOME_REAL%/}
+  if [ -z "$SCH_HOME_REAL" ]; then
+    err "--home-only: HOME ('$HOME') is / or cannot be resolved, so it cannot bound what this run writes"
+    exit 2
+  fi
 fi
 
 # ---- Nothing this script creates is writable by group or others ----
@@ -2620,8 +2831,36 @@ _sch_create() {
   fi
   return 0
 }
-_sch_create "$HARDENING_ENV_FILE"    "env file"    HARDENING_ENV_FILE
+if [ "$HOME_ONLY" = true ]; then
+  # No env file: nothing an agent's runner starts would source it (see --home-only).
+  HARDENING_ENV_FILE=""
+  # --entry: the record is made beside itself and renamed into place (_sch_create).
+  if ! home_guard --entry "$HARDENING_OUTPUT_FILE"; then
+    err "--home-only writes nothing outside HOME, and the run record would go to '$HARDENING_OUTPUT_FILE'. Set HARDENING_OUTPUT_FILE to a path under $HOME${RUNNER_TEMP:+ (RUNNER_TEMP moves the default)}."
+    exit 2
+  fi
+  # What the previous run of this mode printed (see log): only from a record that is
+  # ours, that no one else can write, and that this mode wrote.
+  if [ -f "$HARDENING_OUTPUT_FILE" ] && [ -z "$(_sch_unsafe_target "$HARDENING_OUTPUT_FILE")" ] \
+     && grep -qx 'home_only=true' "$HARDENING_OUTPUT_FILE" 2>/dev/null; then
+    SCH_SEEN=$(sed -n 's/^notices_shown=//p' "$HARDENING_OUTPUT_FILE" 2>/dev/null | tail -n 1) || SCH_SEEN=""
+  fi
+else
+  _sch_create "$HARDENING_ENV_FILE"    "env file"    HARDENING_ENV_FILE
+fi
 _sch_create "$HARDENING_OUTPUT_FILE" "run record"  HARDENING_OUTPUT_FILE
+# --home-only: bash writes a here-document to a temporary file in $TMPDIR (every
+# version before 5.1; from 5.1 only one larger than a pipe holds, per bash's NEWS,
+# not measured here), and the tools this starts write theirs there too. TMPDIR is
+# usually /tmp, so for this run it is a directory beside the record, removed on exit.
+if [ "$HOME_ONLY" = true ]; then
+  if ! SCH_TMPD=$(mktemp -d "$(dirname -- "$HARDENING_OUTPUT_FILE")/.tmp.XXXXXX" 2>/dev/null); then
+    err "--home-only: no temporary directory could be made beside $HARDENING_OUTPUT_FILE"
+    exit 2
+  fi
+  trap 'rm -rf -- "$SCH_TMPD"' EXIT
+  export TMPDIR="$SCH_TMPD"
+fi
 
 # ---- Validation ----
 if ! [[ "$RELEASE_AGE_HOURS" =~ ^[0-9]+$ ]]; then
@@ -2643,8 +2882,22 @@ fi
 # write_env always appends to the canonical env file, always exports into
 # this process (so the script's own probes see hardened values), and then
 # additionally uses the platform's native mechanism where one exists.
+#
+# --home-only writes no env file and no platform file: the value reaches this process
+# and the tools it starts, nothing else. The few settings that exist only as a variable
+# (SCH_ENV_ONLY) are listed in the summary as applied nowhere.
+SCH_ENV_ONLY="COMPOSER_SKIP_SCRIPTS DOTNET_NUGET_SIGNATURE_VERIFICATION"
+ENV_SKIPPED=""
+env_skipped() { # <name>
+  case ", $ENV_SKIPPED, " in *", $1, "*) ;; *) ENV_SKIPPED="${ENV_SKIPPED:+$ENV_SKIPPED, }$1" ;; esac
+}
 write_env() {
   local k="$1" v="$2"
+  if [ "$HOME_ONLY" = true ]; then
+    export "${k}=${v}"
+    case " $SCH_ENV_ONLY " in *" $k "*) env_skipped "$k" ;; esac
+    return 0
+  fi
   printf 'export %s=%q\n' "$k" "$v" >> "$HARDENING_ENV_FILE"
   export "${k}=${v}"
   case "$PLATFORM" in
@@ -2721,6 +2974,10 @@ if [[ "${SUPPLY_CHAIN_HARDEN_SKIP:-false}" == "true" ]]; then
   emit_output env_file "$HARDENING_ENV_FILE"
   emit_output wrappers_deployed ""
   emit_output job_id "$(job_identity)"
+  if [ "$HOME_ONLY" = true ]; then
+    emit_output home_only true
+    emit_output env_layer none
+  fi
   # NO hardening_complete marker. Nothing was hardened, so the verifier must
   # NOT scope itself to this record — it widens back to checking every
   # installed tool and says out loud that the scope is unknown. An
@@ -2766,6 +3023,14 @@ else
   err "cannot compute the uv exclude-newer timestamp: neither GNU nor BSD date syntax worked"
   exit 2
 fi
+# --home-only runs every session: rounded down to midnight UTC, as the role does
+# (defaults/main.yml, sch_uv_cutoff), so a second run on the same day writes the same
+# files, and a uv.lock made under the cutoff does not change with every session.
+# Rounding down only moves the cutoff further back. Outside this mode it stays to the
+# second, as it always has.
+if [ "$HOME_ONLY" = true ]; then
+  UV_EXCLUDE_NEWER="${UV_EXCLUDE_NEWER%%T*}T00:00:00Z"
+fi
 
 write_etc() {
   local path="$1"
@@ -2775,7 +3040,7 @@ write_etc() {
   # write_etc with WRITE_ETC=false.
   local content dir owner why
   content=$(cat)
-  if [[ "$WRITE_ETC" != "true" ]]; then
+  if [[ "$WRITE_ETC" != "true" ]] || ! home_guard "$path"; then
     return 0
   fi
   dir=$(dirname "$path")
@@ -2879,8 +3144,18 @@ ucf_as_root() {
 # tokens, and this is a job log. With PUT_AS_ROOT=1 the file is one in root's home:
 # it is read and written as root, and a run that cannot write it says so and goes
 # on, because the user's own file is already in place.
+#
+# --home-only: never outside HOME (each handler checks first and says why; this is the
+# guard at the write itself), and a file that cannot be written leaves its ecosystem not
+# applied and returns 1, so the caller stops there and the other ecosystems go on.
 put_user_cfg() {
   local kind="$1" path="$2" out rc=0 l bak="" gone="" maybe="" longer="" tool="${1%%-*}"
+  if ! home_guard "$path"; then
+    cat > /dev/null
+    err "${tool%rc}: nothing written: $(outside "$path")"
+    eco_failed "${tool%rc}" "nothing written: $(outside "$path")"
+    return 1
+  fi
   if [[ "${PUT_AS_ROOT:-}" == 1 ]]; then
     out=$(ucf_as_root "$kind" "$path") || rc=$?
   elif [[ "$kind" == npmrc ]]; then
@@ -2903,6 +3178,10 @@ put_user_cfg() {
   if [[ "$rc" -ne 0 ]]; then
     [[ -z "$bak" ]] || err "${tool%rc}: a copy of $path from before this run is at $bak"
     if [[ "${PUT_AS_ROOT:-}" == 1 ]]; then return 0; fi
+    if [[ "$HOME_ONLY" == true ]]; then
+      eco_failed "${tool%rc}" "$path could not be written"
+      return 1
+    fi
     exit 1
   fi
   if [[ -n "$gone" ]]; then
@@ -2933,7 +3212,32 @@ require_privilege() {
   local msg="${4:-PATH wrapper not deployed: @WHY@. Config-file layer still applies.}"
   local owner why="no root and no usable sudo in this job (common in \`container:\` jobs on slim images)"
   local short="this job has no root and no usable sudo"
-  if [[ "${CAN_ESCALATE:-0}" -eq 1 ]]; then
+  # --home-only: a wrapper only where the tool's own entry on PATH is under HOME,
+  # written in place, so whatever PATH finds the tool finds the wrapper. The entry, not
+  # what it links to: the tool is renamed to -real beside it and the wrapper takes its
+  # name. A wrapper of ours already there that is a link is written through, so there
+  # its target must be under HOME too. Nothing outside HOME is wrapped, moved or put
+  # back. One an earlier apply left there is kept and counted; otherwise the summary
+  # says what the tool goes without.
+  SCH_KEPT=0
+  if [[ "$HOME_ONLY" == true ]] && { ! home_guard --entry "$target" \
+       || { [[ -L "$target" ]] && is_our_wrapper "$target" && ! home_guard "$target"; }; }; then
+    if kept_wrapper "$target"; then
+      SCH_KEPT=1
+      record_wrapper "${target##*/}"
+      log "$tool: the wrapper at $target is from an earlier apply, outside HOME: left as it is and not updated"
+      unreached "${target##*/}: the wrapper at $target is from an earlier apply and outside HOME, so it is left as it is and not updated"
+      return 1
+    fi
+    why="$(outside "$target"), and --home-only writes nothing there"
+    degrade_eco "$tool" "$status" "${msg//@WHY@/$why}"
+    unreached "$(wrapper_gap "$target")"
+    return 1
+  fi
+  if [[ "$HOME_ONLY" == true ]]; then
+    short="its directory is not writable by $(id -un), and --home-only runs no sudo"
+    why=$short
+  elif [[ "${CAN_ESCALATE:-0}" -eq 1 ]]; then
     short="its directory is not writable, even as root (a read-only image or mount?)"
     why=$short
   fi
@@ -2969,24 +3273,161 @@ require_privilege() {
 # bare `mv` ended the run there, with every ecosystem after it not applied. Its own
 # output is left alone: it asks on a terminal before it replaces a read-only file.
 move_aside() {
+  if ! home_guard --entry "$2"; then
+    degrade_eco "$1" "${3:-PARTIAL}" "PATH wrapper not deployed: $(outside "$2"), and --home-only moves nothing there. ${4:-Config-file layer still applies.}"
+    return 1
+  fi
   $SUDO mv "$2" "$2-real" && return 0
   warn "$1: cannot deploy the PATH wrapper at $2 — the tool there cannot be moved aside (see mv's message above)."
   degrade_eco "$1" "${3:-PARTIAL}" "PATH wrapper not deployed: $2 cannot be moved aside. ${4:-Config-file layer still applies.}"
   return 1
 }
 
-# subst_inplace <file> <sed-script>
+# put_wrapper <path> [replace]: the wrapper on stdin, at <path>, mode 755. Not written
+# when exactly those bytes are there already, as a regular file of that mode, so a
+# re-run changes nothing (it used to rewrite every wrapper every run). With "replace"
+# whatever is there is removed first, so a symbolic link is replaced, not written through.
 #
-# `sed -i` is NOT portable and there is no form that works on both: GNU takes
-# a bare -i, BSD (macOS) requires -i '' and reads the next argument as the
-# backup suffix otherwise. On a macOS runner `sed -i "s|a|b|" file` consumed
-# the script as the suffix and then choked on the path with
-# "invalid command code f", killing every wrapper that renders through a
-# placeholder. Write to a sibling and move instead.
-subst_inplace() {
-  local file="$1" script="$2"
-  sed "$script" "$file" > "${file}.new" && mv "${file}.new" "$file"
+# Each step returns on failure: the callers handle it (wrapper_failed), and a function
+# called in an || list runs with set -e off.
+put_wrapper() {
+  local p="$1" body
+  body=$(cat)
+  if ! home_guard --entry "$p" || { [ "${2:-}" != replace ] && [ -L "$p" ] && ! home_guard "$p"; }; then
+    err "refusing to write a wrapper at $p: $(outside "$p") (--home-only)"
+    return 1
+  fi
+  if [ -f "$p" ] && [ ! -L "$p" ] && [ "$(_sch_mode "$p")" = "-rwxr-xr-x" ] \
+     && printf '%s\n' "$body" | ucf_same - "$p"; then
+    return 0
+  fi
+  if [ "${2:-}" = replace ]; then $SUDO rm -f "$p" || return 1; fi
+  printf '%s\n' "$body" | $SUDO tee "$p" >/dev/null || return 1
+  $SUDO chmod 755 "$p"
 }
+
+# wrapper_failed <ecosystem> <wrapper path> <the -real this run moved there, or nothing>
+# [status] [what still applies]: the wrapper could not be written. That ends the run, as
+# it always has, except in --home-only mode: there a tool this run moved aside is put
+# back, so it still runs, and only its ecosystem is degraded.
+wrapper_failed() {
+  err "$1: could not write the PATH wrapper at $2"
+  [ "$HOME_ONLY" = true ] || exit 1
+  if [ -n "${3:-}" ] && { [ -e "$3" ] || [ -L "$3" ]; } && home_guard --entry "$2" && home_guard --entry "$3"; then
+    mv -f -- "$3" "$2" && log "$1: the real ${2##*/} is back at $2"
+  fi
+  degrade_eco "$1" "${4:-PARTIAL}" "PATH wrapper not deployed: $2 could not be written. ${5:-Config-file layer still applies.}"
+}
+
+# put_if_changed <file>: stdin to <file>, only when it differs from what is there.
+put_if_changed() {
+  local f="$1" body
+  body=$(cat)
+  home_guard "$f" || return 1
+  if [ -f "$f" ] && printf '%s\n' "$body" | ucf_same - "$f"; then return 0; fi
+  printf '%s\n' "$body" 2>/dev/null > "$f"
+}
+
+# write_failed <ecosystem> <file>: a file that could not be written. That ends the run,
+# as it always has, except in --home-only mode, where only that ecosystem is not applied.
+write_failed() {
+  err "$1: could not write $2"
+  [ "$HOME_ONLY" = true ] || exit 1
+  eco_failed "$1" "$2 could not be written"
+}
+
+# sch_mkdir <dir>: mkdir -p. A failure ends the run, as it always has, except in
+# --home-only mode, where the write that needs the directory then fails and stops only
+# its own ecosystem. Never outside HOME in that mode.
+sch_mkdir() {
+  if [ "$HOME_ONLY" = true ]; then
+    home_guard "$1" && mkdir -p -- "$1" 2>/dev/null
+    return 0
+  fi
+  mkdir -p -- "$1"
+}
+
+# sch_mktemp <the file it is for>: a new temporary file. In --home-only mode it is made
+# beside that file, which is under HOME, and not in $TMPDIR, which usually is not.
+sch_mktemp() {
+  if [ "$HOME_ONLY" = true ]; then mktemp "$(dirname -- "$1")/.sch-XXXXXX"; else mktemp; fi
+}
+
+# ---- --home-only: what is not applied, and why ----
+UNREACHED=()   # the summary's "Not reachable from HOME" lines
+unreached() { UNREACHED+=("$1"); }
+
+# eco_failed <ecosystem> <why>: nothing of it applies. Listed in the verdict even when
+# its handler stops before it would have added itself.
+eco_failed() {
+  case " ${HARDENED[*]:-} " in *" $1 "*) ;; *) HARDENED+=("$1") ;; esac
+  degrade_eco "$1" NONE "$2"
+}
+
+# outside <path> [the variable that put it there]: why --home-only does not write there.
+outside() {
+  local w="$1 is outside HOME"
+  case "$1" in "$HOME"/*) w="$1 leads outside HOME, through a symbolic link" ;; esac
+  printf '%s%s' "$w" "${2:+ ($2)}"
+}
+
+# home_skip <ecosystem> <why>: in --home-only mode that ecosystem would have to write
+# where the guard says no (or where its tool would not look), so nothing of it is written.
+home_skip() {
+  eco_failed "$1" "nothing written: $2"
+  unreached "$1: $2"
+}
+
+# wrapper_gap <tool path>: what the tool goes without when it gets no wrapper.
+wrapper_gap() {
+  local t="${1##*/}" lacks
+  case "$t" in
+    bun)      lacks="bun and bunx can still fetch and run a package they do not have (no --no-install)" ;;
+    bunx)     lacks="bunx still fetches and runs packages with no age gate and no script block" ;;
+    composer) lacks="composer.json scripts still run on install and update (no --no-scripts; the config still refuses plugins)" ;;
+    cargo)    lacks="no --locked, and no cargo-cooldown age gate" ;;
+    deno)     lacks="deno has no age gate at all; the wrapper is its only one" ;;
+    *)        lacks="none of its wrapper's checks apply" ;;
+  esac
+  printf '%s: no wrapper, because %s: %s' "$t" "$(outside "$1")" "$lacks"
+}
+
+# kept_wrapper <tool path>: 0 when it is a wrapper of ours (this script's or the role's)
+# whose real tool is there: <path>-real, or for bunx the real bun it names. An image
+# hardened by a full apply has these outside HOME, and --home-only keeps them as they are.
+# Both write a wrapper as a file of its own, so a link is not one, even when it leads to
+# one (a bunx linked to the bun wrapper this run just wrote).
+SCH_KEPT=0
+kept_wrapper() {
+  local r
+  [ ! -L "$1" ] && is_our_wrapper "$1" || return 1
+  [ -x "$1-real" ] && return 0
+  [ "${1##*/}" = bunx ] || return 1
+  r=$(sed -n "s/^REAL_BUN='\(.*\)'\$/\1/p" "$1" 2>/dev/null | head -n 1) || r=""
+  [ -n "$r" ] && [ -x "$r" ]
+}
+
+# jvm_home_why <dir under the home, .gradle or .m2>: in --home-only mode, why a file
+# there under HOME would not be read, because the JVM's user.home is not HOME; nothing
+# when it is.
+jvm_home_why() {
+  local pw r
+  pw=$(ucf_passwd_home)
+  if [ -z "$pw" ]; then
+    echo "uid $(id -u) has no passwd entry, so it is not known where the JVM looks"
+    return 0
+  fi
+  r=$(cd -P -- "$pw" 2>/dev/null && pwd -P) || r=""
+  [ -n "$r" ] && [ "${r%/}" = "$SCH_HOME_REAL" ] && return 0
+  echo "the JVM reads $pw/$1, not $HOME/$1 (it takes user.home from the passwd entry)"
+}
+
+# The cargo and deno wrappers render through placeholders: sed reads the body on
+# stdin and writes stdout. Never `sed -i`, which is NOT portable and has no form that
+# works on both: GNU takes a bare -i, BSD (macOS) requires -i '' and reads the next
+# argument as the backup suffix otherwise. On a macOS runner `sed -i "s|a|b|" file`
+# consumed the script as the suffix and then choked on the path with "invalid command
+# code f", killing every wrapper that renders through a placeholder.
 
 # Escape a value for safe use as the REPLACEMENT half of `sed "s|__X__|VALUE|"`.
 # Drops newlines (a wrapper value — a path, flag, or bool — is never multiline)
@@ -3111,6 +3552,7 @@ set_tool_version() {
 
 harden_npm() {
   section "npm"
+  if ! home_guard "$HOME/.npmrc"; then home_skip npm "$(outside "$HOME/.npmrc")"; end_section; return 0; fi
   local npm_v npm_vs npm_age=true npm_git=true
   npm_v=$(detect_version npm "npm --version")
   npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
@@ -3148,7 +3590,7 @@ harden_npm() {
   content=$(npm_settings "$NPM_AGE_DAYS" "$npm_age" "$npm_git")
 
   # Merged, never replaced: it is where `npm login` keeps its token.
-  put_user_cfg npmrc "$HOME/.npmrc" <<<"$content"
+  put_user_cfg npmrc "$HOME/.npmrc" <<<"$content" || { end_section; return 0; }
   echo "$content" | write_etc /etc/npmrc
 
   HARDENED+=("npm")
@@ -3224,6 +3666,12 @@ harden_pnpm() {
       pnpm_allowlist+=("$pkg")
     done
   fi
+  local p
+  for p in "$pnpm_dir/config.yaml" "$pnpm_dir/rc"; do
+    if ! home_guard "$p"; then
+      home_skip pnpm "$(outside "$p" "${XDG_CONFIG_HOME:+XDG_CONFIG_HOME}")"; end_section; return 0
+    fi
+  done
 
   # pnpm 11+ format (YAML, camelCase). This is the load-bearing file
   # for pnpm 11 — it ignores ~/.npmrc, ~/.config/pnpm/rc (the older
@@ -3243,7 +3691,9 @@ harden_pnpm() {
   # gate), and false is what lets a project's allowBuilds take effect. It does
   # let the project's own lifecycle scripts run (MEASURED on pnpm 11.28.12 and
   # 12.21.0); the role's pnpm-config.yaml.j2 makes the same trade.
-  {
+  # (Both files go through a function and a here-string, not a pipe, so put_user_cfg
+  # runs in this shell and a --home-only failure can stop only pnpm.)
+  _pnpm_yaml() {
     echo "# Managed by supply-chain-harden action"
     if [[ ${#pnpm_allowlist[@]} -gt 0 ]]; then
       echo "ignoreScripts: false"
@@ -3261,11 +3711,12 @@ harden_pnpm() {
     # default on pnpm 11 before 11.28.1 and 12 before 12.8.0 (MEASURED with
     # CI=true and an out-of-sync lockfile: the lockfile was rewritten).
     echo "verifyStoreIntegrity: true"
-  } | put_user_cfg pnpm-yaml "$pnpm_dir/config.yaml"
+  }
+  put_user_cfg pnpm-yaml "$pnpm_dir/config.yaml" <<<"$(_pnpm_yaml)" || { end_section; return 0; }
 
   # pnpm 10 format (ini, kebab-case). Belt-and-suspenders so we cover
   # both major versions; pnpm 10 still reads this file.
-  {
+  _pnpm_rc() {
     echo "; Managed by supply-chain-harden action"
     echo "minimum-release-age=$PNPM_AGE_MINUTES"
     echo "minimum-release-age-strict=$STRICT"
@@ -3278,7 +3729,8 @@ harden_pnpm() {
     else
       echo "ignore-scripts=true"
     fi
-  } | put_user_cfg pnpm-rc "$pnpm_dir/rc"
+  }
+  put_user_cfg pnpm-rc "$pnpm_dir/rc" <<<"$(_pnpm_rc)" || { end_section; return 0; }
 
   # NO pnpm_config_* VARIABLES ARE EXPORTED HERE, although the role exports two.
   # pnpm 11+ reads pnpm_config_* from the environment, and that outranks a
@@ -3335,6 +3787,7 @@ harden_pnpm() {
 
 harden_yarn() {
   section "yarn"
+  if ! home_guard "$HOME/.yarnrc.yml"; then home_skip yarn "$(outside "$HOME/.yarnrc.yml")"; end_section; return 0; fi
   local yarn_version
   yarn_version=$(detect_version yarn "yarn --version")
   # enableHardenedMode is Yarn 4.0+. Silently ignored on older yarn; we
@@ -3362,7 +3815,7 @@ harden_yarn() {
   }
   local yarn_body
   yarn_body=$(_yarn_config)
-  put_user_cfg yarn "$HOME/.yarnrc.yml" <<<"$yarn_body"
+  put_user_cfg yarn "$HOME/.yarnrc.yml" <<<"$yarn_body" || { end_section; return 0; }
 
   # Root's ~/.yarnrc.yml, not /etc/yarnrc.yml: Yarn Berry reads no system-wide
   # file (MEASURED on 4.9.4, 4.10.3, 4.11.0 and 4.18.1: settings in
@@ -3374,10 +3827,13 @@ harden_yarn() {
   # and its token, so it is judged and kept by the same rule as the user's, as
   # root. An /etc/yarnrc.yml an earlier version wrote is removed; anyone else's is
   # left alone.
-  local root_home
-  root_home=~root
-  case "$root_home" in /*) ;; *) root_home="" ;; esac
-  if [[ "$WRITE_ETC" == "true" ]] && can_write /etc/yarnrc.yml && $SUDO test -f /etc/yarnrc.yml \
+  # Not looked up at all in --home-only mode, which writes neither file.
+  local root_home=""
+  if [[ "$HOME_ONLY" != true ]]; then
+    root_home=~root
+    case "$root_home" in /*) ;; *) root_home="" ;; esac
+  fi
+  if [[ "$WRITE_ETC" == "true" ]] && home_guard /etc/yarnrc.yml && can_write /etc/yarnrc.yml && $SUDO test -f /etc/yarnrc.yml \
      && $SUDO grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' /etc/yarnrc.yml 2>/dev/null; then
     $SUDO rm -f /etc/yarnrc.yml && log "yarn: removed /etc/yarnrc.yml, which an earlier version wrote and Yarn never reads"
   fi
@@ -3416,6 +3872,8 @@ harden_yarn() {
 
 harden_pip() {
   section "pip"
+  local pip_conf="$HOME/.config/pip/pip.conf"
+  if ! home_guard "$pip_conf"; then home_skip pip "$(outside "$pip_conf")"; end_section; return 0; fi
   write_env PIP_DISABLE_PIP_VERSION_CHECK 1
   write_env PYTHONDONTWRITEBYTECODE       1
   # pip 26.0+ native age gate. Shares uv's cutoff deliberately: one clock for
@@ -3431,18 +3889,28 @@ harden_pip() {
   # would be invalid TOML.
   write_env POETRY_SOLVER_MIN_RELEASE_AGE "$POETRY_AGE_DAYS"
   local poetry_cfg="${POETRY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pypoetry}/config.toml"
-  if [[ ! -e "$poetry_cfg" ]]; then
-    mkdir -p "$(dirname "$poetry_cfg")"
-    printf '[solver]\nmin-release-age = %s\n' "$POETRY_AGE_DAYS" > "$poetry_cfg"
-  fi
-  local poetry_version
-  poetry_version=$(detect_version poetry "poetry --version")
-  if [[ -n "$poetry_version" ]] && ! version_ge "$poetry_version" "2.4.0"; then
-    notice "poetry $poetry_version has no solver.min-release-age (MEASURED: added in 2.4.0), and it reads neither pip.conf nor uv.toml, so it is not age-gated on this runner."
+  local poetry_var="${POETRY_CONFIG_DIR:+POETRY_CONFIG_DIR}"
+  [[ -n "$poetry_var" || -z "${XDG_CONFIG_HOME:-}" ]] || poetry_var=XDG_CONFIG_HOME
+  if ! home_guard "$poetry_cfg"; then
+    unreached "poetry: $(outside "$poetry_cfg" "$poetry_var"), so it has no age gate"
+  else
+    if [[ ! -e "$poetry_cfg" ]]; then
+      sch_mkdir "$(dirname "$poetry_cfg")"
+      printf '[solver]\nmin-release-age = %s\n' "$POETRY_AGE_DAYS" | put_if_changed "$poetry_cfg" \
+        || { [[ "$HOME_ONLY" == true ]] || exit 1; warn "poetry: could not write $poetry_cfg, so it has no age gate"; }
+    elif [[ "$HOME_ONLY" == true ]] && ! grep -q '^min-release-age' "$poetry_cfg" 2>/dev/null; then
+      # The user's own file, never edited: without the env layer it is the only gate.
+      env_skipped POETRY_SOLVER_MIN_RELEASE_AGE
+    fi
+    local poetry_version
+    poetry_version=$(detect_version poetry "poetry --version")
+    if [[ -n "$poetry_version" ]] && ! version_ge "$poetry_version" "2.4.0"; then
+      notice "poetry $poetry_version has no solver.min-release-age (MEASURED: added in 2.4.0), and it reads neither pip.conf nor uv.toml, so it is not age-gated on this runner."
+    fi
   fi
 
-  mkdir -p "$HOME/.config/pip"
-  put_user_cfg pip "$HOME/.config/pip/pip.conf" <<EOF
+  sch_mkdir "$HOME/.config/pip"
+  put_user_cfg pip "$pip_conf" <<EOF || { end_section; return 0; }
 ; Managed by supply-chain-harden action
 [global]
 disable-pip-version-check = true
@@ -3490,6 +3958,25 @@ EOF
   end_section
 }
 
+# uv_all_take_spans: every uv here reads a span in exclude-newer. A span is accepted
+# from uv 0.9.17 (MEASURED: 0.9.16 fails the whole config with "failed to parse year
+# in date", 0.9.17 resolves "48 hours" to now minus 48h; see UV_EXCLUDE_NEWER above).
+# Every uv on PATH, and the two places uv's installers put it, ~/.local/bin and
+# ~/.cargo/bin, on PATH or not: uv.toml is read by whichever uv runs. No uv at all, or
+# one that gives no version, is a no: a uv installed later may be older.
+UV_SPAN=false
+uv_all_take_spans() {
+  local p v n=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    v=$(cd / && "$p" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1) || v=""
+    [ -n "$v" ] && version_ge "$v" 0.9.17 || return 1
+    n=$((n + 1))
+  done < <(type -ap uv 2>/dev/null || true
+           for p in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do [ ! -x "$p" ] || printf '%s\n' "$p"; done)
+  [ "$n" -gt 0 ]
+}
+
 harden_uv() {
   section "uv"
   write_env UV_LINK_MODE copy
@@ -3518,11 +4005,25 @@ harden_uv() {
   # covered by the file we write here.
   local uv_config_dir
   uv_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/uv"
+  if ! home_guard "$uv_config_dir/uv.toml"; then
+    home_skip uv "$(outside "$uv_config_dir/uv.toml" "${XDG_CONFIG_HOME:+XDG_CONFIG_HOME}")"; end_section; return 0
+  fi
 
-  mkdir -p "$uv_config_dir"
-  put_user_cfg uv "$uv_config_dir/uv.toml" <<EOF
+  # --home-only: a span ("48 hours") moves with the clock, so the gate does not freeze
+  # between sessions, but only where every uv here reads one (uv_all_take_spans). The
+  # absolute instant otherwise, as outside this mode. ucf_body blanks only an instant,
+  # and the self-check covers the line as written, so a file is still ours when it
+  # switches between the two.
+  local uv_cutoff="$UV_EXCLUDE_NEWER"
+  if [[ "$HOME_ONLY" == true ]] && uv_all_take_spans; then
+    uv_cutoff="$RELEASE_AGE_HOURS hours"
+    UV_SPAN=true
+  fi
+
+  sch_mkdir "$uv_config_dir"
+  put_user_cfg uv "$uv_config_dir/uv.toml" <<EOF || { end_section; return 0; }
 # Managed by supply-chain-harden action
-exclude-newer = "$UV_EXCLUDE_NEWER"
+exclude-newer = "$uv_cutoff"
 no-build = true
 index-strategy = "first-index"
 allow-insecure-host = []
@@ -3544,12 +4045,23 @@ EOF
 
   HARDENED+=("uv")
   set_tool_version "uv" "$(detect_version uv "uv --version")"
-  log "uv: exclude-newer='$UV_EXCLUDE_NEWER', no-build=true, index-strategy=first-index (user config at $uv_config_dir/uv.toml)"
+  log "uv: exclude-newer='$uv_cutoff', no-build=true, index-strategy=first-index (user config at $uv_config_dir/uv.toml)"
   end_section
 }
 
 harden_composer() {
   section "composer"
+  # --home-only: both the file written whatever happens and the one composer reads
+  # (ucf_composer_home, by composer's own rule) have to be under HOME, before composer
+  # is even asked its version.
+  if [[ "$HOME_ONLY" == true ]]; then
+    local p
+    for p in "$(ucf_composer_base)/config.json" "$(ucf_composer_home)/config.json"; do
+      if ! home_guard "$p"; then
+        home_skip composer "$(outside "$p" "${COMPOSER_HOME:+COMPOSER_HOME}")"; end_section; return 0
+      fi
+    done
+  fi
 
   local composer_version
   # --no-plugins, and the home lookup below runs from an empty directory:
@@ -3640,8 +4152,8 @@ harden_composer() {
   composer_body=$(_composer_config)
   # auth.json, where composer keeps tokens, is neither read nor written here.
   composer_base=$(ucf_composer_base)
-  mkdir -p "$composer_base"
-  put_user_cfg composer "$composer_base/config.json" <<<"$composer_body"
+  sch_mkdir "$composer_base"
+  put_user_cfg composer "$composer_base/config.json" <<<"$composer_body" || { end_section; return 0; }
 
   # That directory is not where composer reads on every host: with no XDG_*
   # variable set it was ~/.composer (MEASURED), which left the file above unread
@@ -3652,8 +4164,8 @@ harden_composer() {
   if command -v composer >/dev/null 2>&1; then
     composer_home=$(ucf_path composer-home)
     if [[ -n "$composer_home" ]]; then
-      mkdir -p "$(dirname "$composer_home")"
-      put_user_cfg composer-home "$composer_home" <<<"$composer_body"
+      sch_mkdir "$(dirname "$composer_home")"
+      put_user_cfg composer-home "$composer_home" <<<"$composer_body" || { end_section; return 0; }
     fi
   fi
 
@@ -3709,6 +4221,7 @@ harden_composer() {
 
   local wrapper_target="$real_composer"
   require_privilege composer "$wrapper_target" || { end_section; return 0; }
+  local moved=""
   if is_our_wrapper "$real_composer"; then
     if [[ -x "${real_composer}-real" ]]; then
       real_composer="${real_composer}-real"
@@ -3720,6 +4233,7 @@ harden_composer() {
   else
     move_aside composer "$real_composer" || { end_section; return 0; }
     real_composer="${real_composer}-real"
+    moved=$real_composer
   fi
 
   local inject_no_plugins=true
@@ -3997,8 +4511,7 @@ fi
 
 exec "$REAL_COMPOSER" ${FLAGS[@]+"${FLAGS[@]}"} "$@"
 EOF
-  } | $SUDO tee "$wrapper_target" >/dev/null
-  $SUDO chmod 755 "$wrapper_target"
+  } | put_wrapper "$wrapper_target" || { wrapper_failed composer "$wrapper_target" "$moved"; end_section; return 0; }
   local wrap_desc="--no-scripts on every invocation except a script run by name"
   if [[ "$no_scripts_is_global" != "true" ]]; then
     wrap_desc="--no-scripts on install/update/require/remove/dump-autoload/create-project/reinstall only"
@@ -4008,6 +4521,22 @@ EOF
   log "composer: wrapper deployed at $wrapper_target ($wrap_desc)"
   record_wrapper composer
   end_section
+}
+
+# find_bunx <bun path>: bunx on PATH, else the one beside that bun; nothing when neither.
+find_bunx() {
+  local b
+  b=$(command -v bunx 2>/dev/null || true)
+  if [[ -z "$b" && -e "$(dirname "$1")/bunx" ]]; then b="$(dirname "$1")/bunx"; fi
+  printf '%s' "$b"
+}
+
+# bunx_failed <bunx> <real bun>: wrapper_failed for bunx. put_wrapper removed bunx
+# first, so in --home-only mode it comes back as what it was, a link to the real bun.
+bunx_failed() {
+  wrapper_failed bun "$1" "" PARTIAL "The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."
+  [ -e "$1" ] || [ -L "$1" ] || ln -s "$2" "$1" 2>/dev/null \
+    || warn "bunx: $1 could not be put back; reinstall bun to get bunx again"
 }
 
 harden_bun() {
@@ -4087,7 +4616,10 @@ harden_bun() {
   else
     bunfig_path="$HOME/.bunfig.toml"
   fi
-  mkdir -p "$(dirname "$bunfig_path")"
+  if ! home_guard "$bunfig_path"; then
+    home_skip bun "$(outside "$bunfig_path" "${XDG_CONFIG_HOME:+XDG_CONFIG_HOME}")"; end_section; return 0
+  fi
+  sch_mkdir "$(dirname "$bunfig_path")"
 
   # The bunfig is install-time hardening. NOTE: per bun's docs, this file is
   # NOT consulted for `bun run`; only for `bun install`. The runtime
@@ -4101,7 +4633,8 @@ harden_bun() {
   #
   # Written with `if` blocks, not `[[ ... ]] && echo`: a false test as the
   # last command of the group would return 1 and `set -e` would kill the run.
-  {
+  # A function and a here-string, not a pipe: put_user_cfg runs in this shell.
+  _bunfig() {
     echo "# Managed by supply-chain-harden action"
     echo "[install]"
     if [[ "$has_min_release_age" == "true" ]]; then
@@ -4116,7 +4649,8 @@ harden_bun() {
     if [[ "$has_save_text_lockfile" == "true" ]]; then
       echo "saveTextLockfile = true"
     fi
-  } | put_user_cfg bun "$bunfig_path"
+  }
+  put_user_cfg bun "$bunfig_path" <<<"$(_bunfig)" || { end_section; return 0; }
   log "bun: global bunfig written at $bunfig_path"
 
   if [[ "$has_ignore_scripts" != "true" ]]; then
@@ -4159,8 +4693,19 @@ harden_bun() {
     return 0
   fi
 
-  local wrapper_target="$real_bun"
-  require_privilege bun "$wrapper_target" || { end_section; return 0; }
+  local wrapper_target="$real_bun" moved=""
+  if ! require_privilege bun "$wrapper_target"; then
+    # --home-only kept an earlier apply's bun wrapper outside HOME: bunx is judged the
+    # same way, and is not written either.
+    if [[ "$SCH_KEPT" == 1 ]]; then
+      local kept_bunx
+      kept_bunx=$(find_bunx "$wrapper_target")
+      if [[ -n "$kept_bunx" ]] && require_privilege bun "$kept_bunx" PARTIAL "bunx PATH wrapper not deployed at $kept_bunx: @WHY@. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."; then
+        degrade_eco bun PARTIAL "bunx PATH wrapper not deployed at $kept_bunx: the bun wrapper it would run is outside HOME and was left as it is. The bun wrapper and the bunfig apply, but \`bunx <pkg>\` goes through neither."
+      fi
+    fi
+    end_section; return 0
+  fi
   # If the discovered bun IS our wrapper from a prior step (re-run within
   # the same job), find the real binary at -real and re-wrap.
   if is_our_wrapper "$real_bun"; then
@@ -4178,9 +4723,10 @@ harden_bun() {
     # isn't, and we want this to work in both cases.
     move_aside bun "$real_bun" || { end_section; return 0; }
     real_bun="${real_bun}-real"
+    moved=$real_bun
   fi
 
-  cat <<EOF | $SUDO tee "$wrapper_target" >/dev/null
+  cat <<EOF | put_wrapper "$wrapper_target" || { wrapper_failed bun "$wrapper_target" "$moved"; end_section; return 0; }
 #!/bin/bash
 # Managed by supply-chain-harden action
 REAL_BUN='$real_bun'
@@ -4227,7 +4773,6 @@ case "\${1:-}" in
     ;;
 esac
 EOF
-  $SUDO chmod 755 "$wrapper_target"
   log "bun: wrapper deployed at $wrapper_target (injects --no-install for runtime paths)"
   record_wrapper bun
 
@@ -4254,13 +4799,7 @@ EOF
   #     bun *wrapper* deployed above — re-injecting flags and losing
   #     argv[0]. So it points at the real bun binary directly.
   local real_bunx
-  real_bunx=$(command -v bunx 2>/dev/null || true)
-  if [[ -z "$real_bunx" ]]; then
-    # bunx not on PATH; try the conventional sibling of the bun we wrapped.
-    local sibling
-    sibling="$(dirname "$wrapper_target")/bunx"
-    [[ -e "$sibling" ]] && real_bunx="$sibling"
-  fi
+  real_bunx=$(find_bunx "$wrapper_target")
 
   if [[ -z "$real_bunx" ]]; then
     log "bunx not found — no bunx wrapper deployed"
@@ -4282,8 +4821,7 @@ EOF
     # No -real backup is kept: unlike bun, bunx carries no unique binary. It
     # is a symlink, and the thing it pointed at is already preserved as
     # bun-real by the wrap above.
-    $SUDO rm -f "$real_bunx"
-    cat <<EOF | $SUDO tee "$real_bunx" >/dev/null
+    cat <<EOF | put_wrapper "$real_bunx" replace || { bunx_failed "$real_bunx" "$real_bun"; end_section; return 0; }
 #!/bin/bash
 # Managed by supply-chain-harden
 REAL_BUN='$real_bun'
@@ -4331,7 +4869,6 @@ case "\${1:-}" in
 esac
 exec -a bunx "\$REAL_BUN" --no-install "\$@"
 EOF
-    $SUDO chmod 755 "$real_bunx"
     log "bunx: wrapper deployed at $real_bunx (injects --no-install; fails closed on uninstalled packages)"
     record_wrapper bunx
   fi
@@ -4341,10 +4878,15 @@ EOF
 
 harden_cargo() {
   section "cargo"
-  local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-  mkdir -p "$cargo_home"
+  local cargo_home="${CARGO_HOME:-$HOME/.cargo}" p
+  for p in "$cargo_home/config.toml" "$cargo_home/cooldown.toml"; do
+    if ! home_guard "$p"; then
+      home_skip cargo "$(outside "$p" "${CARGO_HOME:+CARGO_HOME}")"; end_section; return 0
+    fi
+  done
+  sch_mkdir "$cargo_home"
 
-  put_user_cfg cargo "$cargo_home/config.toml" <<'EOF'
+  put_user_cfg cargo "$cargo_home/config.toml" <<'EOF' || { end_section; return 0; }
 # Managed by supply-chain-harden
 # Note: build.rs / proc-macro execution CANNOT be blocked by cargo config —
 # structural gap. Refusing to RESOLVE a too-new version is the only control
@@ -4369,9 +4911,10 @@ EOF
   #
   # Writing this costs nothing and is harmless when the cargo-cooldown binary
   # is absent, so it is unconditional; the binary itself is opt-in below.
+  # Compared first, so a re-run that changes nothing writes nothing.
   local violation_action="deny"
   [[ "$STRICT" == "true" ]] || violation_action="fallback"
-  cat > "$cargo_home/cooldown.toml" <<EOF
+  cat <<EOF | put_if_changed "$cargo_home/cooldown.toml" || { write_failed cargo "$cargo_home/cooldown.toml"; end_section; return 0; }
 # Managed by supply-chain-harden
 [cooldown]
 # "deny" fails the command and restores the original Cargo.lock when a
@@ -4400,7 +4943,11 @@ EOF
   # 1.85.0 is not installed" cannot be read back as cargo's version.
   # From /: through a rustup proxy a checkout's rust-toolchain.toml `path =`
   # picks the cargo that answers (MEASURED, rustup 1.29.3). See detect_version.
-  set_tool_version "cargo" "$(cd / && RUSTUP_AUTO_INSTALL=0 cargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+  # --home-only: not where rustup would write its own settings outside HOME (see
+  # _pf_version: in a RUSTUP_HOME with no state it writes settings.toml there).
+  if home_guard "${RUSTUP_HOME:-$HOME/.rustup}"; then
+    set_tool_version "cargo" "$(cd / && RUSTUP_AUTO_INSTALL=0 cargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+  fi
 
   # ---- optional cargo-cooldown backend ----
   #
@@ -4445,7 +4992,7 @@ EOF
     return 0
   fi
 
-  local wrapper_target="$real_cargo"
+  local wrapper_target="$real_cargo" moved=""
   require_privilege cargo "$wrapper_target" || { end_section; return 0; }
   if is_our_wrapper "$real_cargo"; then
     if [[ -x "${real_cargo}-real" ]]; then
@@ -4457,10 +5004,11 @@ EOF
     fi
   else
     # Moved FIRST, before anything else touches this path: the wrapper is later
-    # written with `cp`, and `cp` onto a symlink writes THROUGH it — into the
+    # written with `tee`, and `tee` onto a symlink writes THROUGH it — into the
     # shared rustup binary, replacing rustc, rustfmt and every other proxy.
     move_aside cargo "$real_cargo" || { end_section; return 0; }
     real_cargo="${real_cargo}-real"
+    moved=$real_cargo
   fi
 
   # ARGV[0]-SAFE BACKUP — parity with tasks/cargo.yml "Prepare cargo-real".
@@ -4493,12 +5041,17 @@ EOF
     cargo_target=$(readlink -f "$cargo_sib" 2>/dev/null || true)
   fi
   if [[ -n "$cargo_target" ]]; then
-    tmp_shim=$(mktemp)
-    printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$cargo_target" > "$tmp_shim"
-    chmod 0755 "$tmp_shim"
+    # --home-only: the entry it replaces, and the temporary file beside it, in HOME.
+    if ! home_guard --entry "$real_cargo" || ! tmp_shim=$(sch_mktemp "$real_cargo"); then
+      wrapper_failed cargo "$wrapper_target" "$moved"; end_section; return 0
+    fi
     # mv replaces the directory entry; it neither follows a symlink nor
     # writes into a hardlink's shared inode (the rustup binary).
-    $SUDO mv -f "$tmp_shim" "$real_cargo"
+    if ! { printf '#!/bin/bash\n# supply-chain-harden: argv[0] shim for the rustup cargo proxy.\n# rustup dispatches on the name it is invoked as, so a file called\n# cargo-real is rejected as an unknown proxy. Restore argv[0]=cargo.\nexec -a cargo "%s" "$@"\n' "$cargo_target" > "$tmp_shim" \
+           && chmod 0755 "$tmp_shim" && $SUDO mv -f "$tmp_shim" "$real_cargo"; }; then
+      rm -f -- "$tmp_shim"
+      wrapper_failed cargo "$wrapper_target" "$moved"; end_section; return 0
+    fi
     log "cargo: ${real_cargo} is an argv[0] shim for rustup (a renamed rustup proxy is rejected as an unknown proxy)"
   fi
 
@@ -4514,10 +5067,13 @@ EOF
   # cannot be made, the wrapper still works for this user and refuses, with a
   # message, for everyone else. Numeric 0 for owner and group: macOS has no
   # group named root.
+  # --home-only wraps a cargo under HOME only, which is this account's own, root's
+  # included (an agent's VM that runs as root with HOME=/home/hatch): its backend is the
+  # one in $CARGO_HOME/bin, and nothing goes to /usr/local/libexec.
   local cooldown_exe=""
   if [[ -n "$cooldown_bin" ]]; then
     cooldown_exe="$cooldown_bin/cargo-cooldown"
-    if [[ "$(id -u)" -eq 0 || ! -O "$(dirname "$wrapper_target")" ]]; then
+    if [[ "$HOME_ONLY" != true ]] && [[ "$(id -u)" -eq 0 || ! -O "$(dirname "$wrapper_target")" ]]; then
       local sys_cooldown=/usr/local/libexec/supply-chain-hardening/cargo/cargo-cooldown
       if [[ "${CAN_ESCALATE:-0}" -eq 1 ]] \
          && $SUDO install -d -o 0 -g 0 -m 0755 "$(dirname "$sys_cooldown")" \
@@ -4539,10 +5095,10 @@ EOF
 
   # Written via placeholders + sed rather than an interpolating heredoc: the
   # wrapper is dense with $ and the escaping is where this kind of code goes
-  # wrong silently.
-  local tmp_wrapper
-  tmp_wrapper=$(mktemp)
-  cat > "$tmp_wrapper" <<'WRAPPER'
+  # wrong silently. Straight from sed to put_wrapper, with no temporary file.
+  local cargo_subst
+  cargo_subst="s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_EXE__|$(sed_repl "$cooldown_exe")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
+  sed "$cargo_subst" <<'WRAPPER' | put_wrapper "$wrapper_target" || { wrapper_failed cargo "$wrapper_target" "$moved"; end_section; return 0; }
 #!/bin/bash
 # cargo — supply-chain-harden wrapper
 #
@@ -5019,12 +5575,7 @@ case "$KIND" in
     ;;
 esac
 WRAPPER
-
-  subst_inplace "$tmp_wrapper" "s|__REAL_CARGO__|$(sed_repl "$real_cargo")|; s|__COOLDOWN_EXE__|$(sed_repl "$cooldown_exe")|; s|__CARGO_SFW__|$(sed_repl "$CARGO_SOCKET_FIREWALL")|; s|__MIN_AGE_MIN__|$((RELEASE_AGE_HOURS * 60))|; s|__VIOLATION_ACTION__|$(sed_repl "$violation_action")|; s|__RELEASE_AGE_HOURS__|$RELEASE_AGE_HOURS|"
-  $SUDO cp "$tmp_wrapper" "$wrapper_target"
-  $SUDO chmod 755 "$wrapper_target"
   record_wrapper cargo
-  rm -f "$tmp_wrapper"
 
   if [[ -n "$cooldown_bin" ]]; then
     log "cargo: wrapper at $wrapper_target (--locked injection + ${RELEASE_AGE_HOURS}h publish-age gate via cargo-cooldown)"
@@ -5043,6 +5594,27 @@ WRAPPER
 
 harden_go() {
   section "go"
+  # --home-only: go env -w writes GOENV, and every go command, `go version` included,
+  # writes telemetry counters under os.UserConfigDir()/go/telemetry, where the default
+  # GOENV is too, whatever GOENV says. MEASURED, go1.24.2 on Linux: with
+  # GOENV=$HOME/.goenv and XDG_CONFIG_HOME outside HOME, `go version` wrote
+  # $XDG_CONFIG_HOME/go/telemetry/local/*.count, weekends and upload.token, and nothing
+  # in HOME. On macOS os.UserConfigDir is ~/Library/Application Support whatever
+  # XDG_CONFIG_HOME says (Go's documentation, not measured here). So go is not started
+  # at all unless both are under HOME. Worked out without starting go; go's own GOENV
+  # is checked again below.
+  local gcfg genv gvar
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then gcfg="$HOME/Library/Application Support"; gvar=""
+  else gcfg="${XDG_CONFIG_HOME:-$HOME/.config}"; gvar="${XDG_CONFIG_HOME:+XDG_CONFIG_HOME}"; fi
+  if ! home_guard "$gcfg/go/telemetry"; then
+    home_skip go "$(outside "$gcfg/go/telemetry" "$gvar"), and every go command writes its telemetry counters there"
+    end_section; return 0
+  fi
+  genv="${GOENV:-$gcfg/go/env}"
+  [[ -z "${GOENV:-}" ]] || gvar=GOENV
+  if ! home_guard "$genv"; then
+    home_skip go "$(outside "$genv" "$gvar")"; end_section; return 0
+  fi
 
   # Go is the ONE ecosystem with no config file behind its settings — every
   # other harden_* here writes a dotfile that survives regardless of how the
@@ -5082,9 +5654,17 @@ harden_go() {
   go_version=$(detect_version go "go version")
 
   if command -v go >/dev/null 2>&1; then
+    genv=$(cd / && go env GOENV 2>/dev/null) || genv=""
+    if [[ "$HOME_ONLY" == true ]] && ! home_guard "$genv"; then
+      home_skip go "$(outside "${genv:-go env GOENV (no answer)}" GOENV)"; end_section; return 0
+    fi
     # `go env -w` validates keys and rejects unknown ones, so a failure here
     # means the host's go is too old for one of these. Non-fatal: the env
     # layer above still applies on platforms that propagate it.
+    # A key whose last line in the file is already that value is not written
+    # again: go env -w writes KEY=VALUE lines and the last one of a key wins (read
+    # from go's cmd/go/internal/envcmd, not measured), so a re-run that finds every
+    # one changes nothing.
     local gokey failed=""
     for gokey in \
       "GOSUMDB=sum.golang.org" \
@@ -5095,6 +5675,10 @@ harden_go() {
       "GOINSECURE=" \
       "GONOSUMDB="
     do
+      if [[ -n "$genv" && -f "$genv" ]] \
+         && [[ "$(grep -e "^${gokey%%=*}=" "$genv" 2>/dev/null | tail -n 1)" == "$gokey" ]]; then
+        continue
+      fi
       (cd / && go env -w "$gokey") 2>/dev/null || failed+="${gokey%%=*} "
     done
     # A runner hardened by an earlier version keeps GOFLAGS=-mod=readonly in its
@@ -5104,11 +5688,17 @@ harden_go() {
       (cd / && go env -u GOFLAGS) 2>/dev/null \
         && log "go: removed GOFLAGS=-mod=readonly left in $(cd / && go env GOENV 2>/dev/null) by an earlier version (it made go ignore vendor/)"
     fi
-    if [[ -n "$failed" ]]; then
+    if [[ -n "$failed" && "$HOME_ONLY" == true ]]; then
+      warn "go env -w rejected: ${failed% } — --home-only has no env layer, so on this host those settings apply nowhere"
+      degrade_eco go PARTIAL "go env -w rejected ${failed% }, and --home-only has no env layer"
+    elif [[ -n "$failed" ]]; then
       warn "go env -w rejected: ${failed% } — those settings rely on the env layer only on this host"
     else
-      log "go: persisted to $(cd / && go env GOENV 2>/dev/null || echo "$HOME/.config/go/env") — survives without env propagation"
+      log "go: persisted to ${genv:-$HOME/.config/go/env} — survives without env propagation"
     fi
+  elif [[ "$HOME_ONLY" == true ]]; then
+    log "go not installed — nothing written: go env -w needs go, and --home-only has no env layer"
+    set_eco_status go NONE "go is not installed, so go env -w wrote nothing, and --home-only has no env layer"
   else
     log "go not installed — env layer written, go env -w skipped"
     # Without go env -w the settings live only in the env layer, which does
@@ -5139,7 +5729,8 @@ bundler_implements_cooldown() {
 
 harden_bundler() {
   section "bundler"
-  mkdir -p "$HOME/.bundle"
+  if ! home_guard "$HOME/.bundle/config"; then home_skip bundler "$(outside "$HOME/.bundle/config")"; end_section; return 0; fi
+  sch_mkdir "$HOME/.bundle"
 
   # THE AGE GATE IS THE POINT HERE, and it was missing entirely.
   #
@@ -5188,7 +5779,7 @@ harden_bundler() {
   # method `inject' for String) -- the whole tool, not just the gate.
   # MEASURED: comment-first crashes 4.1.0; "---" then the comment reads
   # frozen/cooldown correctly on 2.4.20, 2.6.9, 4.0.13 and 4.1.0.
-  {
+  _bundle_config() {
     echo "---"
     echo "# Managed by supply-chain-harden"
     echo "BUNDLE_FROZEN: \"true\""
@@ -5197,7 +5788,8 @@ harden_bundler() {
     # the same argument already made for DOTNET_NUGET_SIGNATURE_VERIFICATION:
     # a default we do not state is a default someone else can flip.
     echo "BUNDLE_DISABLE_CHECKSUM_VALIDATION: \"false\""
-  } | put_user_cfg bundler "$HOME/.bundle/config"
+  }
+  put_user_cfg bundler "$HOME/.bundle/config" <<<"$(_bundle_config)" || { end_section; return 0; }
   write_env BUNDLE_COOLDOWN "$bundle_age_days"
 
   HARDENED+=("bundler")
@@ -5248,7 +5840,7 @@ harden_deno() {
   # exact "partial config, no verdict" defect this change set fixes everywhere
   # else, and it gated AFTER the mv here. deno has no config layer, so a blocked
   # wrap means NONE is enforced, not PARTIAL.
-  local wrapper_path="${real_deno%-real}"
+  local wrapper_path="${real_deno%-real}" moved=""
   require_privilege deno "$wrapper_path" NONE \
     "PATH wrapper not deployed: @WHY@. deno has no config-file layer — the wrapper is its only age gate — so nothing gates deno on this host." \
     || { end_section; return 0; }
@@ -5264,13 +5856,14 @@ harden_deno() {
   else
     move_aside deno "$real_deno" NONE "deno has no config-file layer, so nothing gates deno on this host." || { end_section; return 0; }
     real_deno="${real_deno}-real"
+    moved=$real_deno
   fi
   # Placeholders + sed rather than an interpolating heredoc — same reason as
   # the cargo wrapper: this text is dense with $ and the escaping is where
   # generated wrappers go wrong without failing loudly.
-  local tmp_deno
-  tmp_deno=$(mktemp)
-  cat > "$tmp_deno" <<'DENOWRAP'
+  local deno_subst
+  deno_subst="s|__REAL_DENO__|$(sed_repl "$real_deno")|; s|__WRAPPER_PATH__|$(sed_repl "$wrapper_path")|; s|__MIN_AGE__|$DENO_AGE_ISO|"
+  sed "$deno_subst" <<'DENOWRAP' | put_wrapper "$wrapper_path" || { wrapper_failed deno "$wrapper_path" "$moved" NONE "deno has no config-file layer, so nothing gates deno on this host."; end_section; return 0; }
 #!/bin/bash
 # deno — supply-chain-harden wrapper
 #
@@ -5400,19 +5993,51 @@ case "$subcmd" in
     ;;
 esac
 DENOWRAP
-  subst_inplace "$tmp_deno" "s|__REAL_DENO__|$(sed_repl "$real_deno")|; s|__WRAPPER_PATH__|$(sed_repl "$wrapper_path")|; s|__MIN_AGE__|$DENO_AGE_ISO|"
-  $SUDO cp "$tmp_deno" "$wrapper_path"
-  rm -f "$tmp_deno"
-  $SUDO chmod 755 "$wrapper_path"
   log "deno: wrapper deployed at $wrapper_path (injects --minimum-dependency-age=$DENO_AGE_ISO)"
   record_wrapper deno
   end_section
 }
 
+# --home-only starts no JVM and no dotnet: maven, gradle and nuget record no version
+# in this mode. Neither version decides what is written, both starts are slow, and a
+# JVM writes /tmp/hsperfdata_<user> on start (inferred from the JVM's defaults, not
+# measured here), which is outside HOME.
+sch_probes_vm() { [ "$HOME_ONLY" != true ]; }
+
 harden_maven() {
   section "maven"
-  mkdir -p "$HOME/.m2"
-  put_user_cfg maven "$HOME/.m2/settings.xml" <<'EOF'
+  # Maven reads ${user.home}/.m2/settings.xml, and user.home is the JVM's, which comes
+  # from the passwd entry of the uid, not from $HOME (ucf_passwd_home: MEASURED on maven
+  # 3.10.2, as root with HOME=/tmp/h, it read /root/.m2/settings.xml). It has no
+  # variable like GRADLE_USER_HOME to point it elsewhere. So the file goes to the passwd
+  # home, looked up by uid as gradle's init script is, and the log says so when that is
+  # not $HOME. $HOME/.m2 when there is no passwd home to use (ucf_jvm_home), with a
+  # warning, and for a root that sudo or doas reached with another account's HOME:
+  # ucf_kept_out then refuses that HOME, as it refuses the other per-user files there,
+  # before anything is made in it.
+  # --home-only writes nothing when HOME is not the passwd home: the file would not be read.
+  local why m2home="$HOME" jh="" pw
+  if [[ "$HOME_ONLY" == true ]]; then
+    why=$(jvm_home_why .m2)
+    if [[ -n "$why" ]]; then home_skip maven "$why"; end_section; return 0; fi
+  else
+    jh=$(ucf_jvm_home)
+    case "$jh" in
+      "home "*)
+        m2home=${jh#home }
+        if [[ "$m2home" != "$(ucf_noslash "$HOME")" ]]; then
+          log "maven: \$HOME is '$HOME' but the passwd home is '$m2home' — settings.xml goes to $m2home/.m2, where the JVM looks, not under \$HOME"
+        fi ;;
+      "none "*)
+        pw=${jh#none }
+        if [[ "$(ucf_noslash "$pw")" != "$(ucf_noslash "$HOME")" ]]; then
+          warn "maven: no usable passwd home for uid $(id -u) (passwd says '${pw:-<none>}'; it has to be a directory this account can write, and not /), so settings.xml goes to '$HOME/.m2'. Maven takes its home from the passwd entry, not \$HOME, so it may not read it."
+        fi ;;
+    esac
+  fi
+  if ! home_guard "$m2home/.m2/settings.xml"; then home_skip maven "$(outside "$m2home/.m2/settings.xml")"; end_section; return 0; fi
+  [[ "$jh" == "kept "* ]] || sch_mkdir "$m2home/.m2"
+  put_user_cfg maven "$m2home/.m2/settings.xml" <<'EOF' || { end_section; return 0; }
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by supply-chain-harden action -->
 <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
@@ -5468,7 +6093,10 @@ harden_maven() {
 </settings>
 EOF
   HARDENED+=("maven")
-  set_tool_version "maven" "$(detect_version maven "mvn --version")"
+  if [[ "$jh" == "kept "* ]]; then
+    warn "maven: this is root, reached by sudo or doas from ${jh#kept }, and \$HOME ('$HOME') is not root's passwd home ('$(ucf_passwd_home)'), so settings.xml was written to $HOME/.m2, which maven run as root does not read. Run this as ${jh#kept }, not as root."
+  fi
+  if sch_probes_vm; then set_tool_version "maven" "$(detect_version maven "mvn --version")"; fi
   log "maven: HTTPS-only mirror enforced; HTTP repos blocked; strict checksums (fail) on Central, for dependencies and plugins"
   end_section
 }
@@ -5507,30 +6135,45 @@ harden_gradle() {
   # Unlike the role, exporting here is safe: harden.sh's env layer is scoped to
   # one CI job running as one user, not a system-wide /etc/profile.d shared by
   # every account on a long-lived host.
-  local gradle_home="" passwd_home="" uid
+  #
+  # --home-only has no env layer, so (2) is out: it writes only where gradle looks on
+  # its own. That is GRADLE_USER_HOME when the caller has it set (the agent's shell
+  # then has it too), else the passwd home when that is HOME; anywhere else, nothing.
+  local gradle_home="" passwd_home="" uid why jh
+  if [[ "$HOME_ONLY" == true && -z "${GRADLE_USER_HOME:-}" ]]; then
+    why=$(jvm_home_why .gradle)
+    if [[ -n "$why" ]]; then home_skip gradle "$why"; end_section; return 0; fi
+  fi
   if [[ -n "${GRADLE_USER_HOME:-}" ]]; then
     gradle_home="$GRADLE_USER_HOME"
   else
-    # id -u, never $USER/$LOGNAME: those are env-derived and can lie in exactly
-    # the relocated-HOME containers this resolution exists for. getent is
-    # missing from some minimal images, so fall back to /etc/passwd directly.
+    # The passwd home when it is a directory this account can write, and not "/"; for a
+    # root that sudo or doas reached with another account's HOME, nothing, as for that
+    # account's other per-user files (ucf_jvm_home).
     uid=$(id -u)
-    passwd_home=$(getent passwd "$uid" 2>/dev/null | cut -d: -f6) || passwd_home=""
-    if [[ -z "$passwd_home" ]]; then
-      passwd_home=$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null) || passwd_home=""
-    fi
-    if [[ -n "$passwd_home" && -d "$passwd_home" && -w "$passwd_home" ]]; then
-      gradle_home="$passwd_home/.gradle"
-      if [[ "$passwd_home" != "${HOME:-}" ]]; then
-        log "gradle: \$HOME is '${HOME:-<unset>}' but the passwd home is '$passwd_home' — writing the init script where the JVM will look, and pinning GRADLE_USER_HOME to it"
-      fi
-    else
-      gradle_home="${HOME:-.}/.gradle"
-      warn "gradle: no writable passwd home for uid $uid (passwd says '${passwd_home:-<none>}'), so the init script goes to '$gradle_home' and GRADLE_USER_HOME is exported to point gradle at it. A gradle build that does not inherit this job's environment will not load it."
-    fi
+    jh=$(ucf_jvm_home)
+    case "$jh" in
+      "home "*)
+        passwd_home=${jh#home }
+        gradle_home="$passwd_home/.gradle"
+        if [[ "$passwd_home" != "$(ucf_noslash "${HOME:-}")" ]]; then
+          log "gradle: \$HOME is '${HOME:-<unset>}' but the passwd home is '$passwd_home' — writing the init script where the JVM will look, and pinning GRADLE_USER_HOME to it"
+        fi ;;
+      "kept "*)
+        warn "gradle: init script not written: this is root, reached by sudo or doas from ${jh#kept }, and \$HOME ('${HOME:-<unset>}') is not root's passwd home ('$(ucf_passwd_home)'), so the home meant is most likely not root's. Run this as ${jh#kept }, not as root."
+        eco_failed gradle "init script not written: root reached by sudo or doas from ${jh#kept }, with a HOME that is not root's passwd home"
+        end_section; return 0 ;;
+      *)
+        passwd_home=${jh#none }
+        gradle_home="${HOME:-.}/.gradle"
+        warn "gradle: no usable passwd home for uid $uid (passwd says '${passwd_home:-<none>}'; it has to be a directory this account can write, and not /), so the init script goes to '$gradle_home' and GRADLE_USER_HOME is exported to point gradle at it. A gradle build that does not inherit this job's environment will not load it." ;;
+    esac
   fi
 
-  mkdir -p "$gradle_home"
+  if ! home_guard "$gradle_home/init.gradle.kts"; then
+    home_skip gradle "$(outside "$gradle_home/init.gradle.kts" "${GRADLE_USER_HOME:+GRADLE_USER_HOME}")"; end_section; return 0
+  fi
+  sch_mkdir "$gradle_home"
   # A person's own init script at this path can hold repository credentials. Keep it
   # the way put_user_cfg keeps the other per-user files: a 0600 copy next to itself,
   # then replaced, with a warning. Ours starts with the line written below. MEASURED
@@ -5538,10 +6181,15 @@ harden_gradle() {
   # nothing said.
   local ginit="$gradle_home/init.gradle.kts" gbak
   if [[ -f "$ginit" ]] && [[ "$(head -n 1 -- "$ginit" 2>/dev/null)" != "// Managed by supply-chain-harden action" ]]; then
-    gbak=$(ucf_copy "$ginit") || { err "gradle: could not copy $ginit next to itself before replacing it; it was left as it is"; exit 1; }
+    gbak=$(ucf_copy "$ginit") || {
+      err "gradle: could not copy $ginit next to itself before replacing it; it was left as it is"
+      [[ "$HOME_ONLY" == true ]] || exit 1
+      eco_failed gradle "$ginit is not this project's and could not be copied"; end_section; return 0
+    }
     warn "gradle: replaced $ginit, which this project did not write. Any repository, credential or other setting you had in it no longer applies; the previous file is at $gbak. It may hold a token or a password: delete it once you have moved what you need"
   fi
-  cat > "$ginit" <<'EOF'
+  # Compared first, so a re-run that changes nothing writes nothing.
+  cat <<'EOF' | put_if_changed "$ginit" || { write_failed gradle "$ginit"; end_section; return 0; }
 // Managed by supply-chain-harden action
 // Enforce HTTPS-only repositories in EVERY scope gradle fetches from, and block
 // dynamic versions. Not just project repositories: buildscript{} and the
@@ -5590,8 +6238,10 @@ EOF
   # publish is always a directory we actually populated.
   write_env GRADLE_USER_HOME "$gradle_home"
   HARDENED+=("gradle")
-  set_tool_version "gradle" "$(detect_version gradle "gradle --version")"
-  log "gradle: HTTPS-only repos enforced, dynamic versions blocked for dependencies and plugin classpaths (init script at $gradle_home/init.gradle.kts; GRADLE_USER_HOME pinned to $gradle_home)"
+  if sch_probes_vm; then set_tool_version "gradle" "$(detect_version gradle "gradle --version")"; fi
+  local gpin="; GRADLE_USER_HOME pinned to $gradle_home"
+  [[ "$HOME_ONLY" != true ]] || gpin=""
+  log "gradle: HTTPS-only repos enforced, dynamic versions blocked for dependencies and plugin classpaths (init script at $gradle_home/init.gradle.kts$gpin)"
   end_section
 }
 
@@ -5610,8 +6260,11 @@ harden_nuget() {
   # 9.0.317, `HOME=a DOTNET_CLI_HOME=b dotnet nuget config paths` reports
   # b/.nuget/NuGet/NuGet.Config. Resolve it the tool's way (Axis 5).
   local nuget_home="${DOTNET_CLI_HOME:-$HOME}/.nuget/NuGet"
-  mkdir -p "$nuget_home"
-  put_user_cfg nuget "$nuget_home/NuGet.Config" <<'EOF'
+  if ! home_guard "$nuget_home/NuGet.Config"; then
+    home_skip nuget "$(outside "$nuget_home/NuGet.Config" "${DOTNET_CLI_HOME:+DOTNET_CLI_HOME}")"; end_section; return 0
+  fi
+  sch_mkdir "$nuget_home"
+  put_user_cfg nuget "$nuget_home/NuGet.Config" <<'EOF' || { end_section; return 0; }
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Managed by supply-chain-harden action -->
 <configuration>
@@ -5659,7 +6312,7 @@ EOF
   # later `=false` from being the last word. (ECH-165, Axis 1.)
   write_env DOTNET_NUGET_SIGNATURE_VERIFICATION true
   HARDENED+=("nuget")
-  set_tool_version "nuget" "$(detect_version nuget "dotnet nuget --version")"
+  if sch_probes_vm; then set_tool_version "nuget" "$(detect_version nuget "dotnet nuget --version")"; fi
   log "nuget: nuget.org only, signature validation required (config + DOTNET_NUGET_SIGNATURE_VERIFICATION=true)"
   end_section
 }
@@ -6103,6 +6756,11 @@ unwrap_intel_wrapper() {
     warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw, but this run has intel off and cannot put the real $tool back: the wrapper names '${real:-<none>}', not an executable ${target}-real. It is left in place. Re-run with INTEL=sfw to bring it up to date, or put the real $tool back at $target."
     return 0
   fi
+  # Both entries, not what they link to: mv renames them and writes through neither.
+  if ! home_guard --entry "$target" || ! home_guard --entry "$real"; then
+    warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw. It is outside HOME, and --home-only changes nothing there, so it is left in place. Run harden.sh without --home-only, with sudo, to remove it."
+    return 0
+  fi
   if [[ "${CAN_ESCALATE:-0}" -eq 1 ]] && ! can_write "$target"; then
     warn "$tool: $target is the $tool wrapper an earlier intel: sfw run deployed, and it routes $tool through sfw. This run has intel off, but the wrapper's directory is not writable, even as root (a read-only image or mount?), so it is left in place."
     return 0
@@ -6228,6 +6886,13 @@ emit_output env_file              "$HARDENING_ENV_FILE"
 emit_output wrappers_deployed     "$wrappers_str"
 emit_output pnpm_built_dependencies "$PNPM_ALLOWED"
 emit_output job_id                "$(job_identity)"
+# --home-only (action/verify.sh reads the first two): no env file was written, so
+# there is no env layer to look for; and what this run printed, for the next one.
+if [ "$HOME_ONLY" = true ]; then
+  emit_output home_only           true
+  emit_output env_layer           none
+  emit_output notices_shown       "${SCH_SHOWN# }"
+fi
 
 # THE COMPLETION MARKER, AND IT MUST STAY LAST.
 #
@@ -6239,6 +6904,7 @@ emit_output job_id                "$(job_identity)"
 # written only on the path that reached the end, so a partial record now reads
 # as a partial record.
 emit_output hardening_complete    true
+SCH_FILTER=0
 
 # ---- Job summary ----
 # How later steps actually inherit the env layer differs per platform, so
@@ -6266,9 +6932,18 @@ esac
   echo "| Socket Firewall | \`$SFW_INSTALLED\` |"
   echo "| /etc/ writes | \`$WRITE_ETC\` |"
   echo "| CI platform | \`$PLATFORM\`$([[ "$EMIT" == "auto" ]] && echo " (auto-detected)") |"
-  echo "| Env file | \`$HARDENING_ENV_FILE\` |"
+  if [ "$HOME_ONLY" = true ]; then
+    echo "| Mode | \`--home-only\` |"
+    echo "| Env file | none |"
+  else
+    echo "| Env file | \`$HARDENING_ENV_FILE\` |"
+  fi
   echo ""
-  echo "All subsequent steps in this job inherit the hardening $inherit_note."
+  if [ "$HOME_ONLY" = true ]; then
+    echo "Later shells get the hardening through the config files under HOME, and only those: this mode writes no env file, nothing in /etc and no wrapper outside HOME."
+  else
+    echo "All subsequent steps in this job inherit the hardening $inherit_note."
+  fi
 
   # Spell out every ecosystem that is NOT fully applied, with the reason. A
   # reader should not have to run the verifier to learn that something they
@@ -6284,21 +6959,48 @@ esac
       case "$_s" in APPLIED) continue ;; esac
       echo "| \`$_e\` | $_s | $(eco_note_of "$_e") |"
     done
+    if [ "$HOME_ONLY" != true ]; then
+      echo ""
+      echo "Run \`action/verify.sh\` (or the \`verify\` action) after your setup steps to check what is actually enforcing."
+    fi
+  fi
+
+  if [ "$HOME_ONLY" = true ]; then
     echo ""
-    echo "Run \`action/verify.sh\` (or the \`verify\` action) after your setup steps to check what is actually enforcing."
+    echo "### Not reachable from HOME"
+    echo ""
+    echo "- \`/etc\`: not written (every account's npm, pip and uv config, and root's yarn file)"
+    if [ -n "$ENV_SKIPPED" ]; then
+      echo "- env layer: none, so these apply nowhere: $ENV_SKIPPED"
+    else
+      echo "- env layer: none"
+    fi
+    for _l in ${UNREACHED[@]+"${UNREACHED[@]}"}; do echo "- $_l"; done
+    [ -z "$HOME_ONLY_IGNORED" ] || { echo ""; echo "Ignored in this mode: ${HOME_ONLY_IGNORED#, }."; }
+    echo ""
+    _fixed=""
+    case " ${HARDENED[*]:-} " in *" uv "*) [ "$UV_SPAN" = true ] || _fixed=uv ;; esac
+    case " ${HARDENED[*]:-} " in *" pip "*) _fixed="${_fixed:+$_fixed and }pip" ;; esac
+    [ -z "$_fixed" ] || echo "The $_fixed age-gate cutoff is $UV_EXCLUDE_NEWER, and nothing else moves it."
+    echo "Run \`harden.sh --home-only\` again at the start of every session, and \`verify.sh\` from the agent's own shell to see what it gets."
   fi
 } | emit_summary
 
+_mode="emit=$PLATFORM"
+[ "$HOME_ONLY" != true ] || _mode="--home-only"
 if [ -n "$part_list$none_list" ]; then
-  log "done (emit=$PLATFORM). applied: ${eff_list:-none}${part_list:+ | degraded: $part_list}${none_list:+ | NOT applied: $none_list}"
+  log "done ($_mode). applied: ${eff_list:-none}${part_list:+ | degraded: $part_list}${none_list:+ | NOT applied: $none_list}"
 else
-  log "done (emit=$PLATFORM). applied: ${eff_list:-none}"
+  log "done ($_mode). applied: ${eff_list:-none}"
+fi
+if [ "$SCH_HIDDEN" -gt 0 ]; then
+  log "($SCH_HIDDEN lines an earlier --home-only run printed are not repeated.)"
 fi
 
 # The uv and pip gates are an ABSOLUTE cutoff computed above, so on a host that
 # keeps this hardening they freeze at this run (VM#16: the plain path has no
 # refresh, by design). A CI job re-hardens every run and never notices; a
 # long-lived host does, so plain mode says so once, at the end.
-if [[ "$PLATFORM" == "plain" ]] && [[ " ${HARDENED[*]:-} " == *" uv "* || " ${HARDENED[*]:-} " == *" pip "* ]]; then
+if [[ "$PLATFORM" == "plain" && "$HOME_ONLY" != true ]] && [[ " ${HARDENED[*]:-} " == *" uv "* || " ${HARDENED[*]:-} " == *" pip "* ]]; then
   notice "the uv/pip age-gate cutoff is fixed at $UV_EXCLUDE_NEWER and nothing advances it. On a long-lived host, re-run harden.sh (and re-source $HARDENING_ENV_FILE) to move it, or apply the Ansible role, which installs a refresh timer."
 fi
