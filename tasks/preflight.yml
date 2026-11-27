@@ -423,9 +423,9 @@
 
 - name: Detect a maven settings.xml in the passwd home that this project did not write
   # tasks/maven.yml writes settings.xml to the passwd home, which maven reads
-  # (tasks/passwd_home.yml). Where that is not $HOME, ucf_path in
-  # files/user-config.sh names $HOME's file (the block is action/harden.sh's
-  # too), so this one is judged here, with SCH_UCF_PATH. The tags are those of
+  # (tasks/passwd_home.yml). ucf_path in files/user-config.sh now names that
+  # file too (ucf_jvm_home), but this task pins it with SCH_UCF_PATH to the home
+  # the role resolved, so the two lookups cannot disagree. The tags are those of
   # maven's include in tasks/main.yml, as in the task above.
   ansible.builtin.script: "../files/user-config.sh classify maven"
   args:

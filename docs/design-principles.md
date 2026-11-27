@@ -751,9 +751,8 @@ dead on `docker run -u <uid>`, OpenShift arbitrary uids and `sudo -E`.
 **Maven has the same default, and no `GRADLE_USER_HOME` of its own.** It reads
 `<user.home>/.m2/settings.xml`. MEASURED (maven 3.10.2 on temurin 21.0.13.1, as
 root with `HOME=/tmp/h` and a `settings.xml` in both homes): "Reading user
-settings from /root/.m2/settings.xml". The role wrote `$HOME/.m2` until it
-looked the passwd home up for maven too; `action/harden.sh` still writes
-`$HOME/.m2`. For a passwd home of `/` the JVM went back to `$HOME`, on the newer
+settings from /root/.m2/settings.xml". The role and `action/harden.sh`
+wrote `$HOME/.m2` until they looked the passwd home up for maven too. For a passwd home of `/` the JVM went back to `$HOME`, on the newer
 JDK only: MEASURED for an arbitrary uid in podman, java 21.0.13.1 used `$HOME`
 and java 17.0.21 used `/`.
 
