@@ -354,11 +354,18 @@ MEASURED on two agent VMs on 2026-11-26, started different shells:
   interactive terminal"). A new session on the same VM had the current
   variables, no npq alias, and installed it.
 
+What survives differs as well, MEASURED with marker files on 2026-11-26/27.
+On the first VM, those in `/root`, `/usr/local/bin` and `/etc` were gone
+after a redeploy and the one in `/home/hatch` was kept. On another agent VM
+(user `box`, role applied), markers in `/home/box`, `/workspace`, `/root`,
+`/usr/local/bin` and `/etc` all survived a restart.
+
 **Principle**: the config files reached both runners. The env layer reached
 one, as it stood when its session began. A protection that matters for
 agents needs a config file, in the home the runner's `HOME` names. After a
 re-apply, start new agent sessions. Run the verifier from the runner's own
-shell: it reports what that shell gets.
+shell: it reports what that shell gets. Where only HOME survives a redeploy,
+anything outside it has to come from the image.
 
 ### Deploying user vs other user
 

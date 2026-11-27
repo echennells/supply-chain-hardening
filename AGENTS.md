@@ -139,10 +139,12 @@ settings by hand can read [docs/how-it-works.md](docs/how-it-works.md#setting-va
 ## An agent's VM: `--home-only`
 
 Some agent platforms give the agent a VM where only its HOME is its own: the image is
-read-only or rebuilt, so `/etc` is not the agent's to change (that only HOME survives a
-rebuild is believed, not measured), and the runner starts every command in a shell that
-loads no startup file, so an env file would not reach it
-([why](docs/design-principles.md#agent-runners)). There, at the start of every session:
+read-only or rebuilt, so `/etc` is not the agent's to change, and the runner starts every
+command in a shell that loads no startup file, so an env file would not reach it
+([why](docs/design-principles.md#agent-runners)). On one agent VM, files left in `/root`,
+`/usr/local/bin` and `/etc` were gone after a redeploy and the one in its HOME was kept;
+on another, all of them survived a restart (MEASURED, 2026-11-26/27). There, at the start
+of every session:
 
 ```bash
 ./action/harden.sh --home-only && ./action/verify.sh --emit=plain --json
