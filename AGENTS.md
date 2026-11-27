@@ -25,7 +25,7 @@ around a control to get an install through.
 
 | Target | Use |
 |---|---|
-| A Linux host, VM, sandbox or container image | **The Ansible role.** This is the default. |
+| A Linux host, VM, sandbox or container image | **The Ansible role.** This is the default. For an image, read [docs/container-images.md](docs/container-images.md) first. |
 | A Mac | `action/harden.sh --emit=plain`, below. The role refuses macOS before writing anything; applying it from a Mac to a Linux host works. |
 | GitHub Actions | The action: [action/README.md](action/README.md) |
 | Other CI | `action/harden.sh`, with worked examples in [action/examples/](action/examples/) |

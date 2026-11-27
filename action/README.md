@@ -161,7 +161,9 @@ with a one-line reminder. The Ansible role installs
 
 For **long-lived hosts** rather than CI runners, run the parent Ansible role
 directly. For **any CI that runs containers**, a third option is to bake the
-hardening into an image and skip the adapter question altogether.
+hardening into an image and skip the adapter question altogether
+([docs/container-images.md](../docs/container-images.md),
+[`examples/Dockerfile`](examples/Dockerfile)).
 
 ### An agent's VM: `--home-only`
 

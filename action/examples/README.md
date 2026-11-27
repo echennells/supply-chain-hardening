@@ -9,9 +9,11 @@ On `github`, `circleci` and `azure` that happens automatically. On `gitlab`,
 `buildkite` and `plain` the job sources the env file, because `harden.sh` runs
 as a subprocess and its own exports never reach the calling shell.
 
-> Only the GitHub adapter is exercised by CI today. These are written against
-> each platform's documented mechanism but are not yet covered by a passing
-> pipeline — treat them as a starting point, and please report corrections.
+> Only the GitHub adapter is exercised by CI today, and the `Dockerfile`, which
+> `ci-script.yml` builds as it is and verifies (job `agent-shells`, cell
+> `image-recipe`). The others are written against each platform's documented
+> mechanism but are not yet covered by a passing pipeline — treat them as a
+> starting point, and please report corrections.
 
 | File | Platform |
 |---|---|
@@ -26,7 +28,9 @@ as a subprocess and its own exports never reach the calling shell.
 
 If your CI runs containers, the **Dockerfile** approach is the most portable
 of all — the hardening is baked in, and no platform-specific env mechanism is
-involved. It is the right answer when you control the image.
+involved. It is the right answer when you control the image. Read
+[docs/container-images.md](../../docs/container-images.md) first: harden after the
+toolchains are in, as the user the image runs as, and rebuild at least every 7 days.
 
 Otherwise pick your platform's file. All of them assume the repo is checked
 out; adjust the path to `harden.sh` if you vendor it elsewhere.
