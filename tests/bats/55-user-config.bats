@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # The role and what is the user's in the per-user config files it writes (issue 48,
-# item 1). ~/.npmrc is merged; the others are replaced whole, and the preflight
-# refuses one that is not exactly what the role last wrote.
+# item 1). ~/.npmrc is merged, and so is npm's global config (/etc/npmrc and the file
+# npm names); the others are replaced whole, and the preflight refuses one that is not
+# exactly what the role last wrote.
 #
 # MEASURED at d738db8: an apply dropped a fake token or registry from eight of them,
 # with no copy and no message, turned a 0600 ~/.npmrc into 0644, and did it again
@@ -33,13 +34,20 @@ setup() {
   for x in $SAVED; do
     if [ -e "$x" ]; then mkdir -p "$T/saved$(dirname "$x")"; cp -p "$x" "$T/saved$x"; fi
   done
+  # the copies of npm's global config already there, so a test removes only its own
+  npm_copies > "$T/copies"
 }
+
+npm_copies() { ls -d /etc/npmrc.*~ ${G:+"$G".*~} 2>/dev/null || true; }
 
 teardown() {
   [ -n "${T:-}" ] || return 0
   local x
   for x in $SAVED; do
     if [ -e "$T/saved$x" ]; then cmp -s "$x" "$T/saved$x" || cp -p "$T/saved$x" "$x"; fi
+  done
+  for x in $(npm_copies); do
+    grep -qxF -- "$x" "$T/copies" || rm -f -- "$x"
   done
   for x in /usr/bin/npm /usr/local/bin/npm; do
     if [ -e "$T/away$x" ] || [ -L "$T/away$x" ]; then mv -f "$T/away$x" "$x"; fi
@@ -331,52 +339,135 @@ snapshot() { ( cd "$H" && find . -path ./.ansible -prune -o -path ./.cache -prun
   [ "$(stat -c %a "$H/.composer/auth.json")" = 600 ]
 }
 
-# ---- npm's global config (where it is not /etc/npmrc)
+# ---- npm's global config: /etc/npmrc, and the file npm names where that is another
 #
-# MEASURED at d738db8 (NodeSource's /usr/etc/npmrc): a registry and a token in it
-# were gone after an apply, with no copy, and --diff printed them. In a home it and
-# its directory became root's.
+# Merged like ~/.npmrc. MEASURED at d738db8 (NodeSource's /usr/etc/npmrc): when it was
+# replaced, a registry and a token in it were gone after an apply, with no copy, and
+# --diff printed them. MEASURED on Azure VMs (2026-11-28): RHEL 9.9's and 10.3's npm
+# packages ship /etc/npmrc with prefix=/usr/local, the preflight stopped on it, and
+# with accept_etc_overwrite=true the replaced file left npm's prefix at /usr.
 
-@test "role: npm's global config is refused when it holds something we did not write, and copied when that is accepted" {
-  [ -n "$G" ] || skip "npm's global config here is /etc/npmrc"
-  # what v2.1.0 wrote there is ours
-  cp "/opt/test-fixtures/user-config/v2.1.0-role/npmrc" "$G"; chmod 644 "$G"
-  ONLY=npm role
-  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  grep -q 'Managed by ansible-supply-chain-security; self-check sha256:' "$G"
-  [ "$(stat -c '%a %U' "$G")" = '644 root' ]
-  ONLY=npm role
-  [ "$(changed)" = 0 ]
-  # a token added since, in a file that carries the marker
-  printf '//corp.example/:_authToken=SECRET\n' >> "$G"
-  cp "$G" "$T/before"
+# gnpm <global config> <key>: what npm (the real one behind our wrapper) reads for the
+# key with that global config and no user config, asked from /
+gnpm() {
+  local n
+  n=$(real_binary npm) || n=$(command -v npm)
+  (cd / && env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$T/nohome" npm_config_userconfig=/dev/null \
+     npm_config_globalconfig="$1" npm_config_logs_max=0 npm_config_cache=/dev/null/x "$n" config get "$2" 2>/dev/null | tail -1)
+}
+
+# rest <file>: what is below this project's block in it
+rest() { sed '1,/^; <<< supply-chain-hardening$/d' "$1"; }
+
+# npm_scripts_row: the verifier's npm script-blocking row, from a home with no npmrc and
+# no env layer, so npm's global config is all npm reads
+npm_scripts_row() {
+  mkdir -p "$T/vhome"
+  env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$T/vhome" /usr/local/bin/supply-chain-verify --json 2>/dev/null \
+    | grep '"protection": "npm lifecycle scripts blocked"'
+}
+
+@test "role: RHEL's own /etc/npmrc is merged: prefix and python stay, its update-notifier line goes after a copy, npm's prefix is still /usr/local, and a second run changes nothing" {
+  local c before rhel=$'prefix=/usr/local\npython=/usr/bin/python3\nupdate-notifier=false'
+  # exactly as RHEL 10.3's nodejs-npm 10.9.9 ships it (MEASURED)
+  printf '%s\n' "$rhel" > /etc/npmrc; chmod 644 /etc/npmrc; chown root:root /etc/npmrc
+  printf '%s\n' "$rhel" > "$T/orig"
+  # CONTROL: npm reads this file, and takes its prefix from it, not from where npm is
+  [ "$(gnpm /etc/npmrc python)" = /usr/bin/python3 ]
+  [ "$(gnpm /dev/null prefix)" != /usr/local ]
+  [ "$(gnpm /etc/npmrc prefix)" = /usr/local ]
+  # --check: the preflight says it and nothing changes
+  ONLY=npm role --check
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
+  echo "$output" | grep -qF "/etc/npmrc: npm's global config, merged like ~/.npmrc, never replaced: this project's settings go in a block at the top, and it keeps prefix, python. It takes out its own lines for update-notifier, which set what the block sets, after a copy of the file next to it (0600)."
+  echo "$output" | grep -qF "/etc/npmrc: its own line for update-notifier would be taken out"
+  cmp /etc/npmrc "$T/orig"
+  [ "$(npm_copies)" = "$(cat "$T/copies")" ]
   ONLY=npm role --diff
-  [ "$status" -ne 0 ]
-  echo "$output" | grep -q "Refusing to overwrite npm's global config"
-  echo "$output" | grep -qF "$G"
-  echo "$output" | grep -q 'accept_etc_overwrite=true'
-  [ "$(changed)" = 0 ]
-  cmp "$G" "$T/before"
-  ! echo "$output" | grep SECRET || false
-  # not a reason to stop a run that does not write it
-  ONLY=bundler role
-  [ "$status" -eq 0 ]
-  # a corporate one with no marker, 0600
-  printf 'registry=https://corp.example/\n//corp.example/:_authToken=SECRET\n' > "$G"; chmod 600 "$G"
-  cp "$G" "$T/before"
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
+  head -1 /etc/npmrc | grep -q '^; >>> supply-chain-hardening: Managed by ansible-supply-chain-security; self-check sha256:'
+  [ "$(rest /etc/npmrc)" = "$(printf 'prefix=/usr/local\npython=/usr/bin/python3')" ]
+  [ "$(grep -c '^update-notifier=' /etc/npmrc)" -eq 1 ]           # the block's own
+  [ "$(stat -c '%a %U %G' /etc/npmrc)" = '644 root root' ]
+  c=$(ls -d /etc/npmrc.*~ | grep -vxF -f "$T/copies")
+  [ "$(echo "$c" | wc -l)" -eq 1 ]
+  cmp "$c" "$T/orig"
+  [ "$(stat -c '%a %U' "$c")" = '600 root' ]
+  echo "$output" | grep -qF "/etc/npmrc: its own line for update-notifier was taken out"
+  echo "$output" | grep -qF "/etc/npmrc: the file as it was is at $c."
+  [ "$(gnpm /etc/npmrc prefix)" = /usr/local ]
+  [ "$(gnpm /etc/npmrc python)" = /usr/bin/python3 ]
+  [ "$(gnpm /etc/npmrc ignore-scripts)" = true ]
+  before=$(cksum < /etc/npmrc)
   ONLY=npm role
-  [ "$status" -ne 0 ]
-  cmp "$G" "$T/before"
-  ONLY=npm role --diff -vvv -e accept_etc_overwrite=true
-  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  [ "$status" -eq 0 ]
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B3 '^changed'; return 1; }
+  [ "$(cksum < /etc/npmrc)" = "$before" ]
+  [ "$(ls -d /etc/npmrc.*~ | grep -vxF -f "$T/copies")" = "$c" ]
+  echo "$output" | grep -qF "/etc/npmrc: npm's global config, merged like ~/.npmrc, never replaced: this project's settings go in a block at the top, and it keeps prefix, python. Nothing in it changes."
+}
+
+@test "role: a corporate registry and token in npm's global config stay where npm reads them, ignore-scripts=false goes after a copy, the mode is kept, and nothing of theirs is printed" {
+  local f m c corp=$'registry=https://corp.example.invalid/\n//corp.example.invalid/:_authToken=SECRET-TOKEN\nignore-scripts=false'
+  printf '%s\n' "$corp" > /etc/npmrc; chmod 600 /etc/npmrc
+  if [ -n "$G" ]; then mkdir -p "$(dirname "$G")"; printf '%s\n' "$corp" > "$G"; chmod 644 "$G"; fi
+  # CONTROL: npm reads the line that turns install scripts back on, and so the verifier,
+  # which asks npm, reports it
+  [ "$(gnpm /etc/npmrc ignore-scripts)" = false ]
+  [[ "$(npm_scripts_row)" == *'"status": "GAP"'* ]] || { npm_scripts_row; return 1; }
+  # no accept_etc_overwrite: nothing stops the play
+  ONLY=npm role --diff -vvv
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
   ! echo "$output" | grep SECRET || false
-  local c
-  c=$(ls "$G".*~)
-  cmp "$c" "$T/before"
-  [ "$(stat -c %a "$c")" = 600 ]
-  [ "$(stat -c %a "$G")" = 644 ]                      # every account reads it
-  echo "$output" | grep -qF "$G: the file as it was is at $c. It may hold a token or a password: delete it once"
-  rm -f "$c"
+  ! echo "$output" | grep -q 'Refusing to overwrite' || false
+  for f in /etc/npmrc $G; do
+    m=644; [ "$f" != /etc/npmrc ] || m=600
+    [ "$(rest "$f")" = "$(printf 'registry=https://corp.example.invalid/\n//corp.example.invalid/:_authToken=SECRET-TOKEN')" ] || { echo "$f"; cat "$f"; return 1; }
+    [ "$(stat -c '%a %U' "$f")" = "$m root" ]
+    c=$(ls -d "$f".*~ | grep -vxF -f "$T/copies")
+    [ "$(echo "$c" | wc -l)" -eq 1 ]
+    grep -qx 'ignore-scripts=false' "$c"
+    grep -qx '//corp.example.invalid/:_authToken=SECRET-TOKEN' "$c"
+    [ "$(stat -c '%a %U' "$c")" = '600 root' ]
+    echo "$output" | grep -qF "$f: npm's global config, merged like ~/.npmrc, never replaced: this project's settings go in a block at the top, and it keeps registry, //...:_authToken. It takes out its own lines for ignore-scripts"
+    echo "$output" | grep -qF "$f: your own setting of ignore-scripts was taken out"
+    echo "$output" | grep -qF "$f: the file as it was is at $c."
+    [ "$(gnpm "$f" registry)" = https://corp.example.invalid/ ]
+    [ "$(gnpm "$f" ignore-scripts)" = true ]
+  done
+  echo "$output" | grep -qF "/etc/npmrc: other accounts cannot read it (-rw-------), and its mode is kept"
+  # the kept registry and token are no reason for a GAP: scripts are blocked
+  [[ "$(npm_scripts_row)" == *'"status": "OK"'* ]] || { npm_scripts_row; return 1; }
+  # a second run, with accept_etc_overwrite this time: it changes nothing, and copies nothing
+  ONLY=npm role -e accept_etc_overwrite=true
+  [ "$status" -eq 0 ] || { echo "$output" | tail -30; return 1; }
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B3 '^changed'; return 1; }
+  for f in /etc/npmrc $G; do [ "$(ls -d "$f".*~ | grep -cvxF -f "$T/copies")" -eq 1 ]; done
+}
+
+@test "role: root merges into no /etc/npmrc that is a link, is not root's, or that others can write; each is left as it is and named" {
+  local x why before
+  printf 'registry=https://corp.example.invalid/\n//corp.example.invalid/:_authToken=SECRET\n' > "$T/theirs"
+  chmod 600 "$T/theirs"
+  for x in link nobody writable; do
+    rm -f /etc/npmrc
+    case "$x" in
+      link)     ln -s "$T/theirs" /etc/npmrc; why="goes through /etc/npmrc, a symbolic link" ;;
+      nobody)   cp "$T/theirs" /etc/npmrc; chown nobody /etc/npmrc; why="is in /etc/npmrc, which is not root's" ;;
+      writable) cp "$T/theirs" /etc/npmrc; chmod 666 /etc/npmrc; why="is in /etc/npmrc, which other accounts can write to" ;;
+    esac
+    before=$(stat -c '%F %U %a' /etc/npmrc; cksum < "$T/theirs"; cksum < /etc/npmrc)
+    ONLY=npm role
+    [ "$status" -eq 0 ] || { echo "$x"; echo "$output" | tail -30; return 1; }
+    echo "$output" | grep -qF "/etc/npmrc: npm's global config. It $why, and root writes only to paths no other account controls. The run leaves it as it is" \
+      || { echo "$x: no preflight line"; return 1; }
+    echo "$output" | grep -qF "npm's global config — /etc/npmrc $why, and root writes only to paths no other account controls" \
+      || { echo "$x: not in the summary"; return 1; }
+    ! echo "$output" | grep SECRET || false
+    [ "$(stat -c '%F %U %a' /etc/npmrc; cksum < "$T/theirs"; cksum < /etc/npmrc)" = "$before" ] || { echo "$x changed"; return 1; }
+    [ "$(npm_copies)" = "$(cat "$T/copies")" ]
+  done
+  rm -f /etc/npmrc                   # teardown puts the one that was there back
 }
 
 # kcuser: an account with sudo, as the role is meant to be run; gone with the test
@@ -434,7 +525,7 @@ rootside() {
   for trap in prefix=/home/kcuser/x prefix=/home/kcuser/p globalconfig=/etc/kc-victim.conf \
               globalconfig=/etc/kc-absent globalconfig=/home/kcuser/l globalconfig=/home/kcuser/x/etc/npmrc; do
     askc "printf '%s\n' '$trap' > ~/.npmrc"
-    askc_role -e accept_etc_overwrite=true
+    askc_role
     [ "$status" -eq 0 ] || { echo "$trap"; echo "$output" | tail -20; return 1; }
     diff <(echo "$before") <(rootside) || { echo "$trap"; return 1; }
     [ ! -e /etc/kc-absent ] && [ ! -e /etc/etc ] || { echo "$trap"; return 1; }
@@ -442,7 +533,7 @@ rootside() {
   # and in its environment
   run su - kcuser -c "cd $ROLE_DIR && NPM_CONFIG_PREFIX=/home/kcuser/x NPM_CONFIG_GLOBALCONFIG=/etc/kc-victim.conf PATH=/usr/local/bin:/usr/bin:/bin \
     ansible-playbook site.yml --connection=local --limit localhost --tags npm --skip-tags npq,socket -e podman_enabled=false \
-    -e verify_protections=false -e socket_firewall_install=false -e accept_etc_overwrite=true"
+    -e verify_protections=false -e socket_firewall_install=false"
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
   diff <(echo "$before") <(rootside)
   askc 'rm -f ~/.npmrc; [ ! -w /etc ] && [ ! -w /etc/npmrc ]'
@@ -464,7 +555,7 @@ rootside() {
                /etc/ld.so.preload /opt/kc-prefix/link/npmrc /opt/kc-prefix/gw/etc/npmrc /opt/kc-prefix/theirs/etc/npmrc \
                /opt/kc-prefix/../../etc/npmrc /tmp/kc/etc/npmrc; do
     echo "$where" > /home/kcuser/where
-    askc_role -e accept_etc_overwrite=true
+    askc_role
     [ "$status" -eq 0 ] || { echo "$where"; echo "$output" | tail -20; return 1; }
     echo "$output" | grep -q "npm's global config — $where " || { echo "$where"; echo "$output" | tail -20; return 1; }
     ! echo "$output" | grep SECRET || false
@@ -520,15 +611,19 @@ rootside() {
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
   [ "$(stat -c %U "$(dirname "$g")" "$g" | tr '\n' ' ')" = 'kcuser kcuser ' ]
   grep -q 'self-check sha256:' "$g"
-  # and the user's own is refused, then kept as a copy
+  # and the user's own is merged, as the user: the token stays below the block, the file
+  # stays the user's and 0600, and with nothing taken out there is no copy
   printf '//corp.example/:_authToken=SECRET\n' > "$g"; chmod 600 "$g"
   askc_role
-  [ "$status" -ne 0 ]
-  grep -q SECRET "$g"
+  [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
+  ! echo "$output" | grep SECRET || false
+  head -1 "$g" | grep -q '^; >>> supply-chain-hardening: Managed by ansible-supply-chain-security; self-check '
+  [ "$(rest "$g")" = '//corp.example/:_authToken=SECRET' ]
+  [ "$(stat -c '%U %a' "$g")" = 'kcuser 600' ]
+  [ -z "$(ls -d "$g".*~ 2>/dev/null)" ]
   askc_role -e accept_etc_overwrite=true
   [ "$status" -eq 0 ] || { echo "$output" | tail -20; return 1; }
-  grep -q SECRET "$g".*~
-  [ "$(stat -c '%U %a' "$g".*~)" = 'kcuser 600' ]
+  [ "$(changed)" = 0 ] || { echo "$output" | grep -B2 '^changed'; return 1; }
   # a prefix of the user's outside the home
   mkdir -p /opt/kc-prefix/etc; chown -R kcuser:kcuser /opt/kc-prefix
   g=/opt/kc-prefix/etc/npmrc

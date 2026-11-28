@@ -180,48 +180,52 @@ top_level_facts() {
   [[ "$output" =~ "release_age_hours must be >= 1" ]]
 }
 
-@test "preflight: refuses to overwrite unmarked /etc/npmrc" {
-  # Simulate a host with a pre-existing corporate /etc/npmrc (registry
-  # auth, internal mirror, etc.) and verify the role refuses to clobber
-  # it without explicit operator opt-in.
-  require_root "writes /etc/npmrc"
+@test "preflight: refuses to overwrite an unmarked /etc/pip.conf, and names only that: an unmarked /etc/npmrc is merged, not refused" {
+  # Simulate a host with a pre-existing corporate /etc/pip.conf (an internal index and
+  # its credentials) and verify the role refuses to clobber it without explicit
+  # operator opt-in. /etc/npmrc is merged like ~/.npmrc (tests/bats/55), so a
+  # corporate one is not in the refusal.
+  require_root "writes /etc/pip.conf and /etc/npmrc"
   # cp -p: mktemp creates the backup 0600, and a plain cp into it keeps 0600, so
-  # the mv below used to leave /etc/npmrc unreadable by every non-root user.
-  backup=""
-  if [ -f /etc/npmrc ]; then
-    backup=$(mktemp)
-    cp -p /etc/npmrc "$backup"
-  fi
+  # the mv below used to leave the file unreadable by every non-root user.
+  local f b had="" planted
+  for f in /etc/pip.conf /etc/npmrc; do
+    if [ -f "$f" ]; then b=$(mktemp); cp -p "$f" "$b"; had="$had $f=$b"; fi
+  done
+  printf '[global]\nindex-url = https://malicious-corporate-stand-in.example.invalid/simple\n' > /etc/pip.conf
   echo "registry=https://malicious-corporate-stand-in.example.invalid/" > /etc/npmrc
+  planted=$(cksum < /etc/npmrc)
 
   cd "$ROLE_DIR"
   run ansible-playbook site.yml --connection=local --limit localhost \
     -e podman_enabled=false
+  local after
+  after=$(cksum < /etc/npmrc)
 
   # Restore (regardless of test outcome)
-  if [ -n "$backup" ]; then
-    mv "$backup" /etc/npmrc
-  else
-    rm -f /etc/npmrc
-  fi
+  rm -f /etc/pip.conf /etc/npmrc
+  for f in $had; do mv "${f#*=}" "${f%%=*}"; done
 
   [ "$status" -ne 0 ]
   [[ "$output" =~ "Refusing to overwrite existing system config" ]]
-  [[ "$output" =~ "/etc/npmrc" ]]
+  echo "$output" | sed -n '/Refusing to overwrite existing system config/,/To proceed/p' > "$BATS_TEST_TMPDIR/refusal"
+  grep -q /etc/pip.conf "$BATS_TEST_TMPDIR/refusal"
+  ! grep -q /etc/npmrc "$BATS_TEST_TMPDIR/refusal" || false
+  [ "$after" = "$planted" ]           # stopped before anything was written
 }
 
 @test "preflight: accept_etc_overwrite=true bypasses the refuse-to-clobber check" {
   # The opt-in escape hatch must work — operators who knowingly want to
   # overwrite their existing /etc files need a documented path forward.
-  require_root "writes /etc/npmrc"
+  require_root "writes /etc/pip.conf"
   # cp -p: mktemp creates the backup 0600, and a plain cp into it keeps 0600, so
-  # the mv below used to leave /etc/npmrc unreadable by every non-root user.
+  # the mv below used to leave /etc/pip.conf unreadable by every non-root user.
   backup=""
-  if [ -f /etc/npmrc ]; then
+  if [ -f /etc/pip.conf ]; then
     backup=$(mktemp)
-    cp -p /etc/npmrc "$backup"
+    cp -p /etc/pip.conf "$backup"
   fi
-  echo "registry=https://unmarked-corporate-stand-in.example.invalid/" > /etc/npmrc
+  printf '[global]\nindex-url = https://unmarked-corporate-stand-in.example.invalid/simple\n' > /etc/pip.conf
 
   cd "$ROLE_DIR"
   run ansible-playbook site.yml --connection=local --limit localhost \
@@ -230,9 +234,9 @@ top_level_facts() {
 
   # Restore
   if [ -n "$backup" ]; then
-    mv "$backup" /etc/npmrc
+    mv "$backup" /etc/pip.conf
   else
-    rm -f /etc/npmrc
+    rm -f /etc/pip.conf
   fi
 
   # The preflight check itself must NOT fail. We use --tags always to keep

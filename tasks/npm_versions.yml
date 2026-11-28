@@ -6,9 +6,11 @@
 # defaults/main.yml (sch_npm_writes_min_release_age); action/harden.sh has the same
 # one (npm_writes_key).
 #
-# Imported by npm.yml, which renders the npmrc files, and by shell_env.yml, which
-# renders the env layer on every run, `--tags pnpm` included. Both ask, rather than
-# one reading the other's register: a skipped task overwrites its register.
+# Imported by npm.yml, which renders the npmrc files, by preflight.yml, which says
+# before anything is changed what merging them takes out of npm's global config, and
+# by shell_env.yml, which renders the env layer on every run, `--tags pnpm` included.
+# Each asks, rather than one reading another's register: a skipped task overwrites
+# its register.
 #
 # The first line is the npm in use, in the order npm.yml looks, or "-" when it
 # does not answer; no line at all means no npm. Both of those write the keys.

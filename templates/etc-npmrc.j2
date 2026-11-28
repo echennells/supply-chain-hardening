@@ -1,11 +1,14 @@
 ; Managed by ansible-supply-chain-security
-; System-wide npm config. npm reads this file as its global config only on
-; Debian/Ubuntu apt npm, and where its prefix is /. npm keys only: npm 11.2.0 to
-; 11.19.1 print `Unknown global config` about a pnpm key on every command, and
-; pnpm does not read this file (MEASURED, pnpm 9.15.9 and 10.34.9 on Debian 13,
-; Ubuntu 24.04 and the node image: pnpm reads <node prefix>/etc/npmrc, so
-; /usr/etc/npmrc or /usr/local/etc/npmrc; pnpm 11 reads neither). The pnpm keys
-; that were here protected no one. pnpm's settings are in ~/.config/pnpm.
+; System-wide npm config. npm reads this file as its global config where its
+; builtin npmrc says globalconfig=/etc/npmrc, and where its prefix is /: Debian's
+; and Ubuntu's apt npm, and RHEL's nodejs-npm (MEASURED, RHEL 9.9 and 10.3, whose
+; package ships this file with prefix=/usr/local in it). Merged, not replaced
+; (files/user-config.sh): the lines below this block stay as they were. npm keys
+; only: npm 11.2.0 to 11.19.1 print `Unknown global config` about a pnpm key on
+; every command, and pnpm does not read this file (MEASURED, pnpm 9.15.9 and
+; 10.34.9 on Debian 13, Ubuntu 24.04 and the node image: pnpm reads <node
+; prefix>/etc/npmrc, so /usr/etc/npmrc or /usr/local/etc/npmrc; pnpm 11 reads
+; neither). pnpm's settings are in ~/.config/pnpm.
 ;
 ; User-level config still wins: npm treats it as higher precedence.
 
