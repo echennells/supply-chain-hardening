@@ -40,7 +40,7 @@ part that does not depend on `HOME`:
 
 | Read whatever the user and HOME | Read only with the HOME it was written for |
 |---|---|
-| `/etc/pip.conf`, `/etc/uv/uv.toml` and `/etc/npmrc`, from the role or from `harden.sh` with `WRITE_ETC=true`. Only Debian's and Ubuntu's apt npm reads `/etc/npmrc`; the role also writes the global config other npms read, and pnpm reads none of the three ([how it works](how-it-works.md#config-files-deployed-unconditionally)) | `~/.npmrc` and every other per-user file ([AGENTS.md](../AGENTS.md#before-you-apply) lists them), for pnpm, Yarn and bun among others. Yarn reads no `/etc/yarnrc.yml` |
+| `/etc/pip.conf`, `/etc/uv/uv.toml` and `/etc/npmrc`, from the role or from `harden.sh` with `WRITE_ETC=true`. Debian's, Ubuntu's and RHEL's own npm read `/etc/npmrc`; the role also writes the global config other npms read, and pnpm reads none of the three ([how it works](how-it-works.md#config-files-deployed-unconditionally)) | `~/.npmrc` and every other per-user file ([AGENTS.md](../AGENTS.md#before-you-apply) lists them), for pnpm, Yarn and bun among others. Yarn reads no `/etc/yarnrc.yml` |
 | The PATH wrappers written in place of a binary (bun, bunx, composer, deno and cargo, from `harden.sh`) | Maven's `settings.xml` and Gradle's init script, which go to the passwd home of the uid, not to `HOME` |
 
 The example builds as root with `WRITE_ETC=true`, and on its base image no tool reads

@@ -40,6 +40,17 @@ drift; re-check if you're reading this much later.
 - **`npm install -g npm@latest` only works if the starting npm isn't ancient.**
   It succeeded from RHEL's 10.9; it failed from Ubuntu's 9.2. On RHEL/openSUSE
   the upgrade is a required second step and it works; on Ubuntu it doesn't.
+- **On RHEL the new npm lands in `/usr/local` because of `/etc/npmrc`.** RHEL's
+  `nodejs-npm` package ships `/etc/npmrc` with `prefix=/usr/local` (and
+  `python=/usr/bin/python3`, `update-notifier=false`), and its builtin npmrc makes
+  that file npm's global config (MEASURED on RHEL 10.3's `nodejs-npm` 10.9.9, and
+  on RHEL 9.9). So
+  `sudo npm install -g npm@latest` puts npm 12 in `/usr/local/bin`, ahead of the
+  distro's `/usr/bin/npm` on `PATH`, and that is the npm the role judges and wraps.
+  The role merges its settings into `/etc/npmrc` and keeps `prefix` and `python`;
+  only `update-notifier`, which its block sets, is taken out, after a 0600 copy next
+  to the file. Delete that file or its `prefix` line and global installs go under
+  `/usr`, into the RPM's files.
 - **corepack is broken on Ubuntu 26** for running a modern pnpm
   (`ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` — its patched loader chokes on
   pnpm's ESM entry). Install pnpm via `sudo npm install -g pnpm@latest` or
