@@ -24,7 +24,7 @@
   args:
     executable: /bin/bash
   environment:
-    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.npmrc"
+    SCH_UCF_PATH: "{{ ansible_facts.env.HOME }}/.npmrc"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"

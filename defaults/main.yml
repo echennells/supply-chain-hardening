@@ -99,7 +99,7 @@ poetry_min_release_age_days: "{{ [1, (release_age_hours | int / 24) | int] | max
 # but 3 were given". The previous Jinja-strftime approach broke the role
 # on every jammy host.
 #
-# lookup('pipe', ...) runs on the controller; ansible_date_time.epoch is
+# lookup('pipe', ...) runs on the controller; ansible_facts.date_time.epoch is
 # the target's epoch. Both produce the same RFC 3339 from the same epoch
 # input, so this works correctly for remote-target apply too. Requires
 # GNU date on the controller, for the `date -u -d @...` syntax; a controller
@@ -132,8 +132,8 @@ uv_exclude_newer: rolling
 # not taken never runs, on any version. Keep the two copies identical.
 # `rolling` always means this formula -- for pip too, even when uv is pinned,
 # because that is what the refresh timer will advance it to.
-sch_uv_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') if uv_exclude_newer == 'rolling' else uv_exclude_newer }}"
-sch_pip_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') if pip_uploaded_prior_to == 'rolling' else pip_uploaded_prior_to }}"
+sch_uv_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_facts.date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') if uv_exclude_newer == 'rolling' else uv_exclude_newer }}"
+sch_pip_cutoff: "{{ lookup('pipe', 'date -u -d @' ~ (ansible_facts.date_time.epoch | int - release_age_hours | int * 3600) ~ ' +%Y-%m-%dT00:00:00Z') if pip_uploaded_prior_to == 'rolling' else pip_uploaded_prior_to }}"
 
 # Keep the uv and pip cutoffs ROLLING instead of frozen at apply time.
 # Both are absolute instants: an unattended host drifts into a months-deep

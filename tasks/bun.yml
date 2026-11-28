@@ -40,7 +40,7 @@
   # $XDG_CONFIG_HOME/bunfig.toml WITHOUT the leading dot is not read either,
   # which is the easy thing to get wrong here.
   #
-  # This task previously hardcoded ansible_env.HOME, which left every key in
+  # This task previously hardcoded ansible_facts.env.HOME, which left every key in
   # the file dead on any host that sets XDG_CONFIG_HOME — devcontainers,
   # most language base images and most dotfile setups do. The bun/bunx PATH
   # wrappers below were the only surviving layer there.
@@ -48,9 +48,9 @@
   ansible.builtin.set_fact:
     bun_bunfig_path: >-
       {{
-        ansible_env.XDG_CONFIG_HOME ~ '/.bunfig.toml'
-        if ansible_env.XDG_CONFIG_HOME is defined and ansible_env.XDG_CONFIG_HOME | length > 0
-        else ansible_env.HOME ~ '/.bunfig.toml'
+        ansible_facts.env.XDG_CONFIG_HOME ~ '/.bunfig.toml'
+        if ansible_facts.env.XDG_CONFIG_HOME is defined and ansible_facts.env.XDG_CONFIG_HOME | length > 0
+        else ansible_facts.env.HOME ~ '/.bunfig.toml'
       }}
 
 - name: Validate bun_minimum_release_age_seconds is a bare non-negative integer
@@ -176,7 +176,7 @@
   # HOME with a slash after it: /home/hatchery/.bun/bin/bun is not inside
   # /home/hatch.
   ansible.builtin.set_fact:
-    bun_wrap_become: "{{ not (bun_binary_path.stdout | default('')).startswith((ansible_env.HOME | regex_replace('/+$', '')) ~ '/') }}"
+    bun_wrap_become: "{{ not (bun_binary_path.stdout | default('')).startswith((ansible_facts.env.HOME | regex_replace('/+$', '')) ~ '/') }}"
   when:
     - bun_binary_path is defined
     - bun_binary_path.rc | default(1) == 0

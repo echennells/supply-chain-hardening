@@ -2,10 +2,10 @@
 # Pre-flight guard: refuse invocations where privilege escalation would write
 # per-user config into the wrong home directory.
 #
-# The bug this catches: per-user destinations are "{{ ansible_env.HOME }}/..."
+# The bug this catches: per-user destinations are "{{ ansible_facts.env.HOME }}/..."
 # and facts are gathered under the play's become settings. Running the role
 # with `--become` (or `sudo ansible-playbook`) from a non-root account makes
-# ansible_env.HOME = /root, so every per-user file lands in root's home and
+# ansible_facts.env.HOME = /root, so every per-user file lands in root's home and
 # $HOME-relative tool detection finds nothing and skips — while the recap
 # still reports failed=0. Green run, unhardened machine.
 #

@@ -6,7 +6,7 @@
 #   - gradle's init script and Maven's settings.xml go to the passwd home,
 #     looked up by uid (tasks/passwd_home.yml), because the JVM takes user.home
 #     from there. MEASURED (maven 3.10.2, gradle 8.14.8, temurin 21.0.13.1, as
-#     root with HOME=/tmp/h): both read /root. Not ansible_user_dir, which
+#     root with HOME=/tmp/h): both read /root. Not ansible_facts.user_dir, which
 #     follows $LOGNAME/$USER; the run summary names both homes;
 #   - except for a root that sudo reached with a user's HOME, which writes
 #     neither to root's home and says whose account to run as;
@@ -55,7 +55,7 @@ PY
         dest: "{{ out }}"
         mode: "0644"
         content: |
-          user_dir={{ ansible_user_dir }}
+          user_dir={{ ansible_facts.user_dir }}
           {% for n in sch_home_notes | default([]) %}
           note={{ n }}
           {% endfor %}
@@ -312,7 +312,7 @@ PY
   connection: local
   gather_facts: false
   vars:
-    ansible_env: { HOME: "$1" }
+    ansible_facts: { env: { HOME: "$1" } }
     cargo_check: { rc: 0, stdout: "$2" }
     bun_binary_path: { rc: 0, stdout: "$2" }
   tasks:

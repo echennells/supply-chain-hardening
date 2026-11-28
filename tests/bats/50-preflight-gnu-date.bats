@@ -36,6 +36,9 @@ EOF
   vars:
     release_age_hours: 48
   tasks:
+    - name: Stand in for another target system
+      ansible.builtin.set_fact: { ansible_system: "{{ test_system }}", cacheable: true }
+      when: test_system is defined
     - ansible.builtin.include_vars: $ROLE_DIR/defaults/main.yml
     - ansible.builtin.import_tasks: $ROLE_DIR/tasks/preflight.yml
     - ansible.builtin.debug:
@@ -89,20 +92,22 @@ run_pf() {
 # MEASURED on hosted macos-15: with GNU date on the controller's PATH, or the
 # cutoff pinned as the message above said, the role replaced ~/.npmrc, wrote
 # /etc/npmrc and died on its group ("failed to look up group root"), with nothing
-# after it applied. An extra var outranks a gathered fact, so it stands in for a
-# Mac here; the real one is in .github/workflows/macos.yml.
+# after it applied. A cacheable set_fact replaces the gathered system fact, so it
+# stands in for a Mac here (an extra var cannot set ansible_facts.system without
+# replacing every other fact); the real one is in .github/workflows/macos.yml.
 
 @test "macOS preflight: a macOS target is refused first, with nothing escalated and the script to use instead" {
   local extra
   for extra in "" "-e uv_exclude_newer=2026-05-24T12:00:00Z" "-e skip_gnu_date_check=true"; do
     # shellcheck disable=SC2086  # an empty $extra is no argument
-    run run_pf gnu gnu -e ansible_system=Darwin $extra
+    run run_pf gnu gnu -e test_system=Darwin $extra
     [ "$status" -ne 0 ] || { echo "$extra: not refused"; return 1; }
     echo "$output" | grep -q 'this role supports Linux'
     echo "$output" | grep -q 'action/harden.sh --emit=plain'
     # It is the first task: none of the checks below it ran, the sudo ones included.
-    # (Gathering facts and loading the defaults are this test's own playbook.)
-    [ "$(echo "$output" | grep '^TASK \[' | grep -vcE 'Gathering Facts|include_vars')" -eq 1 ] \
+    # (Gathering facts, standing in for a Mac and loading the defaults are this
+    # test's own playbook.)
+    [ "$(echo "$output" | grep '^TASK \[' | grep -vcE 'Gathering Facts|Stand in for another target system|include_vars')" -eq 1 ] \
       && echo "$output" | grep '^TASK \[' | tail -n 1 | grep -q 'Refuse a macOS target before anything is written' \
       || { echo "$output" | grep '^TASK \['; return 1; }
     [[ "$output" != *"Detect non-managed existing system config files"* ]]
@@ -114,8 +119,19 @@ run_pf() {
   local before after f
   snap() { for f in "$HOME/.npmrc" /etc/npmrc /etc/profile.d/supply-chain-hardening.sh /etc/environment; do stat -c '%n %Y %s' "$f" 2>/dev/null; done; }
   before=$(snap)
+  # site.yml, with the stand-in for a Mac between gathering and the role.
+  cat > /tmp/pf-macos-site.yml <<EOF
+- hosts: all
+  gather_facts: true
+  pre_tasks:
+    - name: Stand in for a macOS target
+      ansible.builtin.set_fact: { ansible_system: Darwin, cacheable: true }
+  roles:
+    - role: $ROLE_DIR
+EOF
   cd "$ROLE_DIR"
-  run ansible-playbook site.yml --connection=local --limit localhost -e ansible_system=Darwin -e accept_etc_overwrite=true
+  run ansible-playbook /tmp/pf-macos-site.yml --connection=local --limit localhost -e accept_etc_overwrite=true
+  rm -f /tmp/pf-macos-site.yml
   [ "$status" -ne 0 ]
   [[ "$output" == *"this role supports Linux"* ]]
   [[ "$output" == *"changed=0"* ]] || { echo "$output" | tail -5; return 1; }

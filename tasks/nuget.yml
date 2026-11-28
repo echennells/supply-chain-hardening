@@ -3,7 +3,7 @@
 
 - name: Resolve NuGet's user config home the way the dotnet CLI does
   ansible.builtin.set_fact:
-    nuget_config_home: "{{ ansible_env.DOTNET_CLI_HOME | default(ansible_env.HOME, true) }}/.nuget/NuGet"
+    nuget_config_home: "{{ ansible_facts.env.DOTNET_CLI_HOME | default(ansible_facts.env.HOME, true) }}/.nuget/NuGet"
 
 - name: Check if dotnet is installed
   ansible.builtin.command: which dotnet

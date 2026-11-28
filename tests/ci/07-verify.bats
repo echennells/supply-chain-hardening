@@ -2116,7 +2116,7 @@ pnpm_row() { grep -E "pnpm $1 " <<<"$output"; }
 import re, sys
 t = open(sys.argv[1], encoding="utf-8").read()
 m = re.search(r"pnpm_config_dir: >-(.*?)\n\n", t, re.S).group(1)
-want = ["ansible_env.XDG_CONFIG_HOME ~ '/pnpm'", "ansible_env.HOME ~ '/Library/Preferences/pnpm'", "ansible_env.HOME ~ '/.config/pnpm'"]
+want = ["ansible_facts.env.XDG_CONFIG_HOME ~ '/pnpm'", "ansible_facts.env.HOME ~ '/Library/Preferences/pnpm'", "ansible_facts.env.HOME ~ '/.config/pnpm'"]
 at = [m.index(w) for w in want]
 assert at == sorted(at), at
 PY

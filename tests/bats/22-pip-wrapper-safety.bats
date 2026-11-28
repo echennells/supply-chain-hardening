@@ -79,7 +79,7 @@ require_runnable_uv() {
   taskfile="$ROLE_DIR/tasks/uv.yml"
   [ -f "$taskfile" ] || skip "role source not available at $taskfile"
 
-  ! grep -qE "ansible_user_id[[:space:]]+is[[:space:]]+defined" "$taskfile"
+  ! grep -qE "ansible_(facts\.)?user_id[[:space:]]+is[[:space:]]+defined" "$taskfile"
 }
 
 @test "pip wrapper does not infinite-loop when uv binary is removed" {

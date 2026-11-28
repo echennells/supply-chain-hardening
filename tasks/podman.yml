@@ -19,7 +19,7 @@
       - fuse-overlayfs
     state: present
     update_cache: true
-  when: ansible_os_family == 'Debian'
+  when: ansible_facts.os_family == 'Debian'
   register: podman_install
   failed_when: false
 
@@ -65,9 +65,9 @@
     dest: /etc/containers/registries.conf
     mode: "0644"
 
-- name: Map ansible_architecture to cosign release naming
+- name: Map ansible_facts.architecture to cosign release naming
   ansible.builtin.set_fact:
-    cosign_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'arm', 'ppc64le': 'ppc64le', 's390x': 's390x'}[ansible_architecture] | default('') }}"
+    cosign_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'arm', 'ppc64le': 'ppc64le', 's390x': 's390x'}[ansible_facts.architecture] | default('') }}"
 
 - name: Install cosign for image signature verification
   # NON-FATAL BY DESIGN. This reaches out to GitHub releases at apply time, so
@@ -87,7 +87,7 @@
     dest: /usr/local/bin/cosign
     mode: "0755"
   when:
-    - ansible_system == 'Linux'
+    - ansible_facts.system == 'Linux'
     - cosign_arch | length > 0
   register: cosign_install
   failed_when: false
@@ -101,7 +101,7 @@
     checksum_algorithm: sha256
   register: cosign_in_place
   when:
-    - ansible_system == 'Linux'
+    - ansible_facts.system == 'Linux'
     - cosign_arch | length > 0
     - not ansible_check_mode
 
@@ -117,12 +117,12 @@
 - name: Notify when cosign install was skipped (unsupported platform)
   ansible.builtin.debug:
     msg: >-
-      Skipping cosign install: no prebuilt binary for {{ ansible_system }}/{{ ansible_architecture }}.
+      Skipping cosign install: no prebuilt binary for {{ ansible_facts.system }}/{{ ansible_facts.architecture }}.
       Container image signature verification via cosign will not be available. The rest of the
       podman hardening (policy.json registry allowlist, registries.conf) still applies — those are
       enforced by podman itself, not by cosign. Install cosign manually from
       https://github.com/sigstore/cosign/releases if you need it.
-  when: ansible_system != 'Linux' or cosign_arch | length == 0
+  when: ansible_facts.system != 'Linux' or cosign_arch | length == 0
 
 - name: Detect systemd (linger and user socket only apply on systemd hosts)
   ansible.builtin.stat:
@@ -131,13 +131,13 @@
 
 - name: Check if linger is already enabled
   ansible.builtin.stat:
-    path: "/var/lib/systemd/linger/{{ ansible_user_id }}"
+    path: "/var/lib/systemd/linger/{{ ansible_facts.user_id }}"
   register: linger_state
   when: systemd_present.stat.exists
 
 - name: Enable linger for deploy user (rootless socket survives reboot)
   become: true
-  ansible.builtin.command: "loginctl enable-linger {{ ansible_user_id }}"
+  ansible.builtin.command: "loginctl enable-linger {{ ansible_facts.user_id }}"
   when:
     - systemd_present.stat.exists
     - not linger_state.stat.exists
@@ -173,13 +173,13 @@
     dest: /etc/tmpfiles.d/podman-docker-compat.conf
     mode: "0644"
     content: |
-      L /run/docker.sock - - - - /run/user/{{ ansible_user_uid }}/podman/podman.sock
+      L /run/docker.sock - - - - /run/user/{{ ansible_facts.user_uid }}/podman/podman.sock
   when: podman_docker_compat | bool
 
 - name: Create docker.sock symlink now
   become: true
   ansible.builtin.file:
-    src: "/run/user/{{ ansible_user_uid }}/podman/podman.sock"
+    src: "/run/user/{{ ansible_facts.user_uid }}/podman/podman.sock"
     dest: /run/docker.sock
     state: link
     force: true

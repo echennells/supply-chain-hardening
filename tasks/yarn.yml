@@ -64,7 +64,7 @@
   args:
     executable: /bin/bash
   environment:
-    SCH_UCF_PATH: "{{ ansible_env.HOME }}/.yarnrc.yml"
+    SCH_UCF_PATH: "{{ ansible_facts.env.HOME }}/.yarnrc.yml"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'yarnrc.yml.j2') }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
     SCH_UCF_FOREIGN: "{{ (accept_user_config_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
@@ -123,7 +123,7 @@
   failed_when: yarn_root_rc.rc | default(2) not in [0, 1, 42]
   when:
     - (yarn_root_home.stdout | default('') | trim) is match('^/')
-    - (yarn_root_home.stdout | trim) != ansible_env.HOME
+    - (yarn_root_home.stdout | trim) != ansible_facts.env.HOME
 
 # Named apart from "Record skipped protection": tests/bats/32-yarn-tier-rendering.bats
 # lifts the one task with that prefix by name.

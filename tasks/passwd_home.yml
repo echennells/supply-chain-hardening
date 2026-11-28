@@ -7,7 +7,7 @@
 # gradle ran the init script in /root/.gradle/init.d, and user.home was /root.
 #
 # Looked up by uid (getent, or awk over /etc/passwd where getent is missing),
-# never by name. ansible_user_dir, which tasks/gradle.yml used to read, is looked
+# never by name. ansible_facts.user_dir, which tasks/gradle.yml used to read, is looked
 # up by the name in $LOGNAME or $USER (ansible-core 2.16.3,
 # module_utils/facts/system/user.py), so it names another account's home
 # whenever those variables do.
@@ -68,7 +68,7 @@
   #   sch_passwd_at_home: $HOME is the passwd entry, so a file under $HOME is
   #     where the JVM looks even when this account cannot write the home itself.
   vars:
-    sch_cmp_home: "{{ ansible_env.HOME | default('') | regex_replace('/+$', '') }}"
+    sch_cmp_home: "{{ ansible_facts.env.HOME | default('') | regex_replace('/+$', '') }}"
     sch_cmp_pw: "{{ (sch_passwd_home | default('', true) or sch_passwd_entry) | regex_replace('/+$', '') }}"
     sch_cmp_kept: "{{ sch_passwd_via | length > 0 and sch_cmp_home != sch_cmp_pw }}"
   ansible.builtin.set_fact:
