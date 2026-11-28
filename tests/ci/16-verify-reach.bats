@@ -856,6 +856,34 @@ cargo_stub() { # <dir>
   [ "$status" -eq 1 ]
 }
 
+@test "home-only record: the cargo wrapper an earlier full run left outside HOME, with no backend, is a GAP a re-run cannot close; with an older record, one it can" {
+  # MEASURED (2026-11-28, an Ubuntu 26.04 VM run as root with HOME=/home/hatch):
+  # the wrapper a full apply had left at /usr/bin/cargo, no cargo-cooldown and no
+  # Cargo.lock failed --fail-on=config with "1 fixable"; --home-only installs no backend.
+  stub_bin cargo 'case "${1:-}" in --version|-V|-v) echo "cargo 1.99.0";; *) echo "STUB:cargo ARGS=[$*]";; esac'
+  harden ECOSYSTEMS=cargo -- --emit=plain >/dev/null
+  # Ground truth: this shell's cargo is that wrapper, outside HOME, with no backend.
+  run agent_sh "$BARE_PATH" 'command -v cargo'
+  [ "$output" = "$TEST_BIN/cargo" ]
+  grep -q supply-chain-harden "$TEST_BIN/cargo"
+  ! agent_sh "$BARE_PATH" 'command -v cargo-cooldown' >/dev/null || false
+  [ ! -e "$PWD/Cargo.lock" ]
+  forge ecosystems_hardened=cargo release_age_hours=48 home_only=true env_layer=none
+  run reach_verify "$BARE_PATH" --fail-on=config
+  echo "$output" | grep -E '^(GAP|WEAK)|fixable' || true
+  [[ "$(row_of "cargo publish-age gate")" == "GAP    FUNCTIONAL  cargo publish-age gate"*"no publish-age backend"*"harden.sh --home-only installs no cargo-cooldown, so re-running it does not close this" ]]
+  [[ "$output" == *"0 fixable by re-running the hardening"* ]]
+  [ "$status" -eq 0 ]
+
+  # Control: the same wrapper with an older record, a GAP a re-run closes.
+  forge ecosystems_hardened=cargo release_age_hours=48
+  run reach_verify "$BARE_PATH" --fail-on=config
+  [[ "$(row_of "cargo publish-age gate")" == "GAP    FUNCTIONAL  cargo publish-age gate"*"no publish-age backend"* ]]
+  [[ "$(row_of "cargo publish-age gate")" != *"--home-only"* ]]
+  [[ "$output" == *"1 fixable by re-running the hardening"* ]]
+  [ "$status" -eq 1 ]
+}
+
 # A deno 2.7.14, unwrapped: it runs and prints its version, and reads no npm
 # min-release-age (2.8.0 is the first that does).
 deno_stub() { # <dir>

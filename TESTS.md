@@ -1,6 +1,6 @@
 # Tests
 
-665 container tests verify the supply chain hardening works (`make test`), plus 631 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+665 container tests verify the supply chain hardening works (`make test`), plus 632 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
