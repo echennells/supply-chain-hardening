@@ -49,12 +49,13 @@ for their OK**:
 
 It changes no file, and run as a normal user it reads none as root; it makes one
 `sudo -n true` probe, which sudo logs. A line starting with `STOP` would end the play
-before it changes anything, or keep it from running: an existing `/etc` file, a per-user
-config file that is not exactly what this project wrote, the wrong user, no Ansible (and
-no uv or pipx to run it with) or one too old. It says what happens to `~/.npmrc`, names
-the keys that would be taken out of it, lists the package managers found, and for a repo
-it adds `--suggest`: the exceptions that repo needs and its own config that outranks the
-host's.
+before it changes anything, or keep it from running: an existing `/etc/pip.conf` or
+`/etc/uv/uv.toml` this project did not write, a per-user config file that is not exactly
+what this project wrote, the wrong user, no Ansible (and no uv or pipx to run it with) or
+one too old. It says what happens to `~/.npmrc` and to npm's global config (`/etc/npmrc`,
+and the file npm names), names the keys each keeps and the keys that would be taken out
+of it, never a value, lists the package managers found, and for a repo it adds
+`--suggest`: the exceptions that repo needs and its own config that outranks the host's.
 `ansible-playbook --check` is not this: it is a dry run of the whole play that stops at
 the first refusal, escalates, and runs the role's probes for real, which leaves npm logs,
 uv and node caches and Go telemetry behind.
@@ -69,6 +70,11 @@ Tell the user what hardening does, unless they have already agreed to it:
 - Several package managers are replaced by wrappers at their current path.
 - `~/.npmrc` is merged: its own lines, tokens included, stay below a block of settings,
   and it ends 0600. A line that sets one of those settings is taken out after a copy.
+- npm's global config is merged the same way: `/etc/npmrc`, and the file npm names
+  where that is another (`/usr/local/etc/npmrc` for one). A corporate registry and its
+  token stay where `sudo npm` and every other account read them, and so does the
+  `prefix=/usr/local` RHEL's npm package ships there. The file keeps its owner and mode,
+  and a line it loses is in a 0600 copy next to it.
 - `~/.yarnrc.yml`, the bunfig, `~/.bundle/config`, the pnpm files in `~/.config/pnpm` (a
   Mac: `~/Library/Preferences/pnpm`), `pip.conf`, `uv.toml`, cargo's `config.toml`, Maven's `settings.xml`, `NuGet.Config` and Composer's `config.json`
   are replaced whole. If one is not exactly what this project last wrote, the role stops
@@ -109,7 +115,7 @@ supply-chain-verify --json
   `--become`: per-user config would land in root's home. The preflight refuses this.
 - If the play stops on a file, don't override it yourself. Tell the user which one (it may
   hold a token, so don't print it), and
-  pass `-e accept_etc_overwrite=true` (the `/etc` files and npm's global config) or
+  pass `-e accept_etc_overwrite=true` (`/etc/pip.conf`, `/etc/uv/uv.toml`) or
   `-e accept_user_config_overwrite=true` (the per-user ones) only if they agree.
 - On Ubuntu 26.04's sudo-rs the preflight may stop because ansible-core cannot answer its
   password prompt. The fix is a newer ansible-core for the user

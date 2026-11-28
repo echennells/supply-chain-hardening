@@ -212,7 +212,12 @@ fi
 # gone after one run, and so was a token `npm login` added after hardening. Now:
 #
 #   ~/.npmrc is merged. This project's settings go in a marked block at the TOP
-#   of the file and every other line stays, byte for byte (ucf_npmrc).
+#   of the file and every other line stays, byte for byte (ucf_npmrc). So is npm's
+#   global config, /etc/npmrc and the file npm names (ucf_npm_global), where a
+#   corporate registry and its token are kept for every account. MEASURED on Azure
+#   VMs (2026-11-28): RHEL 9.9's and 10.3's npm packages ship /etc/npmrc with
+#   prefix=/usr/local in it; on both the play stopped on that file, and with the
+#   overwrite accepted `npm config get prefix` went back to /usr.
 #
 #   pnpm's config.yaml and rc, .yarnrc.yml, pip.conf, uv.toml, bunfig,
 #   ~/.bundle/config, cargo's config.toml, Maven's settings.xml, NuGet.Config and
@@ -272,15 +277,59 @@ ucf_path() {
   esac
 }
 
-# ucf_npm: the npm tasks/npm.yml finds, in its order.
+# ucf_npm: the npm, in the one order the role takes it in: tasks/npm.yml (the npm it
+# judges), tasks/npm_versions.yml (the npm in use) and this hold the block marked "the
+# npm", and tasks/socket.yml (the npm its wrapper runs) the block marked "wrapped npm"
+# inside it; tests/ci/14 compares them. /usr/local/bin/npm comes first, as on every
+# PATH: `npm install -g npm@latest` links the npm people run there wherever npm's prefix
+# is /usr/local (RHEL's stock /etc/npmrc sets it; SLES), over the distro's older
+# /usr/bin/npm, and that npm has no builtin npmrc, so its global config is
+# {prefix}/etc/npmrc and not the distro npm's /etc/npmrc (MEASURED in review, npm
+# 11.19.1 with no builtin npmrc: globalconfig /usr/etc/npmrc, prefix /usr), and asking
+# /usr/bin/npm named the wrong file. Where /usr/local/bin/npm is this project's wrapper, the
+# npm it wraps: an npm installed globally into /usr/local first, whose link the wrapper
+# took, then the REAL_NPM the wrapper names while that is there and no wrapper itself.
+# MEASURED on RHEL 9.9, RHEL 10.3 and SLES 16 (2026-11-28): two applies of the role
+# before it took /usr/local/bin first left REAL_NPM='/usr/bin/npm' in the wrapper, over
+# npm@latest in /usr/local/lib/node_modules/npm, so trusting REAL_NPM alone kept the
+# older npm for good. Then the distro's and the version managers' npms, then PATH.
 ucf_npm() {
-  local p
-  for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
-           "$HOME"/.nvm/versions/node/*/bin/npm "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
-           "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
-    if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
-  done
-  PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
+  local p npm
+  # >>> the npm
+  npm=""
+  if [ -x /usr/local/bin/npm ]; then
+    if ucf_is_wrapper /usr/local/bin/npm 2>/dev/null; then
+      # >>> wrapped npm
+      npm=/usr/local/lib/node_modules/npm/bin/npm-cli.js
+      if [ ! -x "$npm" ] || ucf_is_wrapper "$npm" 2>/dev/null; then
+        npm=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" /usr/local/bin/npm | head -n 1)
+        if [ -z "$npm" ] || [ ! -x "$npm" ] || ucf_is_wrapper "$npm" 2>/dev/null; then npm=""; fi
+      fi
+      # <<< wrapped npm
+    else
+      npm=/usr/local/bin/npm
+    fi
+  fi
+  if [ -z "$npm" ]; then
+    for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
+             "$HOME"/.nvm/versions/node/*/bin/npm "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
+             "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
+      if [ -x "$p" ]; then npm=$p; break; fi
+    done
+  fi
+  [ -n "$npm" ] || npm=$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null) || npm=""
+  # <<< the npm
+  [ -n "$npm" ] || return 1
+  printf '%s\n' "$npm"
+}
+
+# ucf_is_wrapper <file>: a PATH wrapper this project wrote, by its first two lines. The
+# rule of sch_is_wrapper_sh in defaults/main.yml and is_our_wrapper in action/harden.sh
+# (tests/ci/04-wrappers.bats holds all three to the same answers).
+ucf_is_wrapper() {
+  LC_ALL=C awk 'NR == 1 && !/^#!\/bin\/(ba)?sh\r?$/ { exit }
+  NR == 2 { ok = /^# (Managed by supply-chain-harden( action)?|(cargo|deno) — supply-chain-harden wrapper|.* — supply-chain-hardening wrapper(:.*)?)\r?$/; exit }
+  END { exit !ok }' "$1"
 }
 
 # ucf_npm_global <npm>: the file that npm reads as its global config. Asked of npm, from
@@ -488,7 +537,6 @@ ucf_settings() {
     pip)       printf '%s' "\[(global|install)\]|disable-pip-version-check = $b|uploaded-prior-to = [0-9A-Z:.+-]+|only-binary = :all:|require-hashes = true" ;;
     uv)        printf '%s' "\[pip\]|index-strategy = \"[a-z-]+\"|allow-insecure-host = \[\]?|  \"[A-Za-z0-9*.:_-]+\",|\]|exclude-newer = \"[0-9A-Za-z:.+ -]+\"|no-build = true|(verify|require)-hashes = true" ;;
     bun)       printf '%s' "\[install(\.security)?\]|minimumReleaseAge = [0-9]+|(exact|ignoreScripts|lifecycleScripts|frozenLockfile|saveTextLockfile) = $b|auto = \"[a-z]+\"|scanner = \"[@A-Za-z0-9_./-]+\"" ;;
-    npm-global) printf '%s' "(ignore-scripts|audit|save-exact|fund|update-notifier|minimum-release-age-strict|block-exotic-subdeps)=$b|(min-release-age|minimum-release-age)=[0-9]+|allow-git=none|(minimum-release-age-exclude|only-built-dependencies)\[\]=$pkg" ;;
     cargo)     printf '%s' "root = \"[A-Za-z0-9._/-]+\"" ;;
     composer*) # (a template's "{% endif %}" ate the line break after it, hence the closing braces)
       printf '%s' "\{|  \"config\": \{|    \"(secure-http|lock|scripts-are-disabled)\": true,|    \"preferred-install\": \"dist\",|    \"allow-plugins\": (true|false|\{\}),?(  \})?|    \"audit\": \{|      \"abandoned\": \"[a-z]+\",?(    \},?)?(  \})?|      \"block-insecure\": $b,|      \"block-abandoned\": $b(    \},?)?(  \})?|    \},?|    \"policy\": \{|      \"cooldown\": \{|        \"period\": [0-9]+,|        \"block\": true|      \}|  \}|\}" ;;
@@ -705,6 +753,26 @@ ucf_no_root() {
   [ -z "$why" ] || printf '%s, and root writes only to paths no other account controls\n' "$why"
 }
 
+# ucf_global_path <path>: where npm's global config at <path> is judged and written. A
+# path ending in etc/npmrc whose directory is reached through links (macOS: /etc is a link
+# of root's to private/etc) is taken where they lead, when every link on the way is
+# root's own, in a directory only root can write (ucf_roots without "plain"), and that
+# too ends in etc/npmrc. With every link refused, /etc/npmrc was refused on every Mac,
+# where `sudo tee` had written it (inferred from ucf_roots, not run on a Mac). The file
+# itself is never followed, and a directory of another account's is never resolved: the
+# path stays as it is and ucf_no_root refuses it.
+ucf_global_path() {
+  local d
+  case "$1" in
+    */etc/npmrc)
+      if d=$(cd -P -- "${1%/npmrc}" 2>/dev/null && pwd -P) && [ "$d/npmrc" != "$1" ] \
+         && [ -z "$(ucf_roots "${1%/npmrc}")" ]; then
+        case "$d/npmrc" in */etc/npmrc) printf '%s/npmrc\n' "$d"; return 0 ;; esac
+      fi ;;
+  esac
+  printf '%s\n' "$1"
+}
+
 # ucf_kept_out <kind> <path>: the same, for this process: nothing unless it is a root that
 # was reached from another account (UCF_ROOT=1, or sudo or doas, which say so).
 ucf_kept_out() {
@@ -731,8 +799,10 @@ ucf_global_by() {
   echo root
 }
 
-# ucf_blocked <kind> <path>: why that file cannot be written as it has to be;
-# nothing when it can. Judged before anything is touched.
+# ucf_blocked <kind> <path> [read]: why that file cannot be written as it has to be;
+# nothing when it can. Judged before anything is touched. With "read", everything but
+# whether its directory can be written: what is judged before a file is read and
+# compared, when a file that needs no change is not written at all (ucf_npmrc).
 ucf_blocked() {
   local kind="$1" path="$2" real d u t
   t=$(ucf_kept_out "$kind" "$path")
@@ -741,6 +811,7 @@ ucf_blocked() {
     echo "is a symbolic link to a path that cannot be followed"; return 0
   fi
   if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    [ "${3:-}" != read ] || return 0
     d=$(dirname -- "$path")
     while [ ! -e "$d" ] && [ "$d" != / ]; do d=$(dirname -- "$d"); done
     [ -d "$d" ] && [ -w "$d" ] || echo "cannot be created: $d is not a directory this account can write to"
@@ -748,7 +819,7 @@ ucf_blocked() {
   fi
   real=$(ucf_real "$path") || { echo "cannot be resolved"; return 0; }
   if [ ! -e "$real" ]; then
-    [ -w "${real%/*}/" ] || echo "points at $real, which cannot be created"
+    [ "${3:-}" = read ] || [ -w "${real%/*}/" ] || echo "points at $real, which cannot be created"
     return 0
   fi
   if [ ! -f "$real" ]; then echo "is not a regular file"; return 0; fi
@@ -762,12 +833,13 @@ ucf_blocked() {
     t=$(ucf_ls "$path"); t=${t#* }; t=${t%% *}
     if [ "$t" != 0 ] && [ "$t" != "$u" ]; then echo "is a link owned by uid $t to a file owned by uid $u"; return 0; fi
   fi
-  if [ ! -w "${real%/*}/" ]; then echo "cannot be replaced: ${real%/*} is not writable by $(id -un)"; return 0; fi
-  if [ "$kind" = npmrc ] && [ "$(LC_ALL=C tr -d '\000' < "$real" | wc -c)" -ne "$(wc -c < "$real")" ]; then
-    echo "holds NUL bytes (UTF-16?), which npm does not read either"
-  fi
+  if [ "${3:-}" != read ] && [ ! -w "${real%/*}/" ]; then echo "cannot be replaced: ${real%/*} is not writable by $(id -un)"; return 0; fi
+  case "$kind" in npmrc|npm-global) ! ucf_nul "$real" || echo "holds NUL bytes (UTF-16?), which npm does not read either" ;; esac
   return 0
 }
+
+# ucf_nul <file>: it has a NUL byte in it. An npmrc with one is not merged.
+ucf_nul() { [ "$(LC_ALL=C tr -d '\000' < "$1" | wc -c)" -ne "$(wc -c < "$1")" ]; }
 
 # ucf_stuck <kind> <path>: the same, as a preflight has to judge it. A file that is
 # ours need not stop anything: the write comes only if it has to change (a shared
@@ -778,12 +850,13 @@ ucf_blocked() {
 # wrote, in a directory the account could not write, all passed this, so both
 # preflights cleared the host, and ucf_replace then stopped the run at that file,
 # after the ones before it. Composer's file has no marker; what is written to it is
-# the same as before.
+# the same as before. A file that is merged (ucf_npmrc) is judged before anything
+# else, whoever wrote it, so for those the answer is ucf_blocked's.
 ucf_stuck() {
   local why real
   why=$(ucf_blocked "$1" "$2")
   [ -n "$why" ] || return 0
-  if [ "$1" != npmrc ] && [ -z "$(ucf_kept_out "$1" "$2")" ] && [ -f "$2" ] && [ -r "$2" ] \
+  if [ "$1" != npmrc ] && [ "$1" != npm-global ] && [ -z "$(ucf_kept_out "$1" "$2")" ] && [ -f "$2" ] && [ -r "$2" ] \
      && [ "$(user_cfg_class "$1" "$2")" = ours ] && real=$(ucf_real "$2") \
      && [ "$(ucf_ls "$real" | cut -c1-10)" = "$(ucf_mode "$real" 644)" ]; then
     case "$1" in composer*) return 0 ;; esac
@@ -792,13 +865,11 @@ ucf_stuck() {
   printf '%s\n' "$why"
 }
 
-# ucf_mode <path> <600|644|=644>: the mode string that file ends with: what it has,
+# ucf_mode <path> <600|644>: the mode string that file ends with: what it has,
 # with anything that mode does not grant taken away. 600, or 644 less the umask,
-# for a file that is not there yet. =644 is 644 whatever it was: a system file every
-# account has to read, with nothing but ours in it.
+# for a file that is not there yet.
 ucf_mode() {
   local s r=- w=- g=- o=-
-  if [ "$2" = =644 ]; then echo "-rw-r--r--"; return 0; fi
   if [ -e "$1" ]; then
     s=$(ucf_ls "$1")
   elif [ "$2" = 600 ]; then
@@ -830,7 +901,7 @@ ucf_chmod() { # <file> <mode string from ucf_mode>
 # is there already, and never through a link); prints its name.
 ucf_temp() { ( umask 077; mktemp "$(dirname -- "$1")/.sch-XXXXXX" 2>/dev/null ); }
 
-# ucf_put <path> <600|644|=644> <content>: write it, atomically: a temporary file in the
+# ucf_put <path> <600|644> <content>: write it, atomically: a temporary file in the
 # same directory, renamed over, so a run killed at any point leaves the old file or
 # the new one. Through a symlink to the file it names, the owner kept, and the mode
 # as ucf_mode says. Where the rename is impossible (a file bind-mounted into a
@@ -913,10 +984,10 @@ ucf_copy() {
 # user's settings is left alone: "refused <path>", status 42.
 ucf_replace() {
   local kind="$1" path="$2" want why bak cls=absent m=644
+  case "$kind" in npmrc|npm-global) printf 'error: %s is merged (ucf_npmrc), never replaced\n' "$path"; return 1 ;; esac
   # Before anything of it is read.
   why=$(ucf_kept_out "$kind" "$path")
   if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
-  if [ "$kind" = npm-global ] && [ "$(id -u)" = 0 ]; then m="=644"; fi
   case "$kind" in
     composer*) want=$(cat) ;;
     *) want=$(ucf_sign) || { echo "error: no marker line in the new $kind file"; return 1; } ;;
@@ -998,15 +1069,16 @@ ucf_unsafe() {
   return 0
 }
 
-# ucf_npmrc_scan <content> <new block body> <block intact: 0|1> <old whole file: role|action|"">
-# Goes through the file as npm would read it. Prints "removed <key>", "stricter
-# <key>" and "unsure <what>" lines, a record separator, and the lines that stay,
-# byte for byte, with an x after them so a command substitution keeps the last
+# ucf_npmrc_scan <content> <new block body> <block intact: 0|1> <old whole file: role|action|""> [npm-global]
+# Goes through the file as npm would read it. Prints "removed <key>", "same <key>",
+# "stricter <key>" and "unsure <what>" lines, a record separator, and the lines that
+# stay, byte for byte, with an x after them so a command substitution keeps the last
 # newline.
 ucf_npmrc_scan() (
   LC_ALL=C
   nl=$'\n' cr=$'\r' open='${' close='}'
-  intact=$3 old=$4 keep="" notes="" seen=" " n=0 section="" skip=0 loose=0
+  intact=$3 old=$4 keep="" notes="" seen=" " n=0 section="" skip=0 loose=0 global=0
+  [ "${5:-npmrc}" = npmrc ] || global=1
   keys=" " vals=$nl body="$nl$2$nl"
   while IFS= read -r l; do
     case "$l" in ""|";"*|"#"*) ;; *=*) keys="$keys${l%%=*} "; vals="$vals$l$nl" ;; esac
@@ -1027,7 +1099,7 @@ ucf_npmrc_scan() (
       "") return 1 ;;
       ";"*|"#"*)
         [ -n "$old" ] || [ "$loose" = 1 ] || return 1
-        case "$seg" in "; Managed by ansible-supply-chain-security"|"; Managed by supply-chain-harden action") return 0 ;; esac
+        case "$seg" in "; Managed by ansible-supply-chain-security"|"; Managed by ansible-supply-chain-security; self-check "*|"; Managed by supply-chain-harden action") return 0 ;; esac
         case "$body" in *"$nl$seg$nl"*) return 0 ;; esac
         ucf_our_line "$seg"; return ;;
     esac
@@ -1093,8 +1165,18 @@ ucf_npmrc_scan() (
       return 0
     fi
     if [ "$arr" = 0 ]; then
-      # the same setting the block has: nothing of the user's is lost
-      case "$vals" in *"$nl$k=$v$nl"*) seen="$seen$k "; return 0 ;; esac
+      # the same setting the block has: nothing of the user's is lost. Said for npm's
+      # global config, and the file copied first: it is a system file, often a
+      # package's (RHEL's npm ships update-notifier=false in /etc/npmrc), and a line
+      # that goes from it is named, whatever it set. (One `npm config set -g` has
+      # rewritten without the block's markers, as `npm config set` does ~/.npmrc,
+      # holds the block's settings as such lines: it is copied once, by the next run.)
+      case "$vals" in
+        *"$nl$k=$v$nl"*)
+          seen="$seen$k "
+          if [ "$global" = 1 ] && [ -z "$old" ] && [ "$loose" = 0 ]; then note "same $k"; fi
+          return 0 ;;
+      esac
       # a file an older version wrote whole: its own line for each key
       if [ -n "$old" ]; then
         case "$seen" in
@@ -1151,26 +1233,49 @@ ucf_npmrc_scan() (
   printf '%s\036%sx' "$notes" "$keep"
 )
 
-# ucf_npmrc <path>: merge the settings on stdin (a marker line, comments and
-# key=value lines) into that npmrc. Prints
+# ucf_npmrc <path> [npm-global]: merge the settings on stdin (a marker line, comments
+# and key=value lines) into that npmrc: ~/.npmrc, or with npm-global npm's global
+# config (/etc/npmrc, or the file npm names). Prints
 #   removed <key>   a line of the user's for one of our settings was taken out:
 #                   the last line for a key wins, so it would beat the block
+#   same <key>      npm's global config: a line of its own that set one of our
+#                   settings to the block's value was taken out (ucf_npmrc_scan)
 #   stricter <key>  a line that stays: a longer window than ours, which it beats
 #   unsure <what>   a line that stays, and that may set or defeat one of ours
-#   copy <file>     where the file as it was is kept; only when one was removed
-#                   ("-" in a dry run)
-#   mode <string>   other accounts could read it, and no longer can
+#   keeps [<keys>]  npm's global config, when it is there: what the lines that stay
+#                   set, named as ucf_npmrc_keys names them
+#   copy <file>     where the file as it was is kept; only when a line was removed or
+#                   taken out ("-" in a dry run)
+#   mode <string>   ~/.npmrc: other accounts could read it, and no longer can
+#   private <mode>  npm's global config, root's: other accounts cannot read it, and its
+#                   mode is kept, so their npm reads none of the block there either
 #   ok | changed, or "error: <why>" and status 1.
-# UCF_DRY=1 reports and writes nothing.
+# ~/.npmrc ends 0600: npm login keeps its token there. npm's global config is what
+# every account's npm reads: one that is not there is made 0644, and one that is there
+# keeps its mode, a 0600 one too (it may hold a token), less group and other write
+# (ucf_mode 644). Root does not get that far with one that others can write, or that
+# is not root's, or is a link (ucf_no_root).
+# UCF_DRY=1 reports and writes nothing. In a dry run UCF_JUDGED=1 leaves out the judging
+# of the file: harden.sh --preflight, run as another account, has judged one that root
+# writes by root's rules (ucf_no_root) and can read it.
 ucf_npmrc() {
-  local path="$1" want who sum new real="" cur="" bom="" out notes keep intact=0 old="" why bak m="" blk
+  local path="$1" kind="${2:-npmrc}" want who sum new real="" cur="" bom="" out notes keep intact=0 old="" why bak m="" blk to=600
   local nl=$'\n' cr=$'\r' rs=$'\036' utf8=$'\357\273\277'
+  [ "$kind" = npmrc ] || to=644
   want=$(cat)
   who=$(printf '%s\n' "$want" | sed -n '1s/^; Managed by //p')
   [ -n "$who" ] || { echo "error: no marker line in the new npmrc settings"; return 1; }
   want="; These lines are rewritten on every run. Your own settings go below them.$nl${want#*"$nl"}"
-  why=$(ucf_blocked npmrc "$path")
-  if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
+  [ "$kind" = npmrc ] || path=$(ucf_global_path "$path")
+  # ~/.npmrc is judged whole before it is read, as it always was. npm's global config
+  # only as far as reading it: one that needs no change is ok where its directory cannot
+  # be written (/etc in an image built with the role, docs/container-images.md, as the
+  # template task and ucf_replace had it), and whether it can be written is judged below,
+  # before anything is.
+  if [ "${UCF_DRY:-0}" != 1 ] || [ "${UCF_JUDGED:-0}" != 1 ]; then
+    if [ "$kind" = npmrc ]; then why=$(ucf_blocked "$kind" "$path"); else why=$(ucf_blocked "$kind" "$path" read); fi
+    if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
+  fi
   if [ -e "$path" ]; then
     real=$(ucf_real "$path")
     cur=$(cat -- "$real"; printf x); cur=${cur%x}
@@ -1185,25 +1290,39 @@ ucf_npmrc() {
           if [ "$(printf '%s\n' "$blk" | LC_ALL=C sed -e 1d -e '$d' | ucf_sum "${m%%:*}")" = "$m" ]; then intact=1; fi ;;
       esac
     fi
+    # A whole file an earlier version wrote: ~/.npmrc, /etc/npmrc, or npm's global
+    # config, which was replaced whole and signed (ucf_sign) until it was merged too.
     case "$nl${cur//$cr/}$nl" in
       *"$nl; >>> supply-chain-hardening: "*) ;;
-      *"$nl; Managed by ansible-supply-chain-security$nl"*) old=role ;;
+      *"$nl; Managed by ansible-supply-chain-security$nl"*|*"$nl; Managed by ansible-supply-chain-security; self-check "*) old=role ;;
       *"$nl; Managed by supply-chain-harden action$nl"*) old=action ;;
     esac
   fi
-  out=$(ucf_npmrc_scan "$cur" "$want" "$intact" "$old") || { printf 'error: could not read %s\n' "$path"; return 1; }
+  out=$(ucf_npmrc_scan "$cur" "$want" "$intact" "$old" "$kind") || { printf 'error: could not read %s\n' "$path"; return 1; }
   case "$out" in *"$rs"*x) ;; *) printf 'error: could not read %s\n' "$path"; return 1 ;; esac
   notes=${out%%"$rs"*}; keep=${out#*"$rs"}; keep=${keep%x}
   sum=$(printf '%s\n' "$want" | ucf_sum)
   new="$bom; >>> supply-chain-hardening: Managed by $who; self-check $sum$nl$want$nl; <<< supply-chain-hardening$nl$keep"
-  printf '%s' "$notes"
+  # What is said about it, printed once it is known that it is ok or can be written:
+  # a "removed" before an error would claim a line was taken out of a file left as is.
   if [ -n "$real" ]; then
-    m=$(ucf_ls "$real"); m=${m%% *}
-    case "$m" in ????r*|???????r*) printf 'mode %s\n' "$m" ;; esac
-    if [ "$new" = "$bom$cur" ] && [ "$m" = "$(ucf_mode "$real" 600)" ]; then echo ok; return 0; fi
+    m=$(ucf_ls "$real")
+    if [ "$kind" = npmrc ]; then
+      case "$m" in ????r*|???????r*) notes="${notes}mode ${m%% *}$nl" ;; esac
+    else
+      notes="$notes$(ucf_npmrc_keys "$keep")$nl"
+      case "$m" in ??????????" 0 "*) case "$(ucf_mode "$real" 644)" in ???????r*) ;; *) notes="${notes}private $(ucf_mode "$real" 644)$nl" ;; esac ;; esac
+    fi
+    m=${m%% *}
+    if [ "$new" = "$bom$cur" ] && [ "$m" = "$(ucf_mode "$real" "$to")" ]; then printf '%sok\n' "$notes"; return 0; fi
   fi
+  if [ "$kind" != npmrc ] && { [ "${UCF_DRY:-0}" != 1 ] || [ "${UCF_JUDGED:-0}" != 1 ]; }; then
+    why=$(ucf_blocked "$kind" "$path")
+    if [ -n "$why" ]; then printf 'error: %s %s; it was left as it is\n' "$path" "$why"; return 1; fi
+  fi
+  printf '%s' "$notes"
   case "$nl$notes" in
-    *"$nl"removed\ *)
+    *"$nl"removed\ *|*"$nl"same\ *)
       bak=-
       if [ "${UCF_DRY:-0}" != 1 ]; then
         bak=$(ucf_copy "$path") || { printf 'error: could not copy %s next to itself before taking lines out of it; it was left as it is\n' "$path"; return 1; }
@@ -1211,9 +1330,82 @@ ucf_npmrc() {
       printf 'copy %s\n' "$bak" ;;
   esac
   if [ "${UCF_DRY:-0}" != 1 ]; then
-    ucf_put "$path" 600 "$new" || { printf 'error: could not write %s\n' "$path"; return 1; }
+    ucf_put "$path" "$to" "$new" || { printf 'error: could not write %s\n' "$path"; return 1; }
   fi
   echo changed
+}
+
+# ucf_npmrc_keys <the lines that stay>: "keeps", then what those lines set, for a report
+# that shows no value: npm's own keys by name (npm spells every key it has in lowercase
+# letters, digits and hyphens, but _auth, _authToken and _password), a scope's registry
+# and a registry's credential with the scope and the host left out, and how many other
+# lines there are with a key in them. A line with no = is a key to npm, and may be a
+# token pasted in: it is one of those, and so is a key of 16 or more hex digits and
+# hyphens (a token, a UUID-shaped legacy npm token). Nothing at all: "keeps" alone.
+ucf_npmrc_keys() (
+  LC_ALL=C
+  nl=$'\n' cr=$'\r' names="" n=0 section=0
+  while IFS= read -r l; do
+    ucf_trim "$l"; l=$REPLY
+    case "$l" in ""|";"*|"#"*) continue ;; "["*"]") section=1; continue ;; esac
+    k="" a=""
+    case "$l" in "="*) ;; *=*) if ucf_unsafe "${l%%=*}"; then k=$REPLY; fi ;; esac
+    case "$k" in ?*"[]") a="[]"; k=${k%"[]"} ;; esac
+    case "$section:$k" in
+      0://*:_authToken|0://*:_auth|0://*:_password|0://*:username|0://*:email|0://*:certfile|0://*:keyfile|0://*:always-auth)
+        k="//...:${k##*:}" ;;
+      0:@?*:registry) k="@...:registry" ;;
+      0:_auth|0:_authToken|0:_password) ;;
+      0:[a-z]*)
+        case "$k" in *[!a-z0-9-]*) k="" ;; esac
+        [ "${#k}" -le 40 ] || k=""
+        # hex digits and hyphens only, 16 or more of them: a token or a UUID-shaped npm
+        # token used as a key, not a key npm has
+        case "$k" in *[!0-9a-f-]*) ;; *) [ "${#k}" -lt 16 ] || k="" ;; esac ;;
+      *) k="" ;;
+    esac
+    if [ -z "$k" ]; then n=$((n + 1)); continue; fi
+    case ", $names, " in *", $k$a, "*) ;; *) names="${names:+$names, }$k$a" ;; esac
+  done <<<"${1//$cr/$nl}"
+  case "$n" in 0) ;; 1) names="${names:+$names, }1 other line" ;; *) names="${names:+$names, }$n other lines" ;; esac
+  printf 'keeps%s\n' "${names:+ $names}"
+)
+
+# ucf_global_said <path>: what `ucf_npmrc <path> npm-global` printed (on stdin), as one
+# sentence for a preflight: tasks/preflight.yml (user-config.sh preview) and harden.sh
+# --preflight say it in the same words. Key names only, as ucf_npmrc gives them.
+ucf_global_said() {
+  local l keeps="" there=0 gone="" longer="" maybe="" private="" err="" st="" s
+  while IFS= read -r l; do
+    case "$l" in
+      keeps) there=1 ;;
+      "keeps "*) there=1; keeps=${l#keeps } ;;
+      "removed "*|"same "*) case ", $gone, " in *", ${l#* }, "*) ;; *) gone="${gone:+$gone, }${l#* }" ;; esac ;;
+      "stricter "*) longer=${l#stricter } ;;
+      "unsure "*) maybe="${maybe:+$maybe; }${l#unsure }" ;;
+      "private "*) private=${l#private } ;;
+      "error: "*) err=${l#error: } ;;
+      ok|changed) st=$l ;;
+    esac
+  done
+  if [ -n "$err" ]; then
+    err=${err#"$1 "}; err=${err%"; it was left as it is"}
+    printf "%s: npm's global config. It %s. The run leaves it as it is and lists it in the run summary.\n" "$1" "$err"
+    return 0
+  fi
+  if [ "$there" = 0 ]; then
+    printf "%s: npm's global config, not there; the run makes it, with this project's settings.\n" "$1"
+    return 0
+  fi
+  s="$1: npm's global config, merged like ~/.npmrc, never replaced: this project's settings go in a block at the top"
+  if [ -n "$keeps" ]; then s="$s, and it keeps $keeps"; else s="$s; nothing else in it sets anything"; fi
+  [ -z "$gone" ] || s="$s. It takes out its own lines for $gone, which set what the block sets, after a copy of the file next to it (0600)"
+  s="$s."
+  [ -z "$longer" ] || s="$s Its own $longer stays, because it is longer than this project's."
+  [ -z "$maybe" ] || s="$s Kept, but may set or defeat one of the settings in the block: $maybe."
+  [ -z "$private" ] || s="$s Other accounts cannot read it ($private), and its mode is kept, so their npm gets none of these settings from it."
+  [ "$st" != ok ] || s="$s Nothing in it changes."
+  printf '%s\n' "$s"
 }
 # <<< user_config
 
@@ -2114,38 +2306,19 @@ preflight_report() {
 
   echo ""
   echo "Files the play stops on (it did not write them; nothing is changed until they are dealt with):"
-  for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+  for f in /etc/pip.conf /etc/uv/uv.toml; do
     [ -f "$f" ] || continue
     if [ ! -r "$f" ]; then
       _pf_note "$f: not readable by $me; the role reads it as root and decides."
     elif grep -qE "$marker" "$f" 2>/dev/null; then
       _pf_line "$f: written by this project, replaced as before"
     else
-      _pf_stop "$f: not written by this project, and often a corporate registry. Show it to the owner; only with their agreement, -e accept_etc_overwrite=true replaces it."
+      _pf_stop "$f: not written by this project, and often a corporate index. Show it to the owner; only with their agreement, -e accept_etc_overwrite=true replaces it."
     fi
   done
-  # npm's global config, where that is not /etc/npmrc. action/harden.sh does not
-  # write it.
-  f=$(ucf_path npm-global)
-  if [ -n "$f" ]; then
-    case "$(ucf_global_by "$f")" in
-      root) out=$(ucf_no_root npm-global "$f") ;;
-      user) out=$(ucf_stuck npm-global "$f") ;;
-    esac
-  fi
-  if [ -n "$out" ]; then
-    _pf_note "$f: npm's global config. It $out. The role leaves it alone and lists it in the run summary."
-  elif [ -n "$f" ] && [ ! -e "$f" ]; then
-    _pf_line "$f: npm's global config, not there, will be created"
-  elif [ -n "$f" ] && [ ! -f "$f" ]; then
-    _pf_stop "$f: npm's global config, and not a regular file."
-  elif [ -n "$f" ] && [ ! -r "$f" ]; then
-    _pf_note "$f: npm's global config, not readable by $me; the role reads it as root and decides."
-  elif [ -n "$f" ] && [ "$(user_cfg_class npm-global "$f")" = ours ]; then
-    _pf_line "$f: npm's global config, exactly what this project last wrote, replaced as before"
-  elif [ -n "$f" ]; then
-    _pf_stop "$f: npm's global config, not exactly what this project last wrote, and often a corporate registry and its token. Tell the owner, without printing it; only with their agreement, -e accept_etc_overwrite=true copies it next to itself (0600) and replaces it."
-  fi
+  # The settings the role writes to the npmrc files, for the dry runs below.
+  local npm_body g
+  npm_body=$(_pf_npm_body)
   # The files in a home directory. Same code as the apply (ucf_*, user_cfg_class),
   # so what is said here is what happens; which file is whose is asked of the file
   # itself, and no line of one is printed.
@@ -2175,15 +2348,8 @@ preflight_report() {
     esac
   }
   _pf_npmrc() { # ~/.npmrc is merged, so it never stops the play; say what changes in it
-    case "$hours" in ""|*[!0-9]*) hours=48 ;; esac
-    hours=$((10#$hours / 24)); [ "$hours" -ge 1 ] || hours=1
-    local npm_v npm_vs npm_age=true npm_git=true
-    npm_v=$(type -P npm 2>/dev/null) || npm_v=""
-    [ -z "$npm_v" ] || npm_v=$(_pf_version npm "$npm_v")
-    npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
-    npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
-    npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
-    out=$(npm_settings "$hours" "$npm_age" "$npm_git" | UCF_DRY=1 ucf_npmrc "$f") || true
+    hours=$(_pf_npm_days)
+    out=$(printf '%s\n' "$npm_body" | UCF_DRY=1 ucf_npmrc "$f") || true
     gone="" maybe="" longer="" mode=""
     while IFS= read -r l; do
       case "$l" in
@@ -2209,7 +2375,44 @@ preflight_report() {
   if [ "$uid" -ne 0 ]; then
     _pf_note "/root/.yarnrc.yml: not looked at (needs root). If it is there and not this project's, the role leaves it alone and says so in the run summary."
   fi
-  _pf_line "(action/harden.sh does not stop on a per-user file it did not write: it copies it next to itself, replaces it and warns. It writes /etc with sudo where it can.)"
+  _pf_line "(action/harden.sh does not stop on a per-user file it did not write: it copies it next to itself, replaces it and warns. It writes /etc with sudo where it can, and merges into /etc/npmrc as the role does.)"
+
+  # npm's global config: /etc/npmrc, and the file npm names where that is another one
+  # (ucf_path npm-global). Merged like ~/.npmrc (ucf_npmrc npm-global), so it stops
+  # nothing: one line for each, in the words tasks/preflight.yml prints
+  # (ucf_global_said), naming the keys it keeps and the keys it takes out, never a value.
+  # It is read as this account. A file root writes is judged by root's rules
+  # (ucf_no_root), and one this account cannot read is not read as root.
+  _pf_npm_global() { # <path> <root|user>
+    local why=""
+    set -- "$(ucf_global_path "$1")" "$2"
+    if [ "$2" != root ]; then
+      # this account's own: the dry run judges it as the run would
+      _pf_note "$(printf '%s\n' "$npm_body" | UCF_DRY=1 ucf_npmrc "$1" npm-global | ucf_global_said "$1")"
+      return 0
+    fi
+    why=$(ucf_no_root npm-global "$1")
+    if [ -z "$why" ] && [ -e "$1" ]; then
+      if [ ! -f "$1" ]; then
+        why="is not a regular file"
+      elif [ ! -r "$1" ]; then
+        _pf_note "$1: npm's global config, not readable by $me; the role reads it as root, merges into it, and says in the run summary what it took out."
+        return 0
+      elif ucf_nul "$1"; then
+        why="holds NUL bytes (UTF-16?), which npm does not read either"
+      fi
+    fi
+    if [ -n "$why" ]; then
+      _pf_note "$(printf 'error: %s %s\n' "$1" "$why" | ucf_global_said "$1")"
+    else
+      _pf_note "$(printf '%s\n' "$npm_body" | UCF_DRY=1 UCF_JUDGED=1 ucf_npmrc "$1" npm-global | ucf_global_said "$1")"
+    fi
+  }
+  echo ""
+  echo "npm's global config (merged like ~/.npmrc, so it stops nothing):"
+  _pf_npm_global /etc/npmrc root
+  g=$(ucf_path npm-global)
+  [ -z "$g" ] || _pf_npm_global "$g" "$(ucf_global_by "$g")"
 
   echo ""
   echo "Package managers here (the role configures what it finds; it installs none of them):"
@@ -2249,6 +2452,28 @@ preflight_report() {
   fi
   echo "Nothing above would stop the play. Show this to the person who owns the host"
   echo "and wait for their OK before applying. Nothing was changed here."
+}
+
+# _pf_npm_days: the npm age window the role writes, in days (npm_minimum_release_age_days
+# in defaults/main.yml): release_age_hours over 24, and at least 1.
+_pf_npm_days() {
+  local h="$RELEASE_AGE_HOURS"
+  case "$h" in ""|*[!0-9]*) h=48 ;; esac
+  h=$((10#$h / 24)); [ "$h" -ge 1 ] || h=1
+  echo "$h"
+}
+
+# _pf_npm_body: the settings the role puts in the npmrc files for the npm found here, for
+# the preflight's dry runs of ucf_npmrc. Its marker and comments are harden.sh's; what is
+# kept and taken out depends on the keys and their values only.
+_pf_npm_body() {
+  local npm_v npm_vs npm_age=true npm_git=true
+  npm_v=$(type -P npm 2>/dev/null) || npm_v=""
+  [ -z "$npm_v" ] || npm_v=$(_pf_version npm "$npm_v")
+  npm_vs=$(npm_versions_found "$npm_v") || npm_vs=$npm_v
+  npm_writes_key "$NPM_KNOWS_MIN_RELEASE_AGE" "$npm_v" "$npm_vs" || npm_age=false
+  npm_writes_key "$NPM_KNOWS_ALLOW_GIT" "$npm_v" "$npm_vs" || npm_git=false
+  npm_settings "$(_pf_npm_days)" "$npm_age" "$npm_git"
 }
 
 # _pf_ansible_version <ansible-playbook>: ansible-core's version, from its own
@@ -3051,6 +3276,9 @@ if [ "$HOME_ONLY" = true ]; then
   UV_EXCLUDE_NEWER="${UV_EXCLUDE_NEWER%%T*}T00:00:00Z"
 fi
 
+# write_etc <path> [merge]: write the content on stdin to that /etc file, as root where
+# this run can be. With merge it is npm's global config, and the content is merged into
+# it (etc_merge), never written over it.
 write_etc() {
   local path="$1"
   # Always consume stdin so upstream `cat <<EOF | write_etc ...` doesn't
@@ -3081,6 +3309,8 @@ write_etc() {
       owner=$(ls -ld -- "$path" | awk '{print $3}')
       if grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$path" 2>/dev/null; then
         log "$path is already in place, written by an earlier hardening run as $owner, and is left as it is: this run has no root and no usable sudo to update a file $owner owns. Per-user config applies to $(id -un). To update it, re-run harden.sh as $owner or with sudo."
+      elif [[ "${2:-}" == merge ]]; then
+        warn "cannot merge this project's npm settings into $path: it belongs to $owner, and this run has no root and no usable sudo. Per-user config still applies, but a later \`sudo\` step reads $owner's file without them. To merge them in, re-run harden.sh as root or with sudo."
       else
         warn "cannot write $path: it belongs to $owner, this project did not write it, and this run has no root and no usable sudo. Per-user config still applies, but a later \`sudo\` step reads $owner's file. To replace it, re-run harden.sh as root or with sudo."
       fi
@@ -3111,8 +3341,57 @@ write_etc() {
         log "removed group and other write from $dir, which an earlier run left writable by other accounts" ;;
     esac
   fi
+  if [[ "${2:-}" == merge ]]; then etc_merge "$path" "$content"; return 0; fi
   why=$(echo "$content" | $SUDO tee "$path" 2>&1 >/dev/null) || { etc_not_written "$path" "$why"; return 0; }
   why=$($SUDO chmod 644 "$path" 2>&1) || warn "cannot set the mode of $path ($(last_reason "$why"))"
+}
+
+# etc_merge <path> <settings>: merge npm settings into npm's global config at <path>, as
+# the role does (tasks/npm.yml): files/user-config.sh's ucf_npmrc npm-global, run as root
+# (ucf_as_root), or as this account where write_etc found the file or its directory to
+# be its own. This project's block goes at the top and every other line stays, a
+# corporate registry and its token included; a line that sets one of the block's keys is
+# taken out, after a 0600 copy next to the file. The file keeps its owner and mode (a
+# new one is 0644), and root merges only into a path no other account controls. Never
+# fatal: a file it cannot merge into is named, with why, and the run goes on. Key names
+# only, never a line of the file.
+etc_merge() {
+  local path out rc=0 l bak="" gone="" keeps="" maybe="" longer="" private="" why=""
+  # where it really is (macOS: /private/etc/npmrc), as ucf_npmrc will judge it
+  path=$(ucf_global_path "$1")
+  if [[ "${CAN_ESCALATE:-0}" -eq 1 ]]; then
+    out=$(ucf_as_root npm-global "$path" <<<"$2" 2>&1) || rc=$?
+  else
+    out=$(umask 022; ucf_npmrc "$path" npm-global <<<"$2" 2>&1) || rc=$?
+  fi
+  while IFS= read -r l; do
+    case "$l" in
+      "copy "*)    bak=${l#copy } ;;
+      "removed "*|"same "*) gone="${gone:+$gone, }${l#* }" ;;
+      "unsure "*)  maybe="${maybe:+$maybe; }${l#unsure }" ;;
+      "stricter "*) longer=${l#stricter } ;;
+      "keeps "*)   keeps=${l#keeps } ;;
+      "private "*) private=${l#private } ;;
+      "error: "*)  why=${l#error: } ;;
+    esac
+  done <<<"$out"
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ -n "$why" ]]; then
+      why=${why#"$path "}
+      warn "npm: this project's settings were not merged into $path: it ${why%"; it was left as it is"}. It was left as it is. Per-user config still applies, but a later \`sudo\` step will not see them there"
+    else
+      etc_not_written "$path" "$out"
+    fi
+    [[ -z "$bak" ]] || warn "npm: a copy of $path from before this run is at $bak"
+    return 0
+  fi
+  if [[ -n "$gone" ]]; then
+    warn "npm: took $path's own lines for $gone out, because they set what this project's block at the top of it sets; every other line stays${keeps:+ (it keeps $keeps)}. The file as it was is at $bak, 0600. It may hold a token or a password: delete it once you have moved what you need"
+  fi
+  [[ -z "$longer" ]] || log "npm: kept $path's own $longer, which is longer than this project's"
+  [[ -z "$maybe" ]] || warn "npm: kept, in $path, lines that may set or defeat one of the settings this project writes there: $maybe"
+  [[ -z "$private" ]] || warn "npm: other accounts cannot read $path ($private); its mode was kept, so their npm gets none of this project's settings from it"
+  return 0
 }
 
 # last_reason <what a command printed>: the system's own words, at its end.
@@ -3143,9 +3422,10 @@ can_write() {
   [ "$($SUDO sh -c '[ -w "$1" ] || echo no' sh "$dir" 2>/dev/null)" != no ]
 }
 
-# ucf_as_root <kind> <path>, the new body on stdin: ucf_replace, run as root with
-# the functions above handed over as text. Root's shell gets no variable of this
-# one's, and finds its tools in the system's directories only.
+# ucf_as_root <kind> <path>, the new body on stdin: ucf_replace, or for npm-global
+# ucf_npmrc (merged, never replaced), run as root with the functions above handed over
+# as text. Root's shell gets no variable of this one's, and finds its tools in the
+# system's directories only.
 ucf_as_root() {
   local body
   body=$(cat)
@@ -3153,7 +3433,11 @@ ucf_as_root() {
     # shellcheck disable=SC2046  # one word each: they are function names
     declare -f $(declare -F | awk '$3 ~ /^(ucf_|user_cfg_class$)/ { print $3 }')
     declare -p UCF_LINES
-    printf 'umask 022\nUCF_ROOT=1 UCF_FOREIGN=keep\nucf_replace %q %q <<<%q\n' "$1" "$2" "$body"
+    if [[ "$1" == npm-global ]]; then
+      printf 'umask 022\nUCF_ROOT=1\nucf_npmrc %q npm-global <<<%q\n' "$2" "$body"
+    else
+      printf 'umask 022\nUCF_ROOT=1 UCF_FOREIGN=keep\nucf_replace %q %q <<<%q\n' "$1" "$2" "$body"
+    fi
   } | $SUDO /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/ bash
 }
 
@@ -3610,7 +3894,9 @@ harden_npm() {
 
   # Merged, never replaced: it is where `npm login` keeps its token.
   put_user_cfg npmrc "$HOME/.npmrc" <<<"$content" || { end_section; return 0; }
-  echo "$content" | write_etc /etc/npmrc
+  # Merged too: npm's global config on apt and RHEL npm, where a corporate registry and
+  # its token live, and on RHEL its prefix=/usr/local (etc_merge).
+  echo "$content" | write_etc /etc/npmrc merge
 
   HARDENED+=("npm")
   set_tool_version "npm" "$npm_v"

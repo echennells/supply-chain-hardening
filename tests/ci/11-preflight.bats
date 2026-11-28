@@ -175,9 +175,9 @@ echo "${0##*/} 1.95.0 (stub)"'
   [ "$(id -u)" -ne 0 ] || skip "running as root: a different report"
   # This machine's own /etc is read too, and GitHub's Ubuntu image ships an
   # /etc/pip.conf. With a file there that is not this project's, that STOP and no
-  # other is the right answer.
+  # other is the right answer. Not /etc/npmrc: it is merged, so it stops nothing.
   local f foreign=0
-  for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+  for f in /etc/pip.conf /etc/uv/uv.toml; do
     [ -f "$f" ] && [ -r "$f" ] || continue
     grep -qE 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$f" || foreign=$((foreign + 1))
   done
@@ -398,10 +398,30 @@ exit 0"
 @test "preflight: the file list and markers are tasks/preflight.yml's" {
   # The preflight names these; a list that drifted would clear a host the play
   # then stops on.
-  grep -q 'for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do' "$ROOT/tasks/preflight.yml"
-  grep -q 'for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do' "$ROOT/action/harden.sh"
+  grep -q 'for f in /etc/pip.conf /etc/uv/uv.toml; do' "$ROOT/tasks/preflight.yml"
+  grep -q 'for f in /etc/pip.conf /etc/uv/uv.toml; do' "$ROOT/action/harden.sh"
+  # /etc/npmrc is in neither: both merge it, and say so (the next test)
+  ! grep -n 'for f in /etc/npmrc' "$ROOT/tasks/preflight.yml" "$ROOT/action/harden.sh" || false
   grep -q 'Managed by (ansible-supply-chain-security|supply-chain-harden)' "$ROOT/tasks/preflight.yml"
   grep -q "local marker='Managed by (ansible-supply-chain-security|supply-chain-harden)'" "$ROOT/action/harden.sh"
+}
+
+@test "preflight: npm's global config is never a STOP; /etc/npmrc and the file npm names each get a line, as the role's preflight prints it" {
+  # /etc/npmrc and npm's own global config are merged like ~/.npmrc by both surfaces
+  # (ucf_npmrc npm-global): whatever is in them, and whether they are there or not, the
+  # preflight names them and stops on neither. The words are ucf_global_said's, which
+  # tasks/preflight.yml prints through user-config.sh preview; tests/ci/14 checks them
+  # file by file.
+  stub_bin sudo 'case "$1" in --version) echo "Sudo version 1.9.15" ;; -n) shift; [ "$1" = true ] ;; *) exit 1 ;; esac'
+  ansible_at 2.21.6
+  run preflight
+  ! grep -E '^ +STOP  [^:]*npmrc' <<<"$output" || false
+  grep -qE "^  note  /etc/npmrc: npm's global config[,.]" <<<"$output" || { echo "$output"; return 1; }
+  grep -q "^npm's global config (merged like ~/.npmrc, so it stops nothing):" <<<"$output"
+  grep -q 'ucf_global_said' "$ROOT/action/harden.sh"
+  grep -q -- '-s -- preview' "$ROOT/tasks/preflight.yml"
+  # and the role's preflight has no refusal of it left
+  ! grep -n "Refusing to overwrite npm's global config\|classify npm-global" "$ROOT/tasks/preflight.yml" || false
 }
 
 @test "preflight: the per-user classification is the role's: the same code, and the same files" {

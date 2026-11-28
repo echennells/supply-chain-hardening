@@ -353,13 +353,15 @@
   tags: always
 
 # What the run did to anything of the user's in the per-user files it writes
-# (files/user-config.sh). Paths, key names from this project's own list and line
-# numbers only: these files hold tokens. A copy appears here only with
-# accept_user_config_overwrite=true, or when a line was taken out of ~/.npmrc.
+# (files/user-config.sh), and in npm's global config. Paths, key names from this
+# project's own list and line numbers only: these files hold tokens. A copy appears
+# here only with accept_user_config_overwrite=true, or when a line was taken out of
+# ~/.npmrc or npm's global config.
 - name: Report what this run did to your own config files
   vars:
     sch_ucf_out:
       - "{{ sch_ucf_npmrc.stdout_lines | default([]) }}"
+      - "{{ sch_ucf_etc_npmrc.stdout_lines | default([]) }}"
       - "{{ sch_ucf_npm_global.stdout_lines | default([]) }}"
       - "{{ sch_ucf_pnpm_rc.stdout_lines | default([]) }}"
       - "{{ sch_ucf_pnpm_yaml.stdout_lines | default([]) }}"
@@ -373,7 +375,7 @@
       - "{{ sch_ucf_nuget.stdout_lines | default([]) }}"
       - "{{ sch_ucf_composer.stdout_lines | default([]) }}"
       - "{{ sch_ucf_composer_home.stdout_lines | default([]) }}"
-    sch_ucf_said: "{{ sch_ucf_out | flatten | select('match', '(copy|stock|removed|stricter|unsure|mode) ') | list }}"
+    sch_ucf_said: "{{ sch_ucf_out | flatten | select('match', '(copy|stock|removed|same|stricter|unsure|mode|private) ') | list }}"
   ansible.builtin.debug:
     msg: |-
       In your own config files{{ ' (a dry run: nothing was written)' if ansible_check_mode else '' }}:
@@ -382,12 +384,16 @@
       {% for l in lines %}
       {% if l is match('removed ') %}
         - {{ p }}: your own setting of {{ l | regex_replace('^removed ', '') }} {{ 'would be' if ansible_check_mode else 'was' }} taken out; a line after the block this project writes would win over it
+      {% elif l is match('same ') %}
+        - {{ p }}: its own line for {{ l | regex_replace('^same ', '') }} {{ 'would be' if ansible_check_mode else 'was' }} taken out; the block this project writes at the top sets the same
       {% elif l is match('stricter ') %}
         - {{ p }}: your own {{ l | regex_replace('^stricter ', '') }} stays, because it is longer than this project's. It applies where NPM_CONFIG_MIN_RELEASE_AGE is not set; that variable, in /etc/profile.d and /etc/environment, outranks the file
       {% elif l is match('unsure ') %}
         - {{ p }}: kept, but it may set or defeat a setting this project writes there: {{ l | regex_replace('^unsure ', '') }}
       {% elif l is match('mode ') %}
         - {{ p }}: other accounts could read it ({{ l | regex_replace('^mode ', '') }}); it {{ 'would become' if ansible_check_mode else 'is now' }} 0600
+      {% elif l is match('private ') %}
+        - {{ p }}: other accounts cannot read it ({{ l | regex_replace('^private ', '') }}), and its mode is kept, so their npm gets none of this project's settings from it
       {% elif l in ['copy -', 'stock -'] %}
         - {{ p }}: would be copied next to itself (0600) first
       {% elif l is match('stock ') %}

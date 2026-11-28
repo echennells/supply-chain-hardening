@@ -235,12 +235,16 @@
     - not (skip_gnu_date_check | default(false) | bool)
 
 - name: Detect non-managed existing system config files
-  # Each /etc/* file we deploy has a marker comment line. If a file
+  # Each /etc/* file we replace has a marker comment line. If a file
   # already exists without the marker, it was placed by someone or
-  # something else (corporate registry config, sysadmin override,
+  # something else (corporate index config, sysadmin override,
   # distribution package, etc.). Refuse to overwrite without explicit
-  # operator opt-in — silently clobbering a /etc/npmrc with corporate
-  # registry settings is the worst-case scenario (dependency confusion).
+  # operator opt-in — silently clobbering a corporate index setting
+  # is the worst-case scenario (dependency confusion).
+  #
+  # Not /etc/npmrc: it is merged, like ~/.npmrc, and so is npm's global config
+  # wherever npm names it (below, and tasks/npm.yml), so nothing in either stops
+  # the play.
   ansible.builtin.shell:
     cmd: |
       set -e
@@ -248,7 +252,7 @@
       conflict=""
       # No /etc/yarnrc.yml: Yarn never reads it, and the role no longer writes it
       # (tasks/yarn.yml).
-      for f in /etc/npmrc /etc/pip.conf /etc/uv/uv.toml; do
+      for f in /etc/pip.conf /etc/uv/uv.toml; do
         # Recognize files placed by EITHER supply-chain surface — the role
         # ("ansible-supply-chain-security") OR the GitHub Action
         # ("supply-chain-harden action"). Same project; before this, a host
@@ -278,7 +282,7 @@
 
       {{ etc_preflight.stdout }}
 
-      These files are commonly used for corporate registry / proxy /
+      These files are commonly used for corporate index / proxy /
       auth settings; overwriting them blindly can cause registry-takeover
       vulnerabilities (dependency confusion) or break installs entirely.
 
@@ -290,14 +294,26 @@
     - etc_preflight.rc == 42
     - not (accept_etc_overwrite | default(false) | bool)
 
-# npm reads its global config from {prefix}/etc/npmrc on every layout but Debian's,
-# and tasks/npm.yml writes it there too. MEASURED (d738db8, NodeSource's
-# /usr/etc/npmrc): a registry and a token in it were gone after an apply, with no
-# copy, and --diff printed them. Resolved here, as the user, before anything is
-# changed, and judged like the files above: one that is not exactly what this project
-# last wrote, which a token added since makes it, stops the play. Where neither the user
-# nor root may write it (ucf_no_root in files/user-config.sh), tasks/npm.yml leaves it
-# alone and the summary says so; that stops nothing.
+# npm's global config: /etc/npmrc, and {prefix}/etc/npmrc, the file npm reads on
+# every layout but Debian's, Ubuntu's and RHEL's own npm. tasks/npm.yml merges this
+# project's settings into both, like ~/.npmrc (files/user-config.sh, ucf_npmrc
+# npm-global), so neither stops the play: a corporate registry and its token in one
+# stay where npm reads them. MEASURED before (2026-11-28, Azure VMs): on RHEL 9.9 and
+# 10.3 the play stopped on the stock /etc/npmrc their npm package ships, and replacing
+# it, the only way on, dropped its prefix=/usr/local. Said here instead, before
+# anything is changed: one line for each file, naming the keys it keeps and the keys
+# it takes out (lines that set what the block sets, copied first), never a value.
+# Where neither the user nor root may write it (ucf_no_root), tasks/npm.yml leaves it
+# alone and the summary says so; that stops nothing either.
+#
+# The version of every npm here first: the block leaves out a key where an npm would
+# warn about it (tasks/npm_versions.yml), and which keys it holds is what is taken out.
+- name: Find the npm versions the npmrc keys depend on (before anything is changed)
+  ansible.builtin.import_tasks: npm_versions.yml
+  when:
+    - "'all' in (ansible_run_tags | default(['all'])) or 'npm' in (ansible_run_tags | default(['all']))"
+    - "'npm' not in (ansible_skip_tags | default([]))"
+
 - name: Resolve npm's global config path (before anything is changed)
   ansible.builtin.script: ../files/user-config.sh path npm-global
   args:
@@ -309,46 +325,53 @@
     - "'all' in (ansible_run_tags | default(['all'])) or 'npm' in (ansible_run_tags | default(['all']))"
     - "'npm' not in (ansible_skip_tags | default([]))"
 
-- name: Detect a global npmrc this project did not write
-  become: "{{ 'as root' in (npm_global_preflight.stdout_lines | default([])) }}"
-  # On stdin, like every become that runs this script. With pipelining on, nothing root
-  # runs for it is then in a file of the connecting account's (MEASURED on ansible-core
-  # 2.18.20 and 2.22.0; the script module leaves the script there, pipelining or not).
-  # With pipelining off, Ansible's default, it changes nothing: Ansible puts its own
-  # module file for every become task, of any role, in that account's ~/.ansible/tmp.
+# On stdin, like every become that runs this script. With pipelining on, nothing root
+# runs for it is then in a file of the connecting account's (MEASURED on ansible-core
+# 2.18.20 and 2.22.0; the script module leaves the script there, pipelining or not).
+# With pipelining off, Ansible's default, it changes nothing: Ansible puts its own
+# module file for every become task, of any role, in that account's ~/.ansible/tmp.
+#
+# `npm_ignore_scripts is defined`: the template needs the role's defaults, which
+# tests/bats/38 does not load when it imports this file on its own. tests/bats/50
+# loads them, so the templates are named from this file's directory, ../templates/,
+# like ../files/: the role's templates/ is not searched there.
+- name: Say what merging does to /etc/npmrc (nothing is changed)
+  become: true
   ansible.builtin.command:
-    cmd: /bin/bash -s -- classify npm-global
+    cmd: /bin/bash -s -- preview
+    stdin: "{{ lookup('ansible.builtin.file', '../files/user-config.sh') }}"
+  environment:
+    SCH_UCF_PATH: /etc/npmrc
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', '../templates/etc-npmrc.j2') }}"
+    SCH_UCF_ROOT: "1"
+  register: npm_etc_preview
+  changed_when: false
+  check_mode: false
+  when:
+    - "'all' in (ansible_run_tags | default(['all'])) or 'npm' in (ansible_run_tags | default(['all']))"
+    - "'npm' not in (ansible_skip_tags | default([]))"
+    - npm_ignore_scripts is defined
+
+- name: Say what merging does to npm's resolved global config (nothing is changed)
+  become: "{{ 'as root' in (npm_global_preflight.stdout_lines | default([])) }}"
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- preview
     stdin: "{{ lookup('ansible.builtin.file', '../files/user-config.sh') }}"
   environment:
     SCH_UCF_PATH: "{{ npm_global_preflight.stdout_lines | first }}"
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', '../templates/npmrc.j2') }}"
     SCH_UCF_ROOT: "{{ ('as root' in npm_global_preflight.stdout_lines) | ternary('1', '0') }}"
-  register: npm_global_class
+  register: npm_global_preview
   changed_when: false
   check_mode: false
-  failed_when: npm_global_class.rc | default(1) not in [0, 42]
-  when: npm_global_preflight.stdout_lines | default([]) | length > 0
-
-- name: Fail when npm's global config exists and this project did not write it
-  ansible.builtin.fail:
-    msg: |
-      [supply-chain-hardening] Refusing to overwrite npm's global config, which is
-      not exactly what this project wrote:
-
-        {{ npm_global_preflight.stdout_lines | first }}
-
-      It commonly holds a corporate registry and its token; overwriting it blindly
-      can cause dependency confusion or break installs entirely. Nothing has been
-      changed yet.
-
-      To proceed, either:
-        1. Move the file aside, then re-run; or
-        2. Set `accept_etc_overwrite=true` to overwrite it anyway (e.g.
-           `ansible-playbook site.yml -e accept_etc_overwrite=true`). It is copied
-           next to itself first (0600), as <file>.<pid>.<YYYY-MM-DD@HH:MM:SS>~.
   when:
-    - npm_global_class.stdout_lines is defined
-    - npm_global_class.stdout_lines | select('match', 'foreign ') | list | length > 0
-    - not (accept_etc_overwrite | default(false) | bool)
+    - npm_global_preflight.stdout_lines | default([]) | length > 0
+    - npm_ignore_scripts is defined
+
+- name: Report what merging does to npm's global config
+  ansible.builtin.debug:
+    msg: "{{ (npm_etc_preview.stdout_lines | default([])) + (npm_global_preview.stdout_lines | default([])) }}"
+  when: ((npm_etc_preview.stdout_lines | default([])) + (npm_global_preview.stdout_lines | default([]))) | length > 0
 
 - name: Look up the passwd home, where tasks/maven.yml writes settings.xml
   ansible.builtin.import_tasks: passwd_home.yml

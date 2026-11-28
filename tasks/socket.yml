@@ -701,11 +701,33 @@
     cmd: |
       set -o pipefail
       if [ -f /usr/local/bin/npm ] && {{ sch_is_wrapper_sh }} /usr/local/bin/npm 2>/dev/null; then
-        # Wrapper already deployed — re-find the real npm to re-render
-        # the wrapper. Same anti-recursion logic as before.
-        CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vFx '/usr/local/bin' | tr '\n' ':' | sed 's/:$//')
-        PATH="$CLEAN_PATH" command -v npm 2>/dev/null \
-          || { [ -x /usr/local/bin/npm-real ] && echo /usr/local/bin/npm-real; }
+        # Wrapper already deployed: the npm it wraps, by the rule of the block
+        # marked "wrapped npm" (the same in tasks/npm.yml, tasks/npm_versions.yml and
+        # ucf_npm in files/user-config.sh, where the reasons are; tests/ci/14 compares
+        # them): an npm installed globally into /usr/local, whose link the wrapper
+        # took, then the npm the wrapper names while it is there. Searching PATH
+        # without /usr/local/bin re-pointed it: where the first apply had wrapped an
+        # `npm install -g npm@latest` symlinked here, the second found the distro's
+        # /usr/bin/npm and swapped the newer npm for it, age gate and all (MEASURED:
+        # RHEL 9.9, RHEL 10.3, SLES 16, 2026-11-28: the second apply changed it from
+        # npm 12.2.3 to 10.9.9, and later ones kept 10.9.9, with REAL_NPM='/usr/bin/npm'
+        # in the wrapper; the npm@latest in /usr/local/lib/node_modules/npm is what heals
+        # those). That search is the fallback, with the same anti-recursion logic as
+        # before.
+        # >>> wrapped npm
+        npm=/usr/local/lib/node_modules/npm/bin/npm-cli.js
+        if [ ! -x "$npm" ] || {{ sch_is_wrapper_sh }} "$npm" 2>/dev/null; then
+          npm=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" /usr/local/bin/npm | head -n 1)
+          if [ -z "$npm" ] || [ ! -x "$npm" ] || {{ sch_is_wrapper_sh }} "$npm" 2>/dev/null; then npm=""; fi
+        fi
+        # <<< wrapped npm
+        if [ -n "$npm" ]; then
+          echo "$npm"
+        else
+          CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vFx '/usr/local/bin' | tr '\n' ':' | sed 's/:$//')
+          PATH="$CLEAN_PATH" command -v npm 2>/dev/null \
+            || { [ -x /usr/local/bin/npm-real ] && echo /usr/local/bin/npm-real; }
+        fi
       elif [ -e /usr/local/bin/npm ]; then
         # Raw binary or symlink at /usr/local/bin/npm — follow to canonical
         # path. Handles /opt/node-X/bin/npm via /usr/local/bin/npm symlink.

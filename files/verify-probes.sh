@@ -4879,8 +4879,17 @@ else
       clockmsg="lockfile state at $PWD could not be established"
     fi
     if ! printf '%s\n' "$cdisp_nolock" | grep -qx -- '--locked' && [ "$cdisp_nolock" != "<unprobed>" ] && [ ! -f "$PWD/Cargo.lock" ]; then
-      row GAP FUNCTIONAL "cargo publish-age gate" \
-        "no publish-age backend, and the wrapper's fallback (--locked) applies ONLY when a lockfile exists - $clockmsg. \`cargo build\` here resolves the newest matching versions unchecked and runs their build.rs"
+      if scv_home_only; then
+        # harden.sh --home-only installs no cargo-cooldown, so re-running it does not
+        # give this wrapper a backend. MEASURED (2026-11-28, an Ubuntu 26.04 VM run as
+        # root with HOME=/home/hatch, the cargo wrapper an earlier full apply left at
+        # /usr/bin/cargo): as a config gap it failed --fail-on=config with "1 fixable".
+        scv_toolchain_gap cargo.age-gate FUNCTIONAL "cargo publish-age gate" \
+          "no publish-age backend, and the wrapper's fallback (--locked) applies ONLY when a lockfile exists - $clockmsg. \`cargo build\` here resolves the newest matching versions unchecked and runs their build.rs. harden.sh --home-only installs no cargo-cooldown, so re-running it does not close this"
+      else
+        row GAP FUNCTIONAL "cargo publish-age gate" \
+          "no publish-age backend, and the wrapper's fallback (--locked) applies ONLY when a lockfile exists - $clockmsg. \`cargo build\` here resolves the newest matching versions unchecked and runs their build.rs"
+      fi
     elif rustc_below_cooldown_msrv; then
       row WEAK FUNCTIONAL "cargo publish-age gate" \
         "wrapper injects --locked but there is no publish-age backend - it protects a committed lockfile and does nothing for \`cargo update\` or a fresh checkout ($clockmsg). install_cargo_cooldown: true will NOT help here: rustc ${CARGO_RUSTC_V:-?} is below cargo-cooldown's MSRV 1.91.1, so the build from source fails. Use a rustup toolchain >= 1.91.1"

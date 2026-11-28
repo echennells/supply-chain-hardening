@@ -1,11 +1,11 @@
 ; Managed by ansible-supply-chain-security
-; npm config — npm-RECOGNISED keys only. Deployed both as per-user ~/.npmrc and
-; as npm's resolved global config on non-apt layouts (e.g. /usr/etc/npmrc on
-; NodeSource/nvm/fnm/volta). The pnpm-only keys (minimum-release-age*) are
-; deliberately NOT emitted here: npm warns `Unknown global config` about them on
-; every command (measured npm 11.19). pnpm 9 and 10 do read that global file, so
-; `ignore-scripts` reaches them there and their age gate does not. See
-; templates/etc-npmrc.j2 (ECH-196).
+; npm config — npm-RECOGNISED keys only. Merged into the per-user ~/.npmrc and
+; into npm's resolved global config where that is not /etc/npmrc (e.g.
+; /usr/etc/npmrc on NodeSource/nvm/fnm/volta). The pnpm-only keys
+; (minimum-release-age*) are deliberately NOT emitted here: npm warns `Unknown
+; global config` about them on every command (measured npm 11.19). pnpm 9 and
+; 10 do read that global file, so `ignore-scripts` reaches them there and their
+; age gate does not. See templates/etc-npmrc.j2 (ECH-196).
 ignore-scripts={{ npm_ignore_scripts | bool | lower }}
 ; audit: install-time vulnerability REPORT only. It prints counts and blocks
 ; nothing, and POSTs the dependency tree to the registry. Observability, not a

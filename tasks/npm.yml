@@ -32,26 +32,55 @@
   check_mode: false
   changed_when: "'changed' in (sch_ucf_npmrc.stdout_lines | default([]))"
 
-- name: Deploy hardened /etc/npmrc (correct on Debian/Ubuntu apt npm; harmless baseline elsewhere)
+- name: Merge the hardened settings into /etc/npmrc (npm's global config on apt and RHEL npm)
   # The per-user ~/.npmrc above only protects the user the role ran against.
   # `sudo npm install` flips $HOME to /root and misses it; so does any other
-  # account. /etc/npmrc is npm's global config ONLY on Debian/Ubuntu apt npm,
-  # whose builtin /usr/share/npm/npmrc redirects `globalconfig` here. On
-  # NodeSource, nvm, fnm, volta, asdf, Homebrew and the official node images
-  # npm's globalconfig is {prefix}/etc/npmrc (e.g. /usr/etc, /usr/local/etc)
-  # and this file is never read — so the sudo / other-user path gets no
-  # config-file coverage there (ECH-149). The "Resolve npm's real global
-  # config path" tasks after npm detection below deploy to the actual path on
-  # those layouts. This file is kept unconditionally because it is correct on
-  # apt hosts and harmless where inert. pnpm does not read it on any of these
+  # account. /etc/npmrc is npm's global config where npm's builtin npmrc redirects
+  # `globalconfig` here: Debian's and Ubuntu's apt npm (/usr/share/npm/npmrc) and
+  # RHEL's nodejs-npm (/usr/lib/node_modules_22/npm/npmrc, MEASURED on RHEL 10.3). On
+  # NodeSource, nvm, fnm, volta, asdf, Homebrew and the official node images npm's
+  # globalconfig is {prefix}/etc/npmrc (e.g. /usr/etc, /usr/local/etc) and this file
+  # is never read (ECH-149); the "Resolve npm's real global config path" tasks after
+  # npm detection below write that one too. This file is written whatever npm is
+  # here, so it is in place when npm arrives. pnpm does not read it on any of these
   # (measured, see templates/etc-npmrc.j2).
+  #
+  # Merged, never replaced, the same way as ~/.npmrc (files/user-config.sh, ucf_npmrc
+  # npm-global): this project's block at the top, every other line kept. A line that
+  # sets one of the block's keys is taken out after a copy next to the file (0600),
+  # and the summary names the key. MEASURED on Azure VMs (2026-11-28): RHEL 9.9's and
+  # 10.3's nodejs-npm ship this file (prefix=/usr/local, python=, update-notifier=false);
+  # the preflight stopped on it as "often a corporate registry", and with
+  # accept_etc_overwrite=true the template that was here replaced it, after which
+  # `npm config get prefix` was /usr and global installs went under /usr. Replacing a
+  # corporate registry and token here would send installs to the public registry.
+  # The file keeps its owner and mode (one that is not there is 0644 root:root), and
+  # root merges only into a /etc/npmrc that is root's, is no link and that no other
+  # account can write (ucf_no_root); anything else is left as it is and listed in the
+  # summary. No line of the file is printed, and no diff is produced, so --diff prints
+  # none either.
   become: true
-  ansible.builtin.template:
-    src: etc-npmrc.j2
-    dest: /etc/npmrc
-    owner: root
-    group: root
-    mode: "0644"
+  ansible.builtin.command:
+    cmd: /bin/bash -s -- npmrc npm-global
+    stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
+  environment:
+    SCH_UCF_PATH: /etc/npmrc
+    SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'etc-npmrc.j2') }}"
+    SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
+    SCH_UCF_ROOT: "1"
+  register: sch_ucf_etc_npmrc
+  check_mode: false
+  changed_when: "'changed' in (sch_ucf_etc_npmrc.stdout_lines | default([]))"
+  failed_when: sch_ucf_etc_npmrc.rc | default(2) not in [0, 1]
+
+- name: Record skipped protection — /etc/npmrc
+  ansible.builtin.set_fact:
+    skipped_protections: >-
+      {{ (skipped_protections | default([])) + [
+           "npm's global config — " ~ (sch_ucf_etc_npmrc.stdout_lines | select('match', 'error: ') | map('regex_replace', '^error: ', '') | join('; ') | default('/etc/npmrc could not be written', true))
+           ~ ". It is npm's global config on Debian's, Ubuntu's and RHEL's own npm, what `sudo npm` and every other account read there; your own ~/.npmrc is not affected."
+         ] }}
+  when: sch_ucf_etc_npmrc.rc | default(0) != 0
 
 - name: Check if npm is installed
   # Check canonical locations across the most common Node install methods
@@ -59,27 +88,43 @@
   # connection environment misses npm when the user installed Node via nvm,
   # fnm, volta, asdf, etc. — those tools add PATH only through ~/.bashrc.
   # Coverage: system (apt/dnf), volta, asdf, nodenv, nvm, fnm.
+  #
+  # In the one order the role takes "the npm" in: the block marked "the npm" is the same
+  # in tasks/npm_versions.yml and in ucf_npm (files/user-config.sh, where the reasons
+  # are), and tests/ci/14 compares them. /usr/local/bin/npm first, as on every PATH:
+  # `npm install -g npm@latest` puts the npm people run there wherever npm's prefix is
+  # /usr/local (RHEL's stock /etc/npmrc sets it; SLES), over the distro's older
+  # /usr/bin/npm. Probing /usr/bin first judged that one instead (MEASURED: RHEL 9.9,
+  # RHEL 10.3 and SLES 16 with npm 12.2.3 in /usr/local and 10.9.9 in /usr/bin: the run
+  # said npm 10.9.9 had no age gate). Our own wrapper there: the npm it wraps.
   ansible.builtin.shell:
     cmd: |
-      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm"; do
-        if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
+      # >>> the npm
+      npm=""
+      if [ -x /usr/local/bin/npm ]; then
+        if {{ sch_is_wrapper_sh }} /usr/local/bin/npm 2>/dev/null; then
+          # >>> wrapped npm
+          npm=/usr/local/lib/node_modules/npm/bin/npm-cli.js
+          if [ ! -x "$npm" ] || {{ sch_is_wrapper_sh }} "$npm" 2>/dev/null; then
+            npm=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" /usr/local/bin/npm | head -n 1)
+            if [ -z "$npm" ] || [ ! -x "$npm" ] || {{ sch_is_wrapper_sh }} "$npm" 2>/dev/null; then npm=""; fi
+          fi
+          # <<< wrapped npm
+        else
+          npm=/usr/local/bin/npm
         fi
-      done
-      for p in "$HOME"/.nvm/versions/node/*/bin/npm; do
-        if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
-        fi
-      done
-      for p in "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
-        if [ -x "$p" ]; then
-          echo "$p"
-          exit 0
-        fi
-      done
-      PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null
+      fi
+      if [ -z "$npm" ]; then
+        for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
+                 "$HOME"/.nvm/versions/node/*/bin/npm "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
+                 "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
+          if [ -x "$p" ]; then npm=$p; break; fi
+        done
+      fi
+      [ -n "$npm" ] || npm=$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null) || npm=""
+      # <<< the npm
+      [ -n "$npm" ] || exit 1
+      echo "$npm"
     executable: /bin/bash
   register: npm_check
   changed_when: false
@@ -135,7 +180,7 @@
   failed_when: false
   when: npm_check.rc == 0
 
-- name: Deploy hardened npmrc to npm's resolved global config path (non-apt layouts)
+- name: Merge the hardened settings into npm's resolved global config (non-apt layouts)
   # Closes the sudo / other-user gap on every layout where globalconfig is not
   # /etc/npmrc. Idempotent no-op on Debian apt (guarded out above).
   #
@@ -145,22 +190,21 @@
   # their global config too (measured), so ignore-scripts reaches a `sudo pnpm` or
   # another user's here, and the age gate does not.
   #
-  # Replaced whole, but only a file that is exactly what this project last wrote:
-  # anything else stopped the play in preflight, unless accept_etc_overwrite=true,
-  # which copies it first. In the user's home, or a prefix that is the user's
-  # (linuxbrew), it is written as the user. Root writes it only where no other account
-  # controls the path, whatever the path is: no link in it, and every part of it root's
-  # and writable by root alone (ucf_no_root, judged by the process that writes). Anywhere
-  # else it is left alone, and the summary says so.
+  # Merged, never replaced, as /etc/npmrc above is (ucf_npmrc npm-global). MEASURED
+  # (d738db8, NodeSource's /usr/etc/npmrc): when it was replaced, a registry and a
+  # token in it were gone after an apply. In the user's home, or a prefix that is the
+  # user's (linuxbrew), it is written as the user. Root writes it only where no other
+  # account controls the path, whatever the path is: no link in it, and every part of
+  # it root's and writable by root alone (ucf_no_root, judged by the process that
+  # writes). Anywhere else it is left alone, and the summary says so.
   become: "{{ 'as root' in (npm_globalconfig.stdout_lines | default([])) }}"
   ansible.builtin.command:
-    cmd: /bin/bash -s -- replace npm-global
+    cmd: /bin/bash -s -- npmrc npm-global
     stdin: "{{ lookup('ansible.builtin.file', 'user-config.sh') }}"
   environment:
     SCH_UCF_PATH: "{{ npm_globalconfig.stdout_lines | first }}"
     SCH_UCF_BODY: "{{ lookup('ansible.builtin.template', 'npmrc.j2') }}"
     SCH_UCF_DRY: "{{ ansible_check_mode | ternary('1', '0') }}"
-    SCH_UCF_FOREIGN: "{{ (accept_etc_overwrite | default(false) | bool) | ternary('keep', 'refuse') }}"
     SCH_UCF_ROOT: "{{ ('as root' in npm_globalconfig.stdout_lines) | ternary('1', '0') }}"
   register: sch_ucf_npm_global
   check_mode: false
