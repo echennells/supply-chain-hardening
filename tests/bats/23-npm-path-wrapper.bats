@@ -231,3 +231,35 @@ EOF
     return 1
   fi
 }
+
+@test "an npm in /usr/local over the distro's /usr/bin/npm: every apply judges it and keeps the wrapper on it" {
+  # Where npm's prefix is /usr/local (RHEL's stock /etc/npmrc sets it; SLES),
+  # `npm install -g npm@latest` leaves the npm people run as a symlink at
+  # /usr/local/bin/npm, over the distro's older /usr/bin/npm. The role used to
+  # judge /usr/bin/npm, and its second apply re-pointed the wrapper there
+  # (MEASURED: RHEL 9.9, RHEL 10.3, SLES 16; npm 12.2.3 -> 10.9.9, age gate gone).
+  # The stub stands in for that npm and passes every call to the real one, so
+  # nothing else here changes.
+  [ -x /usr/bin/npm ] || skip "needs an npm at /usr/bin/npm"
+  local w=/usr/local/bin/npm save="$BATS_TEST_TMPDIR/npm-wrapper" fail="" i real
+  local top=/usr/local/lib/node_modules/sch-npm-latest-stub cli=/usr/local/lib/node_modules/sch-npm-latest-stub/bin/npm-cli.js
+  cp -p "$w" "$save"
+  mkdir -p "$top/bin" && printf '#!/bin/sh\nexec /usr/bin/npm "$@"\n' > "$cli" && chmod 755 "$cli"
+  ln -sfn ../lib/node_modules/sch-npm-latest-stub/bin/npm-cli.js "$w"
+  cd "$ROLE_DIR"
+  for i in 1 2 3; do
+    run ansible-playbook site.yml --connection=local --limit localhost --tags npm -v
+    [ "$status" -eq 0 ] || { fail="apply $i: rc=$status $(echo "$output" | grep -E '^fatal|ERROR!' | head -3)"; break; }
+    real=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" "$w")
+    [ "$real" = "$cli" ] || { fail="apply $i: the wrapper runs '$real', not $cli"; break; }
+    # Asked of the symlink before the first wrapper, of what the wrapper runs after; never of /usr/bin/npm.
+    { echo "$output" | grep -qF "\"$cli\", \"--version\"" || echo "$output" | grep -qF "\"$w\", \"--version\""; } \
+      && ! echo "$output" | grep -qF '"/usr/bin/npm", "--version"' \
+      || { fail="apply $i: the npm version was asked of $(echo "$output" | grep -oE '"[^"]*npm[^"]*", "--version"' | head -1)"; break; }
+    if [ "$i" -gt 1 ] && echo "$output" | awk '/^TASK \[/{t=$0} /^changed:/ && t ~ /Deploy npm PATH wrapper to \/usr\/local\/bin/{f=1} END{exit !f}'; then
+      fail="apply $i: the wrapper changed again"; break
+    fi
+  done
+  cp -p "$save" "$w"; rm -rf "$top"
+  [ -z "$fail" ] || { echo "$fail"; return 1; }
+}

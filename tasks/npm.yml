@@ -59,8 +59,28 @@
   # connection environment misses npm when the user installed Node via nvm,
   # fnm, volta, asdf, etc. — those tools add PATH only through ~/.bashrc.
   # Coverage: system (apt/dnf), volta, asdf, nodenv, nvm, fnm.
+  #
+  # /usr/local/bin first, as on every PATH: `npm install -g npm@latest` puts the
+  # npm people run there wherever npm's prefix is /usr/local (RHEL's stock
+  # /etc/npmrc sets it; SLES), over the distro's older /usr/bin/npm. Probing
+  # /usr/bin first judged that one instead (MEASURED: RHEL 9.9, RHEL 10.3 and
+  # SLES 16 with npm 12.2.3 in /usr/local and 10.9.9 in /usr/bin: the run said
+  # npm 10.9.9 had no age gate). Our own wrapper there runs the npm it records.
   ansible.builtin.shell:
     cmd: |
+      w=/usr/local/bin/npm
+      if [ -x "$w" ]; then
+        if {{ sch_is_wrapper_sh }} "$w" 2>/dev/null; then
+          r=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" "$w" | head -n 1)
+          if [ -n "$r" ] && [ -x "$r" ] && ! {{ sch_is_wrapper_sh }} "$r" 2>/dev/null; then
+            echo "$r"
+            exit 0
+          fi
+        else
+          echo "$w"
+          exit 0
+        fi
+      fi
       for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm"; do
         if [ -x "$p" ]; then
           echo "$p"
