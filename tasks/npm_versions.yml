@@ -12,19 +12,40 @@
 # Each asks, rather than one reading another's register: a skipped task overwrites
 # its register.
 #
-# The first line is the npm in use, in the order npm.yml looks, or "-" when it
-# does not answer; no line at all means no npm. Both of those write the keys.
+# The first line is the npm in use, in the order npm.yml looks (the block marked "the
+# npm", the same there and in ucf_npm in files/user-config.sh; tests/ci/14 compares
+# them), or "-" when it does not answer; no line at all means no npm. Both of those
+# write the keys. Starting at /usr/bin/npm judged the distro's npm where an npm@latest
+# in /usr/local is the one run: with 10.9.9 there and 11.5.0 in /usr/local, the keys
+# 11.5.0 warns about on every command were written (found in review).
 - name: Find the version of every npm on this host (some warn about keys they do not know)
   ansible.builtin.shell:
     cmd: |
-      first=""
-      for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
-               "$HOME"/.nvm/versions/node/*/bin/npm \
-               "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
-               "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm \
-               "$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null)"; do
-        if [ -n "$p" ] && [ -x "$p" ]; then first=$p; break; fi
-      done
+      # >>> the npm
+      npm=""
+      if [ -x /usr/local/bin/npm ]; then
+        if {{ sch_is_wrapper_sh }} /usr/local/bin/npm 2>/dev/null; then
+          # >>> wrapped npm
+          npm=/usr/local/lib/node_modules/npm/bin/npm-cli.js
+          if [ ! -x "$npm" ] || {{ sch_is_wrapper_sh }} "$npm" 2>/dev/null; then
+            npm=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" /usr/local/bin/npm | head -n 1)
+            if [ -z "$npm" ] || [ ! -x "$npm" ] || {{ sch_is_wrapper_sh }} "$npm" 2>/dev/null; then npm=""; fi
+          fi
+          # <<< wrapped npm
+        else
+          npm=/usr/local/bin/npm
+        fi
+      fi
+      if [ -z "$npm" ]; then
+        for p in /usr/bin/npm /usr/local/bin/npm "$HOME/.volta/bin/npm" "$HOME/.asdf/shims/npm" "$HOME/.nodenv/shims/npm" \
+                 "$HOME"/.nvm/versions/node/*/bin/npm "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/*/installation/bin/npm \
+                 "$HOME"/.local/share/fnm/node-versions/*/installation/bin/npm "$HOME"/.fnm/node-versions/*/installation/bin/npm; do
+          if [ -x "$p" ]; then npm=$p; break; fi
+        done
+      fi
+      [ -n "$npm" ] || npm=$(PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH" command -v npm 2>/dev/null) || npm=""
+      # <<< the npm
+      first=$npm
       [ -n "$first" ] || exit 0
       v=$(cd / && "$first" --version 2>/dev/null | head -n 1)
       case "$v" in

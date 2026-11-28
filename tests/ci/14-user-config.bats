@@ -868,6 +868,134 @@ PY
   [ -z "$(ls -A "$TEST_HOME")" ]
 }
 
+@test "npm: the role takes the npm in one order; npm.yml, npm_versions.yml and ucf_npm hold one block, socket.yml its wrapped-npm part" {
+  # A place that starts at /usr/bin/npm judges, or resolves the global config of, the
+  # distro's npm where an npm@latest in /usr/local is the one run (found in review).
+  local norm='s/^[[:space:]]*//; s/{{ sch_is_wrapper_sh }}/ucf_is_wrapper/g' f
+  blk() { sed -n "/# >>> $1\$/,/# <<< $1\$/p" "$2" | sed "$norm"; }
+  blk 'the npm' "$ROOT/files/user-config.sh" > "$BATS_TEST_TMPDIR/npm"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/npm")" -gt 15 ]
+  for f in tasks/npm.yml tasks/npm_versions.yml; do
+    diff "$BATS_TEST_TMPDIR/npm" <(blk 'the npm' "$ROOT/$f") || { echo "$f"; return 1; }
+  done
+  blk 'wrapped npm' "$ROOT/files/user-config.sh" > "$BATS_TEST_TMPDIR/wrapped"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/wrapped")" -gt 4 ]
+  diff "$BATS_TEST_TMPDIR/wrapped" <(blk 'wrapped npm' "$ROOT/tasks/socket.yml")
+  # in the order this test means: /usr/local/bin/npm, the npm@latest in /usr/local,
+  # the wrapper's REAL_NPM, and only then /usr/bin/npm
+  local a b c e
+  a=$(grep -n 'if \[ -x /usr/local/bin/npm \]' "$BATS_TEST_TMPDIR/npm" | cut -d: -f1)
+  b=$(grep -n '^npm=/usr/local/lib/node_modules/npm/bin/npm-cli.js$' "$BATS_TEST_TMPDIR/npm" | cut -d: -f1)
+  c=$(grep -n "REAL_NPM" "$BATS_TEST_TMPDIR/npm" | head -1 | cut -d: -f1)
+  e=$(grep -n '^for p in /usr/bin/npm ' "$BATS_TEST_TMPDIR/npm" | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$e" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ] && [ "$c" -lt "$e" ]
+  # and what each does with it
+  grep -q '^      first=\$npm$' "$ROOT/tasks/npm_versions.yml"
+  grep -q '^      echo "\$npm"$' "$ROOT/tasks/npm.yml"
+}
+
+# fake_ucf_npm <dir>: ucf_npm and ucf_is_wrapper of the block, with /usr/local and
+# /usr/bin/npm under <dir>
+fake_ucf_npm() {
+  sed -n '/^ucf_npm() {$/,/^}$/p; /^ucf_is_wrapper() {$/,/^}$/p' "$ROOT/files/user-config.sh" \
+    | sed "s#/usr/local/#$1/usr/local/#g; s#/usr/bin/npm#$1/usr/bin/npm#g" > "$BATS_TEST_TMPDIR/npm.sh"
+  # shellcheck disable=SC1091
+  . "$BATS_TEST_TMPDIR/npm.sh"
+}
+
+@test "npm: the npm is the one in /usr/local, or the npm our wrapper there wraps, before the distro's, and npm's global config is that npm's" {
+  lib
+  local d="$BATS_TEST_TMPDIR/r" h="$BATS_TEST_TMPDIR/nohome" cli
+  mkdir -p "$d/usr/bin" "$d/usr/local/bin" "$d/usr/local/lib/node_modules/npm/bin" "$h"
+  cli="$d/usr/local/lib/node_modules/npm/bin/npm-cli.js"
+  mknpm() { # <file> <its globalconfig>: an npm that says where its global config is
+    printf '#!/bin/sh\ncase "$*" in "config get globalconfig") echo %s ;; esac\n' "$2" > "$1"; chmod 755 "$1"
+  }
+  wrapper() { # <REAL_NPM>: this project's wrapper at /usr/local/bin/npm
+    rm -f "$d/usr/local/bin/npm"
+    printf "#!/bin/sh\n# /usr/local/bin/npm — supply-chain-hardening wrapper\nREAL_NPM='%s'\nexec \"\$REAL_NPM\" \"\$@\"\n" "$1" > "$d/usr/local/bin/npm"
+    chmod 755 "$d/usr/local/bin/npm"
+  }
+  fake_ucf_npm "$d"
+  pick() { ( cd / && HOME="$h" PATH=/usr/bin:/bin ucf_npm ); }
+  global() { ( cd / && HOME="$h" PATH=/usr/bin:/bin ucf_path npm-global ); }
+  # the distro's npm, which names /etc/npmrc (RHEL's builtin npmrc does), alone
+  mknpm "$d/usr/bin/npm" /etc/npmrc
+  [ "$(pick)" = "$d/usr/bin/npm" ]
+  [ -z "$(global)" ]                       # /etc/npmrc has a task of its own
+  # npm@latest installed into /usr/local, linked into its bin; no builtin npmrc, so
+  # its global config is {prefix}/etc/npmrc
+  mknpm "$cli" /usr/etc/npmrc
+  ln -s ../lib/node_modules/npm/bin/npm-cli.js "$d/usr/local/bin/npm"
+  [ "$(pick)" = "$d/usr/local/bin/npm" ]
+  [ "$(global)" = /usr/etc/npmrc ]
+  # our wrapper took that link and names the distro's npm, as two applies of the order
+  # before this left it (MEASURED on RHEL 9.9, 10.3 and SLES 16): the npm@latest still
+  wrapper "$d/usr/bin/npm"
+  [ "$(pick)" = "$cli" ]
+  [ "$(global)" = /usr/etc/npmrc ]
+  # with no npm installed into /usr/local, the npm the wrapper names
+  rm -rf "$d/usr/local/lib/node_modules/npm"
+  mknpm "$d/opt-npm" /opt/etc/npmrc
+  wrapper "$d/opt-npm"
+  [ "$(pick)" = "$d/opt-npm" ]
+  [ "$(global)" = /opt/etc/npmrc ]
+  # one that is gone, or is itself a wrapper, is not it: the distro's again
+  wrapper "$d/usr/local/bin/npm"
+  [ "$(pick)" = "$d/usr/bin/npm" ]
+  rm -f "$d/opt-npm"; wrapper "$d/opt-npm"
+  [ "$(pick)" = "$d/usr/bin/npm" ]
+}
+
+@test "npm global config: one that needs no change is ok where its directory cannot be written; one that needs one is refused there, as before" {
+  # An image built with the role has a read-only /etc on its next apply
+  # (docs/container-images.md); the template task and ucf_replace said ok there.
+  [ "$(id -u)" != 0 ] || skip "root writes to a 0555 directory"
+  local d="$BATS_TEST_TMPDIR/g/etc" g body
+  mkdir -p "$d"; g="$d/npmrc"
+  body=$(npm_body)
+  printf 'registry=https://corp.example.invalid/\n' > "$g"
+  SCH_UCF_PATH="$g" SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" npmrc npm-global > /dev/null
+  chmod 555 "$d"
+  run env SCH_UCF_PATH="$g" SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" npmrc npm-global
+  chmod 755 "$d"
+  [ "$status" -eq 0 ]
+  [ "$output" = "path $g"$'\n'"keeps registry"$'\n'"ok" ] || { echo "$output"; return 1; }
+  chmod 555 "$d"
+  [[ "$(SCH_UCF_PATH="$g" SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" preview)" == *", and it keeps registry. Nothing in it changes." ]]
+  chmod 755 "$d"
+  # CONTROL: a line it has to take out, in the same directory: refused, and nothing changes
+  echo 'ignore-scripts=false' >> "$g"
+  cp "$g" "$BATS_TEST_TMPDIR/before"
+  chmod 555 "$d"
+  run env SCH_UCF_PATH="$g" SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" npmrc npm-global
+  local said
+  said=$(SCH_UCF_PATH="$g" SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" preview)
+  chmod 755 "$d"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"error: $g cannot be replaced: $d is not writable by $(id -un); it was left as it is" ]] || { echo "$output"; return 1; }
+  [[ "$said" == "$g: npm's global config. It cannot be replaced: $d is not writable by $(id -un). The run leaves it"* ]] || { echo "$said"; return 1; }
+  cmp "$g" "$BATS_TEST_TMPDIR/before"
+  [ "$(ls -A "$d")" = npmrc ]
+  # and a file with a NUL in it is still refused, changed or not
+  printf 'a=b\0\n' > "$g"
+  run env SCH_UCF_PATH="$g" SCH_UCF_BODY="$body" bash "$ROOT/files/user-config.sh" npmrc npm-global
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"holds NUL bytes"* ]]
+}
+
+@test "npm global config: a key that looks like a token is counted, never named" {
+  lib
+  local keep=$'registry=https://x.invalid/\ndeadbeefcafebabe0123456789abcdef01234567=1\nd3adb33f-4e5f-6a7b-8c9d-0e1f2a3b4c5d=true\nabcdef0123456789\nca=x\ncafe=1\ncafile=/x\naccess=public\n'
+  [ "$(ucf_npmrc_keys "$keep")" = "keeps registry, ca, cafe, cafile, access, 3 other lines" ] || { ucf_npmrc_keys "$keep"; return 1; }
+  # and so in what the preflight says
+  local g="$BATS_TEST_TMPDIR/k/etc/npmrc" out
+  mkdir -p "${g%/npmrc}"; printf '%s' "$keep" > "$g"
+  out=$(SCH_UCF_PATH="$g" SCH_UCF_BODY="$(npm_body)" bash "$ROOT/files/user-config.sh" preview)
+  [[ "$out" == *"it keeps registry, ca, cafe, cafile, access, 3 other lines."* ]] || { echo "$out"; return 1; }
+  [[ "$out" != *deadbeef* && "$out" != *d3adb33f* && "$out" != *abcdef0123* ]]
+}
+
 # --------------------------------------------------------------- modes and links
 
 @test "user config: ~/.npmrc ends 0600, or tighter if it was; nothing is loosened" {
@@ -1377,9 +1505,12 @@ root_without_chown() { # <allowed: owner|nothing>
   # merged, it says nothing changes
   SCH_UCF_PATH="$g" SCH_UCF_BODY="$npm_body" bash "$ROOT/files/user-config.sh" npmrc npm-global > /dev/null
   [[ "$(_pf_npm_global "$g" user)" == *", and it keeps registry, //...:_authToken. Nothing in it changes." ]] || { _pf_npm_global "$g" user; return 1; }
-  # one this account cannot rewrite, and paths root does not write to: named, not a STOP
+  # one this account cannot rewrite: nothing to change is said so, a change is named as
+  # left alone, and paths root does not write to are named: none of it a STOP
   chmod 555 "$TEST_HOME/npm/etc"
   if [ "$(id -u)" != 0 ]; then
+    [[ "$(_pf_npm_global "$g" user)" == *", and it keeps registry, //...:_authToken. Nothing in it changes." ]] || { _pf_npm_global "$g" user; return 1; }
+    echo 'fund=true' >> "$g"
     [[ "$(_pf_npm_global "$g" user)" == "note  $g: npm's global config. It cannot be replaced: "*". The run leaves it as it is and lists it in the run summary." ]] || { _pf_npm_global "$g" user; return 1; }
   fi
   chmod 755 "$TEST_HOME/npm/etc"
@@ -1530,6 +1661,49 @@ gnpm() {
     [ "$out" = "warn npm: this project's settings were not merged into $g: it $why, and root writes only to paths no other account controls. It was left as it is. Per-user config still applies, but a later \`sudo\` step will not see them there" ] || { echo "$x: $out"; return 1; }
     [ "$(sudo ls -lanR "$d"; sudo cksum "$d/theirs" "$g")" = "$t" ] || { echo "$x changed"; return 1; }
   done
+}
+
+@test "npm global config: an etc/npmrc reached through links of root's is merged where they lead (macOS's /etc); one through another account's link, or leading elsewhere, is not" {
+  # macOS: /etc is a link of root's to private/etc. With every link refused, harden.sh
+  # with sudo warned about /etc/npmrc on every Mac where `sudo tee` had written it.
+  need_sudo
+  lib
+  local d out me h="$BATS_TEST_TMPDIR/mine" npm_body
+  me=$(id -un)
+  d=$(rootdir)
+  sudo mkdir -p "$d/private/etc" "$d/other" "$d/x" "$d/y"
+  sudo ln -s private/etc "$d/etc"
+  printf 'prefix=/usr/local\nupdate-notifier=false\n' | sudo tee "$d/private/etc/npmrc" >/dev/null
+  sudo chmod 644 "$d/private/etc/npmrc"
+  [ "$(ucf_global_path "$d/etc/npmrc")" = "$d/private/etc/npmrc" ]
+  out=$(npm_body | etcm "$d/etc/npmrc")
+  [[ "$out" == "warn npm: took $d/private/etc/npmrc's own lines for update-notifier out, "* ]] || { echo "$out"; return 1; }
+  [ -L "$d/etc" ]
+  sudo head -1 "$d/private/etc/npmrc" | grep -q '^; >>> supply-chain-hardening: '
+  [ "$(sudo sed '1,/^; <<< supply-chain-hardening$/d' "$d/private/etc/npmrc")" = prefix=/usr/local ]
+  [ -z "$(npm_body | etcm "$d/etc/npmrc")" ]
+  # harden.sh's preflight names it there, merged, not refused
+  npm_body="; Managed by supply-chain-harden action"$'\n'"$(settings)"
+  sed -n '/^  _pf_npm_global() { # <path> <root|user>$/,/^  }$/p' "$HARDEN_SH" > "$BATS_TEST_TMPDIR/pf.sh"
+  # shellcheck disable=SC1091
+  . "$BATS_TEST_TMPDIR/pf.sh"
+  _pf_note() { echo "note  $*"; }
+  out=$(_pf_npm_global "$d/etc/npmrc" root)
+  [[ "$out" == "note  $d/private/etc/npmrc: npm's global config, merged like ~/.npmrc, never replaced: "*"and it keeps prefix. Nothing in it changes." ]] || { echo "$out"; return 1; }
+  # Not followed: a link of this account's on the way, a link of root's to a directory
+  # that is not an etc (here root's own home), and to one that is not etc/npmrc's
+  mkdir -p "$h"; ln -s "$d/private/etc" "$h/etc"
+  sudo ln -s /root "$d/y/etc"
+  sudo ln -s ../other "$d/x/etc"
+  for out in "$h/etc/npmrc" "$d/y/etc/npmrc" "$d/x/etc/npmrc"; do
+    [ "$(ucf_global_path "$out")" = "$out" ] || { echo "followed: $out"; return 1; }
+  done
+  out=$(npm_body | etcm "$h/etc/npmrc")
+  [[ "$out" == "warn npm: this project's settings were not merged into $h/etc/npmrc: it "*", and root writes only to paths no other account controls. It was left as it is."* ]] || { echo "$out"; return 1; }
+  for out in "$d/y" "$d/x"; do
+    [ "$(npm_body | etcm "$out/etc/npmrc")" = "warn npm: this project's settings were not merged into $out/etc/npmrc: it goes through $out/etc, a symbolic link, and root writes only to paths no other account controls. It was left as it is. Per-user config still applies, but a later \`sudo\` step will not see them there" ] || { npm_body | etcm "$out/etc/npmrc"; return 1; }
+  done
+  [ -z "$(sudo ls -A "$d/other")" ] && ! sudo test -e /root/npmrc
 }
 
 # --------------------------------------------------------- the same on both surfaces

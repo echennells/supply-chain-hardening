@@ -260,6 +260,58 @@ EOF
       fail="apply $i: the wrapper changed again"; break
     fi
   done
-  cp -p "$save" "$w"; rm -rf "$top"
+  # Not through the link, if an apply failed before the wrapper replaced it.
+  rm -f "$w"; cp -p "$save" "$w"; rm -rf "$top"
+  [ -z "$fail" ] || { echo "$fail"; return 1; }
+}
+
+@test "a wrapper the earlier order left naming the distro's npm over an npm@latest in /usr/local is healed by one apply, and stays so" {
+  # Two applies of the order before 14331f1 left REAL_NPM='/usr/bin/npm' in the wrapper
+  # at /usr/local/bin/npm, while the npm@latest whose link it had replaced sat in
+  # /usr/local/lib/node_modules/npm (MEASURED: RHEL 9.9, RHEL 10.3, SLES 16,
+  # 2026-11-28), and trusting REAL_NPM kept the older npm. The npm installed into
+  # /usr/local is the npm (the block marked "wrapped npm"), and its global config is the
+  # one it names: this stub says /usr/local/etc/npmrc, as an npm with no builtin npmrc
+  # names {prefix}/etc/npmrc, and passes everything else to the real npm.
+  [ -x /usr/bin/npm ] || skip "needs an npm at /usr/bin/npm"
+  local w=/usr/local/bin/npm save="$BATS_TEST_TMPDIR/npm-wrapper" fail="" i real
+  local pkg=/usr/local/lib/node_modules/npm away="$BATS_TEST_TMPDIR/npm-pkg" cli=/usr/local/lib/node_modules/npm/bin/npm-cli.js
+  local g=/usr/local/etc/npmrc gdir_made="" g_had=""
+  grep -q "^REAL_NPM='" "$w" || skip "no npm wrapper in the image"
+  cp -p "$w" "$save"
+  if [ -e "$pkg" ] || [ -L "$pkg" ]; then mv "$pkg" "$away"; fi
+  [ -d /usr/local/etc ] || gdir_made=1
+  if [ -e "$g" ]; then g_had=1; cp -p "$g" "$BATS_TEST_TMPDIR/g"; fi
+  mkdir -p "$pkg/bin"
+  printf '#!/bin/sh\ncase "$*" in "config get globalconfig") echo %s ;; *) exec /usr/bin/npm "$@" ;; esac\n' "$g" > "$cli"
+  chmod 755 "$cli"
+  # the state those applies left, written here whatever the image's wrapper names
+  sed "s|^REAL_NPM='.*'\$|REAL_NPM='/usr/bin/npm'|" "$save" > "$w"; chmod 755 "$w"
+  cd "$ROLE_DIR"
+  for i in 1 2; do
+    run ansible-playbook site.yml --connection=local --limit localhost --tags npm -v
+    [ "$status" -eq 0 ] || { fail="apply $i: rc=$status $(echo "$output" | grep -E '^fatal|ERROR!' | head -3)"; break; }
+    real=$(sed -n "s/^REAL_NPM='\(.*\)'\$/\1/p" "$w")
+    [ "$real" = "$cli" ] || { fail="apply $i: the wrapper runs '$real', not $cli"; break; }
+    if ! echo "$output" | grep -qF "\"$cli\", \"--version\""; then
+      fail="apply $i: the npm version was not asked of $cli"; break
+    fi
+    if [ "$i" = 1 ] && ! echo "$output" | awk '/^TASK \[/{t=$0} /^changed:/ && t ~ /Deploy npm PATH wrapper to \/usr\/local\/bin/{f=1} END{exit !f}'; then
+      fail="apply 1: the wrapper was not re-rendered"; break
+    fi
+    if [ "$i" = 2 ] && echo "$output" | awk '/^TASK \[/{t=$0} /^changed:/ && t ~ /Deploy npm PATH wrapper to \/usr\/local\/bin/{f=1} END{exit !f}'; then
+      fail="apply 2: the wrapper changed again"; break
+    fi
+    # npm's global config is the one that npm reads, and it got the settings
+    grep -q '^; >>> supply-chain-hardening: ' "$g" 2>/dev/null || { fail="apply $i: $g has no block"; break; }
+    [ "$(bash "$ROLE_DIR/files/user-config.sh" path npm-global | head -1)" = "$g" ] || { fail="apply $i: the global config is not $g"; break; }
+  done
+  # Restore exactly: the wrapper (not through a link), the npm package that was there or
+  # none, and the global config file and its directory.
+  rm -f "$w"; cp -p "$save" "$w"
+  rm -rf "$pkg"; if [ -e "$away" ] || [ -L "$away" ]; then mv "$away" "$pkg"; fi
+  rm -f "$g".*~
+  if [ -n "$g_had" ]; then cp -p "$BATS_TEST_TMPDIR/g" "$g"; else rm -f "$g"; fi
+  [ -z "$gdir_made" ] || rmdir /usr/local/etc 2>/dev/null || true
   [ -z "$fail" ] || { echo "$fail"; return 1; }
 }

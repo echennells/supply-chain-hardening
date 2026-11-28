@@ -1323,12 +1323,16 @@ L
   local role bad=""
   role=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["sch_is_wrapper_sh"])' "$root/defaults/main.yml")
   sed -n '/^is_our_wrapper() {/,/^}/p' "$root/action/harden.sh" > "$BATS_TEST_TMPDIR/fn.sh"
+  # and the copy in the user_config block, which picks the npm a wrapper runs (ucf_npm)
+  sed -n '/^ucf_is_wrapper() {/,/^}/p' "$root/files/user-config.sh" > "$BATS_TEST_TMPDIR/ucf.sh"
+  grep -q awk "$BATS_TEST_TMPDIR/ucf.sh"
   for f in "$d"/*; do
-    local want=other a=other r=other
+    local want=other a=other r=other u=other
     case "$f" in *-ours) want=ours ;; esac
     if bash -c 'set -euo pipefail; . "$1"; is_our_wrapper "$2"' x "$BATS_TEST_TMPDIR/fn.sh" "$f"; then a=ours; fi
     if bash -c "$role \"\$1\"" x "$f" 2>/dev/null; then r=ours; fi
-    [ "$a" = "$want" ] && [ "$r" = "$want" ] || bad="$bad ${f##*/}(harden.sh=$a role=$r): $(sed -n 2p "$f" | cut -c1-60);"
+    if bash -c '. "$1"; ucf_is_wrapper "$2"' x "$BATS_TEST_TMPDIR/ucf.sh" "$f" 2>/dev/null; then u=ours; fi
+    [ "$a" = "$want" ] && [ "$r" = "$want" ] && [ "$u" = "$want" ] || bad="$bad ${f##*/}(harden.sh=$a role=$r ucf=$u): $(sed -n 2p "$f" | cut -c1-60);"
   done
   [ -z "$bad" ] || { echo "$bad"; false; }
   # And no task still looks for the name anywhere in the file.

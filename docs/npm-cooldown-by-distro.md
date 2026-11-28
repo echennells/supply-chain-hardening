@@ -47,10 +47,13 @@ drift; re-check if you're reading this much later.
   on RHEL 9.9). So
   `sudo npm install -g npm@latest` puts npm 12 in `/usr/local/bin`, ahead of the
   distro's `/usr/bin/npm` on `PATH`, and that is the npm the role judges and wraps.
-  The role merges its settings into `/etc/npmrc` and keeps `prefix` and `python`;
-  only `update-notifier`, which its block sets, is taken out, after a 0600 copy next
-  to the file. Delete that file or its `prefix` line and global installs go under
-  `/usr`, into the RPM's files.
+  That npm has no builtin npmrc, so its global config is `{prefix}/etc/npmrc`, not
+  `/etc/npmrc` (MEASURED in review, npm 11.19.1 with no builtin npmrc: globalconfig
+  `/usr/etc/npmrc`, prefix `/usr`), while the distro's `/usr/bin/npm` still reads
+  `/etc/npmrc`. The role merges its settings into both. In `/etc/npmrc` it keeps
+  `prefix` and `python`; only `update-notifier`, which its block sets, is taken out,
+  after a 0600 copy next to the file. Delete that file or its `prefix` line and the
+  distro npm's global installs go under `/usr`, into the RPM's files.
 - **corepack is broken on Ubuntu 26** for running a modern pnpm
   (`ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` — its patched loader chokes on
   pnpm's ESM entry). Install pnpm via `sudo npm install -g pnpm@latest` or

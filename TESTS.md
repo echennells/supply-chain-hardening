@@ -1,6 +1,6 @@
 # Tests
 
-665 container tests verify the supply chain hardening works (`make test`), plus 632 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
+666 container tests verify the supply chain hardening works (`make test`), plus 637 host-side tests of the GitHub Action script (`make test-ci`, see [tests/ci/README.md](tests/ci/README.md)).
 
 ## Test structure
 
@@ -28,7 +28,7 @@
 | 20-socket-behavioral.bats | 10 | Socket Firewall (sfw) install (a missing sfw is excused only by the role's record that both downloads, sfw's own and the pinned one, were refused) + npm intercept, and a NON-root caller: npm (with sfw's proxy and CA seen in the child's environment) and the verifier row after sfw's 1h update-check window (backdated next-check), a cold cache (named warning, pass-through), and no account but root able to change the cached binary, with the verifier's row turning GAP when another account can |
 | 21-podman.bats | 17 | Podman policy.json, registries (incl. cleanup catchers: no [[registry]] no-op blocks, search list host-only), cosign; a failed cosign or podman install is recorded |
 | 22-pip-wrapper-safety.bats | 15 | Defensive guards in the pip→uv wrapper, and which uv it runs per caller: root refuses a uv another account owns (attributably, never running it), an account runs its own uv or a root-owned one in its own directory; `--version` is answered naming uv and the redirect; `--user` and `download` are refused by name (also after a value-taking option); with no usable uv, or when uv refuses, the message names the redirect and keeps uv's exit code; a real sdist is still refused |
-| 23-npm-path-wrapper.bats | 17 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback, and an npm in /usr/local over the distro's /usr/bin/npm: judged, and kept by every apply) |
+| 23-npm-path-wrapper.bats | 18 | npm PATH wrapper plumbing + end-to-end (incl. self-upgrade survival, direct-binary fallback, and an npm in /usr/local over the distro's /usr/bin/npm: judged, and kept by every apply; a wrapper an earlier order left naming the distro's npm over an npm@latest in /usr/local is healed by one apply, the next changes nothing, and npm's global config is the one that npm names) |
 | 24-deno-path-wrapper.bats | 12 | Deno in-place PATH wrapper plumbing + end-to-end |
 | 25-integration-regressions.bats | 34 | H1/H2/H3 catchers (structural + runtime), the role reading facts only as `ansible_facts.<name>` (with a control), preflight tests (an `/etc/pip.conf` it did not write stops the play and is the only file named, an unmarked `/etc/npmrc` beside it is not, and `accept_etc_overwrite=true` lets it past), idempotency; the end-of-run summary lists what it skipped and claims nothing more (stub yarn, uv moved aside), and with no uv its pip entry describes the wrapper on disk (this version's refuses another account's uv with exit 126; an earlier version's runs any uv); optional tool installs respect the Go 1.21 floor (fake Go 1.18) and reinstall when a pin moves, read the copy the install would replace (lockfile-lint under root's `npm root -g`, not another copy first on `PATH`), and leave alone a zizmor / uv-secure / pip-audit that uv did not install (UV_TOOL_DIR / UV_TOOL_BIN_DIR staging); a JDK-only host gets the gradle init script and settings.xml (with a no-java FIXTURE CONTROL); the preflight refuses to replace a per-user cargo/maven/nuget config it did not write, replaces it with a byte-identical backup under `accept_user_config_overwrite=true`, passes its own files and dotnet's first-run NuGet.Config, and checks only the files this run writes; a composer script that only mentions this project is moved to composer-real and wrapped, not overwritten, and a wrapper action/harden.sh wrote is re-rendered over with its composer-real kept |
 | 26-systemd-coverage.bats | 6 | M2 documented gap: env-var-only protection (GOTOOLCHAIN) vs systemd-style clean env |
@@ -139,7 +139,7 @@ The same workflow runs the role on a Mac, which has to refuse before it writes a
 ## Running tests
 
 ```bash
-make test          # build container + run all 665 tests
+make test          # build container + run all 666 tests
 make shell         # drop into the hardened container for manual exploration
 make test-dev      # docker-compose with mounted tests for fast iteration
 ```
